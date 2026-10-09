@@ -1,0 +1,15 @@
+target-version = "py312"
+line-length = 110
+
+[lint]
+extend-select = [
+  "PTH", "S", "TRY", "B", "BLE", "ARG", "RET", "ANN", "DTZ", "UP", "SIM", "PGH", "RUF100", "PLC0415",
+]
+ignore = [
+  "TRY003",  # the message is the whole point of a die()
+  "S101",    # assert narrows Optional pipes and states invariants
+  "S310",    # every URL is an https literal
+  "S603", "S607",  # a list-form subprocess of a PATH-resolved tool
+  "ANN401",
+  "E501",
+]

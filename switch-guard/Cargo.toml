@@ -1,0 +1,27 @@
+[package]
+name = "switch-guard"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[dependencies]
+libc = "0.2"
+serde_json = "1"
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
+stateright = { version = "0.31", default-features = false }
+
+[profile.release]
+panic = "abort"
+strip = true
+
+# The tests' profile (switch-guard.nix's checkType): the release
+# build's speed for the models, with arithmetic overflow a failure.
+[profile.checked]
+inherits = "release"
+overflow-checks = true
+
+[lib]
+doctest = false

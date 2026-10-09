@@ -1,0 +1,6 @@
+result
+result-*
+/switch-guard/target/
+__pycache__/
+.claude/*
+!.claude/settings.json

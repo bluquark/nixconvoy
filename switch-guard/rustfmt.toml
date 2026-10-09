@@ -1,0 +1,4 @@
+# Wide lines, every width heuristic at its maximum: a struct literal, call
+# or format! stays on one line whenever it fits.
+max_width = 140
+use_small_heuristics = "Max"
