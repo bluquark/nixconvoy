@@ -27,7 +27,7 @@ Model:
     crate's (deploy-plan, deploy-switch: Sans-I/O cores); this program
     performs the git, eval, build and ssh they ask for.
 
-Deploy (nixconvoy [-m "..."] [--reset] [--danger-network-config-change]
+Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
          [--take-over host] [host ...]):
   1. start fetching origin; enumerate the hosts from the hosts directory
   2. probe every host's running system and its lineage
@@ -173,7 +173,7 @@ from .hosts import NETWORK_FLAG
 from .proc import PERF, PERF_FILE, die, git, out
 from .switch import TAKE_OVER_FLAG
 
-USAGE = """usage: nixconvoy [-m "msg"] [--reset] [--take-over host] [host ...]
+USAGE = """usage: nixconvoy apply [-m "msg"] [--reset] [--take-over host] [host ...]
        nixconvoy commit -m "msg"
        nixconvoy land [worktree ...]
        nixconvoy abandon [worktree ...]
@@ -193,9 +193,12 @@ def main() -> None:
     # live run's throwaway worktree in a private /tmp this process cannot see.
     git("worktree", "prune", "--expire", "1.day.ago", check=False)
     args = sys.argv[1:]
-    subcmd = (args.pop(0) if args and args[0] in ("land", "commit", "abandon", "pull", "status",
-                                                 "diffc")
-              else None)
+    if not args or args[0] in ("-h", "--help"):
+        print(USAGE)
+        return
+    if args[0] not in ("apply", "land", "commit", "abandon", "pull", "status", "diffc"):
+        die(USAGE)
+    subcmd = args.pop(0)
     if subcmd == "diffc":
         os.chdir(start)  # its paths are the caller's
         os.execvp("git", ["git", "diffc", *args])  # noqa: S606 - integrations/claude-code/bin/git-diffc
@@ -265,7 +268,7 @@ def main() -> None:
         if reset or danger or hosts or take_over:
             die(USAGE)
         commands.commit_only(msg)
-    else:
+    else:  # apply
         deploy(hosts, msg, reset, danger, take_over)
 
 

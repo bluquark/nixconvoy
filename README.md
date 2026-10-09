@@ -5,7 +5,7 @@ one checkout ever reverting what another already switched.
 
 nixconvoy is for the way a homelab actually evolves: lots of small,
 experimental changes, tested in production, kept honest by NixOS's atomic
-switches and generations.  You stage a change, run `nixconvoy`, and the
+switches and generations.  You stage a change, run `nixconvoy apply`, and the
 hosts that differ from the result are switched.  If the host does not come
 back reachable and healthy, the switch rolls itself back.  Only after the
 hosts run the change is it committed, so a branch never claims more than
@@ -90,7 +90,7 @@ host-side helper are pinned together by your `flake.lock`:
 Then run it from the repo root:
 
 ```sh
-nix run .#nixconvoy -- -m "describe this increment"
+nix run .#nixconvoy -- apply -m "describe this increment"
 ```
 
 A short wrapper script at the repo root (`nix build .#nixconvoy --out-link
@@ -164,7 +164,7 @@ nixconvoy.switchLast = true;                # the router: switched alone, after 
 ## Commands
 
 ```
-nixconvoy [-m "msg"] [--reset] [--take-over host] [host ...]   deploy
+nixconvoy apply [-m "msg"] [--reset] [--take-over host] [host ...]   deploy
 nixconvoy commit -m "msg"      commit + push the staged state, no build or switch
 nixconvoy land [name ...]      land the work branch on main
 nixconvoy abandon [name ...]   discard it
