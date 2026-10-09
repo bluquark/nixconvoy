@@ -86,6 +86,10 @@ def land() -> None:
     if staged_differs():
         die("staged but undeployed changes present; deploy or unstage them first")
     ensure_rebased()
+    tree = tree_less_msg("HEAD")
+    main = rev("refs/remotes/origin/main")
+    if main is None or tree == out(["git", "rev-parse", "origin/main^{tree}"]):
+        die("no changes vs origin/main to land")
     msg = out(["git", "show", f"HEAD:{MSG_FILE}"]) if rev(f"HEAD:{MSG_FILE}") else ""
     if not msg:
         die(f"{wb} has no {MSG_FILE}; write one (it becomes the main commit message)")
@@ -105,10 +109,6 @@ def land() -> None:
     if len(lines) > 1 and lines[1].strip():
         msg = "\n".join([lines[0], "", *lines[1:]])
 
-    tree = tree_less_msg("HEAD")
-    main = rev("refs/remotes/origin/main")
-    if main is None or tree == out(["git", "rev-parse", "origin/main^{tree}"]):
-        die("no changes vs origin/main to land")
     commit = out(["git", "commit-tree", tree, "-p", main, "-m", msg])
 
     p = git("push", "--quiet", "origin", f"{commit}:refs/heads/main", check=False)
