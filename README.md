@@ -201,33 +201,38 @@ prompt segment.
 ## Prior art
 
 nixos-rebuild, deploy-rs and colmena each do things nixconvoy does not,
-and nixconvoy exists for the last rows, which none of them cover: several checkouts
+and nixconvoy exists for the last group, which none of them cover: several checkouts
 deploying unmerged work to the same hosts, each safe from the others.
 
 | | nixos-rebuild | deploy-rs | colmena | nixconvoy |
 |---|:-:|:-:|:-:|:-:|
-| Switch several hosts in parallel |   | ✓ | ✓ | ✓ |
-| Build on a separate build host | ✓ |   |   | ✓ |
-| Build on the target itself | ✓ | ✓ | ✓ |   |
-| Roll back when the deployer cannot confirm the switch |   | ✓ |   | ✓ |
-| Host-side checks decide the confirmation |   |   |   | ✓ |
+| **Targets** | | | | |
 | `boot`, `test` and `dry-activate` goals | ✓ | ✓ | ✓ |   |
-| Upload secrets outside the store |   |   | ✓ |   |
 | Profiles other than the system (home-manager, user) |   | ✓ |   |   |
 | nix-darwin targets |   | ✓ |   |   |
 | Non-flake configurations | ✓ |   | ✓ |   |
 | Node tags and groups |   |   | ✓ |   |
 | Run a command on every node |   |   | ✓ |   |
+| Upload secrets outside the store |   |   | ✓ |   |
 | Prompt for the sudo password | ✓ | ✓ | ✓ |   |
+| **Building** | | | | |
+| Build on a separate build host | ✓ |   |   | ✓ |
+| Build on the target itself | ✓ | ✓ | ✓ |   |
+| **Performance** | | | | |
+| Switch several hosts in parallel |   | ✓ | ✓ | ✓ |
 | Parallel evaluation of the hosts |   |   | ✓ | ✓ |
 | Evaluation memoized across runs |   |   |   | ✓ |
+| **Safety** | | | | |
+| Roll back when the deployer cannot confirm the switch |   | ✓ |   | ✓ |
+| Host-side checks decide the confirmation |   |   |   | ✓ |
 | A flake check gates the deploy |   | ✓ |   | ✓ |
-| Several checkouts deploy unmerged work to the same hosts |   |   |   | ✓ |
-| Refuses to revert another deployer's in-flight work |   |   |   | ✓ |
 | Refuses a switch that would restart protected units |   |   |   | ✓ |
 | Switches the router (or any host) last |   |   |   | ✓ |
 | Commits and pushes only after the switch succeeded |   |   |   | ✓ |
 | Boot counting: an unreachable boot falls back to the last proven generation |   |   |   | ✓ |
+| **Concurrent checkouts** | | | | |
+| Several checkouts deploy unmerged work to the same hosts |   |   |   | ✓ |
+| Refuses to revert another deployer's in-flight work |   |   |   | ✓ |
 
 ## License
 
