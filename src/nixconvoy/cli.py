@@ -5,18 +5,19 @@ deploy work in progress to the same hosts, so a plain nixos-rebuild from
 one tree silently reverts what another tree already deployed.
 
 Model:
-  - main: mirror of origin/main; only finished (squashed) commits.
-  - A work branch, listed by pattern in deploy-branches at the repo root, is
-    owned by the checkout that has it checked out; nixconvoy is its only
-    writer: it commits the staged state onto it and pushes it after a
-    successful deploy.  A checkout on main (or any unlisted branch) is a
+  - main: mirror of origin/main; only finished (landed) commits.
+  - A work branch, listed by pattern in deploy-branches at the repo root and
+    named with this machine's branch_prefix, is owned by the checkout that
+    has it checked out; nixconvoy is its only writer: it commits the staged
+    state onto it and pushes it after a successful deploy.  A checkout on
+    main (or any other branch, another machine's work branch included) is a
     main checkout: it deploys main plus the pushed work branches and owns
     nothing.  A Claude Code subagent worktree (<checkout>/.claude/worktrees/
     <name>) owns <parent's branch>-<name> (<branch_prefix>-<name> under a
-    main checkout) from its first deploy.  After a squash or abandon a
+    main checkout) from its first deploy.  After a land or abandon a
     checkout stays on its work branch, reset onto origin/main.
   - COMMIT_MSG.md at a work branch's root describes the branch's work since
-    its last squash.  It never reaches main's tree: `squash` consumes it as
+    its last landing.  It never reaches main's tree: `land` consumes it as
     the commit message.
   - Targets are inferred: each host's ground truth is its running system
     (/run/current-system), compared against the union build.  Every deploy
@@ -101,15 +102,15 @@ Deploy (nixconvoy [-m "..."] [--reset] [--danger-network-config-change]
      cannot pull a broken commit and pushed tips never overestimate what is
      running; its changes stay staged for the re-run
 
-Squash (nixconvoy squash [<name> ...]): commit the work branch's tree minus
+Land (nixconvoy land [<name> ...]): commit the work branch's tree minus
 COMMIT_MSG.md onto origin/main with COMMIT_MSG.md as the message, push main,
 reset this branch (and its origin copy) onto the new main, the checkout
 staying on it.  Every other checkout on this machine is then brought onto
 the new main (see Pull); checkouts on other machines rebase at their next
-deploy.  A subagent's worktree has done its one task once squashed or
+deploy.  A subagent's worktree has done its one task once landed or
 abandoned, so it is removed instead, with its branch (here and on origin);
 run from any checkout with the worktrees' <name>s (a unique prefix will
-do), squash and abandon act on each in turn.
+do), land and abandon act on each in turn.
 
 Pull (nixconvoy pull): fetch and bring this checkout and every sibling
 checkout onto origin/main - a deploy's automatic rebase, for all of them at
@@ -127,7 +128,7 @@ COMMIT_MSG.md subject, a deploy or git operation in progress - then the
 work branches only origin holds (other machines' checkouts).
 
 Diffc (nixconvoy diffc [<name> ...] [args]): `git diffc`
-(integrations/claude-code/bin/git-diffc), the review of the pending squash.
+(integrations/claude-code/bin/git-diffc), the review of the pending landing.
 
 Abandon (nixconvoy abandon [<name> ...]): discard this checkout's work
 instead of landing it: hard-reset the checkout and reset the work branch
@@ -174,7 +175,7 @@ from .switch import TAKE_OVER_FLAG
 
 USAGE = """usage: nixconvoy [-m "msg"] [--reset] [--take-over host] [host ...]
        nixconvoy commit -m "msg"
-       nixconvoy squash [worktree ...]
+       nixconvoy land [worktree ...]
        nixconvoy abandon [worktree ...]
        nixconvoy pull
        nixconvoy status
@@ -192,7 +193,7 @@ def main() -> None:
     # live run's throwaway worktree in a private /tmp this process cannot see.
     git("worktree", "prune", "--expire", "1.day.ago", check=False)
     args = sys.argv[1:]
-    subcmd = (args.pop(0) if args and args[0] in ("squash", "commit", "abandon", "pull", "status",
+    subcmd = (args.pop(0) if args and args[0] in ("land", "commit", "abandon", "pull", "status",
                                                  "diffc")
               else None)
     if subcmd == "diffc":
@@ -233,10 +234,10 @@ def main() -> None:
             die(USAGE)
         commands.status()
         return
-    if subcmd in ("squash", "abandon"):
+    if subcmd in ("land", "abandon"):
         if msg or reset or danger or take_over:
             die(USAGE)
-        act = commands.squash if subcmd == "squash" else commands.abandon
+        act = commands.land if subcmd == "land" else commands.abandon
         # Several subagent worktrees, one after the other, each under its
         # own checkout's lock.
         top = Path.cwd()
@@ -256,8 +257,8 @@ def main() -> None:
     if lock is None:
         die("another nixconvoy is running in this checkout")
     proc.HELD.append(lock)  # held until exit
-    if subcmd == "squash":
-        commands.squash()
+    if subcmd == "land":
+        commands.land()
     elif subcmd == "abandon":
         commands.abandon()
     elif subcmd == "commit":

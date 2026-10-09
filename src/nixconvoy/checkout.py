@@ -26,7 +26,7 @@ from .proc import die, git, is_ancestor, ok, out, rev, run
 
 # Identity for machinery commits (snapshots, union merges); the fixed date
 # makes an unchanged union re-create the same commit hash.  Work-branch and
-# squash commits use the user's identity.
+# landing commits use the user's identity.
 MACHINE_ENV = {
     "GIT_AUTHOR_NAME": "nixconvoy",
     "GIT_AUTHOR_EMAIL": "deploy@nixconvoy",
@@ -65,6 +65,12 @@ def listed(name: str, pats: set[str] | None = None) -> bool:
 
 def this_prefix() -> str:
     return cfg().branch_prefix.format(host=proc.this_host())
+
+
+def owned(name: str, pats: set[str] | None = None) -> bool:
+    """A work branch this machine may write: listed, and named with its
+    prefix (another machine's listed branch is only ever unioned)."""
+    return name.startswith(this_prefix()) and listed(name, pats)
 
 
 class Checkout(NamedTuple):
@@ -116,22 +122,22 @@ def note_branch(d: Path, wb: str) -> None:
 
 
 def identity_of(here: Path, cur: str | None, pats: set[str] | None = None) -> Checkout:
-    """What the checkout at `here` with `cur` checked out is: on a listed
-    work branch it owns that branch (a subagent's when it lives under
-    another checkout's SUB_DIR); a subagent worktree on any other branch
-    owns <parent's work branch>-<name> (<branch_prefix>-<name> under the
-    main checkout); a checkout that owned a listed branch before (its note)
-    still does; anything else is the main checkout, with no work branch of
-    its own."""
+    """What the checkout at `here` with `cur` checked out is: on one of
+    this machine's listed work branches it owns that branch (a subagent's
+    when it lives under another checkout's SUB_DIR); a subagent worktree on
+    any other branch owns <parent's work branch>-<name> (<branch_prefix>-<name>
+    under the main checkout); a checkout that owned a work branch before
+    (its note) still does; anything else is the main checkout, with no work
+    branch of its own."""
     parent = sub_parent(here)
-    if cur and listed(cur, pats):
+    if cur and owned(cur, pats):
         return Checkout("sub" if parent is not None else "agent", cur)
     if parent is not None:
         pb = branch_at(parent) or noted_branch(parent)
-        base = pb if pb and listed(pb, pats) else this_prefix()
+        base = pb if pb and owned(pb, pats) else this_prefix()
         return Checkout("sub", f"{base}-{here.name}")
     noted = noted_branch(here)
-    if noted and listed(noted, pats):
+    if noted and owned(noted, pats):
         return Checkout("agent", noted)
     return Checkout("main", None)
 
@@ -317,9 +323,15 @@ def sibling_checkouts() -> list[Path]:
             if ln.startswith("worktree "):
                 found.add(Path(ln[len("worktree "):]).resolve())
 
+    def has_git(d: Path) -> bool:
+        try:  # a sibling of the repo may be root-only (/var/lib/private)
+            return d.is_dir() and (d / ".git").exists()
+        except OSError:
+            return False
+
     worktrees(here)
     for d in (sub_parent(here) or here).parent.iterdir():
-        if d != here and d.is_dir() and (d / ".git").exists():
+        if d != here and has_git(d):
             url = run(["git", "remote", "get-url", "origin"], cwd=str(d), check=False).stdout
             if url.strip() == origin:
                 worktrees(d)
@@ -372,7 +384,7 @@ def ensure_on_work_branch(wb: str) -> None:
 def warn_no_msgfile(wb: str) -> None:
     if rev(f"HEAD:{MSG_FILE}") is None:
         print(f"note: {wb} carries work but no {MSG_FILE} yet - it is required "
-              "to squash", file=sys.stderr)
+              "to land", file=sys.stderr)
 
 
 def staged_snapshot() -> str:
@@ -521,8 +533,8 @@ def on_origin(cwd: str | None = None, pats: set[str] | None = None) -> bool:
     origin/main or a pushed listed work branch - as fetched now, or at a
     tip fetched here before (the remote-tracking refs' reflogs, PAST_REFS
     for a branch since deleted: a review subagent's checkout of a work
-    branch that was squashed or reset since)
-    - or, that tip since rebased or squashed, its tree less MSG_FILE is
+    branch that was landed or reset since)
+    - or, that tip since rebased or landed, its tree less MSG_FILE is
     that of an origin/main commit past their merge base, or each commit it
     has beyond a tip is patch-equivalent to one of the tip's (git cherry,
     which skips merges: a merge among them is its own)."""

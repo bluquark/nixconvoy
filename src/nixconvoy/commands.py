@@ -1,4 +1,4 @@
-"""The verbs beside deploy: commit, squash, pull, abandon and status."""
+"""The verbs beside deploy: commit, land, pull, abandon and status."""
 
 from __future__ import annotations
 
@@ -75,13 +75,13 @@ def commit_only(msg: str | None) -> None:
     push_work_branch(wb)
 
 
-def squash() -> None:
+def land() -> None:
     await_background_push()
     git("fetch", "--quiet", "origin")
     pop_tmp_commits()
-    wb = require_work_branch("squash")
+    wb = require_work_branch("land")
     if current_branch() != wb:
-        die(f"squash runs from the work branch ({wb}); currently on "
+        die(f"land runs from the work branch ({wb}); currently on "
             f"{current_branch() or '(detached HEAD)'}")
     if staged_differs():
         die("staged but undeployed changes present; deploy or unstage them first")
@@ -95,7 +95,7 @@ def squash() -> None:
                if b != wb and is_ancestor(tip, "HEAD")
                and not is_ancestor(tip, "refs/remotes/origin/main")]
     if carried:
-        die(f"{wb} contains the unsquashed increments of {', '.join(carried)}; squash "
+        die(f"{wb} contains the unlanded increments of {', '.join(carried)}; land "
             "that branch first, then re-run")
     if sub_parent(Path.cwd().resolve()) is not None:
         require_unlocked(Path.cwd())  # before anything is pushed: finish removes the worktree
@@ -108,7 +108,7 @@ def squash() -> None:
     tree = tree_less_msg("HEAD")
     main = rev("refs/remotes/origin/main")
     if main is None or tree == out(["git", "rev-parse", "origin/main^{tree}"]):
-        die("no changes vs origin/main to squash")
+        die("no changes vs origin/main to land")
     commit = out(["git", "commit-tree", tree, "-p", main, "-m", msg])
 
     p = git("push", "--quiet", "origin", f"{commit}:refs/heads/main", check=False)
@@ -119,7 +119,7 @@ def squash() -> None:
 
     git("reset", "--quiet", commit)  # move wb to main; working tree untouched
     Path(MSG_FILE).unlink(missing_ok=True)  # now main's commit message
-    print(f"squashed onto main: {summarize(commit)}")
+    print(f"landed on main: {summarize(commit)}")
     siblings = sibling_checkouts()  # the parent of a subagent worktree included
     finish(wb)
     if not catch_up(siblings):
@@ -176,7 +176,7 @@ def abandon() -> None:
 
 
 def finish(wb: str) -> None:
-    """The checked-out work branch after a squash or abandon, now at
+    """The checked-out work branch after a land or abandon, now at
     origin/main's commit: an agent's moved there on origin too; a
     subagent's worktree has done its one task, so it is removed with its
     branch, here and on origin (the process moves into the parent)."""
@@ -235,7 +235,7 @@ def sub_label(d: Path) -> str:
 
 def enter_sub(name: str) -> None:
     """Act in the subagent worktree `name` - or the one whose name `name`
-    is a unique prefix of - of any checkout on this machine (squash/abandon
+    is a unique prefix of - of any checkout on this machine (land/abandon
     run from elsewhere, as status suggests)."""
     here = Path.cwd().resolve()
     subs = sorted((d for d in [here, *sibling_checkouts()] if sub_parent(d) is not None),
@@ -372,4 +372,4 @@ def status() -> None:
             print(f"  {paint(e, 'yellow')}")
 
 
-__all__ = ["abandon", "commit_only", "enter_sub", "pull", "squash", "status", "work_branch_name"]
+__all__ = ["abandon", "commit_only", "enter_sub", "land", "pull", "status", "work_branch_name"]

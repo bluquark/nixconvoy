@@ -656,7 +656,7 @@ def git_cases(d: Path) -> None:
         sh(co, "fetch", "--quiet")
         assert sh(rv, "rev-parse", "HEAD") != proc.rev("refs/remotes/origin/other-deploys1")
         assert (got := checkout.update_checkout(rv)) == left, got
-        # ...or at that tip while the branch moved on and was squashed (the
+        # ...or at that tip while the branch moved on and was landed (the
         # remote-tracking ref's reflog remembers the tip as once pushed)...
         sh(rv, "checkout", "--quiet", "--detach", "origin/other-deploys1")
         put(seed, "o.txt", "other, more\n", "more")
@@ -669,7 +669,7 @@ def git_cases(d: Path) -> None:
         sh(seed, "push", "--quiet", "--force", "origin", f"{landed}:main", f"{landed}:other-deploys1")
         sh(co, "fetch", "--quiet")
         assert (got := checkout.update_checkout(rv)) == left, got
-        # ...or at the squashed tip itself, forgotten (its tree less
+        # ...or at the landed tip itself, forgotten (its tree less
         # COMMIT_MSG.md is main's)...
         sh(co, "reflog", "expire", "--expire=all", "refs/remotes/origin/other-deploys1")
         sh(rv, "checkout", "--quiet", "--detach", more)

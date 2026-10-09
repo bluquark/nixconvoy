@@ -128,7 +128,7 @@ def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
         memo.memo_prune(memo.memo_dir())
         objs = memo.union_objects(union)
         # The precheck gates the union, not the increment: a branch rebased
-        # by pull/squash, a skip-switch push or a merge of two passing
+        # by pull/land, a skip-switch push or a merge of two passing
         # branches can each carry a violation no increment introduced.
         check: Future[str | None] | None = None
         if memo.precheck_unproven(objs):

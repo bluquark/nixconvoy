@@ -21,7 +21,8 @@ let
   # What a switch must prove, a boot must too: the very program the
   # confirmed-switch helper's `check` verb runs, reporting its last stderr
   # line.
-  switchChecks = lib.optionalString (options ? nixconvoy.confirmedSwitch && cs.enable) cs.checks;
+  confirmed = options ? nixconvoy.confirmedSwitch && cs.enable;
+  switchChecks = lib.optionalString confirmed cs.checks;
 
   # The gate's poll: the box's own reachability and the host's checks, one
   # failure per line on stdout (everything else they print goes to stderr).
@@ -61,7 +62,7 @@ let
     esp = ${esp}
     profile_dir = ${profileDir}
     boot_log = ${bootLog}
-    state_dir = ${lib.optionalString (switchChecks != "") cs.stateDir}
+    state_dir = ${lib.optionalString confirmed cs.stateDir}
     bootable = ${toString bootable}
     tiers = ${toString tiers}
     reserve = ${toString espReserve}
@@ -147,7 +148,7 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable ({
+  config = lib.mkIf cfg.enable (lib.mkMerge [ {
     # systemd-boot's automatic boot assessment as a failover to the last proven
     # generation (systemd.io/AUTOMATIC_BOOT_ASSESSMENT).  Once a stub's tries
     # suffix hits 0, systemd-boot skips it when resolving its "nixos-*"
@@ -163,7 +164,7 @@ in
         message = "nixconvoy.bootAssessment needs lanzaboote (it installs the counted stubs through lzbt)";
       }
       {
-        assertion = !config.boot.lanzaboote.measuredBoot.enable && config.boot.lanzaboote.extraEfiSysMountPoints == [ ];
+        assertion = !(options ? boot.lanzaboote) || (!config.boot.lanzaboote.measuredBoot.enable && config.boot.lanzaboote.extraEfiSysMountPoints == [ ]);
         message = "nixconvoy.bootAssessment runs lzbt itself: one ESP, no measured boot";
       }
     ];
@@ -258,8 +259,8 @@ in
         EnvironmentFile = lib.mkIf (cfg.noticeEnvironmentFile != null) cfg.noticeEnvironmentFile;
       };
     };
-  } // lib.optionalAttrs (options ? boot.lanzaboote) {
+  } (lib.optionalAttrs (options ? boot.lanzaboote) {
     boot.lanzaboote.bootCounting.initialTries = initialTries;
     boot.lanzaboote.configurationLimit = bootable;
-  });
+  }) ]);
 }

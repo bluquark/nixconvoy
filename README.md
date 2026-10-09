@@ -25,7 +25,7 @@ what is deployed.
 - **Targets are inferred.**  Each host's ground truth is its running
   system.  Whatever differs from the union is switched; a no-op deploy
   evaluates and switches nothing.
-- **`squash` lands a branch on main**, as one commit whose message is the
+- **`land` lands a branch on main**, as one commit whose message is the
   branch's `COMMIT_MSG.md`; **`abandon`** discards it.  Either way the
   checkout stays on its work branch, reset onto the new main, and every
   other checkout on the machine is rebased onto it.
@@ -107,7 +107,7 @@ nixosConfiguration named after its directory under `hosts/`.
 ```
 deploy-branches     patterns of the work branches (one per line, `*` the wildcard)
 nixconvoy.toml      optional settings (below)
-COMMIT_MSG.md       on a work branch: the pending squash's commit message
+COMMIT_MSG.md       on a work branch: the pending landing's commit message
 <flake>/flake.nix
 <flake>/hosts/<name>/   one directory per nixosConfiguration
 ```
@@ -166,11 +166,11 @@ nixconvoy.switchLast = true;                # the router: switched alone, after 
 ```
 nixconvoy [-m "msg"] [--reset] [--take-over host] [host ...]   deploy
 nixconvoy commit -m "msg"      commit + push the staged state, no build or switch
-nixconvoy squash [name ...]    land the work branch on main
+nixconvoy land [name ...]      land the work branch on main
 nixconvoy abandon [name ...]   discard it
 nixconvoy pull                 rebase every checkout on this machine onto origin/main
 nixconvoy status               every checkout on this machine, and origin's other branches
-nixconvoy diffc                review the pending squash (COMMIT_MSG.md, then the diff)
+nixconvoy diffc                review the pending landing (COMMIT_MSG.md, then the diff)
 ```
 
 `nixconvoy --help` and the docstring of `src/nixconvoy/cli.py` describe each
@@ -181,7 +181,7 @@ step of a deploy in full.
 A git worktree under `<checkout>/.claude/worktrees/<name>` (the layout
 Claude Code's worktree isolation creates) owns `<checkout's branch>-<name>`
 from its first deploy, deploys in parallel with its parent, and is removed
-with its branch by `squash` or `abandon` once its task is done.
+with its branch by `land` or `abandon` once its task is done.
 `integrations/claude-code/` holds the hooks that create such worktrees
 under the spawning checkout, the `git diffc` review command and a bash
 prompt segment.
