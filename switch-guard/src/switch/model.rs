@@ -1,5 +1,5 @@
 //! Exhaustive model of confirmed switches on one host: two deploys (each
-//! deploy.py's switch() for its own toplevel) racing for the host's switch
+//! nixconvoy's switch() for its own toplevel) racing for the host's switch
 //! guard, either of which may die at any point (its detached helper runs
 //! carry on, and so does its attached `arm`, which ignores the session's
 //! end), the dead-man timer firing
@@ -37,7 +37,7 @@ struct Run {
     locked: bool,
 }
 
-/// deploy.py's switch() for one host, from taking the guard to its verdict.
+/// nixconvoy's switch() for one host, from taking the guard to its verdict.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Deploy {
     Idle,
@@ -462,7 +462,7 @@ impl Model for Host {
                     || w.hand_fixed
                     || (0..2).all(|d| !(w.fired_early[d] && w.last_arm == Some(d)) || w.running != TOPLEVEL[d])
             }),
-            Property::always("deploy.py reports success only when the host runs and boots its toplevel", |_, w: &World| !w.false_success),
+            Property::always("nixconvoy reports success only when the host runs and boots its toplevel", |_, w: &World| !w.false_success),
             Property::sometimes("both deploys confirmed in turn", |_, w: &World| {
                 matches!(w.deploys, [Deploy::Done { success: true }, Deploy::Done { success: true }])
             }),

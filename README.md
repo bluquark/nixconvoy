@@ -94,8 +94,10 @@ nix run .#nixconvoy -- apply -m "describe this increment"
 ```
 
 On a NixOS machine you deploy from, the package in
-`environment.systemPackages` puts `nixconvoy` (and `git review`) on PATH,
-pinned by the same lock as the hosts' helper.
+`environment.systemPackages` puts `nixconvoy` (and `git review`) on PATH.
+That is the running system's build, which trails the lock until the
+machine itself switches; an unattended deploy that first moves the lock
+should run the lock's build (`nix run .#nixconvoy -- apply ...`).
 
 Requirements on each host: `/run/current-system` reachable over ssh with
 passwordless sudo for the deploying user (a switch, the lineage file under

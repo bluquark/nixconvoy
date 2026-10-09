@@ -257,7 +257,7 @@ impl Host for System<'_> {
 pub const USAGE: &str =
     "usage: confirmed-switch arm | activate <toplevel> | confirm <toplevel> [reboot-pending] | rollback | check | deadline";
 
-/// The `check` verb: deploy.py reports its last stderr line.  Root, so a
+/// The `check` verb: nixconvoy reports its last stderr line.  Root, so a
 /// host's checks can attribute sockets (ss -p) and read state.
 fn check(s: &Settings) -> i32 {
     // SAFETY: geteuid has no preconditions.
@@ -278,7 +278,7 @@ fn check(s: &Settings) -> i32 {
 
 /// `confirmed-switch --config <file> <verb> ...`
 pub fn main(args: &[String]) -> i32 {
-    // deploy.py runs `arm` over a plain ssh session: losing it must not
+    // nixconvoy runs `arm` over a plain ssh session: losing it must not
     // stop the run between stopping the old timer and recording the new.
     // SAFETY: setting a signal's disposition to SIG_IGN has no preconditions.
     unsafe { libc::signal(libc::SIGHUP, libc::SIG_IGN) };

@@ -1,4 +1,4 @@
-//! deploy.py's checkout and drift decisions, one core per process: see
+//! nixconvoy's checkout and drift decisions, one core per process: see
 //! plan/wire.rs.
 use std::io::{BufRead, Write};
 use switch_guard::plan::wire;

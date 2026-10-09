@@ -1,4 +1,4 @@
-//! deploy.py's switch step, one host per process: see deployer/wire.rs.
+//! nixconvoy's switch step, one host per process: see deployer/wire.rs.
 use std::io::{BufRead, Write};
 use switch_guard::deployer::{wire, Machine, Next, Reply};
 

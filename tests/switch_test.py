@@ -509,7 +509,7 @@ def reach_cases(d: Path) -> None:
 
 def git_cases(d: Path) -> None:
     """The rebase and union cores (nixos/pkgs/switch-guard/src/plan/) driven
-    through deploy.py's git queries in scratch clones of a scratch origin."""
+    through nixconvoy's git queries in scratch clones of a scratch origin."""
     scratch_env()
 
     def state(where: Path) -> tuple[str, ...]:

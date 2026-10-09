@@ -53,7 +53,7 @@ pub fn run_limited(mut cmd: Command, input: Option<&str>, limit: Duration) -> i3
     }
 }
 
-/// Stdout lines that a vanished reader (deploy.py's ssh session) cannot
+/// Stdout lines that a vanished reader (nixconvoy's ssh session) cannot
 /// turn into a panic.
 pub fn say(msg: &str) {
     use std::io::Write;

@@ -1,4 +1,4 @@
-//! How deploy.py brings a checkout onto origin/main and onto its work
+//! How nixconvoy brings a checkout onto origin/main and onto its work
 //! branch.  A detached HEAD (made by hand) is moved along when it is
 //! behind origin/main; one at commits already on origin - a review
 //! subagent's checkout of a work branch's tip, which stays where the

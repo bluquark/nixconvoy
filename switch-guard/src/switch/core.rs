@@ -13,7 +13,7 @@ use std::fmt::Display;
 
 pub const ROLLBACK_ATTEMPTS: u32 = 5;
 pub const RETRY_SLEEP: u64 = 5;
-/// Exit code of `rollback` when the record is confirmed: deploy.py reads
+/// Exit code of `rollback` when the record is confirmed: nixconvoy reads
 /// it as "the confirm landed, only its relay died".
 pub const ALREADY_CONFIRMED: i32 = 3;
 

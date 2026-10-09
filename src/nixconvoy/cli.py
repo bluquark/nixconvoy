@@ -173,7 +173,7 @@ from .hosts import NETWORK_FLAG
 from .proc import PERF, PERF_FILE, die, git, out
 from .switch import TAKE_OVER_FLAG
 
-USAGE = """usage: nixconvoy apply [-m "msg"] [--reset] [--take-over host] [host ...]
+USAGE = """usage: nixconvoy apply [-m "msg"] [--reset] [--take-over host] [--danger-network-config-change] [host ...]
        nixconvoy commit -m "msg"
        nixconvoy land [worktree ...]
        nixconvoy abandon [worktree ...]
@@ -187,18 +187,22 @@ reload a unit the host's configuration protects (nixconvoy.protectedUnits)."""
 
 
 def main() -> None:
-    start = Path.cwd()
-    os.chdir(out(["git", "rev-parse", "--show-toplevel"]))
-    # A dead run's leftovers, seen from every worktree; the age spares a
-    # live run's throwaway worktree in a private /tmp this process cannot see.
-    git("worktree", "prune", "--expire", "1.day.ago", check=False)
     args = sys.argv[1:]
-    if not args or args[0] in ("-h", "--help"):
+    if not args:
+        print(USAGE)
+        return
+    if args[0] in ("-h", "--help"):
+        print(__doc__)
         print(USAGE)
         return
     if args[0] not in ("apply", "land", "commit", "abandon", "pull", "status", "review"):
         die(USAGE)
     subcmd = args.pop(0)
+    start = Path.cwd()
+    os.chdir(out(["git", "rev-parse", "--show-toplevel"]))
+    # A dead run's leftovers, seen from every worktree; the age spares a
+    # live run's throwaway worktree in a private /tmp this process cannot see.
+    git("worktree", "prune", "--expire", "1.day.ago", check=False)
     if subcmd == "review":
         os.chdir(start)  # its paths are the caller's
         os.execvp("git", ["git", "review", *args])  # noqa: S606 - integrations/claude-code/bin/git-review

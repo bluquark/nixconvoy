@@ -1,5 +1,5 @@
-//! deploy.py's step 5 verdict on the hosts whose running system differs
-//! from the union: whose work each runs (its lineage, as deploy.py's
+//! nixconvoy's step 5 verdict on the hosts whose running system differs
+//! from the union: whose work each runs (its lineage, as nixconvoy's
 //! lineage_doc wrote it), and so which of them the deploy may switch.
 //!
 //! A host runs another deployer's increment that this union cannot contain
@@ -205,7 +205,7 @@ pub struct Params {
     pub candidates: Vec<String>,
     pub take_over: BTreeSet<String>,
     /// The hosts this checkout's own work reaches: those whose
-    /// configuration reads a file that work changed (deploy.py's
+    /// configuration reads a file that work changed (nixconvoy's
     /// reached_hosts, by the eval memo's scan).
     pub reached: BTreeSet<String>,
     /// Each probed host's running system (None: unreachable).
@@ -233,7 +233,7 @@ pub fn refusal(refused: &[(String, Kind)]) -> String {
         fixes.push("re-run once its push lands".to_string());
     }
     if refused.iter().any(|(_, k)| *k == Kind::Unlisted) {
-        fixes.push(format!("list its branch in {BRANCHES_FILE} (`./deploy.py pull` once that line is on main)"));
+        fixes.push(format!("list its branch in {BRANCHES_FILE} (`nixconvoy pull` once that line is on main)"));
     }
     let fix = fixes.join(" or ");
     let mut c = fix.chars();

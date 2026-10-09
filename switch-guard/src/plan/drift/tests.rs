@@ -18,7 +18,7 @@ fn landed() -> String {
     "b".repeat(40)
 }
 
-/// deploy.py's lineage_doc with the toplevel added: `pending` is the
+/// nixconvoy's lineage_doc with the toplevel added: `pending` is the
 /// deployer's own branch and origin's tip of it.
 fn doc(top: &str, by: (&str, &str), pending: Option<(&str, Option<&str>)>, others: &[&str], at: f64) -> String {
     let own = pending.map(|p| p.0).unwrap_or(BRANCH);

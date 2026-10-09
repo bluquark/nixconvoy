@@ -1,4 +1,4 @@
-//! deploy.py's switch step and the host's helper composed: the real
+//! nixconvoy's switch step and the host's helper composed: the real
 //! deployer `Machine`s drive the real helper `Machine`s through ssh calls
 //! that may be delayed or lost (before or after reaching the host), against a
 //! one-second clock, the dead-man timer due exactly at its arming plus the
@@ -17,7 +17,7 @@ const HORIZON: u64 = 40;
 /// about 11.3M unique states, 32.2M visited, depth 132).
 const MAX_STATES: usize = 40_000_000;
 const MAX_DEPTH: usize = 400;
-/// Seconds a confirm may spend between leaving deploy.py and taking the
+/// Seconds a confirm may spend between leaving nixconvoy and taking the
 /// helper's lock in a timely run.
 const ROUND_TRIP: u64 = 1;
 const SYS: [&str; 3] = ["old", "a", "b"];
@@ -82,7 +82,7 @@ struct World {
     last_arm: Option<usize>,
     success: [bool; 2],
     false_success: bool,
-    /// deploy.py reported rolling back to a system the host does not run.
+    /// nixconvoy reported rolling back to a system the host does not run.
     wrong_target: bool,
     timely: bool,
     confirm_sent: Option<u64>,
@@ -570,7 +570,7 @@ impl Model for Composed {
             Property::always("quiescent: profile matches running unless reboot-pending", |_, w: &World| {
                 !w.quiescent() || w.profile() == w.running || w.staged == Some(w.current)
             }),
-            Property::always("deploy.py reports success only when the host runs and boots its toplevel", |_, w: &World| !w.false_success),
+            Property::always("nixconvoy reports success only when the host runs and boots its toplevel", |_, w: &World| !w.false_success),
             Property::always("a reported rollback names the system the host runs", |_, w: &World| !w.wrong_target),
             Property::always("a reported success is never rolled back", |_, w: &World| {
                 !w.quiescent()

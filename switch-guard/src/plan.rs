@@ -1,7 +1,7 @@
-//! deploy.py's decisions about the checkout and the hosts as Sans-I/O cores
+//! nixconvoy's decisions about the checkout and the hosts as Sans-I/O cores
 //! (deploy-plan): which hosts a deploy may switch (drift), how a checkout is
 //! brought onto origin/main (rebase) and how the union of the work branches
-//! is built and kept current (union).  deploy.py performs each query - git,
+//! is built and kept current (union).  nixconvoy performs each query - git,
 //! a worktree, the eval/build/copy of a union - and feeds the result back.
 //!
 //! A core is a straight-line program over `Script`: each `ask` returns the
@@ -36,11 +36,11 @@ pub enum Effect {
     Print(String),
     /// To stderr.
     Warn(String),
-    /// deploy.py's PERF phase.
+    /// nixconvoy's PERF phase.
     Mark(String),
 }
 
-/// What deploy.py does for the cores: git in the checkout (or in the
+/// What nixconvoy does for the cores: git in the checkout (or in the
 /// worktree a query names), and the union core's callbacks into the deploy.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Query {

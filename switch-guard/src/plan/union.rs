@@ -1,4 +1,4 @@
-//! deploy.py's union of the work branches (its steps 3-4 and the retries
+//! nixconvoy's union of the work branches (its steps 3-4 and the retries
 //! around 5-7): every other listed work branch on origin that still
 //! declares changes is merged onto this checkout's snapshot, structural
 //! conflicts resolved by mergiraf and COMMIT_MSG.md dropped, into a

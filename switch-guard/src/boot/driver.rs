@@ -323,7 +323,7 @@ fn report(s: &Settings) -> i32 {
     let body = format!(
         "{host} booted generation {bgen} at {date}, not the newest ({ngen}).\n\
          Rejected entries on the ESP: {rejected}\n\
-         deploy.py refuses to switch back onto a rejected generation: change the configuration (a new generation gets its own tries), or re-arm the stub to retry it as is (sudo mv of the +0-N stub to +{tries}, then deploy).\n\
+         nixconvoy refuses to switch back onto a rejected generation: change the configuration (a new generation gets its own tries), or re-arm the stub to retry it as is (sudo mv of the +0-N stub to +{tries}, then deploy).\n\
          The boot-assessment notice, if set, says why the newest one failed.\n\
          Log: journalctl -u boot-assessment-watch -u boot-assessment\n",
         host = s.host,

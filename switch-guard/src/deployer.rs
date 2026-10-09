@@ -1,5 +1,5 @@
-//! deploy.py's switch of one host (its module docstring, step 7) as a pure
-//! machine: deploy.py performs each query - the on-host guard, ssh, the
+//! nixconvoy's switch of one host (its module docstring, step 7) as a pure
+//! machine: nixconvoy performs each query - the on-host guard, ssh, the
 //! clock - and feeds the result back, printing and dying as told.
 //!
 //! In a confirmed switch the helper activates under its own lock, so a timer
@@ -17,7 +17,7 @@ pub mod wire;
 /// host's deadline: the confirm need only take the helper's lock before the
 /// timer's rollback does.
 pub const VERIFY_MARGIN_MS: u64 = 5_000;
-/// What one probe may take (deploy.py's PROBE_TIMEOUT), so a stalled ssh
+/// What one probe may take (nixconvoy's PROBE_TIMEOUT), so a stalled ssh
 /// session holds no verification past the deadline.
 pub const PROBE_TIMEOUT_MS: u64 = 20_000;
 /// Every probe ends this long before the host's deadline, whenever its
@@ -121,7 +121,7 @@ pub enum Effect {
     /// The host is armed: a die() elsewhere leaves it to its timer.
     Armed,
     Disarmed,
-    /// deploy.py's PERF phase.
+    /// nixconvoy's PERF phase.
     Mark(String),
 }
 
