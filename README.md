@@ -235,8 +235,9 @@ deploying unmerged work to the same hosts, each safe from the others.
 
 | | nixos-rebuild | deploy-rs | colmena | nixconvoy |
 |---|:-:|:-:|:-:|:-:|
-| Build on a separate build host | ✓ |   |   | ✓ |
-| Build on the target itself | ✓ | ✓ | ✓ |   |
+| Build locally | ✓ | ✓ | ✓ | ✓ |
+| Build on a designated build host | ✓ |   |   | ✓ |
+| Each target builds its own closures | ✓ | ✓ | ✓ |   |
 
 ### Performance
 
