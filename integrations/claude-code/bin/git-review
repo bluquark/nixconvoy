@@ -1,5 +1,5 @@
 #!/bin/sh
-# git diffc [<name> ...] [<diff args>]: the review of a pending landing.
+# git review [<name> ...] [<diff args>]: the review of a pending landing.
 # `git diff --cached` prefixed with COMMIT_MSG.md when present (the pending
 # landing's message); on a work branch (one deploy-branches lists) or in a subagent worktree the
 # diff starts from the merge-base with origin/main, so it shows everything
@@ -10,7 +10,8 @@
 # after the other.
 # One pager stream keeps the messages visible on long diffs; colors are
 # per-line because less -R drops attributes at line boundaries.
-# Put it on PATH (git finds git-<name> there); `nixconvoy diffc` runs it.
+# The nixconvoy package carries it, so `nixconvoy review` runs it anywhere;
+# on your own PATH git finds it as `git review`.
 set -u
 # git exports the invoking worktree's layout to a subcommand; each target
 # is addressed with -C instead.
@@ -40,7 +41,7 @@ resolve() {
     done
     [ "$n" = 1 ] && return 0
     [ "$n" = 0 ] && return 1
-    echo "diffc: $1 is ambiguous among the subagent worktrees matching $1*" >&2
+    echo "review: $1 is ambiguous among the subagent worktrees matching $1*" >&2
     return 2
 }
 

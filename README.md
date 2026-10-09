@@ -93,9 +93,9 @@ Then run it from the repo root:
 nix run .#nixconvoy -- apply -m "describe this increment"
 ```
 
-A short wrapper script at the repo root (`nix build .#nixconvoy --out-link
-.nixconvoy && .nixconvoy/bin/nixconvoy "$@"`) spares the flake evaluation
-on every run.
+On a NixOS machine you deploy from, the package in
+`environment.systemPackages` puts `nixconvoy` (and `git review`) on PATH,
+pinned by the same lock as the hosts' helper.
 
 Requirements on each host: `/run/current-system` reachable over ssh with
 passwordless sudo for the deploying user (a switch, the lineage file under
@@ -170,7 +170,7 @@ nixconvoy land [name ...]      land the work branch on main
 nixconvoy abandon [name ...]   discard it
 nixconvoy pull                 rebase every checkout on this machine onto origin/main
 nixconvoy status               every checkout on this machine, and origin's other branches
-nixconvoy diffc                review the pending landing (COMMIT_MSG.md, then the diff)
+nixconvoy review               the pending landing: COMMIT_MSG.md, then the diff
 ```
 
 `nixconvoy --help` and the docstring of `src/nixconvoy/cli.py` describe each
@@ -183,7 +183,7 @@ Claude Code's worktree isolation creates) owns `<checkout's branch>-<name>`
 from its first deploy, deploys in parallel with its parent, and is removed
 with its branch by `land` or `abandon` once its task is done.
 `integrations/claude-code/` holds the hooks that create such worktrees
-under the spawning checkout, the `git diffc` review command and a bash
+under the spawning checkout, the `git review` command and a bash
 prompt segment.
 
 ## How it is built

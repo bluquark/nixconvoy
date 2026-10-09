@@ -127,8 +127,8 @@ whether they are pushed, staged/unstaged/untracked counts, the
 COMMIT_MSG.md subject, a deploy or git operation in progress - then the
 work branches only origin holds (other machines' checkouts).
 
-Diffc (nixconvoy diffc [<name> ...] [args]): `git diffc`
-(integrations/claude-code/bin/git-diffc), the review of the pending landing.
+Review (nixconvoy review [<name> ...] [args]): `git review`
+(integrations/claude-code/bin/git-review), the review of the pending landing.
 
 Abandon (nixconvoy abandon [<name> ...]): discard this checkout's work
 instead of landing it: hard-reset the checkout and reset the work branch
@@ -179,7 +179,7 @@ USAGE = """usage: nixconvoy apply [-m "msg"] [--reset] [--take-over host] [host 
        nixconvoy abandon [worktree ...]
        nixconvoy pull
        nixconvoy status
-       nixconvoy diffc [worktree ...] [diff args]
+       nixconvoy review [worktree ...] [diff args]
 With no hosts named, every host whose running system differs from the union
 is switched; naming hosts restricts switching to (at most) those.
 --danger-network-config-change admits a switch that would stop, restart or
@@ -196,12 +196,12 @@ def main() -> None:
     if not args or args[0] in ("-h", "--help"):
         print(USAGE)
         return
-    if args[0] not in ("apply", "land", "commit", "abandon", "pull", "status", "diffc"):
+    if args[0] not in ("apply", "land", "commit", "abandon", "pull", "status", "review"):
         die(USAGE)
     subcmd = args.pop(0)
-    if subcmd == "diffc":
+    if subcmd == "review":
         os.chdir(start)  # its paths are the caller's
-        os.execvp("git", ["git", "diffc", *args])  # noqa: S606 - integrations/claude-code/bin/git-diffc
+        os.execvp("git", ["git", "review", *args])  # noqa: S606 - integrations/claude-code/bin/git-review
     if subcmd != "status":
         atexit.register(PERF.write, Path.cwd() / PERF_FILE)
     msg: str | None = None
