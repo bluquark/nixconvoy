@@ -204,9 +204,10 @@ nixos-rebuild, deploy-rs and colmena each do things nixconvoy does not,
 and nixconvoy exists for the last group, which none of them cover: several checkouts
 deploying unmerged work to the same hosts, each safe from the others.
 
+### Targets
+
 | | nixos-rebuild | deploy-rs | colmena | nixconvoy |
 |---|:-:|:-:|:-:|:-:|
-| **Targets** | | | | |
 | `boot`, `test` and `dry-activate` goals | ✓ | ✓ | ✓ |   |
 | Profiles other than the system (home-manager, user) |   | ✓ |   |   |
 | nix-darwin targets |   | ✓ |   |   |
@@ -215,14 +216,26 @@ deploying unmerged work to the same hosts, each safe from the others.
 | Run a command on every node |   |   | ✓ |   |
 | Upload secrets outside the store |   |   | ✓ |   |
 | Prompt for the sudo password | ✓ | ✓ | ✓ |   |
-| **Building** | | | | |
+
+### Building
+
+| | nixos-rebuild | deploy-rs | colmena | nixconvoy |
+|---|:-:|:-:|:-:|:-:|
 | Build on a separate build host | ✓ |   |   | ✓ |
 | Build on the target itself | ✓ | ✓ | ✓ |   |
-| **Performance** | | | | |
+
+### Performance
+
+| | nixos-rebuild | deploy-rs | colmena | nixconvoy |
+|---|:-:|:-:|:-:|:-:|
 | Switch several hosts in parallel |   | ✓ | ✓ | ✓ |
 | Parallel evaluation of the hosts |   |   | ✓ | ✓ |
 | Evaluation memoized across runs |   |   |   | ✓ |
-| **Safety** | | | | |
+
+### Safety
+
+| | nixos-rebuild | deploy-rs | colmena | nixconvoy |
+|---|:-:|:-:|:-:|:-:|
 | Roll back when the deployer cannot confirm the switch |   | ✓ |   | ✓ |
 | Host-side checks decide the confirmation |   |   |   | ✓ |
 | A flake check gates the deploy |   | ✓ |   | ✓ |
@@ -230,7 +243,11 @@ deploying unmerged work to the same hosts, each safe from the others.
 | Switches the router (or any host) last |   |   |   | ✓ |
 | Commits and pushes only after the switch succeeded |   |   |   | ✓ |
 | Boot counting: an unreachable boot falls back to the last proven generation |   |   |   | ✓ |
-| **Concurrent checkouts** | | | | |
+
+### Concurrent checkouts
+
+| | nixos-rebuild | deploy-rs | colmena | nixconvoy |
+|---|:-:|:-:|:-:|:-:|
 | Several checkouts deploy unmerged work to the same hosts |   |   |   | ✓ |
 | Refuses to revert another deployer's in-flight work |   |   |   | ✓ |
 
