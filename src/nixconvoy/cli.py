@@ -152,10 +152,12 @@ origin/main:<branch>) or repair it in its own checkout.
 --danger-network-config-change admits a switch that would stop, restart or
 reload a protected unit (step 7), for this run only.
 
---dry-activate runs steps 1-7 up to the switch, dry-activating every host
-that would be switched instead, and prints the units each would stop,
-restart or reload and whether its protected units would refuse the switch.
-Nothing is switched, committed or pushed; the staged changes need no -m.
+--dry-activate runs steps 1-7 up to the switch (the checkout is rebased and
+the closures copied as for a deploy), dry-activating every host that would
+be switched instead, and prints the units each would stop, restart or
+reload.  Nothing is switched, committed or pushed, and the staged changes
+need no -m; the run fails where a deploy would stop: a dry activation that
+fails, or protected units the switch would touch without the flag.
 
 Exec (nixconvoy exec [host|@tag ...] -- command [arg ...]): the command on
 each named host (every host addressable from here when none is named),
@@ -253,7 +255,7 @@ def main() -> None:
         elif a in ("-h", "--help"):
             print(USAGE)
             return
-        elif not a.startswith("-") or a.startswith("@"):
+        elif not a.startswith("-"):
             hosts.append(a)
         else:
             die(USAGE)

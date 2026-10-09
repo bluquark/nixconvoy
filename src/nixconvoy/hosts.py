@@ -82,6 +82,10 @@ def expand_targets(names: list[str], all_hosts: list[str]) -> list[str]:
             if not tagged:
                 die(f"no host reachable from here carries the tag {n[1:]} (nixconvoy.toml: "
                     f"hosts.<name>.tags)")
+            phantom = [h for h in tagged if h not in all_hosts]
+            if phantom:
+                die(f"nixconvoy.toml tags {', '.join(phantom)} as {n[1:]}, but the inventory "
+                    f"has no such host (it has: {', '.join(all_hosts)})")
             found.extend(tagged)
         else:
             found.append(n)
@@ -100,10 +104,16 @@ def exec_on(names: list[str], argv: list[str]) -> None:
     for h in targets:
         if remote_only(h):
             die(f"{h} is reachable only from itself (nixconvoy.toml: local_only)")
+    def on(h: str) -> int:
+        held = f"[{h}] " if len(targets) > 1 else ""
+        try:
+            return stream(host_cmd(h, argv), held_as=held or None)
+        except FileNotFoundError:  # this very host, no shell to say so
+            print(f"{held}{argv[0]}: command not found")
+            return 127
+
     with ThreadPoolExecutor(len(targets)) as pool:
-        codes = {h: pool.submit(stream, host_cmd(h, argv),
-                                held_as=f"[{h}] " if len(targets) > 1 else None)
-                 for h in targets}
+        codes = {h: pool.submit(on, h) for h in targets}
     failed = [f"{h} (exit {f.result()})" for h, f in codes.items() if f.result() != 0]
     if failed:
         die(f"failed on {', '.join(failed)}")

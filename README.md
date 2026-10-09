@@ -195,9 +195,10 @@ command and a bash prompt segment:
 /plugin install nixconvoy --marketplace bluquark/nixconvoy
 ```
 
-The package also ships the plugin tree under `share/nixconvoy/claude-code/`,
-for an install by path (a settings.json pointing at its hooks, or `claude
-plugin marketplace add <that directory>`).
+The package also ships the plugin tree under `share/nixconvoy/claude-code/`
+for a repo that wires the hooks itself: a settings.json pointing at
+`hooks/worktree-create.sh` and `hooks/worktree-remove.sh` there (such a
+repo should not also enable the plugin, or both would run).
 
 ## How it is built
 

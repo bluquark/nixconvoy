@@ -270,7 +270,8 @@ def target_cases() -> None:
     assert hosts.expand_targets(["b", "@vps"], inv) == ["b", "a"]
     assert hosts.expand_targets(["@lab", "c"], inv) == ["b", "c"]
     assert hosts.remote_only("c") and not hosts.remote_only("a")
-    for bad in (["@nope"], ["zz"]):
+    config.set_cfg(config.parse('[hosts.a]\ntags = ["vps"]\n[hosts.zz]\ntags = ["vps"]\n'))
+    for bad in (["@nope"], ["zz"], ["@vps"]):
         try:
             with contextlib.redirect_stderr(io.StringIO()):
                 hosts.expand_targets(bad, inv)

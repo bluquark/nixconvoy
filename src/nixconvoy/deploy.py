@@ -119,6 +119,9 @@ def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
         ends here."""
         nonlocal plan, affected, left_alone, tops
         if skip:
+            if dry:
+                print(f"NIXCONVOY_SKIP_SWITCH=1 --dry-activate: union {union}; nothing done")
+                return True
             if wb is not None:
                 if snap:
                     commit_deployed(wb, snap, msg or "")
@@ -208,8 +211,9 @@ def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
             refusals = [r for r in (cp.result() for cp in copies) if r]
             refetch.result()
         if dry:
-            for r in refusals:
-                print(f"  a switch would be refused: {r}")
+            if refusals:
+                die("--dry-activate: nothing was switched, committed or pushed; a deploy "
+                    "would stop here:\n" + "\n".join(f"  {r}" for r in refusals))
             if plan:
                 print(f"--dry-activate: {', '.join(plan)} would be switched (union {union}); "
                       f"nothing was switched, committed or pushed")
