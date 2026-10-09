@@ -243,9 +243,9 @@ deploying unmerged work to the same hosts, each safe from the others.
 
 | | nixos-rebuild | deploy-rs | colmena | nixconvoy |
 |---|:-:|:-:|:-:|:-:|
-| Switch several hosts in parallel |   | ✓ | ✓ | ✓ |
-| Parallel evaluation of the hosts |   |   | ✓ | ✓ |
-| Evaluation memoized across runs |   |   |   | ✓ |
+| Parallel switch |   | ✓ | ✓ | ✓ |
+| Parallel eval |   |   | ✓ | ✓ |
+| Eval skipped when inputs unchanged |   |   |   | ✓ |
 
 ### Safety
 
