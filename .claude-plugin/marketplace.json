@@ -1,0 +1,11 @@
+{
+  "name": "nixconvoy",
+  "owner": { "name": "bluquark" },
+  "plugins": [
+    {
+      "name": "nixconvoy",
+      "source": "./integrations/claude-code",
+      "description": "Subagent worktrees under the spawning checkout, each owning a nixconvoy work branch"
+    }
+  ]
+}

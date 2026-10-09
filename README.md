@@ -147,6 +147,7 @@ served_by = "builder"        # skipped when building on that host
 [hosts.laptop]
 local_only = true            # deployable only from itself
 target = "root@10.0.0.9"     # overrides the template
+tags = ["portable"]          # `@portable` on the command line names every host tagged so
 ```
 
 ### The NixOS module
@@ -166,13 +167,15 @@ nixconvoy.switchLast = true;                # the router: switched alone, after 
 ## Commands
 
 ```
-nixconvoy apply [-m "msg"] [--reset] [--take-over host] [host ...]   deploy
+nixconvoy apply [-m "msg"] [--reset] [--take-over host] [host|@tag ...]   deploy
+nixconvoy apply --dry-activate [host|@tag ...]   build and copy, then only report what each switch would do
 nixconvoy commit -m "msg"      commit + push the staged state, no build or switch
 nixconvoy land [name ...]      land the work branch on main
 nixconvoy abandon [name ...]   discard it
 nixconvoy pull                 rebase every checkout on this machine onto origin/main
 nixconvoy status               every checkout on this machine, and origin's other branches
 nixconvoy review               the pending landing: COMMIT_MSG.md, then the diff
+nixconvoy exec [host|@tag ...] -- cmd [arg ...]   run a command on each host, concurrently
 ```
 
 `nixconvoy --help` and the docstring of `src/nixconvoy/cli.py` describe each
@@ -184,9 +187,17 @@ A git worktree under `<checkout>/.claude/worktrees/<name>` (the layout
 Claude Code's worktree isolation creates) owns `<checkout's branch>-<name>`
 from its first deploy, deploys in parallel with its parent, and is removed
 with its branch by `land` or `abandon` once its task is done.
-`integrations/claude-code/` holds the hooks that create such worktrees
-under the spawning checkout, the `git review` command and a bash
-prompt segment.
+`integrations/claude-code/` is a Claude Code plugin holding the hooks that
+create such worktrees under the spawning checkout, beside the `git review`
+command and a bash prompt segment:
+
+```
+/plugin install nixconvoy --marketplace bluquark/nixconvoy
+```
+
+The package also ships the plugin tree under `share/nixconvoy/claude-code/`,
+for an install by path (a settings.json pointing at its hooks, or `claude
+plugin marketplace add <that directory>`).
 
 ## How it is built
 
@@ -210,12 +221,13 @@ deploying unmerged work to the same hosts, each safe from the others.
 
 | | nixos-rebuild | deploy-rs | colmena | nixconvoy |
 |---|:-:|:-:|:-:|:-:|
-| `boot`, `test` and `dry-activate` goals | ✓ | ✓ | ✓ |   |
+| `boot` and `test` goals | ✓ | ✓ | ✓ |   |
+| `dry-activate` goal | ✓ | ✓ | ✓ | ✓ |
 | Profiles other than the system (home-manager, user) |   | ✓ |   |   |
 | nix-darwin targets |   | ✓ |   |   |
 | Non-flake configurations | ✓ |   | ✓ |   |
-| Node tags and groups |   |   | ✓ |   |
-| Run a command on every node |   |   | ✓ |   |
+| Node tags and groups |   |   | ✓ | ✓ |
+| Run a command on every node |   |   | ✓ | ✓ |
 | Upload secrets outside the store |   |   | ✓ |   |
 | Prompt for the sudo password | ✓ | ✓ | ✓ |   |
 

@@ -11,12 +11,13 @@ import signal
 import socket
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import NamedTuple
 
 from . import proc
 from .config import build_host, cfg
-from .proc import die, load_json, ok, run
+from .proc import die, load_json, ok, run, stream
 
 # Seconds one probe of a host may take, so a stalled ssh session holds
 # neither a deploy's start nor verification past the deadline.
@@ -62,6 +63,50 @@ def flake_host_names() -> list[str]:
 
 def local_only(name: str) -> bool:
     return cfg().host(name).local_only
+
+
+def remote_only(name: str) -> bool:
+    """Deployable (and addressed) only from itself, and this is not it."""
+    return local_only(name) and name != proc.this_host()
+
+
+def expand_targets(names: list[str], all_hosts: list[str]) -> list[str]:
+    """The hosts `names` designate, in order and once each: a host by name,
+    or `@tag` for every host nixconvoy.toml tags so (a remote-only one is
+    dropped from a tag, as from the default of every host, since it cannot
+    be addressed from here; named outright it is reported by the caller)."""
+    found: list[str] = []
+    for n in names:
+        if n.startswith("@"):
+            tagged = [h for h in cfg().tagged(n[1:]) if not remote_only(h)]
+            if not tagged:
+                die(f"no host reachable from here carries the tag {n[1:]} (nixconvoy.toml: "
+                    f"hosts.<name>.tags)")
+            found.extend(tagged)
+        else:
+            found.append(n)
+    unknown = [h for h in found if h not in all_hosts]
+    if unknown:
+        die(f"unknown host(s) {', '.join(unknown)}; the inventory has: {', '.join(all_hosts)}")
+    return list(dict.fromkeys(found))
+
+
+def exec_on(names: list[str], argv: list[str]) -> None:
+    """`argv` on each host `names` designate (every host addressable from
+    here when none), concurrently, the output of each held and printed
+    under its name once it finishes; dies naming the hosts where it failed."""
+    all_hosts = flake_host_names()
+    targets = expand_targets(names, all_hosts) or [h for h in all_hosts if not remote_only(h)]
+    for h in targets:
+        if remote_only(h):
+            die(f"{h} is reachable only from itself (nixconvoy.toml: local_only)")
+    with ThreadPoolExecutor(len(targets)) as pool:
+        codes = {h: pool.submit(stream, host_cmd(h, argv),
+                                held_as=f"[{h}] " if len(targets) > 1 else None)
+                 for h in targets}
+    failed = [f"{h} (exit {f.result()})" for h, f in codes.items() if f.result() != 0]
+    if failed:
+        die(f"failed on {', '.join(failed)}")
 
 
 def target(name: str) -> str:
@@ -322,27 +367,39 @@ def unit_changes(dry_activate: str) -> dict[str, list[str]]:
     return found
 
 
+def dry_activate(host: str, toplevel: str) -> tuple[dict[str, list[str]], str | None]:
+    """Dry-activate `toplevel` on `host` (its closure already copied): the
+    unit changes it reports (unit_changes), printed under the host's name,
+    or why it could not be run.  Runs in the copy pool, so it only reports;
+    the caller dies once the other copies have finished."""
+    p = run(host_cmd(host, [f"{toplevel}/bin/switch-to-configuration", "dry-activate"],
+                     sudo=True), check=False, merged=True, timeout=DRY_ACTIVATE_TIMEOUT)
+    if proc.DYING:  # another thread's die() killed the child; it reports, not us
+        return {}, None
+    if p.returncode == -signal.SIGKILL:
+        return {}, (f"dry-activating the new system on {host} did not finish within "
+                    f"{DRY_ACTIVATE_TIMEOUT} s (a stalled ssh connection?); nothing was "
+                    f"switched or committed")
+    if p.returncode != 0:
+        return {}, (f"dry-activating the new system on {host} failed (exit {p.returncode}); "
+                    f"nothing was switched or committed"
+                    + (f"\n{p.stdout.strip()}" if p.stdout else ""))
+    changes = unit_changes(p.stdout)
+    for verb, units in changes.items():
+        print(f"  {host}: would {verb} {', '.join(units)}")
+    if not changes:
+        print(f"  {host}: would stop, restart or reload no unit")
+    return changes, None
+
+
 def protected_units_gate(host: str, toplevel: str, protected: tuple[str, ...],
                          allowed: bool) -> str | None:
     """Dry-activate `toplevel` on `host`: why the deploy must stop (it would
     stop, restart or reload one of the host's `protected` units and not
-    `allowed`, or it fails), else None.  Runs in the copy pool, so it only
-    reports; the caller dies once the other copies have finished."""
-    p = run(host_cmd(host, [f"{toplevel}/bin/switch-to-configuration", "dry-activate"],
-                     sudo=True), check=False, merged=True, timeout=DRY_ACTIVATE_TIMEOUT)
-    if proc.DYING:  # another thread's die() killed the child; it reports, not us
-        return None
-    if p.returncode == -signal.SIGKILL:
-        return (f"dry-activating the new system on {host} did not finish within "
-                f"{DRY_ACTIVATE_TIMEOUT} s (a stalled ssh connection?); nothing was "
-                f"switched or committed")
-    if p.returncode != 0:
-        return (f"dry-activating the new system on {host} failed (exit {p.returncode}); "
-                f"nothing was switched or committed"
-                + (f"\n{p.stdout.strip()}" if p.stdout else ""))
-    changes = unit_changes(p.stdout)
-    for verb, units in changes.items():
-        print(f"  {host}: would {verb} {', '.join(units)}")
+    `allowed`, or it fails), else None."""
+    changes, err = dry_activate(host, toplevel)
+    if err:
+        return err
     hits = [f"{verb} {u}" for verb, units in changes.items()
             for u in units if u in protected]
     if not hits:

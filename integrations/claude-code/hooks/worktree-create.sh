@@ -12,7 +12,7 @@
 # periodic sweep removes these: `nixconvoy status` marks one with nothing of
 # its own, `nixconvoy abandon <name>` removes it (worktree-remove.sh covers
 # the removals Claude Code does make, a `claude --worktree` session's).
-# Wire it up in the repo's .claude/settings.json (see the README).
+# hooks.json beside it wires both hooks up as the nixconvoy plugin.
 set -eu
 command -v jq >/dev/null 2>&1 || { echo "worktree-create: jq missing" >&2; exit 1; }
 INPUT=$(cat)

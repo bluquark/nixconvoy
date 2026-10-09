@@ -24,7 +24,7 @@ from .checkout import (
 )
 from .config import build_host
 from .guard import binary, decide
-from .hosts import Probe, flake_host_names, local_only
+from .hosts import Probe, expand_targets, flake_host_names, remote_only
 from .memo import Top
 from .proc import PERF, die, dump_json, git, rev
 from .switch import lineage_record, switch
@@ -32,17 +32,19 @@ from .union import UnionQueries
 
 
 def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
-           danger: bool = False, take_over: set[str] | None = None) -> None:
+           danger: bool = False, take_over: set[str] | None = None,
+           dry: bool = False) -> None:
+    """`dry`: stop after the dry activation of every host that would be
+    switched, printing the units it would stop, restart or reload; nothing
+    is switched, committed or pushed."""
     skip = os.environ.get("NIXCONVOY_SKIP_SWITCH") == "1"
     all_hosts = flake_host_names()
     take_over = take_over or set()
-    unknown = [h for h in [*filter_hosts, *take_over] if h not in all_hosts]
+    filter_hosts = expand_targets(filter_hosts, all_hosts)
+    unknown = [h for h in take_over if h not in all_hosts]
     if unknown:
         die(f"unknown host(s) {', '.join(unknown)}; the inventory has: {', '.join(all_hosts)}")
     me = proc.this_host()
-
-    def remote_only(h: str) -> bool:
-        return local_only(h) and h != me
 
     for h in filter_hosts:
         if remote_only(h):
@@ -73,7 +75,7 @@ def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
     snap = ""
     PERF.mark("snapshot")
     if staged_differs():
-        if not msg:
+        if not msg and not dry:
             die('staged changes present; describe this increment with -m "..."')
         if wb is None:
             die("staged changes in the main checkout, which has no work branch: commit "
@@ -191,15 +193,33 @@ def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
 
         def copy_then_gate(name: str, top: Top, quiet: bool) -> str | None:
             hosts.copy_closure(name, top.out, quiet)
+            if dry:
+                # The gate's verdict is part of the report, not a stop.
+                return hosts.protected_units_gate(name, top.out, top.protected, danger)
             if top.protected:
                 return hosts.protected_units_gate(name, top.out, top.protected, danger)
             return None
 
+        if dry and plan:
+            print(f"dry-activating {', '.join(plan)}...")
         with ThreadPoolExecutor(1 + len(plan)) as pool:
             refetch = pool.submit(git, "fetch", "--quiet", "origin")
             copies = [pool.submit(copy_then_gate, n, tops[n], len(plan) > 1) for n in plan]
             refusals = [r for r in (cp.result() for cp in copies) if r]
             refetch.result()
+        if dry:
+            for r in refusals:
+                print(f"  a switch would be refused: {r}")
+            if plan:
+                print(f"--dry-activate: {', '.join(plan)} would be switched (union {union}); "
+                      f"nothing was switched, committed or pushed")
+            elif left_alone:
+                print(f"--dry-activate: nothing would be switched: {', '.join(left_alone)} left "
+                      f"alone, running another deployer's work this checkout's does not reach "
+                      f"(union {union})")
+            else:
+                print(f"--dry-activate: nothing drifts from the union ({union}); nothing to switch")
+            return True
         if refusals:
             die(refusals[0])
         return False
@@ -207,7 +227,7 @@ def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
     queries = UnionQueries(lambda: snap or "HEAD", fetch, refresh, stage)
     try:
         done = decide("union", queries, wb=wb or "", reset=reset, main0=main0)
-        if skip:
+        if skip or dry:
             return
         assert isinstance(done, dict)
         union = str(done["union"])

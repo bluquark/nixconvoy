@@ -257,6 +257,36 @@ def report(text: str, age: float | None, *, tips: dict[str, str] | None = None,
     return out.getvalue().strip(), err.getvalue().strip().removeprefix("nixconvoy: ")
 
 
+def target_cases() -> None:
+    """expand_targets: names and @tags from nixconvoy.toml, once each, a
+    remote-only host dropped from a tag but not from a name."""
+    proc.this_host = lambda: "tester"
+    config.set_cfg(config.parse(
+        '[hosts.a]\ntags = ["vps"]\n[hosts.b]\ntags = ["vps", "lab"]\n'
+        '[hosts.c]\nlocal_only = true\ntags = ["lab"]\n'))
+    inv = ["a", "b", "c"]
+    assert hosts.expand_targets([], inv) == []
+    assert hosts.expand_targets(["@vps"], inv) == ["a", "b"]
+    assert hosts.expand_targets(["b", "@vps"], inv) == ["b", "a"]
+    assert hosts.expand_targets(["@lab", "c"], inv) == ["b", "c"]
+    assert hosts.remote_only("c") and not hosts.remote_only("a")
+    for bad in (["@nope"], ["zz"]):
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                hosts.expand_targets(bad, inv)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError(bad)
+    try:
+        config.parse('[hosts.a]\ntag = ["vps"]\n')
+    except config.ConfigError:
+        pass
+    else:
+        raise AssertionError("unknown host key accepted")
+    print("targets: ok")
+
+
 def lineage_cases() -> None:
     """The drift core (nixos/pkgs/switch-guard/src/plan/drift.rs, whose own
     tests hold the cases) on the lineages lineage_doc writes."""
@@ -754,6 +784,7 @@ if __name__ == "__main__":
         os.environ["FAKE_HOST_STATE"] = str(Path(d) / "host.json")
         main()
     lineage_cases()
+    target_cases()
     with tempfile.TemporaryDirectory() as d:
         guard_cases(Path(d))
     with tempfile.TemporaryDirectory() as d:

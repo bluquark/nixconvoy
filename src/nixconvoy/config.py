@@ -30,6 +30,8 @@ class HostConfig:
     local_only: bool = False
     # ssh target, overriding Config.target's template.
     target: str = ""
+    # `@tag` on the command line names every host carrying it.
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,9 @@ class Config:
 
     def ssh_target(self, name: str) -> str:
         return self.host(name).target or self.target.format(host=name)
+
+    def tagged(self, tag: str) -> list[str]:
+        return [n for n, h in self.hosts.items() if tag in h.tags]
 
     @property
     def hosts_path(self) -> str:
@@ -148,8 +153,12 @@ def parse(text: str) -> Config:
     hosts: dict[str, HostConfig] = {}
     for name, h in _table(doc.get("hosts", {}), "hosts").items():
         t = _table(h, f"hosts.{name}")
+        for k in t:
+            if k not in ("local_only", "target", "tags"):
+                raise ConfigError(f"{CONFIG_FILE}: unknown key hosts.{name}.{k}")
         hosts[name] = HostConfig(local_only=_bool(t, "local_only", f"hosts.{name}"),
-                                 target=_str(t, "target", f"hosts.{name}"))
+                                 target=_str(t, "target", f"hosts.{name}"),
+                                 tags=_strs(t, "tags", f"hosts.{name}"))
     overlay = _str(memo, "overlay", "memo")
     namespace = _str(memo, "namespace", "memo")
     if bool(overlay) != bool(namespace):

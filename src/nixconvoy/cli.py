@@ -28,14 +28,15 @@ Model:
     performs the git, eval, build and ssh they ask for.
 
 Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
-         [--take-over host] [host ...]):
+         [--take-over host] [--dry-activate] [host|@tag ...]):
   1. start fetching origin; enumerate the hosts from the hosts directory
   2. probe every host's running system and its lineage
      (/var/lib/nixconvoy/lineage.json, in the same round trip; a local_only
      host participates only when the checkout is on it), concurrently with
-     steps 3-4.  Candidates default to all hosts; naming hosts restricts
-     switching to (at most) those.  An unreachable candidate fails the
-     deploy before anything is evaluated
+     steps 3-4.  Candidates default to all hosts; naming hosts (or @tag, every
+     host nixconvoy.toml gives that tag) restricts switching to (at most)
+     those.  An unreachable candidate fails the deploy before anything is
+     evaluated
   3. snapshot the staged state (index) as an ephemeral deterministic commit
      on top of the work branch; unstaged and untracked changes are excluded,
      since staging marks a change as ready to deploy.  Nothing is committed
@@ -151,6 +152,17 @@ origin/main:<branch>) or repair it in its own checkout.
 --danger-network-config-change admits a switch that would stop, restart or
 reload a protected unit (step 7), for this run only.
 
+--dry-activate runs steps 1-7 up to the switch, dry-activating every host
+that would be switched instead, and prints the units each would stop,
+restart or reload and whether its protected units would refuse the switch.
+Nothing is switched, committed or pushed; the staged changes need no -m.
+
+Exec (nixconvoy exec [host|@tag ...] -- command [arg ...]): the command on
+each named host (every host addressable from here when none is named),
+concurrently, each host's output printed under its name once it finishes.
+Arguments are passed as they are (a pipeline wants `sh -c '...'`); the exit
+status is non-zero when it failed anywhere.
+
 Env: NIXCONVOY_SKIP_SWITCH=1 exercises only the branch/union machinery: no
 probe, eval, build or switch.  NIXCONVOY_FAIL_VERIFY=1 fails a confirmed
 switch's verification, exercising the rollback.  NIXCONVOY_BUILD_HOST
@@ -169,21 +181,25 @@ from pathlib import Path
 from . import commands, proc
 from .checkout import lock_checkout
 from .deploy import deploy
-from .hosts import NETWORK_FLAG
+from .hosts import NETWORK_FLAG, exec_on
 from .proc import PERF, PERF_FILE, die, git, out
 from .switch import TAKE_OVER_FLAG
 
-USAGE = """usage: nixconvoy apply [-m "msg"] [--reset] [--take-over host] [--danger-network-config-change] [host ...]
+USAGE = """usage: nixconvoy apply [-m "msg"] [--reset] [--take-over host] [--danger-network-config-change] [--dry-activate] [host|@tag ...]
        nixconvoy commit -m "msg"
        nixconvoy land [worktree ...]
        nixconvoy abandon [worktree ...]
        nixconvoy pull
        nixconvoy status
        nixconvoy review [worktree ...] [diff args]
+       nixconvoy exec [host|@tag ...] -- command [arg ...]
 With no hosts named, every host whose running system differs from the union
-is switched; naming hosts restricts switching to (at most) those.
+is switched; naming hosts, or @tag for the hosts nixconvoy.toml tags so,
+restricts switching to (at most) those.
 --danger-network-config-change admits a switch that would stop, restart or
-reload a unit the host's configuration protects (nixconvoy.protectedUnits)."""
+reload a unit the host's configuration protects (nixconvoy.protectedUnits).
+--dry-activate stops before any switch, printing what each would do."""
+DRY_FLAG = "--dry-activate"
 
 
 def main() -> None:
@@ -195,7 +211,7 @@ def main() -> None:
         print(__doc__)
         print(USAGE)
         return
-    if args[0] not in ("apply", "land", "commit", "abandon", "pull", "status", "review"):
+    if args[0] not in ("apply", "land", "commit", "abandon", "pull", "status", "review", "exec"):
         die(USAGE)
     subcmd = args.pop(0)
     start = Path.cwd()
@@ -206,11 +222,20 @@ def main() -> None:
     if subcmd == "review":
         os.chdir(start)  # its paths are the caller's
         os.execvp("git", ["git", "review", *args])  # noqa: S606 - integrations/claude-code/bin/git-review
+    if subcmd == "exec":
+        if "--" not in args or args[0] in ("-h", "--help"):
+            die(USAGE)
+        at = args.index("--")
+        if not args[at + 1:]:
+            die(USAGE)
+        exec_on(args[:at], args[at + 1:])
+        return
     if subcmd != "status":
         atexit.register(PERF.write, Path.cwd() / PERF_FILE)
     msg: str | None = None
     reset = False
     danger = False
+    dry = False
     take_over: set[str] = set()
     hosts: list[str] = []
     while args:
@@ -221,28 +246,30 @@ def main() -> None:
             reset = True
         elif a == NETWORK_FLAG:
             danger = True
+        elif a == DRY_FLAG:
+            dry = True
         elif a == TAKE_OVER_FLAG and args:
             take_over.add(args.pop(0))
         elif a in ("-h", "--help"):
             print(USAGE)
             return
-        elif not a.startswith("-"):
+        elif not a.startswith("-") or a.startswith("@"):
             hosts.append(a)
         else:
             die(USAGE)
 
     if subcmd == "pull":
-        if msg or reset or danger or hosts or take_over:
+        if msg or reset or danger or dry or hosts or take_over:
             die(USAGE)
         commands.pull()  # takes each checkout's lock itself, this one included
         return
     if subcmd == "status":
-        if msg or reset or danger or hosts or take_over:
+        if msg or reset or danger or dry or hosts or take_over:
             die(USAGE)
         commands.status()
         return
     if subcmd in ("land", "abandon"):
-        if msg or reset or danger or take_over:
+        if msg or reset or danger or dry or take_over:
             die(USAGE)
         act = commands.land if subcmd == "land" else commands.abandon
         # Several subagent worktrees, one after the other, each under its
@@ -269,11 +296,11 @@ def main() -> None:
     elif subcmd == "abandon":
         commands.abandon()
     elif subcmd == "commit":
-        if reset or danger or hosts or take_over:
+        if reset or danger or dry or hosts or take_over:
             die(USAGE)
         commands.commit_only(msg)
     else:  # apply
-        deploy(hosts, msg, reset, danger, take_over)
+        deploy(hosts, msg, reset, danger, take_over, dry)
 
 
 if __name__ == "__main__":

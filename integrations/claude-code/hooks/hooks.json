@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/worktree-create.sh\"",
+            "timeout": 120,
+            "statusMessage": "Creating the subagent worktree under this checkout"
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/worktree-remove.sh\"",
+            "timeout": 60,
+            "statusMessage": "Removing the subagent worktree"
+          }
+        ]
+      }
+    ]
+  }
+}

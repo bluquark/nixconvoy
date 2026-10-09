@@ -15,11 +15,14 @@ let
     build-system = [ python.pkgs.setuptools ];
     doCheck = false;
   };
-  # `git review`, which `nixconvoy review` execs.
+  # `git review`, which `nixconvoy review` execs, and the Claude Code
+  # plugin (hooks, prompt segment) under share/, for an install by path.
   integrations = pkgs.runCommand "nixconvoy-integrations" { } ''
-    mkdir -p $out/bin
+    mkdir -p $out/bin $out/share/nixconvoy
     cp ${../integrations/claude-code/bin}/* $out/bin/
     chmod +x $out/bin/*
+    cp -r ${../integrations/claude-code} $out/share/nixconvoy/claude-code
+    chmod +x $out/share/nixconvoy/claude-code/hooks/*.sh $out/share/nixconvoy/claude-code/bin/*
   '';
 in
 pkgs.symlinkJoin {
