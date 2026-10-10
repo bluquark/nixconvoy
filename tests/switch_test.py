@@ -782,13 +782,13 @@ def git_cases(d: Path) -> None:
             # nothing relocked it since the stop (a resume does).
             held = f"claude agent review (pid {parent} start {pstart})"
             with contextlib.redirect_stdout(io.StringIO()):
-                why = commands.prune_one(rv.resolve(), named=True, ended=parent, stop_lock=f"{held} 1.2")
+                why = commands.prune_one(rv.resolve(), named=True, stopped=(parent, f"{held} 1.2"))
                 assert why == "the claude session that spawned its agent still runs", why
                 # A lock naming no session tells no relock apart: kept.
                 sh(co, "worktree", "unlock", str(rv))
                 sh(co, "worktree", "lock", "--reason", f"claude agent review {checkout.SESSIONLESS}", str(rv))
-                why = commands.prune_one(rv.resolve(), named=True, ended=parent,
-                                         stop_lock=f"claude agent review {checkout.SESSIONLESS}")
+                why = commands.prune_one(rv.resolve(), named=True,
+                                         stopped=(parent, f"claude agent review {checkout.SESSIONLESS}"))
                 assert why is not None and why.startswith("its create found no claude session to outlive"), why
                 sh(co, "worktree", "unlock", str(rv))
                 sh(co, "worktree", "lock", "--reason", held, str(rv))
@@ -798,12 +798,12 @@ def git_cases(d: Path) -> None:
                 exclude.write_text(kept_out + "target/\n")
                 (rv / "target").mkdir()
                 (rv / "target" / "build").write_text("x\n")
-                why = commands.prune_one(rv.resolve(), named=True, ended=parent, stop_lock=held)
+                why = commands.prune_one(rv.resolve(), named=True, stopped=(parent, held))
                 assert why is not None and why.startswith("it has uncommitted or untracked changes"), why
                 (rv / "target" / "build").unlink()
                 (rv / "target").rmdir()
                 exclude.write_text(kept_out)
-                assert commands.prune_one(rv.resolve(), named=True, ended=parent, stop_lock=held) is None
+                assert commands.prune_one(rv.resolve(), named=True, stopped=(parent, held)) is None
 
             assert not rv.exists() and Path.cwd().resolve() == co.resolve()
             sh(co, "worktree", "add", "--quiet", "--detach", str(rv), "origin/main")

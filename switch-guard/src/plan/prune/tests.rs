@@ -3,7 +3,7 @@ use super::*;
 use crate::plan::{drive, Replay, Reply};
 
 fn params(named: bool) -> Params {
-    Params { name: "agent-x".into(), named, own_session_ends: false }
+    Params { name: "agent-x".into(), named, own_session_ends: false, stopped: None }
 }
 
 /// Answers for a worktree holding nothing of its own, locked by dead
@@ -147,6 +147,22 @@ fn named_and_own_session() {
     let (asked, o) = run(p, sessionless);
     assert_eq!(o, Outcome::Removed);
     assert!(asked.contains(&Query::ClaimLock { expect: Some(format!("claude agent agent-x {SESSIONLESS}")) }));
+}
+
+#[test]
+fn a_stop_ends_its_session_while_the_lock_is_the_stop_s() {
+    let live = |q: &Query| matches!(q, Query::Alive { .. }).then_some(Reply::Flag(true));
+    let at_stop = |lock: &str| Params { stopped: Some(Stopped { pid: 7, lock: Some(lock.into()) }), ..params(true) };
+    let (asked, o) = run(at_stop("claude agent agent-x (pid 7 start 9)"), live);
+    assert_eq!(o, Outcome::Removed);
+    assert!(!asked.iter().any(|q| matches!(q, Query::Alive { .. })));
+    // Relocked since, by a resume.
+    let (_, o) = run(at_stop("claude agent agent-x (pid 7 start 9) 1.2"), live);
+    assert_eq!(kept(&o), "the claude session that spawned its agent still runs");
+    // Only its own session's lock, never one naming none.
+    let sessionless = format!("claude agent agent-x {SESSIONLESS}");
+    let (_, o) = run(at_stop(&sessionless), |q| (*q == Query::Lock).then(|| Reply::Text(Some(sessionless.clone()))));
+    assert!(kept(&o).starts_with("its create found no claude session to outlive"), "{o:?}");
 }
 
 #[test]

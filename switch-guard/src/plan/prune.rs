@@ -2,8 +2,10 @@
 //! removed, and its removal.  Claude Code never removes the worktrees
 //! nixconvoy's WorktreeCreate hook makes, and an agent can be resumed while
 //! the session that spawned it runs, which needs its worktree; so a
-//! worktree goes only once the session its lock names has exited, and only
-//! when it holds nothing of its own.  A sweep (no name given) keeps an
+//! worktree goes only once the session its lock names has exited, or its
+//! agent stopped and no resume relocked it since, and only when it holds
+//! nothing of its own.  A sweep (no name given) keeps an
+
 //! unlocked one, which no session's exit tells the end of.
 //!
 //! A live session or a hand lock is told before origin is fetched, which
@@ -31,6 +33,18 @@ pub struct Params {
     /// The session running this may judge its own agents' worktrees dead
     /// (abandon); prune never does, the session may yet resume them.
     pub own_session_ends: bool,
+    /// A stop's (`prune --stopped`).
+    pub stopped: Option<Stopped>,
+}
+
+/// The session whose agent stopped, by pid, and the worktree's lock then:
+/// that session counts as ended for it while the lock is still that one.
+/// A resume relocks it, and each lock the create hook writes naming a
+/// session carries a token of its own.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Stopped {
+    pub pid: u32,
+    pub lock: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -111,7 +125,8 @@ fn holder(s: &mut Script, p: &Params) -> Run<Result<Option<String>, Outcome>> {
                 return kept(format!("locked by hand ({why}): `git worktree unlock` it to let prune judge it"));
             }
             Some((pid, start)) => {
-                if s.flag(Query::Alive { pid, start, own_ends: p.own_session_ends })? {
+                let ended = p.stopped.as_ref().is_some_and(|st| st.pid == pid && st.lock.as_deref() == Some(reason));
+                if !ended && s.flag(Query::Alive { pid, start, own_ends: p.own_session_ends })? {
                     return kept("the claude session that spawned its agent still runs");
                 }
             }

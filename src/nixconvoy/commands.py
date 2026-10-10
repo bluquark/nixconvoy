@@ -215,7 +215,7 @@ def prune(names: list[str]) -> None:
 def prune_one(d: Path, *, named: bool, own_session_ends: bool = False,
               fetched: list[dict[str, object]] | None = None, prefetched: bool = False,
               deploy_held: bool = False, dropped_failed: list[str] | None = None,
-              ended: int | None = None, stop_lock: str | None = None) -> str | None:
+              stopped: tuple[int, str | None] | None = None) -> str | None:
     """deploy-plan's prune core on the subagent worktree `d`: None once
     removed (the process then in its parent), else why it was kept.
     `fetched` shares one fetch across a run (`prefetched`: the caller
@@ -223,17 +223,18 @@ def prune_one(d: Path, *, named: bool, own_session_ends: bool = False,
     `dropped_failed` collects the origin branch deletions that failed.
     `own_session_ends`: the session the lock names ends for it - this
     one's, abandon from inside it (the invoking command no occupant).
-    `ended`: the claude session whose agent stopped, counted as ended while
-    the lock is still `stop_lock`.  A worktree named waits for its name
-    lock, a sweep does not."""
+    `stopped`: the claude session (pid) whose agent stopped and the lock
+    then, a stop's prune (see the core's Stopped).  A worktree named waits
+    for its name lock, a sweep does not."""
     os.chdir(d)
     memo: list[dict[str, object]] = [] if fetched is None else fetched
     if prefetched and not memo:
         memo.append({"ran": True, "detail": ""})
     perform = PruneQueries(d, memo, deploy_held=deploy_held, invoker=own_session_ends,
-                           ended=ended, stop_lock=stop_lock, name_wait=60 if named else 0)
+                           stop=stopped is not None, name_wait=60 if named else 0)
     try:
-        done = decide("prune", perform=perform, name=d.name, named=named, own_session_ends=own_session_ends)
+        done = decide("prune", perform=perform, name=d.name, named=named, own_session_ends=own_session_ends,
+                      stopped=None if stopped is None else {"pid": stopped[0], "lock": stopped[1]})
     finally:
         perform.close()
     if dropped_failed is not None:
@@ -323,18 +324,16 @@ class PruneQueries(GitQueries):
     file claimed by renaming it aside (git refuses to remove a locked
     worktree, so a lock renamed in meanwhile keeps it); `fetched` shares one
     fetch across a run; `invoker`: the invoking command is abandon's, its
-    processes in `d` no occupants; `ended`: the claude session the core
-    may count as ended, if not this one's, while `d` keeps `stop_lock`, the
-    lock it had when that session's agent stopped (a resume relocks it)."""
+    processes in `d` no occupants; `stop`: a stop's prune, its agent's
+    ignored files counted as its own."""
 
     def __init__(self, d: Path, fetched: list[dict[str, object]], *, deploy_held: bool = False,
-                 invoker: bool = False, ended: int | None = None, stop_lock: str | None = None,
+                 invoker: bool = False, stop: bool = False,
                  name_wait: float = 0) -> None:
         super().__init__()
         self.d = d
         self.invoker = invoker
-        self.ended = ended
-        self.stop_lock = stop_lock
+        self.stop = stop
         self.name_wait = name_wait
         # The origin branch deletions that failed after the removal.
         self.dropped_failed: list[str] = []
@@ -371,6 +370,13 @@ class PruneQueries(GitQueries):
             return f.read_text().removesuffix("\n")
         except FileNotFoundError:
             return None
+
+    @staticmethod
+    def current_lock(locked: Path) -> str | None:
+        """The worktree's lock, at `locked`, or as a removal claimed it
+        (one that died before restoring it still counts)."""
+        lock = PruneQueries.read(locked)
+        return lock if lock is not None else PruneQueries.read(locked.with_name("locked.prune"))
 
     def restore(self) -> None:
         # Not onto a registration whose tree git deleted: locked, it would
@@ -412,18 +418,11 @@ class PruneQueries(GitQueries):
             return {"flag": self.take(Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path",
                                                 "nixconvoy-deploy.lock"]))) is not None}
         if kind == "lock":
-            # A lock a removal claimed before it died still counts.
-            return {"text": self.read(self.locked) if self.locked.exists() else self.read(self.claimed)}
+            return {"text": self.current_lock(self.locked)}
         if kind == "alive":
             start = ask.get("start")
             reason = f"pid {ask.get('pid')}" + (f" start {start}" if start is not None else "")
-            if self.ended is not None:
-                now = self.read(self.locked) if self.locked.exists() else self.read(self.claimed)
-                alive = now != self.stop_lock or (ask.get("pid") != self.ended and lock_pid_alive(reason) is not False)
-            elif not ask.get("own_ends"):
-                alive = lock_pid_alive(reason) is not False
-            else:
-                alive = lock_live(reason)
+            alive = lock_live(reason) if ask.get("own_ends") else lock_pid_alive(reason) is not False
             return {"flag": alive}
         if kind == "push_in_flight":
             return {"flag": Path(push_state("pid")).exists()}
@@ -438,7 +437,7 @@ class PruneQueries(GitQueries):
         if kind == "dirty":
             # An agent that stopped may be resumed: what git ignores (its
             # builds, notes) is kept for it too.
-            ignored = ["--ignored"] if self.ended is not None else []
+            ignored = ["--ignored"] if self.stop else []
             return {"flag": bool(out(["git", "status", "--porcelain", *ignored]))}
         if kind == "occupied":
             return {"flag": occupied(self.d, invoker=self.invoker)}
@@ -550,7 +549,19 @@ def log_to(common: Path) -> None:
     os.dup2(log.fileno(), 2)
 
 
+# How long after an agent's stop a message sent it before then wakes it.
+STOP_GRACE = 10
+
+
+def transcript_size(path: Path) -> int | None:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
 def transcript_cwd(path: Path, *, last: bool = False) -> Path | None:
+
     """The working directory a Claude Code transcript records first (where
     its agent started), or `last` (within its final 256 KiB)."""
     def cwd(raw: bytes) -> str | None:
@@ -582,8 +593,8 @@ def prune_stopped(session: int, stop: dict[str, object]) -> None:
     recreates it first (worktree-resume.sh).  Kept while a process, a
     background task the agent started (which wakes it, bypassing that hook),
     or another running agent of the session (a skill forked there) works in
-    it; the agent stops again once that work has woken it, and is judged
-    again."""
+    it, or once its transcript grew since the stop (it ran again); the
+    agent stops again once that work has woken it, and is judged again."""
     agent = str(stop.get("agent_id") or "")
     transcript = Path(str(stop.get("agent_transcript_path") or ""))
     d = transcript_cwd(transcript)
@@ -596,11 +607,15 @@ def prune_stopped(session: int, stop: dict[str, object]) -> None:
     os.chdir(top)
     common = Path(out(["git", "rev-parse", "--git-common-dir"])).resolve()
     locked = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path", "locked"], cwd=str(d)))
-    stop_lock = PruneQueries.read(locked)
+    stop_lock = PruneQueries.current_lock(locked)
+    size = transcript_size(transcript)
     if not detached(top):
         return
     log_to(common)
     try:
+        # A message sent it after its last tool round wakes it at once,
+        # past the resume hook, which relocked it before the stop.
+        time.sleep(STOP_GRACE)
         try:
             told = transcript.read_bytes()
         except OSError:
@@ -616,7 +631,11 @@ def prune_stopped(session: int, stop: dict[str, object]) -> None:
         else:
             with (common / "nixconvoy-prune.lock").open("w") as serial:
                 fcntl.flock(serial, fcntl.LOCK_EX)
-                why = prune_one(d, named=True, ended=session, stop_lock=stop_lock)
+                if transcript_size(transcript) != size:
+                    why = "it ran again since it stopped"
+                else:
+                    why = prune_one(d, named=True, stopped=(session, stop_lock))
+
             verdict = "empty, removed" if why is None else f"kept, {why}"
     except (Exception, SystemExit) as e:  # noqa: BLE001 - reported in the log
         verdict = f"kept, its check failed: {e!r}"

@@ -107,7 +107,14 @@ fn rebase_params(v: &Value) -> Result<rebase::Params, String> {
 }
 
 fn prune_params(v: &Value) -> Result<prune::Params, String> {
-    Ok(prune::Params { name: text(v, "name")?, named: flag(v, "named")?, own_session_ends: flag(v, "own_session_ends")? })
+    let stopped = match field(v, "stopped")? {
+        Value::Null => None,
+        st => Some(prune::Stopped {
+            pid: u32::try_from(field(st, "pid")?.as_u64().ok_or("pid is not a number")?).map_err(|e| e.to_string())?,
+            lock: opt_text(field(st, "lock")?)?,
+        }),
+    };
+    Ok(prune::Params { name: text(v, "name")?, named: flag(v, "named")?, own_session_ends: flag(v, "own_session_ends")?, stopped })
 }
 
 fn union_params(v: &Value) -> Result<union::Params, String> {
@@ -295,7 +302,8 @@ mod tests {
         );
         let mut u = start(r#"{"protocol":2,"core":"union","wb":"w","reset":true,"main0":null}"#).unwrap();
         assert_eq!(u.decide(None).0, r#"{"effects":[{"mark":"union"}],"next":{"ask":"listed"}}"#);
-        let mut p = start(r#"{"protocol":2,"core":"prune","name":"agent-x","named":false,"own_session_ends":false}"#).unwrap();
+        let mut p =
+            start(r#"{"protocol":2,"core":"prune","name":"agent-x","named":false,"own_session_ends":false,"stopped":null}"#).unwrap();
         assert_eq!(p.decide(None).0, r#"{"effects":[],"next":{"ask":"lock"}}"#);
         assert_eq!(
             p.decide(Some(Reply::Text(Some("pid 7".into())))).0,
