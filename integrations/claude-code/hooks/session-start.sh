@@ -11,6 +11,7 @@ set -u
 INPUT=$(cat)
 cwd=$(printf '%s' "$INPUT" | jq -r '.cwd // ""' 2>/dev/null)
 root=$(git -C "${CLAUDE_PROJECT_DIR:-${cwd:-.}}" rev-parse --show-toplevel 2>/dev/null) || exit 0
+[ -f "$root/deploy-branches" ] || exit 0  # not a nixconvoy repository
 pid=$PPID
 while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
   case "$(ps -o comm= -p "$pid" 2>/dev/null)" in *claude*) break ;; esac

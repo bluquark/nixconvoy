@@ -44,10 +44,11 @@ if [ -n "$pid" ] && [ "$pid" -gt 1 ]; then
   lock=(--lock --reason "$reason)")
 fi
 if [ "$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" = "$dir" ]; then
-  # The worktree exists: reused (`claude --worktree <name>` again).
+  # The worktree exists: reused (`claude --worktree <name>` again).  Its
+  # lock file is replaced in one rename, never unlocked in between.
   if [ ${#lock[@]} -gt 0 ]; then
-    git -C "$root" worktree unlock "$dir" >/dev/null 2>&1 || true  # its old lock
-    git -C "$root" worktree lock --reason "${lock[2]}" "$dir" >&2 || true
+    locked=$(git -C "$dir" rev-parse --path-format=absolute --git-path locked)
+    printf '%s' "${lock[2]}" > "$locked.tmp" && mv -f "$locked.tmp" "$locked"
   fi
 elif git -C "$root" rev-parse -q --verify "refs/heads/$branch" >/dev/null; then
   # The branch outlived its worktree: checked out as it is.

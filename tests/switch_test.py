@@ -716,12 +716,15 @@ def git_cases(d: Path) -> None:
         line = next(ln for ln in out.getvalue().splitlines() if "review" in ln)
         assert "nothing of its own" in line and "prune review removes it" in line, line
         # prune keeps a worktree with anything of its own, saying why, and
-        # removes an empty one (a locked one only once its session is gone:
-        # the lock cases below).
-        put(rv, "r.txt", "review\n", "by hand")
+        # removes an empty one; a sweep (no names) keeps an unlocked one.
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             commands.prune([])
+        assert "/review: kept, unlocked: no session to outlive" in out.getvalue(), out.getvalue()
+        put(rv, "r.txt", "review\n", "by hand")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            commands.prune(["rev"])
         assert out.getvalue().endswith("/review: kept, it carries commits not on origin, which the "
                                        "removal would lose; push them (git push origin HEAD:main) "
                                        "or deploy from the work branch\n"), out.getvalue()
@@ -733,11 +736,30 @@ def git_cases(d: Path) -> None:
         assert "/review: kept, it has uncommitted or untracked changes" in out.getvalue(), out.getvalue()
         assert rv.exists() and Path.cwd().resolve() == co.resolve()
         (rv / "u.txt").unlink()
+        # A sweep removes one whose session is dead, but not while it owns a
+        # local work branch carrying commits origin lacks.
+        exited = subprocess.Popen(["true"])
+        exited.wait()
+        sh(co, "worktree", "lock", "--reason", f"claude agent review (pid {exited.pid})", str(rv))
+        own = checkout.identity_of(rv.resolve(), None).wb
+        assert own is not None
+        put(co, "unpushed.txt", "x\n", "unpushed")
+        sh(co, "branch", own, "HEAD")
+        sh(co, "reset", "--quiet", "--hard", "HEAD~1")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            commands.prune([])
+        assert f"/review: kept, it owns {own}, which carries commits not on origin" in out.getvalue(), out.getvalue()
+        sh(co, "branch", "-D", own)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             commands.prune([])
         assert out.getvalue().endswith("/review: empty, removed\n"), out.getvalue()
         assert not rv.exists() and Path.cwd().resolve() == co.resolve()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            commands.prune([])
+        assert out.getvalue().startswith("no subagent worktree under"), out.getvalue()
         sh(co, "worktree", "add", "--quiet", "--detach", str(rv), "origin/main")
         # Unlike abandon, prune keeps a worktree whose session still runs even
         # when that session is the one asking: it may resume the agent.
