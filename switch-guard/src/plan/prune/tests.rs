@@ -52,7 +52,7 @@ fn parses_the_session() {
 fn removes_an_empty_dead_one() {
     let (asked, o) = run(params(false), |_| None);
     assert_eq!(o, Outcome::Removed);
-    assert_eq!(&asked[..2], &[Query::TakeNameLock, Query::TakeDeployLock]);
+    assert_eq!(&asked[..3], &[Query::Fetch, Query::TakeNameLock, Query::TakeDeployLock]);
     assert_eq!(&asked[asked.len() - 2..], &[Query::ReleaseDeployLock, Query::ReleaseNameLock]);
     assert!(asked.contains(&Query::Alive { pid: 7, start: Some(9), own_ends: false }));
     assert!(asked.contains(&Query::ClaimLock { expect: Some("claude agent agent-x (pid 7 start 9)".into()) }));
@@ -62,7 +62,7 @@ fn removes_an_empty_dead_one() {
 #[test]
 fn keeps_and_says_why() {
     let cases: Vec<(Query, Reply, &str)> = vec![
-        (Query::TakeNameLock, Reply::Flag(false), "a worktree of its name is being created"),
+        (Query::TakeNameLock, Reply::Flag(false), "its name is locked: a create or another removal is at it"),
         (Query::TakeDeployLock, Reply::Flag(false), "a nixconvoy runs in it"),
         (Query::Lock, Reply::Text(Some("kept for a look".into())), "locked by hand (kept for a look): `git worktree unlock`"),
         (Query::Lock, Reply::Text(None), "unlocked: no session to outlive"),
@@ -91,7 +91,7 @@ fn keeps_and_says_why() {
         let (asked, o) = run(params(false), |x| (*x == q).then(|| r.clone()));
         assert!(kept(&o).starts_with(why), "{q:?}: {o:?}");
         assert!(!asked.contains(&Query::RemoveWorktree) || matches!(q, Query::RemoveWorktree), "{q:?} still removed");
-        let named = q != Query::TakeNameLock;
+        let named = q != Query::TakeNameLock && q != Query::Fetch;
         assert_eq!(asked.last() == Some(&Query::ReleaseNameLock), named, "{q:?}: {asked:?}");
         let deployed = named && q != Query::TakeDeployLock;
         assert_eq!(asked.contains(&Query::ReleaseDeployLock), deployed, "{q:?}: {asked:?}");
@@ -138,4 +138,21 @@ fn named_and_own_session() {
     let p = Params { own_session_ends: true, ..params(true) };
     let (asked, _) = run(p, |_| None);
     assert!(asked.contains(&Query::Alive { pid: 7, start: Some(9), own_ends: true }));
+}
+
+#[test]
+fn a_failed_branch_deletion_warns() {
+    let (_, fx, out) = drive(Replay::new(params(false), program), 40, |q| match q {
+        Query::DropBranches { .. } => Reply::Ran { ok: false, detail: "deleting w on origin failed: offline".into() },
+        Query::Lock => Reply::Text(Some("claude agent agent-x (pid 7 start 9)".into())),
+        Query::OwnBranch => Reply::Text(Some("h-deploys3-agent-x".into())),
+        Query::CurrentBranch | Query::OpInProgress | Query::Rev { .. } => Reply::Text(None),
+        Query::TakeNameLock | Query::TakeDeployLock | Query::OnOrigin | Query::ClaimLock { .. } => Reply::Flag(true),
+        Query::Fetch | Query::RemoveWorktree | Query::ReleaseDeployLock | Query::ReleaseNameLock => {
+            Reply::Ran { ok: true, detail: String::new() }
+        }
+        _ => Reply::Flag(false),
+    });
+    assert_eq!(out, Ok(Outcome::Removed));
+    assert_eq!(fx, vec![crate::plan::Effect::Warn("deleting w on origin failed: offline".into())]);
 }

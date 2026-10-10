@@ -367,9 +367,11 @@ def catch_up(paths: list[Path]) -> bool:
         try:
             done, status = update_checkout(d)
         except FileNotFoundError:
-            done, status = False, "gone"
-        if not done and not d.is_dir():
+            if d.is_dir():
+                raise
             continue  # a subagent worktree pruned meanwhile
+        if not done and not d.is_dir():
+            continue
         print(f"{d.name}: {status}", file=sys.stdout if done else sys.stderr,
               flush=True)
         good &= done
@@ -645,6 +647,9 @@ def require_unlocked(here: Path) -> None:
     """Die unless the subagent worktree `here` may be removed: Claude Code
     locks it for the lifetime of the session that spawned the agent."""
     reason = worktree_lock(here)
+    if reason is not None and lock_pid_alive(reason) is None:
+        die(f"this worktree is locked by hand ({reason or 'no reason given'}): "
+            "`git worktree unlock` it, then re-run")
     if reason is not None and lock_live(reason):
         die(f"this worktree is locked ({reason or 'no reason given'}): the claude session that "
             "spawned its agent still runs; wait for it to exit, or `git worktree unlock` it, "

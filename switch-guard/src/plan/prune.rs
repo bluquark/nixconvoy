@@ -62,8 +62,12 @@ fn kept<T>(why: impl Into<String>) -> Run<Result<T, Outcome>> {
 }
 
 pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
+    // Before any lock: a slow fetch holds up no create of this name.
+    if let Err(detail) = s.ran(Query::Fetch)? {
+        return Ok(Outcome::Kept(format!("origin could not be fetched to judge it:\n{}", detail.trim())));
+    }
     if !s.flag(Query::TakeNameLock)? {
-        return Ok(Outcome::Kept("a worktree of its name is being created".into()));
+        return Ok(Outcome::Kept("its name is locked: a create or another removal is at it; re-run".into()));
     }
     let outcome = if s.flag(Query::TakeDeployLock)? {
         let o = match judge(s, p)? {
@@ -119,9 +123,6 @@ fn judge(s: &mut Script, p: &Params) -> Run<Result<Judged, Outcome>> {
             format!("it has {wb}, another checkout's work branch, checked out")
         });
     }
-    if let Err(detail) = s.ran(Query::Fetch)? {
-        return kept(format!("origin could not be fetched to judge it:\n{}", detail.trim()));
-    }
     if let Some(tip) = s.text(Query::Rev { name: format!("refs/remotes/origin/{wb}") })? {
         if !s.flag(Query::Contains { a: tip, b: MAIN.into() })? {
             return kept(format!("it is not on {wb}, which carries pushed increments; `git switch {wb}` there to discard them"));
@@ -155,7 +156,9 @@ fn remove(s: &mut Script, lock: Option<String>, wb: &str, cur: Option<String>) -
         s.tolerate(Query::RestoreLock)?;
         return Ok(Outcome::Kept(format!("git refused to remove it:\n{}", detail.trim())));
     }
-    s.tolerate(Query::DropBranches { wb: wb.into(), cur })?;
+    if let Err(detail) = s.ran(Query::DropBranches { wb: wb.into(), cur })? {
+        s.warn(detail);
+    }
     Ok(Outcome::Removed)
 }
 

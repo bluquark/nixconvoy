@@ -54,13 +54,20 @@ fi
 # tree, then the admin directory by name): held here across the reuse or
 # the add, so neither meets a removal half done.  flock(1), or perl's where
 # there is none (macOS); held until this hook exits.
+# The lock file is named after the worktree's path, each / a %.
 locks="$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)/nixconvoy-worktree-locks"
 mkdir -p "$locks"
-exec 9>>"$locks/$name.lock"
+exec 9>>"$locks/${dir//\//%}.lock"
 if command -v flock >/dev/null 2>&1; then
-  flock -w 60 9
+  locked_name() { flock -w 60 9; }
 else
-  perl -MFcntl=:flock -e 'open(my $f, ">&=", 9) or die "fd 9: $!\n"; $SIG{ALRM} = sub { die "timed out\n" }; alarm 60; flock($f, LOCK_EX) or die "$!\n"'
+  locked_name() {
+    perl -MFcntl=:flock -e 'open(my $f, ">&=", 9) or exit 1; $SIG{ALRM} = sub { exit 1 }; alarm 60; flock($f, LOCK_EX) or exit 1'
+  }
+fi
+if ! locked_name; then
+  echo "worktree-create: $dir stayed locked for 60s by a nixconvoy prune or another create" >&2
+  exit 1
 fi
 
 # Under the name lock nothing else removes it; the retries cover git

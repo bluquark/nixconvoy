@@ -20,6 +20,16 @@ if [ -n "$(git -C "$path" status --porcelain)" ] \
 fi
 branch=$(git -C "$path" symbolic-ref --short -q HEAD || true)
 top=$(dirname "$(dirname "$(dirname "$path")")")
+# The name lock worktree-create.sh and nixconvoy's prune take, so neither
+# meets this removal half done.
+locks="$(git -C "$top" rev-parse --path-format=absolute --git-common-dir)/nixconvoy-worktree-locks"
+mkdir -p "$locks"
+exec 9>>"$locks/${path//\//%}.lock"
+if command -v flock >/dev/null 2>&1; then
+  flock -w 60 9
+else
+  perl -MFcntl=:flock -e 'open(my $f, ">&=", 9) or exit 1; $SIG{ALRM} = sub { exit 1 }; alarm 60; flock($f, LOCK_EX) or exit 1'
+fi
 git -C "$top" worktree unlock "$path" 2>/dev/null || true
 git -C "$top" worktree remove --force "$path"
 [ -z "$branch" ] || git -C "$top" branch -D "$branch" >&2 || true
