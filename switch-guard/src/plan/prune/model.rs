@@ -1,43 +1,43 @@
-//! The prune core against the world it runs in: two claude sessions, each
-//! with its waiter (`prune --after`: a sweep at start, another once the
-//! session exits), spawning a subagent into a fresh worktree or, through
-//! `claude --worktree <name>`, reusing a dead session's (relocking it, by a
-//! lock naming no session when no claude ancestor is found) or recreating
-//! it, each under the create hook's name lock; the subagent dirtying,
-//! committing, deploying (a background push that may fail) and leaving its
-//! work branch, a few times, stopping (`prune --stopped`), resumed (the
-//! create hook again, relocking or recreating it) or woken past the resume
-//! hook: by a background task it started, whose end may come at any time
-//! (prune --stopped keeps it outright while one runs), or by a message sent
-//! it after its last tool round or Claude Code's own follow-up turn, which
-//! come at once, within the stop's grace, so before its prune runs; a
-//! process working in it without its lock; a hand lock; a reboot killing
-//! sessions, waiters, creates, pushes and sweeps mid-removal; and, once all
-//! is quiet, a later session's start sweep.  Each query the real core asks is one step, so every other actor
+//! The prune core against the world it runs in: two claude sessions, each with
+//! its waiter (`prune --after`: a sweep at start, another once the session
+//! exits), spawning a subagent into a fresh worktree or, through `claude
+//! --worktree <name>`, reusing a dead session's (relocking it, by a lock naming
+//! no session when no claude ancestor is found) or recreating it, each under
+//! the create hook's name lock; the subagent dirtying, committing, deploying (a
+//! background push that may fail) and leaving its work branch, a few times,
+//! stopping (`prune --stopped`), resumed (the create hook again, relocking or
+//! recreating it) or woken past the resume hook: by a background task it
+//! started, whose end may come at any time (prune --stopped keeps it outright
+//! while one runs), or by a message sent it after its last tool round or Claude
+//! Code's own follow-up turn, whose prompts are recorded at once, within the
+//! stop's grace, so before its prune runs; a process working in it without its
+//! lock; a hand lock; a reboot killing sessions, waiters, creates, pushes and
+//! sweeps mid-removal; and, once all is quiet, a later session's start
+//! sweep.  Each query the real core asks is one step, so every other actor
 //! interleaves between any two of them; `git worktree remove` is three: its
-//! lock and cleanliness check, the tree's deletion, the admin directory's
-//! (by name, whichever worktree of that name it then belongs to).  The core
-//! judges each worktree on its own, so one name is modelled (a fresh
-//! agent's unique name takes it only once it is empty); a manual prune is a
-//! waiter's first sweep at another moment.  One stop's prune at a time: the
-//! agent stops again only once it ran again, after which a pending one
-//! keeps it (a turn recorded since) or, a resume having relocked it, judges
-//! it as a sweep does.  Three configurations: the whole world with sweeps
-//! and a stop's prune one at a time, as prune's flock runs them, the stop
-//! maybe leaving a background task running; the same with the agent
-//! stopping twice, woken in between by a message, its background task's end
-//! or a resume, and no hand lock, stale reuse or lockless process; and
-//! sweeps fully concurrent against the sessions and creates alone (no agent
-//! work, stop, hand lock, stale reuse, lockless process or reboot), since
-//! the name and deploy locks alone have to keep them apart.
+//! lock and cleanliness check, the tree's deletion, the admin directory's (by
+//! name, whichever worktree of that name it then belongs to).  The core judges
+//! each worktree on its own, so one name is modelled (a fresh agent's unique
+//! name takes it only once it is empty); a manual prune is a waiter's first
+//! sweep at another moment.  One stop's prune at a time: the agent stops again
+//! only once it ran again, after which a pending one keeps it (a turn or prompt
+//! recorded since) or, a resume having relocked it, judges it as a sweep
+//! does.  Three configurations: the whole world with sweeps and a stop's prune
+//! one at a time, as prune's flock runs them, the stop maybe leaving a
+//! background task running; the same with the agent stopping twice, woken in
+//! between by a message, its background task's end or a resume, and no hand
+//! lock, stale reuse or lockless process; and sweeps fully concurrent against
+//! the sessions and creates alone (no agent work, stop, hand lock, stale reuse,
+//! lockless process or reboot), since the name and deploy locks alone have to
+//! keep them apart.
 //!
-//! Under the name lock no create meets a removal half done (a property), so
-//! the hook's retries are for failures this world leaves out.  Not
-//! modelled: the lockless process writing to the worktree after the
-//! occupancy check (a removal can always race a shell entering it at that
-//! instant), ignored files (a sweep removes them with the worktree), and
-//! git operations left in progress, nested worktrees or another agent
-//! working in it, which only make prune keep it.
+//! Under the name lock no create meets a removal half done (a property), so the
+//! hook's retries are for failures this world leaves out.  Not modelled: the
+//! lockless process writing to the worktree after the occupancy check (a
+//! removal can always race a shell entering it at that instant), ignored files
+//! (a sweep removes them with the worktree), and git operations left in
+//! progress, nested worktrees or another agent working in it, which only make
+//! prune keep it.
 use super::{program, Outcome, Params, Stopped};
 use crate::plan::{resume, Next, Query, Reply, MAIN};
 use stateright::{Checker, Model, Property};
@@ -238,8 +238,8 @@ struct Sweep {
     /// A process was in the worktree when its lock was claimed.
     occupied_at_claim: bool,
     stopped: Option<Stopped>,
-    /// For a stop's prune, its agent woke past the resume hook since (a
-    /// turn recorded; a resume records one too, but its relock already tells).
+    /// For a stop's prune, its agent woke past the resume hook since (its
+    /// prompt recorded; a resume's is too, but its relock already tells).
     ran: bool,
 }
 

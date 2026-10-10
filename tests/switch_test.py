@@ -806,12 +806,22 @@ def git_cases(d: Path) -> None:
                 (rv / "target" / "build").unlink()
                 (rv / "target").rmdir()
                 exclude.write_text(kept_out)
-                # A turn recorded since the stop: it ran again.  A tool's
-                # result written after it is none.
-                transcript.write_text('{"type":"assistant"}\n{"type":"user","note":"assistant"}\n[]\n')
-                assert commands.transcript_turns(transcript) == 1
+                # A turn recorded since the stop, or a prompt awaiting one:
+                # it runs again.  Its tool's result, or an error recorded in
+                # its place, is neither.
+                turn = '{"type":"assistant","message":{"model":"m","content":[]}}\n'
+                result = '{"type":"user","message":{"content":[{"type":"tool_result"}]}}\n'
+                error = '{"type":"assistant","message":{"model":"<synthetic>","content":[]}}\n'
+                transcript.write_text(turn + result + "[]\n" + error)
+                assert commands.transcript_turns(transcript) == (1, False)
                 why = commands.prune_one(rv.resolve(), named=True, stopped=commands.Stop(parent, held, transcript, 0))
                 assert why == "its agent ran again since it stopped", why
+                with transcript.open("a") as f:
+                    f.write('{"type":"user","message":{"content":"go on"}}\n')
+                assert commands.transcript_turns(transcript) == (1, True)
+                why = commands.prune_one(rv.resolve(), named=True, stopped=commands.Stop(parent, held, transcript, 1))
+                assert why == "its agent ran again since it stopped", why
+                transcript.write_text(turn + result)
                 assert commands.prune_one(rv.resolve(), named=True, stopped=commands.Stop(parent, held, transcript, 1)) is None
             assert not rv.exists() and Path.cwd().resolve() == co.resolve()
             sh(co, "worktree", "add", "--quiet", "--detach", str(rv), "origin/main")

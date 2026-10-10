@@ -215,8 +215,8 @@ pub enum Query {
     /// Whether a process other than nixconvoy's own has its working
     /// directory in it -> Flag.
     Occupied,
-    /// A stop's prune: whether its agent took a turn since the stop (it ran
-    /// again) -> Flag.
+    /// A stop's prune: whether its agent took a turn since the stop or a
+    /// prompt awaits one (it runs again) -> Flag.
     RanAgain,
 
     /// Rename its lock aside, if it still holds `expect` (None: if it is

@@ -453,7 +453,8 @@ class PruneQueries(GitQueries):
         if kind == "occupied":
             return {"flag": occupied(self.d, invoker=self.invoker)}
         if kind == "ran_again":
-            return {"flag": self.stop is not None and transcript_turns(self.stop.transcript) != self.stop.turns}
+            now = None if self.stop is None else transcript_turns(self.stop.transcript)
+            return {"flag": self.stop is not None and (now is None or now[0] != self.stop.turns or now[1])}
         if kind == "fetch":
             if not self.fetched:
                 self.fetched.append(super().__call__(ask))
@@ -568,24 +569,34 @@ def log_to(common: Path) -> None:
 STOP_GRACE = 10
 
 
-def transcript_turns(path: Path) -> int | None:
-    """How many turns a Claude Code transcript records its agent taking:
-    what grows when it runs again (its tools' results may still be written
-    after it stopped)."""
-    def turn(raw: bytes) -> bool:
-        if b'"assistant"' not in raw:
-            return False
-        try:
-            rec = json.loads(raw)
-        except ValueError:
-            return False
-        return isinstance(rec, dict) and rec.get("type") == "assistant"
-
+def transcript_turns(path: Path) -> tuple[int, bool] | None:
+    """How many turns a Claude Code transcript records its agent taking, and
+    whether a prompt awaits one: an agent running again records its prompt
+    at once, its turn only once a block of it is done.  Its tools' results
+    (written after it stopped, too) are no prompt; an error Claude Code
+    records in its place is no turn."""
+    turns, pending = 0, False
     try:
         with path.open("rb") as f:
-            return sum(map(turn, f))
+            for raw in f:
+                if b'"assistant"' not in raw and b'"user"' not in raw:
+                    continue
+                try:
+                    rec = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict) or not isinstance(msg := rec.get("message"), dict):
+                    continue
+                if rec.get("type") == "assistant":
+                    turns += msg.get("model") != "<synthetic>"
+                    pending = False
+                elif rec.get("type") == "user":
+                    content = msg.get("content")
+                    pending |= not isinstance(content, list) or any(
+                        not isinstance(b, dict) or b.get("type") != "tool_result" for b in content)
     except OSError:
         return None
+    return turns, pending
 
 
 def transcript_cwd(path: Path, *, last: bool = False) -> Path | None:
@@ -620,15 +631,18 @@ def prune_stopped(session: int, stop: dict[str, object]) -> None:
     recreates it first (worktree-resume.sh).  Kept while a process, a
     background task the agent started (which wakes it, bypassing that hook),
     or another running agent of the session (a skill forked there) works in
-    it, or once its transcript records a turn since the stop (it ran
-    again); the agent stops again once that work has woken it, and is
-    judged again."""
+    it, or once its transcript records a turn since the stop or a prompt
+    awaiting one (it runs again); the agent stops again once that work has
+    woken it, and is judged again."""
+
     agent = str(stop.get("agent_id") or "")
     transcript = Path(str(stop.get("agent_transcript_path") or ""))
-    turns = transcript_turns(transcript)
     d = transcript_cwd(transcript)
     if not agent or d is None or d.name != f"agent-{agent}" or not d.is_dir() or sub_parent(d) is None:
         return
+    counted = transcript_turns(transcript)
+    turns = None if counted is None else counted[0]
+
     tasks = stop.get("background_tasks")
     running = [t for t in tasks if isinstance(t, dict) and t.get("status") == "running"
                and t.get("id") != agent] if isinstance(tasks, list) else []

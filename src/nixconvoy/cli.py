@@ -154,9 +154,12 @@ dir): the Claude Code plugin's SessionStart hook starts it, so a subagent's
 worktree with nothing of its own goes when its session ends.  `--stopped
 PID`, the SubagentStop hook's, takes that hook's input on stdin and,
 detached, removes the stopped agent's worktree sooner, at its stop, when it
-holds nothing of its own and no process or other running agent works in
-it, whether session PID runs or not: resuming the agent recreates it (the
-PreToolUse hook on SendMessage).
+holds nothing of its own, no process or other running agent works in it
+and, a few seconds on, the agent has not run again (a message or Claude
+Code's own follow-up turn) and no resume relocked it, whether session PID
+runs or not: resuming the agent recreates it (the PreToolUse hook on
+SendMessage).  It keeps a worktree whose lock names no session.
+
 
 Commit (nixconvoy commit -m "..."): commit + push the staged state onto the
 work branch without probing, building or switching anything - for changes
