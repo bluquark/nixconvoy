@@ -46,7 +46,9 @@ if [ -n "$pid" ] && [ "$pid" -gt 1 ]; then
   if [ -r "/proc/$pid/stat" ]; then
     reason="$reason start $(sed 's/.*) //' "/proc/$pid/stat" | awk '{print $20}')"
   fi
-  reason="$reason)"
+  # Then a token of this create, so a lock taken again (a reuse, a resume)
+  # never reads as one a prune judged before.
+  reason="$reason) $(date +%s).$$"
 else
   reason="claude agent $name (no claude session found)"
 fi

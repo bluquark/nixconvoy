@@ -778,14 +778,31 @@ def git_cases(d: Path) -> None:
             with contextlib.redirect_stdout(out):
                 commands.prune([])
             assert "/review: kept, the claude session that spawned its agent still runs" in out.getvalue(), out.getvalue()
-            # ...unless its agent stopped: that session ended for it.
+            # ...unless its agent stopped: that session ended for it, while
+            # nothing relocked it since the stop (a resume does).
+            held = f"claude agent review (pid {parent} start {pstart})"
             with contextlib.redirect_stdout(io.StringIO()):
-                assert commands.prune_one(rv.resolve(), named=True, own_session_ends=True, ended=parent) is None
+                why = commands.prune_one(rv.resolve(), named=True, own_session_ends=True, ended=parent,
+                                         stop_lock=f"{held} 1.2")
+                assert why == "the claude session that spawned its agent still runs", why
+                exclude = Path(sh(rv, "rev-parse", "--path-format=absolute", "--git-common-dir")) / "info" / "exclude"
+                exclude.parent.mkdir(exist_ok=True)
+                kept_out = exclude.read_text() if exclude.exists() else ""
+                exclude.write_text(kept_out + "target/\n")
+                (rv / "target").mkdir()
+                (rv / "target" / "build").write_text("x\n")
+                why = commands.prune_one(rv.resolve(), named=True, own_session_ends=True, ended=parent, stop_lock=held)
+                assert why is not None and why.startswith("it has uncommitted or untracked changes"), why
+                (rv / "target" / "build").unlink()
+                (rv / "target").rmdir()
+                exclude.write_text(kept_out)
+                assert commands.prune_one(rv.resolve(), named=True, own_session_ends=True, ended=parent,
+                                          stop_lock=held) is None
             assert not rv.exists() and Path.cwd().resolve() == co.resolve()
             sh(co, "worktree", "add", "--quiet", "--detach", str(rv), "origin/main")
         # Where an agent's transcript says it started, and is now.
         log = Path(tempfile.mkdtemp()) / "agent-a1.jsonl"
-        log.write_text('{"type":"user","cwd":"/a"}\nnot json\n{"type":"x"}\n{"cwd":"/b"}\n')
+        log.write_bytes(b'[1]\n\xff\xfe\n{"type":"user","cwd":"/a"}\nnot json\n{"type":"x"}\n{"cwd":"/b"}\n')
         assert commands.transcript_cwd(log) == Path("/a") and commands.transcript_cwd(log, last=True) == Path("/b")
         assert commands.transcript_cwd(log.with_name("none.jsonl")) is None
         # Claude Code's lock names the spawning session's process and its start
