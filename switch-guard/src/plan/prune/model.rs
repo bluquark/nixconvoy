@@ -494,19 +494,21 @@ impl World {
                 replies.push(r);
                 // What the core asks before the name lock only ever keeps
                 // it, and is asked again under the lock: one step.
-                while first {
-                    match resume(&p, program, &replies) {
-                        Next::Ask(q @ (Query::Lock | Query::Alive { .. } | Query::Fetch)) => {
-                            let r = self.answer(who, &q);
-                            replies.push(r);
+                if first {
+                    loop {
+                        match resume(&p, program, &replies) {
+                            Next::Ask(q @ (Query::Lock | Query::Alive { .. } | Query::Fetch)) => {
+                                let r = self.answer(who, &q);
+                                replies.push(r);
+                            }
+                            Next::Ask(Query::TakeNameLock) => {
+                                // Passed, what it read steers nothing after: one
+                                // form, so states differing only there merge.
+                                replies = vec![Reply::Text(Some("pid 1".into())), flag(false), ran(true)];
+                                break;
+                            }
+                            _ => break,
                         }
-                        Next::Ask(Query::TakeNameLock) => {
-                            // Passed, what it read steers nothing after: one
-                            // form, so states differing only there merge.
-                            replies = vec![Reply::Text(Some("pid 1".into())), flag(false), ran(true)];
-                            break;
-                        }
-                        _ => break,
                     }
                 }
                 self.sweeps[i].core = Some(replies);
