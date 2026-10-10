@@ -258,11 +258,11 @@ def hold_name_lock(d: Path, wait: float = 0) -> IO[str] | None:
 def occupied(d: Path, *, invoker: bool = False) -> bool:
     """Whether a process other than this one or its children has its
     working directory in `d` (via /proc, else lsof).  `invoker`: nor its
-    ancestors or process group - the session abandoning its own worktree,
-    its shell and pipeline there with it."""
+    ancestors or their process groups - the session abandoning its own
+    worktree, its shell and pipeline there with it (`timeout` gives its
+    command a group of its own)."""
     me = os.getpid()
     mine = {me, *ancestor_pids()} if invoker else {me}
-    group = os.getpgrp() if invoker else None
     cwds: dict[int, str] = {}
     stats: dict[int, tuple[int, int]] = {}  # pid -> (ppid, pgid)
     if Path("/proc/self").exists():
@@ -289,9 +289,10 @@ def occupied(d: Path, *, invoker: bool = False) -> bool:
             f = ln.split()
             if len(f) == 3 and all(x.isdigit() for x in f):
                 stats[int(f[0])] = (int(f[1]), int(f[2]))
+    groups = {os.getpgrp(), *(stats[p][1] for p in mine if p in stats)} if invoker else set()
     for pid, cwd in cwds.items():
         ppid, pgid = stats.get(pid, (0, 0))
-        if pid in mine or ppid == me or pgid == group:
+        if pid in mine or ppid == me or pgid in groups:
             continue
         p = Path(cwd)
         if p == d or d in p.parents:
