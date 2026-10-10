@@ -7,12 +7,14 @@
 # origin's default branch, as Claude Code would (an existing worktree of
 # that name is reused, as `claude --worktree <name>` expects), and takes the
 # same kind of lock Claude Code takes (the spawning claude process's pid and
-# start time), which nixconvoy's status and abandon read.  The hook replaces
-# Claude Code's logic entirely, so neither a finished subagent nor the
-# periodic sweep removes these: `nixconvoy status` marks one with nothing of
-# its own, `nixconvoy abandon <name>` removes it (worktree-remove.sh covers
-# the removals Claude Code does make, a `claude --worktree` session's).
-# hooks.json beside it wires both hooks up as the nixconvoy plugin.
+# start time), which nixconvoy's status, prune and abandon read.  The hook
+# replaces Claude Code's logic entirely, so neither a finished subagent nor
+# the periodic sweep removes these: subagent-stop.sh prunes a finished
+# agent's when it holds nothing of its own, `nixconvoy status` marks a
+# leftover as such and `nixconvoy prune` or `abandon <name>` removes it
+# (worktree-remove.sh covers the removals Claude Code does make, a `claude
+# --worktree` session's).  hooks.json beside it wires the three hooks up as
+# the nixconvoy plugin.
 set -eu
 command -v jq >/dev/null 2>&1 || { echo "worktree-create: jq missing" >&2; exit 1; }
 INPUT=$(cat)

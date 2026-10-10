@@ -12,6 +12,18 @@
         ]
       }
     ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/subagent-stop.sh\"",
+            "timeout": 60,
+            "statusMessage": "Pruning the finished subagent's worktree"
+          }
+        ]
+      }
+    ],
     "WorktreeRemove": [
       {
         "hooks": [

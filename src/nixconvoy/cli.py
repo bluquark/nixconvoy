@@ -136,6 +136,15 @@ instead of landing it: hard-reset the checkout and reset the work branch
 (local and origin) onto origin/main, staying on it.  Untracked files
 survive; the old tip remains reachable via the reflog.
 
+Prune (nixconvoy prune [<name> ...]): remove the subagent worktrees that
+hold nothing of their own - never deployed, no staged, unstaged or
+untracked change, HEAD on origin - with their fresh branch; the named ones,
+or every one under this checkout.  One at work (its agent's claude session
+alive, a nixconvoy or git operation running in it), deployed (on its work
+branch: land or abandon decides it) or holding anything is kept and said
+so.  The Claude Code plugin's SubagentStop hook runs it on a finished
+subagent's worktree, so only one with work outlives its agent.
+
 Commit (nixconvoy commit -m "..."): commit + push the staged state onto the
 work branch without probing, building or switching anything - for changes
 that affect no NixOS host, or to publish work while a host is unreachable.
@@ -191,6 +200,7 @@ USAGE = """usage: nixconvoy apply [-m "msg"] [--reset] [--take-over host] [--dan
        nixconvoy commit -m "msg"
        nixconvoy land [worktree ...]
        nixconvoy abandon [worktree ...]
+       nixconvoy prune [worktree ...]
        nixconvoy pull
        nixconvoy status
        nixconvoy review [worktree ...] [diff args]
@@ -213,7 +223,7 @@ def main() -> None:
         print(__doc__)
         print(USAGE)
         return
-    if args[0] not in ("apply", "land", "commit", "abandon", "pull", "status", "review", "exec"):
+    if args[0] not in ("apply", "land", "commit", "abandon", "prune", "pull", "status", "review", "exec"):
         die(USAGE)
     subcmd = args.pop(0)
     start = Path.cwd()
@@ -232,7 +242,7 @@ def main() -> None:
             die(USAGE)
         exec_on(args[:at], args[at + 1:])
         return
-    if subcmd != "status":
+    if subcmd not in ("status", "prune"):
         atexit.register(PERF.write, Path.cwd() / PERF_FILE)
     msg: str | None = None
     reset = False
@@ -269,6 +279,11 @@ def main() -> None:
         if msg or reset or danger or dry or hosts or take_over:
             die(USAGE)
         commands.status()
+        return
+    if subcmd == "prune":
+        if msg or reset or danger or dry or take_over:
+            die(USAGE)
+        commands.prune(hosts)
         return
     if subcmd in ("land", "abandon"):
         if msg or reset or danger or dry or take_over:

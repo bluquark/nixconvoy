@@ -1,7 +1,9 @@
-"""The verbs beside deploy: commit, land, pull, abandon and status."""
+"""The verbs beside deploy: commit, land, pull, abandon, prune and status."""
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import sys
 import time
@@ -24,6 +26,7 @@ from .checkout import (
     git_op_in_progress,
     identity_of,
     listed_tips,
+    lock_checkout,
     lock_live,
     on_origin,
     origin_tips,
@@ -144,17 +147,8 @@ def abandon() -> None:
     if ident.kind == "sub" and sub_parent(here) is not None:
         require_unlocked(Path.cwd())
     if ident.kind == "sub" and ident.wb and current_branch() != ident.wb and sub_parent(here):
-        tip = rev(f"refs/remotes/origin/{ident.wb}")
-        if tip and not is_ancestor(tip, "refs/remotes/origin/main"):
-            die(f"this worktree is not on {ident.wb}, which carries pushed increments; "
-                f"`git switch {ident.wb}` there and re-run to discard them")
-        # Its removal takes the reflog along: nothing may be lost to it.
-        if out(["git", "status", "--porcelain"]):
-            die("this worktree has uncommitted or untracked changes, which the removal would "
-                "lose; commit or discard them (git status there), then re-run")
-        if not on_origin():
-            die("HEAD carries commits not on origin, which the removal would lose; push them "
-                "(git push origin HEAD:main) or deploy from the work branch, then re-run")
+        if (why := keep_reason(ident.wb)) is not None:
+            die(f"this worktree {why}, then re-run")
         remove_sub([ident.wb])  # never deployed: still on its fresh branch
         return
     wb = require_work_branch("abandon")
@@ -173,6 +167,68 @@ def abandon() -> None:
     git("branch", "-f", "main", main, check=False)
     print(f"abandoned {wb} (was {prev[:12]}, see reflog): {summarize(main)}")
     finish(wb)
+
+
+def keep_reason(wb: str) -> str | None:
+    """Why the current subagent worktree, owning `wb` but not on it, is not
+    simply removable - what the removal, which takes the reflog along, would
+    lose - or None when it holds nothing of its own."""
+    tip = rev(f"refs/remotes/origin/{wb}")
+    if tip and not is_ancestor(tip, "refs/remotes/origin/main"):
+        return (f"is not on {wb}, which carries pushed increments; "
+                f"`git switch {wb}` there to discard them")
+    if out(["git", "status", "--porcelain"]):
+        return ("has uncommitted or untracked changes, which the removal would lose; "
+                "commit or discard them (git status there)")
+    if not on_origin():
+        return ("carries commits not on origin, which the removal would lose; push them "
+                "(git push origin HEAD:main) or deploy from the work branch")
+    return None
+
+
+def prune(names: list[str]) -> None:
+    """Remove the subagent worktrees that hold nothing of their own (cli
+    docstring: Prune): the named ones, or every one under this checkout.
+    One at work (its agent's claude session alive, a nixconvoy or git
+    operation running in it), on its work branch (deployed: land or
+    abandon decides it) or with anything of its own is kept and said so."""
+    git("fetch", "--quiet", "--no-auto-gc", "origin", check=False)  # on_origin reads the tips
+    top = Path.cwd().resolve()
+    subs = ([find_sub(n) for n in names] if names
+            else sorted(d for d in sibling_checkouts() if sub_parent(d) == top))
+    for d in subs:
+        os.chdir(d)
+        try:
+            print(f"{sub_label(d)}: {prune_here(d)}")
+        finally:
+            os.chdir(top)
+
+
+def prune_here(d: Path) -> str:
+    """Prune the subagent worktree `d`, the cwd: what became of it."""
+    lock = lock_checkout()
+    if lock is None:
+        return "kept, a nixconvoy runs in it"
+    try:
+        reason = worktree_lock(d)
+        if reason is not None and lock_live(reason):
+            return "kept, its agent's claude session still runs"
+        if (op := git_op_in_progress(d)) is not None:
+            return f"kept, {op} in progress"
+        await_background_push()
+        cur = current_branch()
+        wb = identity_of(d, cur).wb
+        if wb is None:
+            return "kept, it owns no work branch"
+        if cur == wb:
+            return f"kept, on its work branch {wb}: land or abandon decides it"
+        if (why := keep_reason(wb)) is not None:
+            return f"kept, it {why}"
+        with contextlib.redirect_stdout(io.StringIO()):
+            remove_sub([wb])
+        return "empty, removed"
+    finally:
+        lock.close()
 
 
 def finish(wb: str) -> None:
@@ -237,6 +293,10 @@ def enter_sub(name: str) -> None:
     """Act in the subagent worktree `name` - or the one whose name `name`
     is a unique prefix of - of any checkout on this machine (land/abandon
     run from elsewhere, as status suggests)."""
+    os.chdir(find_sub(name))
+
+
+def find_sub(name: str) -> Path:
     here = Path.cwd().resolve()
     subs = sorted((d for d in [here, *sibling_checkouts()] if sub_parent(d) is not None),
                   key=lambda d: (d.name, str(d)))
@@ -250,7 +310,7 @@ def enter_sub(name: str) -> None:
             f"; there are: {', '.join(map(sub_label, subs))}" if subs else ""))
     if len(found) > 1:
         die(f"{name} is ambiguous among the subagent worktrees {', '.join(map(sub_label, found))}")
-    os.chdir(found[0])
+    return found[0]
 
 
 def status() -> None:
@@ -323,7 +383,7 @@ def status() -> None:
                 notes.append(p("empty, locked by its agent's claude session: abandon removes it "
                                "once that exits", "dim"))
             else:
-                notes.append(p(f"empty: nixconvoy abandon {d.name} removes it", "dim"))
+                notes.append(p(f"empty: nixconvoy prune {d.name} removes it", "dim"))
         msg = g(d, "show", f"HEAD:{MSG_FILE}").partition("\n")[0] if cur not in (None, "main") else ""
         if msg:
             notes.append(p(f'"{msg[:60]}"', "dim"))
@@ -372,4 +432,4 @@ def status() -> None:
             print(f"  {paint(e, 'yellow')}")
 
 
-__all__ = ["abandon", "commit_only", "enter_sub", "land", "pull", "status", "work_branch_name"]
+__all__ = ["abandon", "commit_only", "enter_sub", "land", "prune", "pull", "status", "work_branch_name"]

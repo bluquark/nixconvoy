@@ -172,6 +172,7 @@ nixconvoy apply --dry-activate [host|@tag ...]   build and copy, then only repor
 nixconvoy commit -m "msg"      commit + push the staged state, no build or switch
 nixconvoy land [name ...]      land the work branch on main
 nixconvoy abandon [name ...]   discard it
+nixconvoy prune [name ...]     remove the subagent worktrees holding nothing of their own
 nixconvoy pull                 rebase every checkout on this machine onto origin/main
 nixconvoy status               every checkout on this machine, and origin's other branches
 nixconvoy review               the pending landing: COMMIT_MSG.md, then the diff
@@ -186,10 +187,11 @@ step of a deploy in full.
 A git worktree under `<checkout>/.claude/worktrees/<name>` (the layout
 Claude Code's worktree isolation creates) owns `<checkout's branch>-<name>`
 from its first deploy, deploys in parallel with its parent, and is removed
-with its branch by `land` or `abandon` once its task is done.
-`integrations/claude-code/` is a Claude Code plugin holding the hooks that
-create such worktrees under the spawning checkout, beside the `git review`
-command and a bash prompt segment:
+with its branch by `land` or `abandon` once its task is done - or by
+`prune` when it holds nothing of its own.  `integrations/claude-code/` is
+a Claude Code plugin holding the hooks that create such worktrees under
+the spawning checkout and prune a finished subagent's, beside the `git
+review` command and a bash prompt segment:
 
 ```
 /plugin install nixconvoy --marketplace bluquark/nixconvoy
@@ -197,8 +199,9 @@ command and a bash prompt segment:
 
 The package also ships the plugin tree under `share/nixconvoy/claude-code/`
 for a repo that wires the hooks itself: a settings.json pointing at
-`hooks/worktree-create.sh` and `hooks/worktree-remove.sh` there (such a
-repo should not also enable the plugin, or both would run).
+`hooks/worktree-create.sh`, `hooks/worktree-remove.sh` and
+`hooks/subagent-stop.sh` there (such a repo should not also enable the
+plugin, or both would run).
 
 ## How it is built
 

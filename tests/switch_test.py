@@ -714,7 +714,31 @@ def git_cases(d: Path) -> None:
         with contextlib.redirect_stdout(out):
             commands.status()
         line = next(ln for ln in out.getvalue().splitlines() if "review" in ln)
-        assert "nothing of its own" in line and "abandon review removes it" in line, line
+        assert "nothing of its own" in line and "prune review removes it" in line, line
+        # prune keeps a worktree with anything of its own, saying why, and
+        # removes an empty one (a locked one only once its session is gone:
+        # the lock cases below).
+        put(rv, "r.txt", "review\n", "by hand")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            commands.prune([])
+        assert out.getvalue().endswith("/review: kept, it carries commits not on origin, which the "
+                                       "removal would lose; push them (git push origin HEAD:main) "
+                                       "or deploy from the work branch\n"), out.getvalue()
+        sh(rv, "reset", "--quiet", "--hard", "HEAD~1")
+        (rv / "u.txt").write_text("untracked\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            commands.prune(["rev"])
+        assert "/review: kept, it has uncommitted or untracked changes" in out.getvalue(), out.getvalue()
+        assert rv.exists() and Path.cwd().resolve() == co.resolve()
+        (rv / "u.txt").unlink()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            commands.prune([])
+        assert out.getvalue().endswith("/review: empty, removed\n"), out.getvalue()
+        assert not rv.exists() and Path.cwd().resolve() == co.resolve()
+        sh(co, "worktree", "add", "--quiet", "--detach", str(rv), "origin/main")
         # Claude Code's lock names the spawning session's process and its start
         # time: refused while that lives, lifted once it is gone (or its pid
         # reused by a process started at another time).

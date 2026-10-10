@@ -2,7 +2,7 @@
 # WorktreeRemove hook: the counterpart of worktree-create.sh.  Claude Code
 # fires it when it removes a worktree that hook created - a `claude
 # --worktree` session's on exit; not a finished subagent's, which
-# `nixconvoy abandon` removes - and without it the worktree's branch
+# subagent-stop.sh prunes - and without it the worktree's branch
 # would stay behind.  A worktree with changes, or commits not on
 # origin/main (a work branch deployed but not landed: nixconvoy's land
 # or abandon is its way out), is kept (exit 1 leaves it on disk, as
