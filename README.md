@@ -213,9 +213,9 @@ both would run).
 - `switch-guard/`: a Rust crate holding the decisions as Sans-I/O state
   machines, with stateright models and property tests: `deploy-plan` (the
   rebase, the union, the drift verdicts, a subagent worktree's pruning
-  against the create hook and the sessions), `deploy-switch` (the switch
-  protocol), `confirmed-switch` (the host-side helper) and
-  `boot-assessment`.
+  against the create hook, the sessions and its agent's stops and
+  resumes), `deploy-switch` (the switch protocol), `confirmed-switch` (the
+  host-side helper) and `boot-assessment`.
 - `tests/switch_test.py`: the switch driven end to end against a fake host,
   the lineage classification, and the git cores on scratch repositories.
 - `nix flake check` runs all of it.

@@ -222,15 +222,15 @@ def prune_one(d: Path, *, named: bool, own_session_ends: bool = False,
     fetched); `deploy_held`: the caller holds its deploy lock already;
     `dropped_failed` collects the origin branch deletions that failed.
     `own_session_ends`: the session the lock names ends for it - this
-    one's, abandon from inside it (the invoking command no occupant), or
-    `ended`, the claude session whose agent stopped, while the lock is still
-    `stop_lock`.  A worktree named waits for its name lock, a sweep does
-    not."""
+    one's, abandon from inside it (the invoking command no occupant).
+    `ended`: the claude session whose agent stopped, counted as ended while
+    the lock is still `stop_lock`.  A worktree named waits for its name
+    lock, a sweep does not."""
     os.chdir(d)
     memo: list[dict[str, object]] = [] if fetched is None else fetched
     if prefetched and not memo:
         memo.append({"ran": True, "detail": ""})
-    perform = PruneQueries(d, memo, deploy_held=deploy_held, invoker=own_session_ends and ended is None,
+    perform = PruneQueries(d, memo, deploy_held=deploy_held, invoker=own_session_ends,
                            ended=ended, stop_lock=stop_lock, name_wait=60 if named else 0)
     try:
         done = decide("prune", perform=perform, name=d.name, named=named, own_session_ends=own_session_ends)
@@ -417,11 +417,11 @@ class PruneQueries(GitQueries):
         if kind == "alive":
             start = ask.get("start")
             reason = f"pid {ask.get('pid')}" + (f" start {start}" if start is not None else "")
-            if not ask.get("own_ends"):
-                alive = lock_pid_alive(reason) is not False
-            elif self.ended is not None:
+            if self.ended is not None:
                 now = self.read(self.locked) if self.locked.exists() else self.read(self.claimed)
                 alive = now != self.stop_lock or (ask.get("pid") != self.ended and lock_pid_alive(reason) is not False)
+            elif not ask.get("own_ends"):
+                alive = lock_pid_alive(reason) is not False
             else:
                 alive = lock_live(reason)
             return {"flag": alive}
@@ -616,7 +616,7 @@ def prune_stopped(session: int, stop: dict[str, object]) -> None:
         else:
             with (common / "nixconvoy-prune.lock").open("w") as serial:
                 fcntl.flock(serial, fcntl.LOCK_EX)
-                why = prune_one(d, named=True, own_session_ends=True, ended=session, stop_lock=stop_lock)
+                why = prune_one(d, named=True, ended=session, stop_lock=stop_lock)
             verdict = "empty, removed" if why is None else f"kept, {why}"
     except (Exception, SystemExit) as e:  # noqa: BLE001 - reported in the log
         verdict = f"kept, its check failed: {e!r}"
