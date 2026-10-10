@@ -34,6 +34,30 @@
           }
         ]
       }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/subagent-stop.sh\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "SendMessage",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/worktree-resume.sh\"",
+            "timeout": 120,
+            "statusMessage": "Recreating the subagent's worktree"
+          }
+        ]
+      }
     ]
   }
 }

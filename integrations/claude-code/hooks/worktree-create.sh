@@ -9,11 +9,13 @@
 # same kind of lock Claude Code takes (the spawning claude process's pid and
 # start time), which nixconvoy's status, prune and abandon read.  The hook
 # replaces Claude Code's logic entirely, so neither a finished subagent nor
-# the periodic sweep removes these: once the session exits, the `nixconvoy
-# prune --after` session-start.sh started removes those holding nothing of
-# their own, and land or abandon the others (worktree-remove.sh covers the
-# removals Claude Code does make, a `claude --worktree` session's).
-# hooks.json beside it wires the three hooks up as the nixconvoy plugin.
+# the periodic sweep removes these: subagent-stop.sh removes one holding
+# nothing of its own when its agent stops (worktree-resume.sh recreates it
+# through this hook for a resume), session-start.sh's `nixconvoy prune
+# --after` those left at the session's exit, and land or abandon the others
+# (worktree-remove.sh covers the removals Claude Code does make, a `claude
+# --worktree` session's).  hooks.json beside it wires the hooks up as the
+# nixconvoy plugin.
 set -eu
 command -v jq >/dev/null 2>&1 || { echo "worktree-create: jq missing" >&2; exit 1; }
 INPUT=$(cat)

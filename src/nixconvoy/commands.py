@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import os
 import sys
 import time
@@ -213,19 +214,23 @@ def prune(names: list[str]) -> None:
 
 def prune_one(d: Path, *, named: bool, own_session_ends: bool = False,
               fetched: list[dict[str, object]] | None = None, prefetched: bool = False,
-              deploy_held: bool = False, dropped_failed: list[str] | None = None) -> str | None:
+              deploy_held: bool = False, dropped_failed: list[str] | None = None,
+              ended: int | None = None) -> str | None:
     """deploy-plan's prune core on the subagent worktree `d`: None once
     removed (the process then in its parent), else why it was kept.
     `fetched` shares one fetch across a run (`prefetched`: the caller
     fetched); `deploy_held`: the caller holds its deploy lock already;
     `dropped_failed` collects the origin branch deletions that failed.
-    A worktree named waits for its name lock, a sweep does not."""
+    `own_session_ends`: the session the lock names ends for it - this
+    one's, abandon from inside it (the invoking command no occupant), or
+    `ended`, the claude session whose agent stopped.  A worktree named
+    waits for its name lock, a sweep does not."""
     os.chdir(d)
     memo: list[dict[str, object]] = [] if fetched is None else fetched
     if prefetched and not memo:
         memo.append({"ran": True, "detail": ""})
-    perform = PruneQueries(d, memo, deploy_held=deploy_held, own_session_ends=own_session_ends,
-                           name_wait=60 if named else 0)
+    perform = PruneQueries(d, memo, deploy_held=deploy_held, invoker=own_session_ends and ended is None,
+                           ended=ended, name_wait=60 if named else 0)
     try:
         done = decide("prune", perform=perform, name=d.name, named=named, own_session_ends=own_session_ends)
     finally:
@@ -316,14 +321,16 @@ class PruneQueries(GitQueries):
     (the create hook's too) and deploy lock held until close(), its lock
     file claimed by renaming it aside (git refuses to remove a locked
     worktree, so a lock renamed in meanwhile keeps it); `fetched` shares one
-    fetch across a run; `own_session_ends`: the invoking command is
-    abandon's, its processes in `d` no occupants."""
+    fetch across a run; `invoker`: the invoking command is abandon's, its
+    processes in `d` no occupants; `ended`: the claude session the core
+    may count as ended, if not this one's."""
 
     def __init__(self, d: Path, fetched: list[dict[str, object]], *, deploy_held: bool = False,
-                 own_session_ends: bool = False, name_wait: float = 0) -> None:
+                 invoker: bool = False, ended: int | None = None, name_wait: float = 0) -> None:
         super().__init__()
         self.d = d
-        self.own_session_ends = own_session_ends
+        self.invoker = invoker
+        self.ended = ended
         self.name_wait = name_wait
         # The origin branch deletions that failed after the removal.
         self.dropped_failed: list[str] = []
@@ -406,7 +413,12 @@ class PruneQueries(GitQueries):
         if kind == "alive":
             start = ask.get("start")
             reason = f"pid {ask.get('pid')}" + (f" start {start}" if start is not None else "")
-            alive = lock_live(reason) if ask.get("own_ends") else lock_pid_alive(reason) is not False
+            if not ask.get("own_ends"):
+                alive = lock_pid_alive(reason) is not False
+            elif self.ended is not None:
+                alive = ask.get("pid") != self.ended and lock_pid_alive(reason) is not False
+            else:
+                alive = lock_live(reason)
             return {"flag": alive}
         if kind == "push_in_flight":
             return {"flag": Path(push_state("pid")).exists()}
@@ -421,7 +433,7 @@ class PruneQueries(GitQueries):
         if kind == "dirty":
             return {"flag": bool(out(["git", "status", "--porcelain"]))}
         if kind == "occupied":
-            return {"flag": occupied(self.d, invoker=self.own_session_ends)}
+            return {"flag": occupied(self.d, invoker=self.invoker)}
         if kind == "fetch":
             if not self.fetched:
                 self.fetched.append(super().__call__(ask))
@@ -465,32 +477,17 @@ def prune_after(pid: int) -> None:
     past 1 MiB."""
     stat = proc_stat(pid)
     session = f"pid {pid}" + (f" start {stat.split()[19]}" if stat else "")  # as a lock names it
-    top = Path.cwd().resolve()
-    while (up := sub_parent(top)) is not None:
-        top = up
+    top = outermost(Path.cwd().resolve())
     common = Path(out(["git", "rev-parse", "--git-common-dir"])).resolve()
-    if os.fork():
+    if not detached(top):
         return
-    os.setsid()
-    if os.fork():
-        os._exit(0)
-    os.chdir(top)
-    devnull = os.open(os.devnull, os.O_RDWR)
-    for fd in (0, 1, 2):
-        os.dup2(devnull, fd)
     waiter = common / f"nixconvoy-prune-after.{pid}"
     held = waiter.open("w")
     try:
         fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         os._exit(0)
-    logf = common / "nixconvoy-prune.log"
-    with contextlib.suppress(OSError):
-        if logf.stat().st_size > 1 << 20:
-            logf.replace(logf.with_suffix(".log.old"))
-    log = logf.open("a")
-    os.dup2(log.fileno(), 1)
-    os.dup2(log.fileno(), 2)
+    log_to(common)
 
     def sweep(what: str) -> None:
         print(f"{time.strftime('%F %T')} claude session {pid} {what} ({top})", flush=True)
@@ -508,6 +505,93 @@ def prune_after(pid: int) -> None:
     finally:
         waiter.unlink(missing_ok=True)
         sys.stdout.flush()
+    os._exit(0)
+
+
+def outermost(d: Path) -> Path:
+    """The checkout `d`'s subagent worktrees hang off, `d` if it is none."""
+    while (up := sub_parent(d)) is not None:
+        d = up
+    return d
+
+
+def detached(top: Path) -> bool:
+    """Fork a process of its own session in `top`, stdio on /dev/null:
+    True in it, False in the caller."""
+    if os.fork():
+        return False
+    os.setsid()
+    if os.fork():
+        os._exit(0)
+    os.chdir(top)
+    devnull = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(devnull, fd)
+    return True
+
+
+def log_to(common: Path) -> None:
+    """stdout and stderr onto nixconvoy-prune.log in the common git dir,
+    started over past 1 MiB."""
+    logf = common / "nixconvoy-prune.log"
+    with contextlib.suppress(OSError):
+        if logf.stat().st_size > 1 << 20:
+            logf.replace(logf.with_suffix(".log.old"))
+    log = logf.open("a")
+    os.dup2(log.fileno(), 1)
+    os.dup2(log.fileno(), 2)
+
+
+def transcript_cwd(path: Path, *, last: bool = False) -> Path | None:
+    """The working directory a Claude Code transcript records first (where
+    its agent started), or `last`."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return None
+    for ln in reversed(lines) if last else lines:
+        with contextlib.suppress(ValueError):
+            cwd = json.loads(ln).get("cwd")
+            if isinstance(cwd, str):
+                return Path(cwd).resolve()
+    return None
+
+
+def prune_stopped(session: int, stop: dict[str, object]) -> None:
+    """`prune --stopped PID`: claude session PID's subagent stopped, its
+    SubagentStop hook input `stop`.  Detached, logged as --after logs, the
+    agent's worktree (where its transcript starts) goes when it holds
+    nothing of its own, the session counted as ended for it: a resume
+    recreates it (worktree-resume.sh).  Kept while a process, or another
+    running agent of the session (a skill forked there), works in it; the
+    agent stops again once that work has woken it, and is judged again."""
+    agent = str(stop.get("agent_id") or "")
+    transcript = Path(str(stop.get("agent_transcript_path") or ""))
+    d = transcript_cwd(transcript)
+    if not agent or d is None or d.name != f"agent-{agent}" or not d.is_dir() or sub_parent(d) is None:
+        return
+    tasks = stop.get("background_tasks")
+    others = [str(t.get("id")) for t in tasks if isinstance(t, dict) and t.get("type") == "subagent"
+              and t.get("status") == "running" and t.get("id") != agent] if isinstance(tasks, list) else []
+    top = outermost(d)
+    os.chdir(top)
+    common = Path(out(["git", "rev-parse", "--git-common-dir"])).resolve()
+    if not detached(top):
+        return
+    log_to(common)
+    try:
+        busy = [a for a in others if (cwd := transcript_cwd(transcript.with_name(f"agent-{a}.jsonl"), last=True))
+                and (cwd == d or d in cwd.parents)]
+        if busy:
+            verdict = f"kept, agent {busy[0]} works in it"
+        else:
+            with (common / "nixconvoy-prune.lock").open("w") as serial:
+                fcntl.flock(serial, fcntl.LOCK_EX)
+                why = prune_one(d, named=True, own_session_ends=True, ended=session)
+            verdict = "empty, removed" if why is None else f"kept, {why}"
+    except (Exception, SystemExit) as e:  # noqa: BLE001 - reported in the log
+        verdict = f"kept, its check failed: {e!r}"
+    print(f"{time.strftime('%F %T')} agent {agent} stopped: {sub_label(d)}: {verdict}", flush=True)
     os._exit(0)
 
 
@@ -701,8 +785,8 @@ def status() -> None:
             elif alive is None:
                 notes.append(p("empty, locked by hand: prune keeps it", "dim"))
             elif live:
-                notes.append(p("empty, locked by its agent's claude session: pruned once that "
-                               "exits", "dim"))
+                notes.append(p("empty, locked by its agent's claude session: pruned when its agent "
+                               "stops or that session exits", "dim"))
             else:
                 notes.append(p(f"empty: nixconvoy prune {d.name} removes it", "dim"))
         msg = g(d, "show", f"HEAD:{MSG_FILE}").partition("\n")[0] if cur not in (None, "main") else ""

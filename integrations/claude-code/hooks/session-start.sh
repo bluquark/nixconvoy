@@ -1,8 +1,8 @@
 #!/bin/bash
 # SessionStart hook: Claude Code never removes a worktree a WorktreeCreate
-# hook made (worktree-create.sh), and removing one while its session runs
-# would break resuming its agent.  This starts `nixconvoy prune --after`
-# on the session's claude process: detached, it prunes what dead sessions
+# hook made (worktree-create.sh).  subagent-stop.sh removes an agent's when
+# it stops; this starts `nixconvoy prune --after` on the session's claude
+# process for those its stops left: detached, it prunes what dead sessions
 # left, then, once this session exits, the worktrees its agents left with
 # nothing of their own.  The nixconvoy of the package these hooks are in
 # (bin/ four levels up from hooks/, reached through the symlink a repo may

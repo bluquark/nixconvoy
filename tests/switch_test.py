@@ -778,7 +778,16 @@ def git_cases(d: Path) -> None:
             with contextlib.redirect_stdout(out):
                 commands.prune([])
             assert "/review: kept, the claude session that spawned its agent still runs" in out.getvalue(), out.getvalue()
-            sh(co, "worktree", "unlock", str(rv))
+            # ...unless its agent stopped: that session ended for it.
+            with contextlib.redirect_stdout(io.StringIO()):
+                assert commands.prune_one(rv.resolve(), named=True, own_session_ends=True, ended=parent) is None
+            assert not rv.exists() and Path.cwd().resolve() == co.resolve()
+            sh(co, "worktree", "add", "--quiet", "--detach", str(rv), "origin/main")
+        # Where an agent's transcript says it started, and is now.
+        log = Path(tempfile.mkdtemp()) / "agent-a1.jsonl"
+        log.write_text('{"type":"user","cwd":"/a"}\nnot json\n{"type":"x"}\n{"cwd":"/b"}\n')
+        assert commands.transcript_cwd(log) == Path("/a") and commands.transcript_cwd(log, last=True) == Path("/b")
+        assert commands.transcript_cwd(log.with_name("none.jsonl")) is None
         # Claude Code's lock names the spawning session's process and its start
         # time: refused while that lives, lifted once it is gone (or its pid
         # reused by a process started at another time).

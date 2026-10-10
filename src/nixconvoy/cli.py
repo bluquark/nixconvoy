@@ -151,7 +151,12 @@ the lock it judged and leaves git to refuse a worktree locked meanwhile.  `--aft
 sessions left, waits for the claude session PID to exit and prunes again
 (one waiter per session, logged to nixconvoy-prune.log in the common git
 dir): the Claude Code plugin's SessionStart hook starts it, so a subagent's
-worktree with nothing of its own goes when its session ends.
+worktree with nothing of its own goes when its session ends.  `--stopped
+PID`, the SubagentStop hook's, takes that hook's input on stdin and,
+detached, removes the stopped agent's worktree sooner, at its stop, when it
+holds nothing of its own and no process or other running agent works in
+it, whether session PID runs or not: resuming the agent recreates it (the
+PreToolUse hook on SendMessage).
 
 Commit (nixconvoy commit -m "..."): commit + push the staged state onto the
 work branch without probing, building or switching anything - for changes
@@ -193,6 +198,7 @@ deploy-switch (the nix package sets it)."""
 from __future__ import annotations
 
 import atexit
+import json
 import os
 import sys
 from pathlib import Path
@@ -208,7 +214,7 @@ USAGE = """usage: nixconvoy apply [-m "msg"] [--reset] [--take-over host] [--dan
        nixconvoy commit -m "msg"
        nixconvoy land [worktree ...]
        nixconvoy abandon [worktree ...]
-       nixconvoy prune [worktree ...] | --after PID
+       nixconvoy prune [worktree ...] | --after PID | --stopped PID < hook-input
        nixconvoy pull
        nixconvoy status
        nixconvoy review [worktree ...] [diff args]
@@ -259,12 +265,15 @@ def main() -> None:
     take_over: set[str] = set()
     hosts: list[str] = []
     after = ""
+    stopped = ""
     while args:
         a = args.pop(0)
         if a == "-m" and args:
             msg = args.pop(0)
         elif a == "--after" and subcmd == "prune" and args and args[0].isdigit():
             after = args.pop(0)
+        elif a == "--stopped" and subcmd == "prune" and args and args[0].isdigit():
+            stopped = args.pop(0)
         elif a == "--reset":
             reset = True
         elif a == NETWORK_FLAG:
@@ -292,9 +301,12 @@ def main() -> None:
         commands.status()
         return
     if subcmd == "prune":
-        if msg or reset or danger or dry or take_over or (after and hosts):
+        if msg or reset or danger or dry or take_over or ((after or stopped) and hosts) or (after and stopped):
             die(USAGE)
-        if after:
+        if stopped:
+            stop = json.loads(sys.stdin.read() or "{}")
+            commands.prune_stopped(int(stopped), stop if isinstance(stop, dict) else {})
+        elif after:
             commands.prune_after(int(after))
         else:
             commands.prune(hosts)
