@@ -6,9 +6,10 @@
 //! when it holds nothing of its own.  A sweep (no name given) keeps an
 //! unlocked one, which no session's exit tells the end of.
 //!
-//! Every check is taken under the worktree's name lock - a file in the
-//! common git dir that the create hook also holds while it adds or reuses a
-//! worktree of that name - and under its deploy lock, so neither a create
+//! Origin is fetched first; every check after is taken under the
+//! worktree's name lock - a file in the common git dir that the create hook
+//! also holds while it adds or reuses a worktree of that name, as do the
+//! other removals - and under its deploy lock, so neither a create
 //! nor a deploy moves it meanwhile; the agent's session is dead, so its
 //! agent does not either.  `git worktree remove` checks the lock, then
 //! cleanliness, then deletes the tree and the admin directory by name, so

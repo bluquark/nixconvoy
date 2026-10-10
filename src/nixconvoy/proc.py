@@ -113,11 +113,12 @@ def run(
     cleanup: bool = False,
     timeout: float | None = None,
     input: str | None = None,
+    pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     """`merged` captures stderr into stdout, in order (p.stderr is None).
     `cleanup` marks the commands that must still run after die().  `timeout`
     kills the command after that many seconds (returncode -SIGKILL).
-    `input` is fed to the command's stdin."""
+    `input` is fed to the command's stdin; the command inherits `pass_fds`."""
     full_env = dict(os.environ)
     if env:
         full_env.update(env)
@@ -130,6 +131,7 @@ def run(
             stdin=subprocess.PIPE if input is not None else None,
             stdout=subprocess.PIPE if capture else None,
             stderr=(subprocess.STDOUT if merged else subprocess.PIPE) if capture else None,
+            pass_fds=pass_fds,
         )
         CHILDREN.add(child)
     try:
@@ -163,9 +165,9 @@ def ok(cmd: list[str], *, cwd: str | None = None, timeout: float | None = None,
 # a global post-commit auto-push or pre-push hook.
 def git(*args: str, cwd: str | None = None, env: dict[str, str] | None = None,
         check: bool = True, capture: bool = True,
-        cleanup: bool = False) -> subprocess.CompletedProcess[str]:
+        cleanup: bool = False, pass_fds: tuple[int, ...] = ()) -> subprocess.CompletedProcess[str]:
     return run(["git", "-c", "core.hooksPath=/dev/null", *args],
-               cwd=cwd, env=env, check=check, capture=capture, cleanup=cleanup)
+               cwd=cwd, env=env, check=check, capture=capture, cleanup=cleanup, pass_fds=pass_fds)
 
 
 def rev(ref: str) -> str | None:

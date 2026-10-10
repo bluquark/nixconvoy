@@ -366,10 +366,10 @@ def catch_up(paths: list[Path]) -> bool:
     for d in paths:
         try:
             done, status = update_checkout(d)
-        except FileNotFoundError:
-            if d.is_dir():
-                raise
-            continue  # a subagent worktree pruned meanwhile
+        except FileNotFoundError as e:
+            if not d.is_dir():
+                continue  # a subagent worktree pruned meanwhile
+            done, status = False, f"not caught up: {e}"
         if not done and not d.is_dir():
             continue
         print(f"{d.name}: {status}", file=sys.stdout if done else sys.stderr,

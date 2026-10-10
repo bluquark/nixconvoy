@@ -761,6 +761,14 @@ def git_cases(d: Path) -> None:
             commands.prune([])
         assert out.getvalue().startswith("no subagent worktree under"), out.getvalue()
         sh(co, "worktree", "add", "--quiet", "--detach", str(rv), "origin/main")
+        # The shell that ran a prune from inside it occupies it; only
+        # abandon, ending its own session, discounts its invoker.
+        probe = ("import sys; from pathlib import Path; from nixconvoy.commands import occupied; "
+                 "d = Path(sys.argv[1]); print(occupied(d), occupied(d, invoker=True))")
+        got = subprocess.run(["sh", "-c", 'cd "$1" && "$2" -c "$3" "$1"; :', "sh", str(rv.resolve()),
+                              sys.executable, probe], env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+                             capture_output=True, text=True, check=True).stdout
+        assert got == "True False\n", got
         # Unlike abandon, prune keeps a worktree whose session still runs even
         # when that session is the one asking: it may resume the agent.
         if (parent := os.getppid()) > 1:
