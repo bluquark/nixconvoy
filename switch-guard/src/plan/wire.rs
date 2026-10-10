@@ -107,7 +107,7 @@ fn rebase_params(v: &Value) -> Result<rebase::Params, String> {
 }
 
 fn prune_params(v: &Value) -> Result<prune::Params, String> {
-    let stopped = match field(v, "stopped")? {
+    let stopped = match v.get("stopped").unwrap_or(&Value::Null) {
         Value::Null => None,
         st => Some(prune::Stopped {
             pid: u32::try_from(field(st, "pid")?.as_u64().ok_or("pid is not a number")?).map_err(|e| e.to_string())?,
@@ -198,6 +198,7 @@ pub fn query(q: &Query) -> Value {
         Query::Unpushed { sha } => ("unpushed", vec![("sha", s(sha))]),
         Query::Dirty => ("dirty", vec![]),
         Query::Occupied => ("occupied", vec![]),
+        Query::RanAgain => ("ran_again", vec![]),
         Query::ClaimLock { expect } => ("claim_lock", vec![("expect", json!(expect))]),
         Query::RemoveWorktree => ("remove_worktree", vec![]),
         Query::RestoreLock => ("restore_lock", vec![]),

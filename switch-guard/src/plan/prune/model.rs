@@ -5,41 +5,40 @@
 //! lock naming no session when no claude ancestor is found) or recreating
 //! it, each under the create hook's name lock; the subagent dirtying,
 //! committing, deploying (a background push that may fail) and leaving its
-//! work branch, a few times, stopping (`prune --stopped`, which keeps it
-//! outright while a wake bypassing the resume hook is pending: a background
-//! task the agent started, or a message sent it after its last tool round,
-//! which wakes it at once and grows its transcript within the stop's grace)
-//! and resumed (the create hook again, relocking or recreating it); a
-//! process
-//! working in it without its lock; a hand lock; a reboot killing sessions,
-//! waiters, creates, pushes and sweeps mid-removal; and, once all is quiet,
-//! a later session's start sweep.  Each query the real core asks is one
-//! step, so every other actor interleaves between any two of them;
-//! `git worktree remove` is three: its lock and cleanliness check, the
-//! tree's deletion, the admin directory's (by name, whichever worktree of
-//! that name it then belongs to).  The core judges each worktree on its
-//! own, so one name is modelled (a fresh agent's unique name takes it only
-//! once it is empty); a manual prune is a waiter's first sweep at another
-//! moment.  One stop's prune at a time: the agent runs again only once a
-//! resume relocked its worktree, after which a pending one judges it as a
-//! sweep does.  Three configurations: the whole world with sweeps and a
-//! stop's prune one at a time, as prune's flock runs them; the same with
-//! the agent stopping twice (woken in between, by its pending wake or a
-//! resume) and no hand lock, stale reuse or lockless process; and sweeps
-//! fully concurrent against the sessions and creates alone (no agent work,
-//! stop, hand lock, stale reuse, lockless process or reboot), since the
-//! name and deploy locks alone have to keep them apart.
+//! work branch, a few times, stopping (`prune --stopped`), resumed (the
+//! create hook again, relocking or recreating it) or woken past the resume
+//! hook: by a background task it started, whose end may come at any time
+//! (prune --stopped keeps it outright while one runs), or by a message sent
+//! it after its last tool round, which wakes it at once, within the stop's
+//! grace, so before its prune runs; a process working in it without its
+//! lock; a hand lock; a reboot killing sessions, waiters, creates, pushes
+//! and sweeps mid-removal; and, once all is quiet, a later session's start
+//! sweep.  Each query the real core asks is one step, so every other actor
+//! interleaves between any two of them; `git worktree remove` is three: its
+//! lock and cleanliness check, the tree's deletion, the admin directory's
+//! (by name, whichever worktree of that name it then belongs to).  The core
+//! judges each worktree on its own, so one name is modelled (a fresh
+//! agent's unique name takes it only once it is empty); a manual prune is a
+//! waiter's first sweep at another moment.  One stop's prune at a time: the
+//! agent stops again only once it ran again, after which a pending one
+//! keeps it (its transcript grew) or, a resume having relocked it, judges
+//! it as a sweep does.  Three configurations: the whole world with sweeps
+//! and a stop's prune one at a time, as prune's flock runs them, the stop
+//! maybe leaving a background task running; the same with the agent
+//! stopping twice, woken in between by a message, its background task's end
+//! or a resume, and no hand lock, stale reuse or lockless process; and
+//! sweeps fully concurrent against the sessions and creates alone (no agent
+//! work, stop, hand lock, stale reuse, lockless process or reboot), since
+//! the name and deploy locks alone have to keep them apart.
 //!
 //! Under the name lock no create meets a removal half done (a property), so
 //! the hook's retries are for failures this world leaves out.  Not
-//! modelled: the lockless process writing to
-//! the worktree after the
+//! modelled: the lockless process writing to the worktree after the
 //! occupancy check (a removal can always race a shell entering it at that
 //! instant), ignored files (a sweep removes them with the worktree), and
 //! git operations left in progress, nested worktrees or another agent
 //! working in it, which only make prune keep it.
 use super::{program, Outcome, Params, Stopped};
-
 use crate::plan::{resume, Next, Query, Reply, MAIN};
 use stateright::{Checker, Model, Property};
 
@@ -165,7 +164,7 @@ const EMPTY: Slot = Slot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Run {
     Running,
-    /// Its run ended; a resume or its background task's end wakes it.
+    /// Its run ended; a resume or a pending wake wakes it.
     Stopped,
     /// A resume's create hook is at its worktree.
     Resuming,
@@ -179,7 +178,13 @@ struct Agent {
     sub: bool,
     run: Run,
     /// A wake bypassing the resume hook is pending.
-    wake: bool,
+    wake: Option<Wake>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Wake {
+    Background,
+    Message,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -233,11 +238,20 @@ struct Sweep {
     /// A process was in the worktree when its lock was claimed.
     occupied_at_claim: bool,
     stopped: Option<Stopped>,
+    /// For a stop's prune, its agent woke past the resume hook since (its
+    /// transcript grew; a resume grows it too, but its relock already tells).
+    ran: bool,
 }
 
 impl Sweep {
     fn new(who: Who, stopped: Option<Stopped>) -> Sweep {
-        Sweep { who, listed: false, core: None, removing: Removing::No, occupied_at_claim: false, stopped }
+        Sweep { who, listed: false, core: None, removing: Removing::No, occupied_at_claim: false, stopped, ran: false }
+    }
+}
+
+fn ran_again(sweeps: &mut [Sweep]) {
+    for sw in sweeps {
+        sw.ran = true;
     }
 }
 
@@ -252,7 +266,8 @@ struct World {
     later: Option<bool>,
     work: u8,
     stops: u8,
-    wakes: u8,
+    background: u8,
+    messages: u8,
     reboots: u8,
     stale_reuse: u8,
     hand: u8,
@@ -281,10 +296,10 @@ enum Act {
     Commit,
     Deploy,
     Detach,
-    /// Its run ends, or with a wake bypassing the resume hook pending (when
-    /// it arose is moot until then).
+    /// Its run ends, maybe with a wake bypassing the resume hook pending
+    /// (when it arose is moot until then).
     Stop {
-        wake: bool,
+        wake: Option<Wake>,
     },
     Resume,
     Wake,
@@ -327,7 +342,7 @@ fn release(l: &mut Option<Holder>, h: Holder) {
 fn arrive(agent: &mut Option<Agent>, s: usize, c: Create) {
     match agent {
         Some(a) if c.resume => a.run = Run::Running,
-        _ => *agent = Some(Agent { session: s, sub: !c.reuse, run: Run::Running, wake: false }),
+        _ => *agent = Some(Agent { session: s, sub: !c.reuse, run: Run::Running, wake: None }),
     }
 }
 
@@ -343,7 +358,7 @@ impl World {
 
     /// The agent works in the worktree, or will without a resume.
     fn needs_tree(&self) -> bool {
-        self.agent().is_some_and(|a| a.run == Run::Running || a.wake)
+        self.agent().is_some_and(|a| a.run == Run::Running || a.wake.is_some())
     }
 
     /// No stop's prune pending: no token is one it read.
@@ -365,6 +380,7 @@ impl World {
     fn answer(&mut self, who: Who, q: &Query) -> Reply {
         let live = self.sessions.map(|s| s == Session::Alive);
         let me = Holder::Sweep(who);
+        let ran_again = self.sweeps.iter().any(|sw| sw.who == who && sw.ran);
         let x = &mut self.x;
         match q {
             Query::TakeNameLock => {
@@ -414,6 +430,8 @@ impl World {
                 flag(claimed)
             }
             Query::Occupied => flag(x.occupant),
+            Query::RanAgain => flag(ran_again),
+
             Query::RestoreLock => {
                 if x.lock.is_none() {
                     x.lock = x.claimed;
@@ -620,7 +638,10 @@ struct Prune {
     /// Agent actions on the worktree, all told, and the other actors' turns.
     work: u8,
     stops: u8,
-    wakes: u8,
+    /// Stops with a background task the agent started still running.
+    background: u8,
+    /// Stops with a message sent after its last tool round.
+    messages: u8,
     reboots: u8,
     others: u8,
 }
@@ -640,7 +661,8 @@ impl Model for Prune {
             later: None,
             work: self.work,
             stops: self.stops,
-            wakes: self.wakes,
+            background: self.background,
+            messages: self.messages,
             reboots: self.reboots,
             stale_reuse: self.others,
             hand: self.others,
@@ -704,16 +726,19 @@ impl Model for Prune {
                         }
                     }
                     if a.sub && w.stops > 0 && w.sweeps.iter().all(|sw| sw.stopped.is_none()) {
-                        acts.push(Act::Stop { wake: false });
-                        if w.wakes > 0 && !a.wake {
-                            acts.push(Act::Stop { wake: true });
+                        acts.push(Act::Stop { wake: None });
+                        if w.background > 0 && a.wake.is_none() {
+                            acts.push(Act::Stop { wake: Some(Wake::Background) });
+                        }
+                        if w.messages > 0 && a.wake.is_none() {
+                            acts.push(Act::Stop { wake: Some(Wake::Message) });
                         }
                     }
                 }
                 Run::Stopped if w.creating[a.session].is_none() => acts.push(Act::Resume),
                 _ => {}
             }
-            if a.wake {
+            if a.wake.is_some() {
                 acts.push(Act::Wake);
             }
         }
@@ -737,7 +762,6 @@ impl Model for Prune {
         let busy = w.sweeps.iter().any(|sw| sw.listed || sw.stopped.is_none());
         for s in 0..S {
             let running = |who| w.sweeps.iter().any(|sw| sw.who == who) || !self.concurrent && busy;
-
             match w.waiters[s] {
                 Waiter::WantFirst if !running(Who::First(s)) => acts.push(Act::Begin(Who::First(s))),
                 Waiter::Waiting if w.sessions[s] == Session::Dead && !running(Who::Last(s)) => acts.push(Act::Begin(Who::Last(s))),
@@ -745,8 +769,10 @@ impl Model for Prune {
             }
         }
         let serving = w.sweeps.iter().any(|sw| sw.listed);
+        // A message's wake comes within the stop's grace, before its prune.
+        let grace = w.agent().is_some_and(|a| a.wake == Some(Wake::Message));
         for (i, sw) in w.sweeps.iter().enumerate() {
-            if self.concurrent || sw.listed || !serving {
+            if (self.concurrent || sw.listed || !serving) && !(grace && sw.stopped.is_some()) {
                 acts.push(Act::Step(i));
             }
         }
@@ -801,12 +827,16 @@ impl Model for Prune {
                 w.stops -= 1;
                 let a = w.agent.as_mut().expect("a running agent");
                 a.run = Run::Stopped;
-                if wake {
-                    w.wakes -= 1;
-                    a.wake = true;
+                match wake {
+                    Some(Wake::Background) => w.background -= 1,
+                    Some(Wake::Message) => w.messages -= 1,
+                    None => {}
                 }
-                // Kept outright while that wake is pending.
-                if !a.wake {
+                if wake.is_some() {
+                    a.wake = wake;
+                }
+                // Kept outright while its background task runs.
+                if a.wake != Some(Wake::Background) {
                     let pid = 100 + a.session as u32;
                     mark(&mut w.x.lock, true);
                     mark(&mut w.x.claimed, true);
@@ -821,9 +851,10 @@ impl Model for Prune {
             }
             Act::Wake => {
                 let a = w.agent.as_mut().expect("an agent");
-                a.wake = false;
+                a.wake = None;
                 if a.run == Run::Stopped {
                     a.run = Run::Running;
+                    ran_again(&mut w.sweeps);
                 }
             }
             Act::PushDone(ok) => {
@@ -928,15 +959,18 @@ fn check(m: Prune, name: &str) {
 
 #[test]
 fn prune_model() {
-    check(Prune { concurrent: false, work: 3, stops: 1, wakes: 1, reboots: 1, others: 1 }, "prune model");
+    check(Prune { concurrent: false, work: 3, stops: 1, background: 1, messages: 0, reboots: 1, others: 1 }, "prune model");
 }
 
 #[test]
 fn prune_model_stopping_again() {
-    check(Prune { concurrent: false, work: 3, stops: 2, wakes: 1, reboots: 1, others: 0 }, "prune model, stopping again");
+    check(Prune { concurrent: false, work: 2, stops: 2, background: 1, messages: 1, reboots: 1, others: 0 }, "prune model, stopping again");
 }
 
 #[test]
 fn prune_model_concurrent() {
-    check(Prune { concurrent: true, work: 0, stops: 0, wakes: 0, reboots: 0, others: 0 }, "prune model, concurrent sweeps");
+    check(
+        Prune { concurrent: true, work: 0, stops: 0, background: 0, messages: 0, reboots: 0, others: 0 },
+        "prune model, concurrent sweeps",
+    );
 }

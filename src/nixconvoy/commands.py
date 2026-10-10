@@ -10,7 +10,7 @@ import sys
 import time
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import IO
+from typing import IO, NamedTuple
 
 from . import hosts, memo, proc
 from .checkout import (
@@ -212,10 +212,21 @@ def prune(names: list[str]) -> None:
             print(f"{sub_label(d)}: {verdict}", flush=True)
 
 
+class Stop(NamedTuple):
+    """A stop's prune: the claude session (pid) whose agent stopped, the
+    worktree's lock then (see the core's Stopped), and the agent's
+    transcript with its size then."""
+
+    pid: int
+    lock: str | None
+    transcript: Path
+    size: int | None
+
+
 def prune_one(d: Path, *, named: bool, own_session_ends: bool = False,
               fetched: list[dict[str, object]] | None = None, prefetched: bool = False,
               deploy_held: bool = False, dropped_failed: list[str] | None = None,
-              stopped: tuple[int, str | None] | None = None) -> str | None:
+              stopped: Stop | None = None) -> str | None:
     """deploy-plan's prune core on the subagent worktree `d`: None once
     removed (the process then in its parent), else why it was kept.
     `fetched` shares one fetch across a run (`prefetched`: the caller
@@ -223,18 +234,17 @@ def prune_one(d: Path, *, named: bool, own_session_ends: bool = False,
     `dropped_failed` collects the origin branch deletions that failed.
     `own_session_ends`: the session the lock names ends for it - this
     one's, abandon from inside it (the invoking command no occupant).
-    `stopped`: the claude session (pid) whose agent stopped and the lock
-    then, a stop's prune (see the core's Stopped).  A worktree named waits
-    for its name lock, a sweep does not."""
+    `stopped`: a stop's prune.  A worktree named waits for its name lock, a
+    sweep does not."""
     os.chdir(d)
     memo: list[dict[str, object]] = [] if fetched is None else fetched
     if prefetched and not memo:
         memo.append({"ran": True, "detail": ""})
     perform = PruneQueries(d, memo, deploy_held=deploy_held, invoker=own_session_ends,
-                           stop=stopped is not None, name_wait=60 if named else 0)
+                           stop=stopped, name_wait=60 if named else 0)
     try:
         done = decide("prune", perform=perform, name=d.name, named=named, own_session_ends=own_session_ends,
-                      stopped=None if stopped is None else {"pid": stopped[0], "lock": stopped[1]})
+                      stopped=None if stopped is None else {"pid": stopped.pid, "lock": stopped.lock})
     finally:
         perform.close()
     if dropped_failed is not None:
@@ -325,10 +335,11 @@ class PruneQueries(GitQueries):
     worktree, so a lock renamed in meanwhile keeps it); `fetched` shares one
     fetch across a run; `invoker`: the invoking command is abandon's, its
     processes in `d` no occupants; `stop`: a stop's prune, its agent's
-    ignored files counted as its own."""
+    ignored files counted as its own, its transcript telling whether it ran
+    again."""
 
     def __init__(self, d: Path, fetched: list[dict[str, object]], *, deploy_held: bool = False,
-                 invoker: bool = False, stop: bool = False,
+                 invoker: bool = False, stop: Stop | None = None,
                  name_wait: float = 0) -> None:
         super().__init__()
         self.d = d
@@ -437,10 +448,12 @@ class PruneQueries(GitQueries):
         if kind == "dirty":
             # An agent that stopped may be resumed: what git ignores (its
             # builds, notes) is kept for it too.
-            ignored = ["--ignored"] if self.stop else []
+            ignored = ["--ignored"] if self.stop is not None else []
             return {"flag": bool(out(["git", "status", "--porcelain", *ignored]))}
         if kind == "occupied":
             return {"flag": occupied(self.d, invoker=self.invoker)}
+        if kind == "ran_again":
+            return {"flag": self.stop is not None and transcript_size(self.stop.transcript) != self.stop.size}
         if kind == "fetch":
             if not self.fetched:
                 self.fetched.append(super().__call__(ask))
@@ -561,7 +574,6 @@ def transcript_size(path: Path) -> int | None:
 
 
 def transcript_cwd(path: Path, *, last: bool = False) -> Path | None:
-
     """The working directory a Claude Code transcript records first (where
     its agent started), or `last` (within its final 256 KiB)."""
     def cwd(raw: bytes) -> str | None:
@@ -597,6 +609,7 @@ def prune_stopped(session: int, stop: dict[str, object]) -> None:
     agent stops again once that work has woken it, and is judged again."""
     agent = str(stop.get("agent_id") or "")
     transcript = Path(str(stop.get("agent_transcript_path") or ""))
+    size = transcript_size(transcript)
     d = transcript_cwd(transcript)
     if not agent or d is None or d.name != f"agent-{agent}" or not d.is_dir() or sub_parent(d) is None:
         return
@@ -608,14 +621,10 @@ def prune_stopped(session: int, stop: dict[str, object]) -> None:
     common = Path(out(["git", "rev-parse", "--git-common-dir"])).resolve()
     locked = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path", "locked"], cwd=str(d)))
     stop_lock = PruneQueries.current_lock(locked)
-    size = transcript_size(transcript)
     if not detached(top):
         return
     log_to(common)
     try:
-        # A message sent it after its last tool round wakes it at once,
-        # past the resume hook, which relocked it before the stop.
-        time.sleep(STOP_GRACE)
         try:
             told = transcript.read_bytes()
         except OSError:
@@ -629,14 +638,17 @@ def prune_stopped(session: int, stop: dict[str, object]) -> None:
         elif forked:
             verdict = f"kept, agent {forked[0]} works in it"
         else:
+            # A message sent it after its last tool round wakes it at once,
+            # past the resume hook, which relocked it before the stop: the
+            # core then keeps it, its transcript grown.
+            time.sleep(STOP_GRACE)
             with (common / "nixconvoy-prune.lock").open("w") as serial:
                 fcntl.flock(serial, fcntl.LOCK_EX)
-                if transcript_size(transcript) != size:
-                    why = "it ran again since it stopped"
-                else:
-                    why = prune_one(d, named=True, stopped=(session, stop_lock))
+                gone = not d.is_dir()
+                why = None if gone else prune_one(d, named=True, stopped=Stop(session, stop_lock, transcript, size))
+            verdict = "removed meanwhile" if gone else "empty, removed" if why is None else f"kept, {why}"
 
-            verdict = "empty, removed" if why is None else f"kept, {why}"
+
     except (Exception, SystemExit) as e:  # noqa: BLE001 - reported in the log
         verdict = f"kept, its check failed: {e!r}"
     print(f"{time.strftime('%F %T')} agent {agent} stopped: {sub_label(d)}: {verdict}", flush=True)

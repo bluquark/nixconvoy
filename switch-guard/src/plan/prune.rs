@@ -3,10 +3,11 @@
 //! nixconvoy's WorktreeCreate hook makes, and an agent can be resumed while
 //! the session that spawned it runs, which needs its worktree; so a
 //! worktree goes only once the session its lock names has exited, or its
-//! agent stopped and no resume relocked it since, and only when it holds
-//! nothing of its own.  A sweep (no name given) keeps an
+//! agent stopped and neither a resume relocked it nor anything woke the
+//! agent since, and only when it holds nothing of its own.  A sweep (no
+//! name given) keeps an unlocked one, which no session's exit tells the
+//! end of.
 
-//! unlocked one, which no session's exit tells the end of.
 //!
 //! A live session or a hand lock is told before origin is fetched, which
 //! may be offline; every check after the fetch is taken under the
@@ -94,7 +95,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     let outcome = if s.flag(Query::TakeDeployLock)? {
         let o = match judge(s, p)? {
             Err(o) => o,
-            Ok((lock, wb, cur)) => remove(s, lock, &wb, cur)?,
+            Ok((lock, wb, cur)) => remove(s, p, lock, &wb, cur)?,
         };
         s.tolerate(Query::ReleaseDeployLock)?;
         o
@@ -184,7 +185,7 @@ fn judge(s: &mut Script, p: &Params) -> Run<Result<Judged, Outcome>> {
     Ok(Ok((lock, wb, cur)))
 }
 
-fn remove(s: &mut Script, lock: Option<String>, wb: &str, cur: Option<String>) -> Run<Outcome> {
+fn remove(s: &mut Script, p: &Params, lock: Option<String>, wb: &str, cur: Option<String>) -> Run<Outcome> {
     if !s.flag(Query::ClaimLock { expect: lock })? {
         return Ok(Outcome::Kept("its lock changed meanwhile: a session took it over".into()));
     }
@@ -192,6 +193,12 @@ fn remove(s: &mut Script, lock: Option<String>, wb: &str, cur: Option<String>) -
         s.tolerate(Query::RestoreLock)?;
         return Ok(Outcome::Kept("a process works in it".into()));
     }
+    // Woken past the resume hook, whose relock would have kept it.
+    if p.stopped.is_some() && s.flag(Query::RanAgain)? {
+        s.tolerate(Query::RestoreLock)?;
+        return Ok(Outcome::Kept("its agent ran again since it stopped".into()));
+    }
+
     if let Err(detail) = s.ran(Query::RemoveWorktree)? {
         s.tolerate(Query::RestoreLock)?;
         return Ok(Outcome::Kept(format!("git refused to remove it:\n{}", detail.trim())));

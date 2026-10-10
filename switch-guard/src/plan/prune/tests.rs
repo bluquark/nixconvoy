@@ -156,6 +156,15 @@ fn a_stop_ends_its_session_while_the_lock_is_the_stop_s() {
     let (asked, o) = run(at_stop("claude agent agent-x (pid 7 start 9)"), live);
     assert_eq!(o, Outcome::Removed);
     assert!(!asked.iter().any(|q| matches!(q, Query::Alive { .. })));
+    let (asked, o) = run(at_stop("claude agent agent-x (pid 7 start 9)"), |q| match q {
+        Query::RanAgain => Some(Reply::Flag(true)),
+        q => live(q),
+    });
+    assert_eq!(kept(&o), "its agent ran again since it stopped");
+    assert!(asked.contains(&Query::RestoreLock));
+    let (asked, _) = run(params(true), |_| None);
+    assert!(!asked.contains(&Query::RanAgain));
+
     // Relocked since, by a resume.
     let (_, o) = run(at_stop("claude agent agent-x (pid 7 start 9) 1.2"), live);
     assert_eq!(kept(&o), "the claude session that spawned its agent still runs");
