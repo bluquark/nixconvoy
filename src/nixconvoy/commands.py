@@ -215,12 +215,12 @@ def prune(names: list[str]) -> None:
 class Stop(NamedTuple):
     """A stop's prune: the claude session (pid) whose agent stopped, the
     worktree's lock then (see the core's Stopped), and the agent's
-    transcript with its size then."""
+    transcript with its turns then."""
 
     pid: int
     lock: str | None
     transcript: Path
-    size: int | None
+    turns: int | None
 
 
 def prune_one(d: Path, *, named: bool, own_session_ends: bool = False,
@@ -453,7 +453,7 @@ class PruneQueries(GitQueries):
         if kind == "occupied":
             return {"flag": occupied(self.d, invoker=self.invoker)}
         if kind == "ran_again":
-            return {"flag": self.stop is not None and transcript_size(self.stop.transcript) != self.stop.size}
+            return {"flag": self.stop is not None and transcript_turns(self.stop.transcript) != self.stop.turns}
         if kind == "fetch":
             if not self.fetched:
                 self.fetched.append(super().__call__(ask))
@@ -562,13 +562,28 @@ def log_to(common: Path) -> None:
     os.dup2(log.fileno(), 2)
 
 
-# How long after an agent's stop a message sent it before then wakes it.
+# How long after an agent's stop what continues it past the resume hook
+# (a message sent it before then, Claude Code's own follow-up turn) has it
+# take a turn.
 STOP_GRACE = 10
 
 
-def transcript_size(path: Path) -> int | None:
+def transcript_turns(path: Path) -> int | None:
+    """How many turns a Claude Code transcript records its agent taking:
+    what grows when it runs again (its tools' results may still be written
+    after it stopped)."""
+    def turn(raw: bytes) -> bool:
+        if b'"assistant"' not in raw:
+            return False
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            return False
+        return isinstance(rec, dict) and rec.get("type") == "assistant"
+
     try:
-        return path.stat().st_size
+        with path.open("rb") as f:
+            return sum(map(turn, f))
     except OSError:
         return None
 
@@ -605,11 +620,12 @@ def prune_stopped(session: int, stop: dict[str, object]) -> None:
     recreates it first (worktree-resume.sh).  Kept while a process, a
     background task the agent started (which wakes it, bypassing that hook),
     or another running agent of the session (a skill forked there) works in
-    it, or once its transcript grew since the stop (it ran again); the
-    agent stops again once that work has woken it, and is judged again."""
+    it, or once its transcript records a turn since the stop (it ran
+    again); the agent stops again once that work has woken it, and is
+    judged again."""
     agent = str(stop.get("agent_id") or "")
     transcript = Path(str(stop.get("agent_transcript_path") or ""))
-    size = transcript_size(transcript)
+    turns = transcript_turns(transcript)
     d = transcript_cwd(transcript)
     if not agent or d is None or d.name != f"agent-{agent}" or not d.is_dir() or sub_parent(d) is None:
         return
@@ -638,17 +654,15 @@ def prune_stopped(session: int, stop: dict[str, object]) -> None:
         elif forked:
             verdict = f"kept, agent {forked[0]} works in it"
         else:
-            # A message sent it after its last tool round wakes it at once,
-            # past the resume hook, which relocked it before the stop: the
-            # core then keeps it, its transcript grown.
+            # What continues it at once, past the resume hook (a message
+            # sent it after its last tool round, which relocked it before
+            # the stop): the core then keeps it, a turn recorded since.
             time.sleep(STOP_GRACE)
             with (common / "nixconvoy-prune.lock").open("w") as serial:
                 fcntl.flock(serial, fcntl.LOCK_EX)
                 gone = not d.is_dir()
-                why = None if gone else prune_one(d, named=True, stopped=Stop(session, stop_lock, transcript, size))
+                why = None if gone else prune_one(d, named=True, stopped=Stop(session, stop_lock, transcript, turns))
             verdict = "removed meanwhile" if gone else "empty, removed" if why is None else f"kept, {why}"
-
-
     except (Exception, SystemExit) as e:  # noqa: BLE001 - reported in the log
         verdict = f"kept, its check failed: {e!r}"
     print(f"{time.strftime('%F %T')} agent {agent} stopped: {sub_label(d)}: {verdict}", flush=True)

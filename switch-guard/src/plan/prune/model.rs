@@ -9,11 +9,11 @@
 //! create hook again, relocking or recreating it) or woken past the resume
 //! hook: by a background task it started, whose end may come at any time
 //! (prune --stopped keeps it outright while one runs), or by a message sent
-//! it after its last tool round, which wakes it at once, within the stop's
-//! grace, so before its prune runs; a process working in it without its
-//! lock; a hand lock; a reboot killing sessions, waiters, creates, pushes
-//! and sweeps mid-removal; and, once all is quiet, a later session's start
-//! sweep.  Each query the real core asks is one step, so every other actor
+//! it after its last tool round or Claude Code's own follow-up turn, which
+//! come at once, within the stop's grace, so before its prune runs; a
+//! process working in it without its lock; a hand lock; a reboot killing
+//! sessions, waiters, creates, pushes and sweeps mid-removal; and, once all
+//! is quiet, a later session's start sweep.  Each query the real core asks is one step, so every other actor
 //! interleaves between any two of them; `git worktree remove` is three: its
 //! lock and cleanliness check, the tree's deletion, the admin directory's
 //! (by name, whichever worktree of that name it then belongs to).  The core
@@ -21,7 +21,7 @@
 //! agent's unique name takes it only once it is empty); a manual prune is a
 //! waiter's first sweep at another moment.  One stop's prune at a time: the
 //! agent stops again only once it ran again, after which a pending one
-//! keeps it (its transcript grew) or, a resume having relocked it, judges
+//! keeps it (a turn recorded since) or, a resume having relocked it, judges
 //! it as a sweep does.  Three configurations: the whole world with sweeps
 //! and a stop's prune one at a time, as prune's flock runs them, the stop
 //! maybe leaving a background task running; the same with the agent
@@ -238,8 +238,8 @@ struct Sweep {
     /// A process was in the worktree when its lock was claimed.
     occupied_at_claim: bool,
     stopped: Option<Stopped>,
-    /// For a stop's prune, its agent woke past the resume hook since (its
-    /// transcript grew; a resume grows it too, but its relock already tells).
+    /// For a stop's prune, its agent woke past the resume hook since (a
+    /// turn recorded; a resume records one too, but its relock already tells).
     ran: bool,
 }
 

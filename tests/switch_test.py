@@ -806,11 +806,13 @@ def git_cases(d: Path) -> None:
                 (rv / "target" / "build").unlink()
                 (rv / "target").rmdir()
                 exclude.write_text(kept_out)
-                # Its transcript grew since the stop: it ran again.
-                transcript.write_text("{}\n")
+                # A turn recorded since the stop: it ran again.  A tool's
+                # result written after it is none.
+                transcript.write_text('{"type":"assistant"}\n{"type":"user","note":"assistant"}\n[]\n')
+                assert commands.transcript_turns(transcript) == 1
                 why = commands.prune_one(rv.resolve(), named=True, stopped=commands.Stop(parent, held, transcript, 0))
                 assert why == "its agent ran again since it stopped", why
-                assert commands.prune_one(rv.resolve(), named=True, stopped=commands.Stop(parent, held, transcript, 3)) is None
+                assert commands.prune_one(rv.resolve(), named=True, stopped=commands.Stop(parent, held, transcript, 1)) is None
             assert not rv.exists() and Path.cwd().resolve() == co.resolve()
             sh(co, "worktree", "add", "--quiet", "--detach", str(rv), "origin/main")
         # Where an agent's transcript says it started, and is now.

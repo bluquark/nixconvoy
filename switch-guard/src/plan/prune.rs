@@ -7,7 +7,6 @@
 //! agent since, and only when it holds nothing of its own.  A sweep (no
 //! name given) keeps an unlocked one, which no session's exit tells the
 //! end of.
-
 //!
 //! A live session or a hand lock is told before origin is fetched, which
 //! may be offline; every check after the fetch is taken under the
