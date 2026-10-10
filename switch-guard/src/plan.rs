@@ -1,7 +1,8 @@
 //! nixconvoy's decisions about the checkout and the hosts as Sans-I/O cores
 //! (deploy-plan): which hosts a deploy may switch (drift), how a checkout is
-//! brought onto origin/main (rebase) and how the union of the work branches
-//! is built and kept current (union).  nixconvoy performs each query - git,
+//! brought onto origin/main (rebase), how the union of the work branches
+//! is built and kept current (union) and whether a subagent worktree is
+//! removed (prune).  nixconvoy performs each query - git,
 //! a worktree, the eval/build/copy of a union - and feeds the result back.
 //!
 //! A core is a straight-line program over `Script`: each `ask` returns the
@@ -10,6 +11,7 @@
 //! the program reads like the procedure it decides and holds no state of its
 //! own; it is pure, so each re-run retraces the same queries.
 pub mod drift;
+pub mod prune;
 pub mod rebase;
 pub mod union;
 pub mod wire;
@@ -178,6 +180,49 @@ pub enum Query {
     Stage {
         union: String,
         listed: Vec<String>,
+    },
+
+    /// The prune core's, in the subagent worktree it judges.  Take its
+    /// deploy lock, without waiting -> Flag: taken.
+    TakeDeployLock,
+    ReleaseDeployLock,
+    /// Its git worktree lock's reason -> Text (None: unlocked).
+    Lock,
+    /// Whether the claude session `pid` (started at `start`, where /proc
+    /// tells) runs - not counting the one running this when `own_ends`
+    /// -> Flag.
+    Alive {
+        pid: u32,
+        start: Option<u64>,
+        own_ends: bool,
+    },
+    /// Whether a background push of its work branch runs -> Flag.
+    PushInFlight,
+    /// Whether another worktree lives under its directory -> Flag.
+    Nested,
+    /// The work branch it owns -> Text.
+    OwnBranch,
+    /// Whether `sha` has commits on no origin ref -> Flag.
+    Unpushed {
+        sha: String,
+    },
+    /// Whether it has staged, unstaged or untracked changes -> Flag.
+    Dirty,
+    /// Rename its lock aside, if it still holds `expect` (None: if it is
+    /// still unlocked) -> Flag: claimed.
+    ClaimLock {
+        expect: Option<String>,
+    },
+    /// `git worktree remove` without force: refused for a locked or
+    /// unclean worktree -> Ran.
+    RemoveWorktree,
+    /// The claimed lock back in place, unless a new one took it -> Ran.
+    RestoreLock,
+    /// Delete its branches - `wb`, and `cur` or its fresh branch when its
+    /// own - here and on origin -> Ran.
+    DropBranches {
+        wb: String,
+        cur: Option<String>,
     },
 }
 
@@ -356,6 +401,18 @@ impl<P, O> Replay<P, O> {
             }
         };
         Step { effects, next }
+    }
+}
+
+/// A core's program run once over `replies`: what it asks next, or how
+/// it ends (the stateright models keep the replies, not a `Replay`).
+#[cfg(test)]
+pub fn resume<P, O>(params: &P, program: fn(&mut Script, &P) -> Run<O>, replies: &[Reply]) -> Next<O> {
+    let mut s = Script { replies, pos: 0, effects: Vec::new() };
+    match program(&mut s, params) {
+        Ok(o) => Next::Done(o),
+        Err(Halt::Die(m)) => Next::Die(m),
+        Err(Halt::Ask(q)) => Next::Ask(q),
     }
 }
 

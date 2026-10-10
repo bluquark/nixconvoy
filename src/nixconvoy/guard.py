@@ -17,7 +17,7 @@ from typing import NoReturn
 from . import proc
 from .proc import die, dump_json, load_json
 
-PLAN_PROTOCOL = 1
+PLAN_PROTOCOL = 2
 DEPLOYER_PROTOCOL = 1
 
 Perform = Callable[[dict[str, object]], dict[str, object]]

@@ -364,9 +364,12 @@ def catch_up(paths: list[Path]) -> bool:
     whether all succeeded."""
     good = True
     for d in paths:
-        if not d.is_dir():
-            continue  # a subagent worktree pruned since it was listed
-        done, status = update_checkout(d)
+        try:
+            done, status = update_checkout(d)
+        except FileNotFoundError:
+            done, status = False, "gone"
+        if not done and not d.is_dir():
+            continue  # a subagent worktree pruned meanwhile
         print(f"{d.name}: {status}", file=sys.stdout if done else sys.stderr,
               flush=True)
         good &= done

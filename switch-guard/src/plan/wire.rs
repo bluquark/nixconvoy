@@ -2,13 +2,13 @@
 //! (deployer/wire.rs).  nixconvoy writes the core's name and parameters,
 //! then one reply per query; the binary answers each with
 //! `{"effects": [...], "next": {"ask": ...} | {"done": ...} | {"die": ...}}`.
-use super::{drift, rebase, union, Effect, Next, Query, Replay, Reply, Step};
+use super::{drift, prune, rebase, union, Effect, Next, Query, Replay, Reply, Step};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
 /// Bumped on any change of the messages below; nixconvoy sends the version
 /// it speaks.
-pub const PROTOCOL: u64 = 1;
+pub const PROTOCOL: u64 = 2;
 
 fn field<'a>(v: &'a Value, k: &str) -> Result<&'a Value, String> {
     v.get(k).ok_or_else(|| format!("missing {k} in {v}"))
@@ -106,6 +106,10 @@ fn rebase_params(v: &Value) -> Result<rebase::Params, String> {
     })
 }
 
+fn prune_params(v: &Value) -> Result<prune::Params, String> {
+    Ok(prune::Params { name: text(v, "name")?, named: flag(v, "named")?, own_session_ends: flag(v, "own_session_ends")? })
+}
+
 fn union_params(v: &Value) -> Result<union::Params, String> {
     Ok(union::Params { wb: text(v, "wb")?, reset: flag(v, "reset")?, main0: opt_text(field(v, "main0")?)? })
 }
@@ -173,6 +177,21 @@ pub fn query(q: &Query) -> Value {
         Query::CollectFetch => ("collect_fetch", vec![]),
         Query::Refresh => ("refresh", vec![]),
         Query::Stage { union, listed } => ("stage", vec![("union", s(union)), ("listed", json!(listed))]),
+        Query::TakeDeployLock => ("take_deploy_lock", vec![]),
+        Query::ReleaseDeployLock => ("release_deploy_lock", vec![]),
+        Query::Lock => ("lock", vec![]),
+        Query::Alive { pid, start, own_ends } => {
+            ("alive", vec![("pid", json!(pid)), ("start", json!(start)), ("own_ends", json!(own_ends))])
+        }
+        Query::PushInFlight => ("push_in_flight", vec![]),
+        Query::Nested => ("nested", vec![]),
+        Query::OwnBranch => ("own_branch", vec![]),
+        Query::Unpushed { sha } => ("unpushed", vec![("sha", s(sha))]),
+        Query::Dirty => ("dirty", vec![]),
+        Query::ClaimLock { expect } => ("claim_lock", vec![("expect", json!(expect))]),
+        Query::RemoveWorktree => ("remove_worktree", vec![]),
+        Query::RestoreLock => ("restore_lock", vec![]),
+        Query::DropBranches { wb, cur } => ("drop_branches", vec![("wb", s(wb)), ("cur", json!(cur))]),
     };
     let mut o: Map<String, Value> = fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
     o.insert("ask".into(), json!(ask));
@@ -201,6 +220,7 @@ pub enum Core {
     Drift(Box<Replay<drift::Params, drift::Outcome>>),
     Rebase(Replay<rebase::Params, rebase::Outcome>),
     Union(Replay<union::Params, union::Outcome>),
+    Prune(Replay<prune::Params, prune::Outcome>),
 }
 
 pub fn start(line: &str) -> Result<Core, String> {
@@ -213,6 +233,7 @@ pub fn start(line: &str) -> Result<Core, String> {
         "drift" => Core::Drift(Box::new(Replay::new(drift_params(&v)?, drift::program))),
         "rebase" => Core::Rebase(Replay::new(rebase_params(&v)?, rebase::program)),
         "union" => Core::Union(Replay::new(union_params(&v)?, union::program)),
+        "prune" => Core::Prune(Replay::new(prune_params(&v)?, prune::program)),
         c => return Err(format!("unknown core {c}")),
     })
 }
@@ -233,6 +254,10 @@ impl Core {
                 m.decide(reply),
                 |o| json!({ "union": o.union, "branches": o.branches.iter().map(|(n, s)| json!([n, s])).collect::<Vec<_>>() }),
             ),
+            Core::Prune(m) => step(m.decide(reply), |o| match o {
+                prune::Outcome::Removed => json!({ "removed": true, "kept": null }),
+                prune::Outcome::Kept(why) => json!({ "removed": false, "kept": why }),
+            }),
         }
     }
 }
@@ -244,7 +269,7 @@ mod tests {
     #[test]
     fn round_trip() {
         assert!(start(r#"{"protocol":0,"core":"rebase","mode":"pop_tmp"}"#).is_err());
-        let mut c = start(r#"{"protocol":1,"core":"rebase","mode":"pop_tmp"}"#).unwrap();
+        let mut c = start(r#"{"protocol":2,"core":"rebase","mode":"pop_tmp"}"#).unwrap();
         assert_eq!(c.decide(None), (r#"{"effects":[],"next":{"ask":"head_subject"}}"#.to_string(), true));
         assert_eq!(reply(r#"{"text":null}"#).unwrap(), Reply::Text(None));
         let (line, more) = c.decide(Some(Reply::Text(None)));
@@ -259,13 +284,23 @@ mod tests {
         );
         assert_eq!(reply(r#"{"ran":true,"detail":""}"#).unwrap(), Reply::Ran { ok: true, detail: String::new() });
         assert_eq!(query(&Query::Switch { branch: "b".into(), start: None }).to_string(), r#"{"ask":"switch","branch":"b","start":null}"#);
-        let mut d = start(r#"{"protocol":1,"core":"drift","me":["h","/c"],"listed":["main"],"tips":{},"now":0,"tz_offset":0,"router":"choko","hosts":["a"],"candidates":["a"],"take_over":[],"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"lineages":{"a":{"text":"","age":null}}}"#).unwrap();
+        let mut d = start(r#"{"protocol":2,"core":"drift","me":["h","/c"],"listed":["main"],"tips":{},"now":0,"tz_offset":0,"router":"choko","hosts":["a"],"candidates":["a"],"take_over":[],"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"lineages":{"a":{"text":"","age":null}}}"#).unwrap();
         let (line, _) = d.decide(None);
         assert_eq!(
             line,
             r#"{"effects":[{"print":"  a: will switch"}],"next":{"done":{"affected":["a"],"drift":{"a":["untracked",""]},"plan":["a"]}}}"#
         );
-        let mut u = start(r#"{"protocol":1,"core":"union","wb":"w","reset":true,"main0":null}"#).unwrap();
+        let mut u = start(r#"{"protocol":2,"core":"union","wb":"w","reset":true,"main0":null}"#).unwrap();
         assert_eq!(u.decide(None).0, r#"{"effects":[{"mark":"union"}],"next":{"ask":"listed"}}"#);
+        let mut p = start(r#"{"protocol":2,"core":"prune","name":"agent-x","named":false,"own_session_ends":false}"#).unwrap();
+        assert_eq!(p.decide(None).0, r#"{"effects":[],"next":{"ask":"take_deploy_lock"}}"#);
+        assert_eq!(
+            p.decide(Some(Reply::Flag(false))).0,
+            r#"{"effects":[],"next":{"done":{"kept":"a nixconvoy runs in it","removed":false}}}"#
+        );
+        assert_eq!(
+            query(&Query::Alive { pid: 7, start: None, own_ends: false }).to_string(),
+            r#"{"ask":"alive","own_ends":false,"pid":7,"start":null}"#
+        );
     }
 }

@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import io
 import os
 import sys
 import time
 from fnmatch import fnmatchcase
 from pathlib import Path
+from typing import IO
 
 from . import hosts, memo, proc
 from .checkout import (
     PAST_REFS,
+    GitQueries,
     add_worktree,
     allowed_branches,
     await_background_push,
@@ -28,6 +29,7 @@ from .checkout import (
     identity_of,
     listed_tips,
     lock_checkout,
+    lock_live,
     lock_pid_alive,
     on_origin,
     origin_tips,
@@ -35,6 +37,7 @@ from .checkout import (
     proc_stat,
     push_state,
     push_work_branch,
+    ran,
     require_unlocked,
     require_work_branch,
     sibling_checkouts,
@@ -48,7 +51,7 @@ from .checkout import (
     worktree_lock,
 )
 from .config import MSG_FILE
-from .guard import binary
+from .guard import binary, decide
 from .proc import die, git, is_ancestor, ok, out, painter, rev, run
 
 
@@ -150,9 +153,10 @@ def abandon() -> None:
     if ident.kind == "sub" and sub_parent(here) is not None:
         require_unlocked(Path.cwd())
     if ident.kind == "sub" and ident.wb and current_branch() != ident.wb and sub_parent(here):
-        if (why := keep_reason(ident.wb)) is not None:
-            die(f"this worktree {why}, then re-run")
-        remove_sub([ident.wb])  # never deployed: still on its fresh branch
+        # Never deployed: still on its fresh branch.
+        if (why := prune_one(here, named=True, own_session_ends=True)) is not None:
+            die(f"this worktree is kept: {why}; then re-run")
+        print(f"subagent worktree {sub_label(here)} removed")
         return
     wb = require_work_branch("abandon")
     if current_branch() != wb:
@@ -172,36 +176,10 @@ def abandon() -> None:
     finish(wb)
 
 
-def keep_reason(wb: str) -> str | None:
-    """Why the current subagent worktree, owning `wb` but not on it, is not
-    simply removable - what the removal, which takes the reflog and `wb`
-    along, would lose - or None when it holds nothing of its own."""
-    tip = rev(f"refs/remotes/origin/{wb}")
-    if tip and not is_ancestor(tip, "refs/remotes/origin/main"):
-        return (f"is not on {wb}, which carries pushed increments; "
-                f"`git switch {wb}` there to discard them")
-    local = rev(f"refs/heads/{wb}")
-    if local and out(["git", "rev-list", "-n", "1", local, "--not", "--remotes=origin"]):
-        return (f"owns {wb}, which carries commits not on origin (a deploy whose push "
-                f"failed?); push it or `git switch {wb}` there and abandon")
-    if out(["git", "status", "--porcelain"]):
-        return ("has uncommitted or untracked changes, which the removal would lose; "
-                "commit or discard them (git status there)")
-    if not on_origin():
-        return ("carries commits not on origin, which the removal would lose; push them "
-                "(git push origin HEAD:main) or deploy from the work branch")
-    return None
-
-
 def prune(names: list[str]) -> None:
     """Remove the subagent worktrees that hold nothing of their own (cli
-    docstring: Prune): the named ones, or every one under this checkout.
-    One whose spawning claude session still runs is kept, whichever session
-    asks (it may yet resume its agent, which needs the worktree), as is one
-    locked by hand, or unlocked unless named, one at work (a nixconvoy, git
-    operation or push running in it), on a work branch (deployed: land or
-    abandon decides it) or with anything of its own; each kept one is said
-    so.  Runs are serialised per repository."""
+    docstring: Prune), as deploy-plan's prune core decides: the named ones,
+    or every one under this checkout.  Runs are serialised per repository."""
     here = Path.cwd().resolve()
     top = sub_parent(here) or here
     serial = Path(out(["git", "rev-parse", "--git-common-dir"])).resolve() / "nixconvoy-prune.lock"
@@ -210,19 +188,14 @@ def prune(names: list[str]) -> None:
         subs = ([find_sub(n) for n in names] if names
                 else sorted(d for d in sibling_checkouts() if sub_parent(d) == top))
         if not subs:
-            print(f"no subagent worktree under {top}")
-        fetched = False
+            print(f"no subagent worktree under {top}", flush=True)
+        fetched: list[dict[str, object]] = []
         for d in subs:
             try:
                 if not d.is_dir():
                     continue  # removed since it was listed
-                os.chdir(d)
-                verdict = prune_check(d, named=bool(names))
-                if verdict is None:
-                    if not fetched:  # keep_reason reads origin's tips
-                        git("fetch", "--quiet", "--no-auto-gc", "origin", check=False)
-                        fetched = True
-                    verdict = prune_here(d, named=bool(names))
+                why = prune_one(d, named=bool(names), fetched=fetched)
+                verdict = "empty, removed" if why is None else f"kept, {why}"
             except (Exception, SystemExit) as e:  # noqa: BLE001 - one worktree's failure, reported
                 proc.DYING = False
                 verdict = f"kept, its check failed: {e!r}"
@@ -231,86 +204,145 @@ def prune(names: list[str]) -> None:
             print(f"{sub_label(d)}: {verdict}", flush=True)
 
 
-def prune_check(d: Path, *, named: bool) -> str | None:
-    """Why the subagent worktree `d`, the cwd, is kept, judged without
-    origin; None when only its contents remain to be checked."""
-    reason = worktree_lock(d)
-    if reason is None:
-        if not named:
-            return ("kept, unlocked: no session to outlive; "
-                    f"`nixconvoy prune {d.name}` judges it")
-    else:
-        alive = lock_pid_alive(reason)
-        if alive is None:
-            return f"kept, locked by hand ({reason or 'no reason given'})"
-        if alive:
-            return "kept, the claude session that spawned its agent still runs"
-    if (op := git_op_in_progress(d)) is not None:
-        return f"kept, {op} in progress"
-    if Path(push_state("pid")).exists():
-        return "kept, a push of its work branch is in flight"
-    cur = current_branch()
-    wb = identity_of(d, cur).wb
-    if wb is None:
-        return "kept, it owns no work branch"
-    if cur == wb:
-        if wb.endswith(f"-{d.name}"):
-            return f"kept, on its work branch {wb}: land or abandon decides it"
-        return f"kept, it has {wb}, another checkout's work branch, checked out"
-    return None
+def prune_one(d: Path, *, named: bool, own_session_ends: bool = False,
+              fetched: list[dict[str, object]] | None = None) -> str | None:
+    """deploy-plan's prune core on the subagent worktree `d`: None once
+    removed (the process then in its parent), else why it was kept."""
+    os.chdir(d)
+    done = decide("prune", perform=PruneQueries(d, [] if fetched is None else fetched),
+                  name=d.name, named=named, own_session_ends=own_session_ends)
+    assert isinstance(done, dict)
+    if done.get("removed"):
+        return None
+    return str(done.get("kept"))
 
 
-def prune_here(d: Path, *, named: bool) -> str:
-    """Prune the subagent worktree `d`, the cwd, under its deploy lock:
-    what became of it."""
-    lock = lock_checkout()
-    if lock is None:
-        return "kept, a nixconvoy runs in it"
-    try:
-        if (why := prune_check(d, named=named)) is not None:
-            return why
-        wb = identity_of(d, current_branch()).wb
-        assert wb is not None
-        if (why := keep_reason(wb)) is not None:
-            return f"kept, it {why}"
-        with contextlib.redirect_stdout(io.StringIO()):
-            remove_sub([wb])
-        return "empty, removed"
-    finally:
-        lock.close()
+class PruneQueries(GitQueries):
+    """The prune core's queries on the subagent worktree `d`: its lock file
+    claimed by renaming it aside (git refuses to remove a locked worktree,
+    so a lock renamed in meanwhile keeps it), its deploy lock held until
+    released; `fetched` shares one fetch across a run."""
+
+    def __init__(self, d: Path, fetched: list[dict[str, object]]) -> None:
+        super().__init__()
+        self.d = d
+        parent = sub_parent(d)
+        assert parent is not None
+        self.parent = parent
+        self.fetched = fetched
+        self.locked = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path", "locked"]))
+        self.claimed = self.locked.with_name("locked.prune")
+        self.held: IO[str] | None = None
+
+    @staticmethod
+    def read(f: Path) -> str | None:
+        try:
+            return f.read_text().removesuffix("\n")
+        except FileNotFoundError:
+            return None
+
+    def restore(self) -> None:
+        with contextlib.suppress(FileExistsError, FileNotFoundError):
+            os.link(self.claimed, self.locked)
+        self.claimed.unlink(missing_ok=True)
+
+    def __call__(self, ask: dict[str, object]) -> dict[str, object]:
+        kind = ask.get("ask")
+        if kind == "take_deploy_lock":
+            self.held = lock_checkout()
+            return {"flag": self.held is not None}
+        if kind == "release_deploy_lock":
+            if self.held is not None:
+                self.held.close()
+            return {"ran": True, "detail": ""}
+        if kind == "lock":
+            # A lock a removal claimed before it died still counts.
+            return {"text": self.read(self.locked) if self.locked.exists() else self.read(self.claimed)}
+        if kind == "alive":
+            start = ask.get("start")
+            reason = f"pid {ask.get('pid')}" + (f" start {start}" if start is not None else "")
+            alive = lock_live(reason) if ask.get("own_ends") else lock_pid_alive(reason) is not False
+            return {"flag": alive}
+        if kind == "push_in_flight":
+            return {"flag": Path(push_state("pid")).exists()}
+        if kind == "nested":
+            inside = [Path(ln[len("worktree "):]).resolve() for ln in out(
+                ["git", "worktree", "list", "--porcelain"]).splitlines() if ln.startswith("worktree ")]
+            return {"flag": any(w != self.d and self.d in w.parents for w in inside)}
+        if kind == "own_branch":
+            return {"text": identity_of(self.d, current_branch()).wb}
+        if kind == "unpushed":
+            return {"flag": bool(out(["git", "rev-list", "-n", "1", str(ask.get("sha")), "--not", "--remotes=origin"]))}
+        if kind == "dirty":
+            return {"flag": bool(out(["git", "status", "--porcelain"]))}
+        if kind == "fetch":
+            if not self.fetched:
+                self.fetched.append(super().__call__(ask))
+            return self.fetched[0]
+        if kind == "claim_lock":
+            expect = ask.get("expect")
+            if expect is None:
+                return {"flag": not self.locked.exists() and not self.claimed.exists()}
+            with contextlib.suppress(FileNotFoundError):
+                self.locked.rename(self.claimed)
+            if self.read(self.claimed) == expect:
+                return {"flag": True}
+            self.restore()  # a new lock was renamed in before the claim
+            return {"flag": False}
+        if kind == "remove_worktree":
+            os.chdir(self.parent)
+            done = git("worktree", "remove", str(self.d), check=False)
+            if done.returncode != 0 and self.d.is_dir():
+                os.chdir(self.d)
+            return ran(done)
+        if kind == "restore_lock":
+            self.restore()
+            return {"ran": True, "detail": ""}
+        if kind == "drop_branches":
+            cur = ask.get("cur")
+            drop_branches(sub_branches(self.d, cur if isinstance(cur, str) else None, [str(ask.get("wb"))]))
+            return {"ran": True, "detail": ""}
+        return super().__call__(ask)
 
 
 def prune_after(pid: int) -> None:
     """`prune --after PID`: detach, prune what dead sessions left, wait for
     the claude session PID to exit, then prune again - its own agents'
-    worktrees among them.  One waiter per session (a lock file named after
-    it in the git dir); the output goes to nixconvoy-prune.log there, which
-    starts over past 1 MiB."""
+    worktrees among them.  It runs from the checkout the session's agents
+    hang off (a `claude --worktree` session's own root goes at its exit).
+    One waiter per session (a lock file named after it in the common git
+    dir); the output goes to nixconvoy-prune.log there, which starts over
+    past 1 MiB."""
     stat = proc_stat(pid)
     session = f"pid {pid}" + (f" start {stat.split()[19]}" if stat else "")  # as a lock names it
-    gitdir = Path(out(["git", "rev-parse", "--absolute-git-dir"]))
+    here = Path.cwd().resolve()
+    top = sub_parent(here) or here
+    common = Path(out(["git", "rev-parse", "--git-common-dir"])).resolve()
     if os.fork():
         return
     os.setsid()
     if os.fork():
         os._exit(0)
-    logf = gitdir / "nixconvoy-prune.log"
-    if logf.exists() and logf.stat().st_size > 1 << 20:
-        logf.replace(logf.with_suffix(".log.old"))
-    log = logf.open("a")
-    os.dup2(log.fileno(), 1)
-    os.dup2(log.fileno(), 2)
-    devnull = os.open(os.devnull, os.O_RDONLY)
-    os.dup2(devnull, 0)
-    waiter = gitdir / f"nixconvoy-prune-after.{pid}"
+    os.chdir(top)
+    devnull = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(devnull, fd)
+    waiter = common / f"nixconvoy-prune-after.{pid}"
     held = waiter.open("w")
     try:
         fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         os._exit(0)
+    logf = common / "nixconvoy-prune.log"
+    with contextlib.suppress(OSError):
+        if logf.stat().st_size > 1 << 20:
+            logf.replace(logf.with_suffix(".log.old"))
+    log = logf.open("a")
+    os.dup2(log.fileno(), 1)
+    os.dup2(log.fileno(), 2)
 
     def sweep(what: str) -> None:
-        print(f"{time.strftime('%F %T')} claude session {pid} {what}", flush=True)
+        print(f"{time.strftime('%F %T')} claude session {pid} {what} ({top})", flush=True)
         try:
             prune([])
         except (Exception, SystemExit) as e:  # noqa: BLE001 - the waiter outlives a failed sweep
@@ -324,6 +356,7 @@ def prune_after(pid: int) -> None:
         sweep("exited: pruning its own")
     finally:
         waiter.unlink(missing_ok=True)
+        sys.stdout.flush()
     os._exit(0)
 
 
@@ -348,22 +381,34 @@ def remove_sub(branches: list[str]) -> None:
     here = Path.cwd().resolve()
     parent = sub_parent(here)
     assert parent is not None
-    cur = current_branch()
-    # The worktree's own branches only - its work branch, the fresh one it was
-    # created on (a hand commit's post-commit hook pushes it), and the
-    # checked-out one when named after it - never another checkout's it may
-    # have checked out to read.  The fresh one goes when it holds nothing
-    # beyond origin/main.
-    fresh = f"worktree-{here.name}"
-    names = [b for b in {cur, *branches} if b is not None and (b in branches or b == fresh or b.endswith(f"-{here.name}"))]
-    if fresh not in names and rev(f"refs/heads/{fresh}") and is_ancestor(fresh, "refs/remotes/origin/main"):
-        names.append(fresh)
-    gone = {b: rev(f"refs/remotes/origin/{b}") for b in names}
+    names = sub_branches(here, current_branch(), branches)
     require_unlocked(here)
     if worktree_lock(here) is not None:
         git("worktree", "unlock", str(here))
     os.chdir(parent)
     git("worktree", "remove", "--force", str(here))
+    drop_branches(names)
+    print(f"subagent worktree {here.relative_to(parent)} removed, with "
+          f"{', '.join(branches)} here and on origin")
+
+
+def sub_branches(here: Path, cur: str | None, branches: list[str]) -> list[str]:
+    """The subagent worktree `here`'s own branches only - its work branch
+    (`branches`), the fresh one it was created on (a hand commit's
+    post-commit hook pushes it) and the checked-out `cur` when named after
+    it - never another checkout's it may have checked out to read.  The
+    fresh one goes when it holds nothing beyond origin/main."""
+    fresh = f"worktree-{here.name}"
+    names = [b for b in {cur, *branches} if b is not None and (b in branches or b == fresh or b.endswith(f"-{here.name}"))]
+    if fresh not in names and rev(f"refs/heads/{fresh}") and is_ancestor(fresh, "refs/remotes/origin/main"):
+        names.append(fresh)
+    return names
+
+
+def drop_branches(names: list[str]) -> None:
+    """Delete `names` here and on origin, remembering origin's tips in
+    PAST_REFS (on_origin's memory)."""
+    gone = {b: rev(f"refs/remotes/origin/{b}") for b in names}
     for b in names:
         git("branch", "--quiet", "-D", b, check=False)
     for b, old in gone.items():
@@ -377,8 +422,6 @@ def remove_sub(branches: list[str]) -> None:
         ref, _, when = ln.partition(" ")
         if when and int(when) < cutoff:
             git("update-ref", "-d", ref, check=False)
-    print(f"subagent worktree {here.relative_to(parent)} removed, with "
-          f"{', '.join(branches)} here and on origin")
 
 
 def sub_label(d: Path) -> str:
@@ -479,7 +522,7 @@ def status() -> None:
         if ident.wb and cur != ident.wb and ident.kind != "main":
             notes.append(p(f"owns {ident.wb}", "dim"))
         notes += [p(f"{label} {n}", "cyan") for label, n in counts.items() if n]
-        if ident.kind == "sub" and not own and not any(counts.values()):
+        if ident.kind == "sub" and not own and not any(counts.values()) and cur != ident.wb:
             if alive is None:
                 notes.append(p("empty, locked by hand: prune keeps it", "dim"))
             elif live:
@@ -507,7 +550,10 @@ def status() -> None:
     width = max(len(d.name) + 4 for d in checkouts)
 
     def show(indent: str, d: Path, pad: int) -> None:
-        text, quiet = line(d)
+        try:
+            text, quiet = line(d)
+        except FileNotFoundError:
+            return  # a subagent worktree pruned since it was listed
         label = d.name if indent else d.name + "/"
         print(f"{indent}{paint(label.ljust(pad), 'dim' if quiet else 'bold')}  {text}")
 

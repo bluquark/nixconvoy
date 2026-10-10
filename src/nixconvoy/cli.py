@@ -138,16 +138,19 @@ survive; the old tip remains reachable via the reflog.
 
 Prune (nixconvoy prune [<name> ...]): remove the subagent worktrees that
 hold nothing of their own - never deployed, no staged, unstaged or
-untracked change, HEAD on origin - with their fresh branch; the named ones,
-or every one under this checkout.  One whose spawning claude session still
-runs is kept, whichever session asks: the session may resume its agent,
-which needs the worktree.  So is one at work (a nixconvoy, git operation or
-push running in it), on a work branch (land or abandon decides it) or
-holding anything; each kept one is said so.  `--after PID` detaches, prunes
-what dead sessions left, waits for the claude session PID to exit and
-prunes again (one waiter per session, logged to nixconvoy-prune.log in the
-git dir): the Claude Code plugin's SessionStart hook starts it, so a
-subagent's worktree with nothing of its own goes when its session ends.
+untracked change, HEAD and its work branch on origin - with their fresh
+branch; the named ones, or every one under this checkout (deploy-plan's
+prune core decides each).  One whose spawning claude session still runs is
+kept, whichever session asks: the session may resume its agent, which needs
+the worktree.  So is one at work (a nixconvoy, git operation or push
+running in it), on a work branch (land or abandon decides it), locked by
+hand (or, in a sweep, unlocked) or holding anything; each kept one is said
+so.  The removal claims the lock it judged and leaves git to refuse a
+worktree locked meanwhile.  `--after PID` detaches, prunes what dead
+sessions left, waits for the claude session PID to exit and prunes again
+(one waiter per session, logged to nixconvoy-prune.log in the common git
+dir): the Claude Code plugin's SessionStart hook starts it, so a subagent's
+worktree with nothing of its own goes when its session ends.
 
 Commit (nixconvoy commit -m "..."): commit + push the staged state onto the
 work branch without probing, building or switching anything - for changes
