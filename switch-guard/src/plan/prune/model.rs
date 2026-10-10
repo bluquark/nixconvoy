@@ -504,6 +504,8 @@ impl World {
                             Next::Ask(Query::TakeNameLock) => {
                                 // Passed, what it read steers nothing after: one
                                 // form, so states differing only there merge.
+                                // That form is a sweep's: a lock, its session, the fetch.
+                                assert!(!p.named && !p.own_session_ends && replies.len() == 3);
                                 replies = vec![Reply::Text(Some("pid 1".into())), flag(false), ran(true)];
                                 break;
                             }

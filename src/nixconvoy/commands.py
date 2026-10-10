@@ -14,6 +14,7 @@ from typing import IO
 from . import hosts, memo, proc
 from .checkout import (
     PAST_REFS,
+    SESSIONLESS,
     GitQueries,
     add_worktree,
     allowed_branches,
@@ -159,9 +160,9 @@ def abandon() -> None:
         why = prune_one(here, named=True, own_session_ends=True, prefetched=True, deploy_held=True,
                         dropped_failed=failed)
         if why is not None:
-            die(f"this worktree is kept: {why}; then re-run")
+            die(f"this worktree is kept: {why}")
         if failed:
-            die(f"subagent worktree {sub_label(here)} removed, but:\n" + "\n".join(failed))
+            die(f"subagent worktree {sub_label(here)} removed, but not its branches on origin (above)")
         print(f"subagent worktree {sub_label(here)} removed")
         return
     wb = require_work_branch("abandon")
@@ -542,8 +543,10 @@ def remove_sub(branches: list[str]) -> None:
         git("worktree", "unlock", str(here))
     os.chdir(parent)
     git("worktree", "remove", "--force", str(here), pass_fds=(held.fileno(),))
+    # Still held: a create of the name reuses no branch about to go.
+    failed = drop_branches(names)
     held.close()
-    if failed := drop_branches(names):
+    if failed:
         die("\n".join(failed))
     print(f"subagent worktree {here.relative_to(parent)} removed, with "
           f"{', '.join(branches)} here and on origin")
@@ -662,8 +665,10 @@ def status() -> None:
             ("untracked", ["ls-files", "--others", "--exclude-standard"]))}
         live = False  # a subagent worktree's lock: its session alive, or a hand lock
         alive: bool | None = False
+        sessionless = False
         if ident.kind == "sub":
             reason = worktree_lock(d)
+            sessionless = reason is not None and reason.endswith(SESSIONLESS)
             alive = lock_pid_alive(reason) if reason is not None else False
             live = alive is not False
         op = git_op_in_progress(d)
@@ -690,7 +695,10 @@ def status() -> None:
             notes.append(p(f"owns {ident.wb}", "dim"))
         notes += [p(f"{label} {n}", "cyan") for label, n in counts.items() if n]
         if ident.kind == "sub" and not own and not any(counts.values()) and cur != ident.wb:
-            if alive is None:
+            if sessionless:
+                notes.append(p(f"empty, its create found no claude session: nixconvoy abandon {d.name} "
+                               "removes it", "dim"))
+            elif alive is None:
                 notes.append(p("empty, locked by hand: prune keeps it", "dim"))
             elif live:
                 notes.append(p("empty, locked by its agent's claude session: pruned once that "
