@@ -52,7 +52,7 @@ fn parses_the_session() {
 fn removes_an_empty_dead_one() {
     let (asked, o) = run(params(false), |_| None);
     assert_eq!(o, Outcome::Removed);
-    assert_eq!(&asked[..3], &[Query::Fetch, Query::TakeNameLock, Query::TakeDeployLock]);
+    assert_eq!(&asked[..4], &[Query::Lock, Query::Alive { pid: 7, start: Some(9), own_ends: false }, Query::Fetch, Query::TakeNameLock]);
     assert_eq!(&asked[asked.len() - 2..], &[Query::ReleaseDeployLock, Query::ReleaseNameLock]);
     assert!(asked.contains(&Query::Alive { pid: 7, start: Some(9), own_ends: false }));
     assert!(asked.contains(&Query::ClaimLock { expect: Some("claude agent agent-x (pid 7 start 9)".into()) }));
@@ -91,7 +91,9 @@ fn keeps_and_says_why() {
         let (asked, o) = run(params(false), |x| (*x == q).then(|| r.clone()));
         assert!(kept(&o).starts_with(why), "{q:?}: {o:?}");
         assert!(!asked.contains(&Query::RemoveWorktree) || matches!(q, Query::RemoveWorktree), "{q:?} still removed");
-        let named = q != Query::TakeNameLock && q != Query::Fetch;
+        let early = matches!(q, Query::Lock | Query::Alive { .. });
+        assert_eq!(asked.contains(&Query::Fetch), !early, "{q:?}: {asked:?}");
+        let named = !early && q != Query::TakeNameLock && q != Query::Fetch;
         assert_eq!(asked.last() == Some(&Query::ReleaseNameLock), named, "{q:?}: {asked:?}");
         let deployed = named && q != Query::TakeDeployLock;
         assert_eq!(asked.contains(&Query::ReleaseDeployLock), deployed, "{q:?}: {asked:?}");
@@ -136,8 +138,15 @@ fn named_and_own_session() {
     assert_eq!(o, Outcome::Removed);
     assert!(asked.contains(&Query::ClaimLock { expect: None }));
     let p = Params { own_session_ends: true, ..params(true) };
-    let (asked, _) = run(p, |_| None);
+    let (asked, _) = run(p.clone(), |_| None);
     assert!(asked.contains(&Query::Alive { pid: 7, start: Some(9), own_ends: true }));
+    // The create hook's sessionless lock: kept by prune, not by abandon.
+    let sessionless = |q: &Query| (*q == Query::Lock).then(|| Reply::Text(Some(format!("claude agent agent-x {SESSIONLESS}"))));
+    let (_, o) = run(params(true), sessionless);
+    assert!(kept(&o).starts_with("its create found no claude session to outlive"), "{o:?}");
+    let (asked, o) = run(p, sessionless);
+    assert_eq!(o, Outcome::Removed);
+    assert!(asked.contains(&Query::ClaimLock { expect: Some(format!("claude agent agent-x {SESSIONLESS}")) }));
 }
 
 #[test]

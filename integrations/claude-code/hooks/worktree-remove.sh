@@ -38,7 +38,14 @@ while [ -n "$me" ] && [ "$me" -gt 1 ]; do
   me=$(ps -o ppid= -p "$me" 2>/dev/null | tr -d ' ')
 done
 locked=$(git -C "$path" rev-parse --path-format=absolute --git-path locked)
-holder=$({ grep -oE '(^|[^[:alnum:]_])pid [0-9]+' "$locked" 2>/dev/null || true; } | head -n 1 | grep -oE '[0-9]+$' || true)
+session=$({ grep -oE '(^|[^[:alnum:]_])pid [0-9]+( start [0-9]+)?' "$locked" 2>/dev/null || true; } | head -n 1)
+holder=$(printf '%s' "$session" | sed -n 's/.*pid \([0-9][0-9]*\).*/\1/p')
+start=$(printf '%s' "$session" | sed -n 's/.* start \([0-9][0-9]*\)$/\1/p')
+# A start time the pid's process does not have: the pid reused.
+if [ -n "$start" ] && [ -r "/proc/$holder/stat" ] \
+   && [ "$(sed 's/.*) //' "/proc/$holder/stat" | awk '{print $20}')" != "$start" ]; then
+  holder=
+fi
 if [ -n "$holder" ] && [ "$holder" != "$me" ] && kill -0 "$holder" 2>/dev/null; then
   echo "worktree-remove: $path is another claude session's now (pid $holder), kept" >&2
   exit 1

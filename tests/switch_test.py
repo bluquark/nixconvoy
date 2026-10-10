@@ -813,6 +813,18 @@ def git_cases(d: Path) -> None:
         with contextlib.redirect_stdout(io.StringIO()):
             commands.abandon()
         assert not rv.exists() and Path.cwd().resolve() == co.resolve()
+        # The create hook's lock naming no session: prune keeps it, abandon
+        # does not.
+        sh(co, "worktree", "add", "--quiet", "--detach", str(rv), "origin/main")
+        sh(co, "worktree", "lock", "--reason", f"claude agent review {checkout.SESSIONLESS}", str(rv))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            commands.prune(["rev"])
+        assert "/review: kept, its create found no claude session" in out.getvalue(), out.getvalue()
+        commands.enter_sub("rev")
+        with contextlib.redirect_stdout(io.StringIO()):
+            commands.abandon()
+        assert not rv.exists() and Path.cwd().resolve() == co.resolve()
 
         # A subagent's pushed branch, deleted with its worktree, stays in
         # on_origin's memory (PAST_REFS): a review checkout at its tip still

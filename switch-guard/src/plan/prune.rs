@@ -6,7 +6,8 @@
 //! when it holds nothing of its own.  A sweep (no name given) keeps an
 //! unlocked one, which no session's exit tells the end of.
 //!
-//! Origin is fetched first; every check after is taken under the
+//! A live session or a hand lock is told before origin is fetched, which
+//! may be offline; every check after the fetch is taken under the
 //! worktree's name lock - a file in the common git dir that the create hook
 //! also holds while it adds or reuses a worktree of that name, as do the
 //! other removals - and under its deploy lock, so neither a create
@@ -58,11 +59,17 @@ pub fn session(reason: &str) -> Option<(u32, Option<u64>)> {
     Some((pid, start))
 }
 
+/// The create hook's lock when it found no claude session to name.
+pub const SESSIONLESS: &str = "(no claude session found)";
+
 fn kept<T>(why: impl Into<String>) -> Run<Result<T, Outcome>> {
     Ok(Err(Outcome::Kept(why.into())))
 }
 
 pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
+    if let Err(o) = holder(s, p)? {
+        return Ok(o);
+    }
     // Before any lock: a slow fetch holds up no create of this name.
     if let Err(detail) = s.ran(Query::Fetch)? {
         return Ok(Outcome::Kept(format!("origin could not be fetched to judge it:\n{}", detail.trim())));
@@ -84,15 +91,21 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     Ok(outcome)
 }
 
-/// The lock it holds, its work branch and its branch, or why it is kept.
-type Judged = (Option<String>, String, Option<String>);
-
-fn judge(s: &mut Script, p: &Params) -> Run<Result<Judged, Outcome>> {
+/// The lock it holds, or why it is kept: a session it outlives, or none.
+fn holder(s: &mut Script, p: &Params) -> Run<Result<Option<String>, Outcome>> {
     let lock = s.text(Query::Lock)?;
     match lock.as_deref() {
         None if !p.named => return kept(format!("unlocked: no session to outlive; `nixconvoy prune {}` judges it", p.name)),
         None => {}
+        // Abandon ends the session that would have unlocked it.
+        Some(reason) if p.own_session_ends && reason.ends_with(SESSIONLESS) => {}
         Some(reason) => match session(reason) {
+            None if reason.ends_with(SESSIONLESS) => {
+                return kept(format!(
+                    "its create found no claude session to outlive: `nixconvoy abandon {}`, or `git worktree unlock` it to let prune judge it",
+                    p.name
+                ));
+            }
             None => {
                 let why = if reason.is_empty() { "no reason given" } else { reason };
                 return kept(format!("locked by hand ({why}): `git worktree unlock` it to let prune judge it"));
@@ -104,6 +117,17 @@ fn judge(s: &mut Script, p: &Params) -> Run<Result<Judged, Outcome>> {
             }
         },
     }
+    Ok(Ok(lock))
+}
+
+/// The lock it holds, its work branch and its branch, or why it is kept.
+type Judged = (Option<String>, String, Option<String>);
+
+fn judge(s: &mut Script, p: &Params) -> Run<Result<Judged, Outcome>> {
+    let lock = match holder(s, p)? {
+        Ok(lock) => lock,
+        Err(o) => return Ok(Err(o)),
+    };
     if let Some(op) = s.text(Query::OpInProgress)? {
         return kept(format!("a {op} is in progress"));
     }

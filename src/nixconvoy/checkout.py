@@ -643,10 +643,17 @@ def lock_live(reason: str) -> bool:
     return m is None or int(m.group(1)) not in ancestor_pids()
 
 
+# The create hook's lock when it found no claude session to name: no
+# session's exit lifts it, so land and abandon do.
+SESSIONLESS = "(no claude session found)"
+
+
 def require_unlocked(here: Path) -> None:
     """Die unless the subagent worktree `here` may be removed: Claude Code
     locks it for the lifetime of the session that spawned the agent."""
     reason = worktree_lock(here)
+    if reason is not None and reason.endswith(SESSIONLESS):
+        return
     if reason is not None and lock_pid_alive(reason) is None:
         die(f"this worktree is locked by hand ({reason or 'no reason given'}): "
             "`git worktree unlock` it, then re-run")

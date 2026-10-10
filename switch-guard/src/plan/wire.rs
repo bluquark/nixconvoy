@@ -296,7 +296,12 @@ mod tests {
         let mut u = start(r#"{"protocol":2,"core":"union","wb":"w","reset":true,"main0":null}"#).unwrap();
         assert_eq!(u.decide(None).0, r#"{"effects":[{"mark":"union"}],"next":{"ask":"listed"}}"#);
         let mut p = start(r#"{"protocol":2,"core":"prune","name":"agent-x","named":false,"own_session_ends":false}"#).unwrap();
-        assert_eq!(p.decide(None).0, r#"{"effects":[],"next":{"ask":"fetch"}}"#);
+        assert_eq!(p.decide(None).0, r#"{"effects":[],"next":{"ask":"lock"}}"#);
+        assert_eq!(
+            p.decide(Some(Reply::Text(Some("pid 7".into())))).0,
+            r#"{"effects":[],"next":{"ask":"alive","own_ends":false,"pid":7,"start":null}}"#
+        );
+        assert_eq!(p.decide(Some(Reply::Flag(false))).0, r#"{"effects":[],"next":{"ask":"fetch"}}"#);
         assert_eq!(p.decide(Some(Reply::Ran { ok: true, detail: String::new() })).0, r#"{"effects":[],"next":{"ask":"take_name_lock"}}"#);
         assert_eq!(p.decide(Some(Reply::Flag(true))).0, r#"{"effects":[],"next":{"ask":"take_deploy_lock"}}"#);
         assert_eq!(p.decide(Some(Reply::Flag(false))).0, r#"{"effects":[],"next":{"ask":"release_name_lock"}}"#);
