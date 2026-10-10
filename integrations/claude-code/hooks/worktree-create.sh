@@ -20,6 +20,9 @@ INPUT=$(cat)
 name=$(printf '%s' "$INPUT" | jq -r '.name')
 cwd=$(printf '%s' "$INPUT" | jq -r '.cwd // ""')
 root=$(git -C "${CLAUDE_PROJECT_DIR:-${cwd:-.}}" rev-parse --show-toplevel)
+# A session running in a subagent worktree (`claude --worktree`) hangs its
+# own agents off the outermost checkout, where the sweeps look.
+case "$root" in */.claude/worktrees/*) root=${root%%/.claude/worktrees/*} ;; esac
 dir="$root/.claude/worktrees/$name"
 base=$(git -C "$root" rev-parse -q --verify refs/remotes/origin/HEAD \
     || git -C "$root" rev-parse -q --verify refs/remotes/origin/main \
@@ -46,10 +49,24 @@ else
   reason="claude agent $name (no claude session found)"
 fi
 
-# A prune may remove the worktree, or its fresh branch, between any two of
-# these steps; each failure starts over (nixconvoy's prune model checks
-# this protocol against the prune core).
-for _ in 1 2 3 4 5; do
+# The name lock nixconvoy's prune holds from judging a worktree of this
+# name through its removal (`git worktree remove` checks, then deletes the
+# tree, then the admin directory by name): held here across the reuse or
+# the add, so neither meets a removal half done.  flock(1), or perl's where
+# there is none (macOS); held until this hook exits.
+locks="$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)/nixconvoy-worktree-locks"
+mkdir -p "$locks"
+exec 9>>"$locks/$name.lock"
+if command -v flock >/dev/null 2>&1; then
+  flock -w 60 9
+else
+  perl -MFcntl=:flock -e 'open(my $f, ">&=", 9) or die "fd 9: $!\n"; $SIG{ALRM} = sub { die "timed out\n" }; alarm 60; flock($f, LOCK_EX) or die "$!\n"'
+fi
+
+# Under the name lock nothing else removes it; the retries cover git
+# failing for reasons of its own meanwhile.
+for attempt in 1 2 3; do
+  [ "$attempt" = 1 ] || sleep 1
   if [ "$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" = "$dir" ]; then
     # The worktree exists: reused (`claude --worktree <name>` again), its
     # lock replaced in one rename.
@@ -62,8 +79,8 @@ for _ in 1 2 3 4 5; do
       exit 0
     fi
   else
-    git -C "$root" worktree prune >&2  # a registration whose directory is gone
-    mkdir -p "$root/.claude/worktrees"
+    git -C "$root" worktree prune >&2 || true  # a registration whose directory is gone
+    mkdir -p "$root/.claude/worktrees" || continue
     if git -C "$root" rev-parse -q --verify "refs/heads/$branch" >/dev/null; then
       # The branch outlived its worktree: checked out as it is.
       add=("$dir" "$branch")
@@ -76,5 +93,5 @@ for _ in 1 2 3 4 5; do
     fi
   fi
 done
-echo "worktree-create: $dir kept changing under a concurrent prune" >&2
+echo "worktree-create: could not create or reuse $dir (git's errors above)" >&2
 exit 1

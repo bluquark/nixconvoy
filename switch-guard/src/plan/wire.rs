@@ -177,6 +177,8 @@ pub fn query(q: &Query) -> Value {
         Query::CollectFetch => ("collect_fetch", vec![]),
         Query::Refresh => ("refresh", vec![]),
         Query::Stage { union, listed } => ("stage", vec![("union", s(union)), ("listed", json!(listed))]),
+        Query::TakeNameLock => ("take_name_lock", vec![]),
+        Query::ReleaseNameLock => ("release_name_lock", vec![]),
         Query::TakeDeployLock => ("take_deploy_lock", vec![]),
         Query::ReleaseDeployLock => ("release_deploy_lock", vec![]),
         Query::Lock => ("lock", vec![]),
@@ -188,6 +190,7 @@ pub fn query(q: &Query) -> Value {
         Query::OwnBranch => ("own_branch", vec![]),
         Query::Unpushed { sha } => ("unpushed", vec![("sha", s(sha))]),
         Query::Dirty => ("dirty", vec![]),
+        Query::Occupied => ("occupied", vec![]),
         Query::ClaimLock { expect } => ("claim_lock", vec![("expect", json!(expect))]),
         Query::RemoveWorktree => ("remove_worktree", vec![]),
         Query::RestoreLock => ("restore_lock", vec![]),
@@ -293,11 +296,15 @@ mod tests {
         let mut u = start(r#"{"protocol":2,"core":"union","wb":"w","reset":true,"main0":null}"#).unwrap();
         assert_eq!(u.decide(None).0, r#"{"effects":[{"mark":"union"}],"next":{"ask":"listed"}}"#);
         let mut p = start(r#"{"protocol":2,"core":"prune","name":"agent-x","named":false,"own_session_ends":false}"#).unwrap();
-        assert_eq!(p.decide(None).0, r#"{"effects":[],"next":{"ask":"take_deploy_lock"}}"#);
+        assert_eq!(p.decide(None).0, r#"{"effects":[],"next":{"ask":"take_name_lock"}}"#);
+        assert_eq!(p.decide(Some(Reply::Flag(true))).0, r#"{"effects":[],"next":{"ask":"take_deploy_lock"}}"#);
+        assert_eq!(p.decide(Some(Reply::Flag(false))).0, r#"{"effects":[],"next":{"ask":"release_name_lock"}}"#);
         assert_eq!(
-            p.decide(Some(Reply::Flag(false))).0,
+            p.decide(Some(Reply::Ran { ok: true, detail: String::new() })).0,
             r#"{"effects":[],"next":{"done":{"kept":"a nixconvoy runs in it","removed":false}}}"#
         );
+        assert_eq!(query(&Query::Occupied).to_string(), r#"{"ask":"occupied"}"#);
+        assert_eq!(query(&Query::ReleaseNameLock).to_string(), r#"{"ask":"release_name_lock"}"#);
         assert_eq!(
             query(&Query::Alive { pid: 7, start: None, own_ends: false }).to_string(),
             r#"{"ask":"alive","own_ends":false,"pid":7,"start":null}"#

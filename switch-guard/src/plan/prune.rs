@@ -6,14 +6,18 @@
 //! when it holds nothing of its own.  A sweep (no name given) keeps an
 //! unlocked one, which no session's exit tells the end of.
 //!
-//! Every check is taken under the worktree's deploy lock, so no deploy
-//! moves it meanwhile; the agent's session is dead, so nothing else writes
-//! to it.  What can still move is its lock: the create hook hands a dead
-//! session's worktree to a new session (`claude --worktree <name>`) by
-//! renaming a new lock over the old one.  So the removal claims the lock
-//! it judged - renames it aside, only if it still holds that reason - and
-//! then removes the worktree with git's own refusal of a locked or unclean
-//! one; a lock that appeared meanwhile is left alone and the worktree kept.
+//! Every check is taken under the worktree's name lock - a file in the
+//! common git dir that the create hook also holds while it adds or reuses a
+//! worktree of that name - and under its deploy lock, so neither a create
+//! nor a deploy moves it meanwhile; the agent's session is dead, so its
+//! agent does not either.  `git worktree remove` checks the lock, then
+//! cleanliness, then deletes the tree and the admin directory by name, so
+//! without the name lock a reuse could relock and hand out the worktree
+//! after git's check, or a fresh add recreate the admin directory that
+//! git then deletes.  The removal claims the lock it judged - renames it
+//! aside, only if it still holds that reason - and leaves git to refuse a
+//! locked or unclean worktree; a process working in it without its lock
+//! (a shell cd'd there) keeps it too.
 use super::{Query, Run, Script, MAIN};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -36,16 +40,20 @@ pub enum Outcome {
 
 /// The claude session a lock names: Claude Code's and the create hook's
 /// "... (pid P start S)", S the process's start time where /proc has one.
+/// As nixconvoy's lock_pid_alive reads it: `\bpid (\d+)\b(?: start (\d+)\b)?`.
 pub fn session(reason: &str) -> Option<(u32, Option<u64>)> {
-    let digits = |s: &str| -> Option<(u64, usize)> {
-        let n = s.bytes().take_while(u8::is_ascii_digit).count();
-        (n > 0).then(|| s[..n].parse().ok().map(|v| (v, n)))?
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let b = reason.as_bytes();
+    let number = |at: usize| -> Option<(u64, usize)> {
+        let n = b[at..].iter().take_while(|c| c.is_ascii_digit()).count();
+        if n == 0 || b.get(at + n).is_some_and(|&c| word(c)) {
+            return None;
+        }
+        Some((reason[at..at + n].parse().ok()?, at + n))
     };
-    let at = reason.match_indices("pid ").find(|(i, _)| *i == 0 || !reason.as_bytes()[i - 1].is_ascii_alphanumeric())?.0;
-    let rest = &reason[at + 4..];
-    let (pid, n) = digits(rest)?;
+    let (pid, end) = reason.match_indices("pid ").filter(|(i, _)| *i == 0 || !word(b[i - 1])).find_map(|(i, _)| number(i + 4))?;
     let pid = u32::try_from(pid).ok()?;
-    let start = rest[n..].strip_prefix(" start ").and_then(digits).map(|(s, _)| s);
+    let start = reason[end..].strip_prefix(" start ").and_then(|_| number(end + 7)).map(|(s, _)| s);
     Some((pid, start))
 }
 
@@ -54,14 +62,20 @@ fn kept<T>(why: impl Into<String>) -> Run<Result<T, Outcome>> {
 }
 
 pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
-    if !s.flag(Query::TakeDeployLock)? {
-        return Ok(Outcome::Kept("a nixconvoy runs in it".into()));
+    if !s.flag(Query::TakeNameLock)? {
+        return Ok(Outcome::Kept("a worktree of its name is being created".into()));
     }
-    let outcome = match judge(s, p)? {
-        Err(o) => o,
-        Ok((lock, wb, cur)) => remove(s, lock, &wb, cur)?,
+    let outcome = if s.flag(Query::TakeDeployLock)? {
+        let o = match judge(s, p)? {
+            Err(o) => o,
+            Ok((lock, wb, cur)) => remove(s, lock, &wb, cur)?,
+        };
+        s.tolerate(Query::ReleaseDeployLock)?;
+        o
+    } else {
+        Outcome::Kept("a nixconvoy runs in it".into())
     };
-    s.tolerate(Query::ReleaseDeployLock)?;
+    s.tolerate(Query::ReleaseNameLock)?;
     Ok(outcome)
 }
 
@@ -74,7 +88,10 @@ fn judge(s: &mut Script, p: &Params) -> Run<Result<Judged, Outcome>> {
         None if !p.named => return kept(format!("unlocked: no session to outlive; `nixconvoy prune {}` judges it", p.name)),
         None => {}
         Some(reason) => match session(reason) {
-            None => return kept(format!("locked by hand ({})", if reason.is_empty() { "no reason given" } else { reason })),
+            None => {
+                let why = if reason.is_empty() { "no reason given" } else { reason };
+                return kept(format!("locked by hand ({why}): `git worktree unlock` it to let prune judge it"));
+            }
             Some((pid, start)) => {
                 if s.flag(Query::Alive { pid, start, own_ends: p.own_session_ends })? {
                     return kept("the claude session that spawned its agent still runs");
@@ -129,6 +146,10 @@ fn judge(s: &mut Script, p: &Params) -> Run<Result<Judged, Outcome>> {
 fn remove(s: &mut Script, lock: Option<String>, wb: &str, cur: Option<String>) -> Run<Outcome> {
     if !s.flag(Query::ClaimLock { expect: lock })? {
         return Ok(Outcome::Kept("its lock changed meanwhile: a session took it over".into()));
+    }
+    if s.flag(Query::Occupied)? {
+        s.tolerate(Query::RestoreLock)?;
+        return Ok(Outcome::Kept("a process works in it".into()));
     }
     if let Err(detail) = s.ran(Query::RemoveWorktree)? {
         s.tolerate(Query::RestoreLock)?;

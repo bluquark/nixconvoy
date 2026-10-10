@@ -15,10 +15,13 @@ fn run(p: Params, over: impl Fn(&Query) -> Option<Reply>) -> (Vec<Query>, Outcom
             Query::CurrentBranch => Reply::Text(Some("worktree-agent-x".into())),
             Query::OwnBranch => Reply::Text(Some("h-deploys3-agent-x".into())),
             Query::OpInProgress | Query::Rev { .. } => Reply::Text(None),
-            Query::TakeDeployLock | Query::OnOrigin | Query::ClaimLock { .. } => Reply::Flag(true),
-            Query::Fetch | Query::RemoveWorktree | Query::RestoreLock | Query::DropBranches { .. } | Query::ReleaseDeployLock => {
-                Reply::Ran { ok: true, detail: String::new() }
-            }
+            Query::TakeNameLock | Query::TakeDeployLock | Query::OnOrigin | Query::ClaimLock { .. } => Reply::Flag(true),
+            Query::Fetch
+            | Query::RemoveWorktree
+            | Query::RestoreLock
+            | Query::DropBranches { .. }
+            | Query::ReleaseDeployLock
+            | Query::ReleaseNameLock => Reply::Ran { ok: true, detail: String::new() },
             _ => Reply::Flag(false),
         })
     });
@@ -40,14 +43,17 @@ fn parses_the_session() {
     assert_eq!(session("rapid 5"), None);
     assert_eq!(session("kept for a look"), None);
     assert_eq!(session("pid 99999999999"), None);
+    assert_eq!(session("pid 12abc"), None);
+    assert_eq!(session("x_pid 3 pid 4"), Some((4, None)));
+    assert_eq!(session("pid 5 start 6x"), Some((5, None)));
 }
 
 #[test]
 fn removes_an_empty_dead_one() {
     let (asked, o) = run(params(false), |_| None);
     assert_eq!(o, Outcome::Removed);
-    assert_eq!(asked.first(), Some(&Query::TakeDeployLock));
-    assert_eq!(asked.last(), Some(&Query::ReleaseDeployLock));
+    assert_eq!(&asked[..2], &[Query::TakeNameLock, Query::TakeDeployLock]);
+    assert_eq!(&asked[asked.len() - 2..], &[Query::ReleaseDeployLock, Query::ReleaseNameLock]);
     assert!(asked.contains(&Query::Alive { pid: 7, start: Some(9), own_ends: false }));
     assert!(asked.contains(&Query::ClaimLock { expect: Some("claude agent agent-x (pid 7 start 9)".into()) }));
     assert!(asked.contains(&Query::DropBranches { wb: "h-deploys3-agent-x".into(), cur: Some("worktree-agent-x".into()) }));
@@ -56,8 +62,9 @@ fn removes_an_empty_dead_one() {
 #[test]
 fn keeps_and_says_why() {
     let cases: Vec<(Query, Reply, &str)> = vec![
+        (Query::TakeNameLock, Reply::Flag(false), "a worktree of its name is being created"),
         (Query::TakeDeployLock, Reply::Flag(false), "a nixconvoy runs in it"),
-        (Query::Lock, Reply::Text(Some("kept for a look".into())), "locked by hand (kept for a look)"),
+        (Query::Lock, Reply::Text(Some("kept for a look".into())), "locked by hand (kept for a look): `git worktree unlock`"),
         (Query::Lock, Reply::Text(None), "unlocked: no session to outlive"),
         (
             Query::Alive { pid: 7, start: Some(9), own_ends: false },
@@ -69,7 +76,6 @@ fn keeps_and_says_why() {
         (Query::Nested, Reply::Flag(true), "another worktree lives inside it"),
         (Query::OwnBranch, Reply::Text(None), "it owns no work branch"),
         (Query::CurrentBranch, Reply::Text(Some("h-deploys3-agent-x".into())), "on its work branch h-deploys3-agent-x"),
-        (Query::CurrentBranch, Reply::Text(Some("h-deploys3".into())), "SKIP"),
         (Query::Fetch, Reply::Ran { ok: false, detail: "offline".into() }, "origin could not be fetched"),
         (Query::Dirty, Reply::Flag(true), "it has uncommitted or untracked changes"),
         (Query::OnOrigin, Reply::Flag(false), "it carries commits not on origin"),
@@ -78,21 +84,28 @@ fn keeps_and_says_why() {
             Reply::Flag(false),
             "its lock changed meanwhile",
         ),
+        (Query::Occupied, Reply::Flag(true), "a process works in it"),
         (Query::RemoveWorktree, Reply::Ran { ok: false, detail: "is locked".into() }, "git refused to remove it:\nis locked"),
     ];
     for (q, r, why) in cases {
-        if why == "SKIP" {
-            continue;
-        }
         let (asked, o) = run(params(false), |x| (*x == q).then(|| r.clone()));
         assert!(kept(&o).starts_with(why), "{q:?}: {o:?}");
         assert!(!asked.contains(&Query::RemoveWorktree) || matches!(q, Query::RemoveWorktree), "{q:?} still removed");
-        let took = asked.first() == Some(&Query::TakeDeployLock) && q != Query::TakeDeployLock;
-        assert_eq!(asked.last() == Some(&Query::ReleaseDeployLock), took, "{q:?}: {asked:?}");
-        if q == Query::RemoveWorktree {
-            assert!(asked.contains(&Query::RestoreLock));
-        }
+        let named = q != Query::TakeNameLock;
+        assert_eq!(asked.last() == Some(&Query::ReleaseNameLock), named, "{q:?}: {asked:?}");
+        let deployed = named && q != Query::TakeDeployLock;
+        assert_eq!(asked.contains(&Query::ReleaseDeployLock), deployed, "{q:?}: {asked:?}");
+        let claimed = asked.iter().any(|a| matches!(a, Query::ClaimLock { .. })) && !matches!(q, Query::ClaimLock { .. });
+        assert_eq!(asked.contains(&Query::RestoreLock), claimed && o != Outcome::Removed, "{q:?}: {asked:?}");
     }
+    // Another checkout's work branch checked out: kept, and said so.
+    let foreign = |q: &Query| match q {
+        Query::CurrentBranch => Some(Reply::Text(Some("h-deploys3".into()))),
+        Query::OwnBranch => Some(Reply::Text(Some("h-deploys3".into()))),
+        _ => None,
+    };
+    let (_, o) = run(params(false), foreign);
+    assert_eq!(kept(&o), "it has h-deploys3, another checkout's work branch, checked out");
 }
 
 #[test]

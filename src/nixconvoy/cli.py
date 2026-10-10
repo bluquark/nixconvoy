@@ -145,8 +145,9 @@ kept, whichever session asks: the session may resume its agent, which needs
 the worktree.  So is one at work (a nixconvoy, git operation or push
 running in it), on a work branch (land or abandon decides it), locked by
 hand (or, in a sweep, unlocked) or holding anything; each kept one is said
-so.  The removal claims the lock it judged and leaves git to refuse a
-worktree locked meanwhile.  `--after PID` detaches, prunes what dead
+so, as is one a process works in.  It all happens under a lock on the
+worktree's name, which the create hook takes too, and the removal claims
+the lock it judged and leaves git to refuse a worktree locked meanwhile.  `--after PID` detaches, prunes what dead
 sessions left, waits for the claude session PID to exit and prunes again
 (one waiter per session, logged to nixconvoy-prune.log in the common git
 dir): the Claude Code plugin's SessionStart hook starts it, so a subagent's

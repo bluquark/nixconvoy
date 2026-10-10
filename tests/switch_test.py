@@ -788,8 +788,13 @@ def git_cases(d: Path) -> None:
             assert not checkout.lock_live(f"claude agent review (pid {parent} start {pstart})")
             sh(co, "worktree", "unlock", str(rv))
         sh(co, "worktree", "lock", "--reason", f"claude agent review (pid {me} start 1)", str(rv))
+        # As the CLI runs it: under the worktree's deploy lock.
+        commands.enter_sub("rev")
+        held = checkout.lock_checkout()
+        assert held is not None
         with contextlib.redirect_stdout(io.StringIO()):
             commands.abandon()
+        held.close()
         assert not rv.exists() and Path.cwd().resolve() == co.resolve()
         sh(co, "worktree", "add", "--quiet", "--detach", str(rv), "origin/main")
         exited = subprocess.Popen(["true"])

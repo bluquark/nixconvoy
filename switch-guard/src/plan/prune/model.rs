@@ -1,25 +1,38 @@
 //! The prune core against the world it runs in: two claude sessions, each
 //! with its waiter (`prune --after`: a sweep at start, another once the
-//! session exits), spawning an agent into a worktree through the create
-//! hook - a fresh worktree, or `claude --worktree <name>` reusing a dead
-//! session's, relocking it (with no claude ancestor found, by a lock
-//! naming no session) - and resuming it while it runs; the agent dirtying, committing,
-//! deploying (a background push that may fail) and leaving its work
-//! branch, a few times; a hand lock; a reboot killing sessions, waiters,
-//! pushes and a sweep mid-removal; and, once all is quiet, a later
-//! session's start sweep.  Each query the real core asks is one step, so
-//! every other actor interleaves between any two of them.  Sweeps are
-//! serialised (prune's flock), as the create hook's steps are per session.
-//! The core judges each worktree on its own, so one is modelled; a manual
-//! prune is a waiter's first sweep at another moment.
+//! session exits), spawning an agent into a fresh worktree or, through
+//! `claude --worktree <name>`, reusing a dead session's (relocking it, by a
+//! lock naming no session when no claude ancestor is found) or recreating
+//! it, each under the create hook's name lock, and resuming the agent while
+//! it runs; the agent dirtying, committing, deploying (a background push
+//! that may fail) and leaving its work branch, a few times; a process
+//! working in it without its lock; a hand lock; a reboot killing sessions,
+//! waiters, creates, pushes and sweeps mid-removal; and, once all is quiet,
+//! a later session's start sweep.  Each query the real core asks is one
+//! step, so every other actor interleaves between any two of them;
+//! `git worktree remove` is three: its lock and cleanliness check, the
+//! tree's deletion, the admin directory's (by name, whichever worktree of
+//! that name it then belongs to).  The core judges each worktree on its
+//! own, so one name is modelled (a fresh agent's unique name takes it only
+//! once it is empty); a manual prune is a waiter's first sweep at another
+//! moment.  Two configurations: the whole world with sweeps one at a time,
+//! as prune's flock runs them; and sweeps fully concurrent against the
+//! sessions and creates alone (no agent work, hand lock, stale reuse,
+//! lockless process or reboot), since the name and deploy locks alone have
+//! to keep them apart.
+//!
+//! Under the name lock no create meets a removal half done (a property), so
+//! the hook's retries are for failures this world leaves out.  Not
+//! modelled: the lockless process writing to
+//! the worktree after the
+//! occupancy check (a removal can always race a shell entering it at that
+//! instant), ignored files (removed with the worktree), and git operations
+//! left in progress or nested worktrees, which only make prune keep it.
 use super::{program, Outcome, Params};
 use crate::plan::{resume, Next, Query, Reply, MAIN};
 use stateright::{Checker, Model, Property};
 
 const S: usize = 2;
-const W: usize = 1;
-/// Agent actions on the worktree, all told.
-const WORK: u8 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Session {
@@ -32,10 +45,11 @@ enum Session {
 enum Lock {
     /// The create hook's, naming session `.0`.
     Of(usize),
+    /// By hand, or the hook's when it found no claude ancestor.
     Hand,
 }
 
-const HAND: &str = "kept for a look";
+const HAND: &str = "claude agent x (no claude session found)";
 
 fn reason(l: Lock) -> String {
     match l {
@@ -59,9 +73,25 @@ enum Local {
     Unpushed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Who {
+    First(usize),
+    Last(usize),
+    Later,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Holder {
+    Sweep(Who),
+    Create(usize),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Slot {
-    exists: bool,
+    /// The checked-out tree (with its .git file), and the admin directory
+    /// under .git/worktrees holding its lock and deploy lock files.
+    tree: bool,
+    admin: bool,
     lock: Option<Lock>,
     /// The lock a removal renamed aside (ClaimLock).
     claimed: Option<Lock>,
@@ -73,14 +103,27 @@ struct Slot {
     /// origin's tip of its work branch carries increments.
     increments: bool,
     push: bool,
+    /// Its fresh branch exists.
     fresh: bool,
-    deploy_lock: bool,
+    /// In the admin directory: gone with it.
+    deploy_lock: Option<Holder>,
+    /// In the common git dir: outlives the worktree.
+    name_lock: Option<Holder>,
     /// The session whose agent works in it, and may resume it.
     agent: Option<usize>,
+    /// A process working in it without its lock (a shell cd'd there).
+    occupant: bool,
+}
+
+impl Slot {
+    fn exists(&self) -> bool {
+        self.tree && self.admin
+    }
 }
 
 const EMPTY: Slot = Slot {
-    exists: false,
+    tree: false,
+    admin: false,
     lock: None,
     claimed: None,
     dirty: false,
@@ -90,33 +133,30 @@ const EMPTY: Slot = Slot {
     increments: false,
     push: false,
     fresh: false,
-    deploy_lock: false,
+    deploy_lock: None,
+    name_lock: None,
     agent: None,
+    occupant: false,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum CStep {
-    /// worktree-create.sh: does the worktree exist (reuse), else does its
-    /// branch (check out as is, else add -b).
-    Check {
-        reuse: bool,
-        ancestor: bool,
-    },
+    NameLock,
+    /// Does the worktree exist (reuse it), else `git worktree prune` and
+    /// does its branch (check out as is, else add -b).
+    Check,
     Add {
         on_branch: bool,
     },
-    /// Rename the new lock over the old one: the session's, or with no
-    /// claude ancestor found one naming none, which prune keeps as a hand
-    /// lock.
-    Relock {
-        ancestor: bool,
-    },
+    /// Rename the new lock over the old one.
+    Relock,
     Verify,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Create {
-    slot: usize,
+    reuse: bool,
+    ancestor: bool,
     step: CStep,
 }
 
@@ -130,17 +170,22 @@ enum Waiter {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Who {
-    First(usize),
-    Last(usize),
-    Later,
+enum Removing {
+    No,
+    /// git found it unlocked and clean.
+    Checked,
+    /// The tree is gone; the admin directory is next.
+    TreeGone,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Sweep {
     who: Who,
-    todo: Vec<usize>,
-    core: Option<(usize, Vec<Reply>)>,
+    listed: bool,
+    core: Option<Vec<Reply>>,
+    removing: Removing,
+    /// A process was in the worktree when its lock was claimed.
+    occupied_at_claim: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -148,47 +193,48 @@ struct World {
     sessions: [Session; S],
     waiters: [Waiter; S],
     creating: [Option<Create>; S],
-    slots: [Slot; W],
-    sweep: Option<Sweep>,
+    x: Slot,
+    sweeps: Vec<Sweep>,
     later: Option<bool>,
     work: u8,
     reboots: u8,
     stale_reuse: u8,
     hand: u8,
+    enters: u8,
     // Ghosts.
     stranded: bool,
     lost: bool,
     died: bool,
+    evicted: bool,
     removed: bool,
     raced: bool,
+    deferred: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Act {
     Start(usize),
-    Spawn(usize, usize),
-    Reuse(usize, usize, bool),
+    /// A fresh agent (a unique name).
+    Spawn(usize),
+    /// `claude --worktree <name>`; with or without a claude ancestor.
+    Reuse(usize, bool),
     CreateStep(usize),
-    Dirty(usize),
-    Commit(usize),
-    Deploy(usize),
-    Detach(usize),
-    PushDone(usize, bool),
+    Dirty,
+    Commit,
+    Deploy,
+    Detach,
+    PushDone(bool),
     Exit(usize),
     Reboot,
-    /// `git worktree lock` by hand on a worktree its session left.
-    HandLock(usize),
+    HandLock,
+    Enter,
+    Leave,
     Begin(Who),
-    Step,
+    Step(usize),
 }
 
-fn wb(k: usize) -> String {
-    format!("p-agent-{k}")
-}
-
-fn fresh(k: usize) -> String {
-    format!("worktree-agent-{k}")
-}
+const WB: &str = "p-agent-x";
+const FRESH: &str = "worktree-agent-x";
 
 fn flag(b: bool) -> Reply {
     Reply::Flag(b)
@@ -198,35 +244,56 @@ fn ran(ok: bool) -> Reply {
     Reply::Ran { ok, detail: if ok { String::new() } else { "refused".into() } }
 }
 
+fn take(l: &mut Option<Holder>, h: Holder) -> bool {
+    let took = l.is_none();
+    if took {
+        *l = Some(h);
+    }
+    took
+}
+
+fn release(l: &mut Option<Holder>, h: Holder) {
+    if *l == Some(h) {
+        *l = None;
+    }
+}
+
 impl World {
     fn alive(&self, s: usize) -> bool {
         self.sessions[s] == Session::Alive
     }
 
-    fn agent_of(&self, k: usize) -> Option<usize> {
-        self.slots[k].agent.filter(|&s| self.alive(s))
+    fn agent_alive(&self) -> bool {
+        self.x.agent.is_some_and(|s| self.alive(s))
     }
 
     fn quiet(&self) -> bool {
         self.sessions.iter().all(|s| *s == Session::Dead)
             && self.waiters.iter().all(|w| matches!(w, Waiter::Done | Waiter::Killed | Waiter::Unstarted))
             && self.creating.iter().all(Option::is_none)
-            && self.sweep.is_none()
-            && self.slots.iter().all(|x| !x.push)
+            && self.sweeps.is_empty()
+            && !self.x.push
+            && !self.x.occupant
     }
 
-    /// What the real git would answer the core judging slot `k`.
-    fn answer(&mut self, k: usize, q: &Query) -> Reply {
+    /// What git and the system would answer sweep `who`'s core.
+    fn answer(&mut self, who: Who, q: &Query) -> Reply {
         let live = self.sessions.map(|s| s == Session::Alive);
-        let x = &mut self.slots[k];
+        let me = Holder::Sweep(who);
+        let x = &mut self.x;
         match q {
-            Query::TakeDeployLock => {
-                let took = x.exists && !x.deploy_lock;
-                x.deploy_lock |= took;
+            Query::TakeNameLock => {
+                let took = take(&mut x.name_lock, me);
+                self.deferred |= !took && matches!(x.name_lock, Some(Holder::Create(_)));
                 flag(took)
             }
+            Query::ReleaseNameLock => {
+                release(&mut x.name_lock, me);
+                ran(true)
+            }
+            Query::TakeDeployLock => flag(x.admin && take(&mut x.deploy_lock, me)),
             Query::ReleaseDeployLock => {
-                x.deploy_lock = false;
+                release(&mut x.deploy_lock, me);
                 ran(true)
             }
             Query::Lock => Reply::Text(x.lock.or(x.claimed).map(reason)),
@@ -237,39 +304,31 @@ impl World {
             Query::OpInProgress => Reply::Text(None),
             Query::PushInFlight => flag(x.push),
             Query::Nested => flag(false),
-            Query::CurrentBranch => Reply::Text(if x.on_wb { Some(wb(k)) } else { x.fresh.then(|| fresh(k)) }),
-            Query::OwnBranch => Reply::Text(Some(wb(k))),
+            Query::CurrentBranch => Reply::Text(if x.on_wb { Some(WB.into()) } else { x.fresh.then(|| FRESH.into()) }),
+            Query::OwnBranch => Reply::Text(Some(WB.into())),
             Query::Fetch => ran(true),
-            Query::Rev { name } if *name == format!("refs/remotes/origin/{}", wb(k)) => Reply::Text(x.increments.then(|| "tip".into())),
-            Query::Rev { name } if *name == format!("refs/heads/{}", wb(k)) => {
-                Reply::Text((x.local != Local::None).then(|| "local".into()))
-            }
+            Query::Rev { name } if *name == format!("refs/remotes/origin/{WB}") => Reply::Text(x.increments.then(|| "tip".into())),
+            Query::Rev { name } if *name == format!("refs/heads/{WB}") => Reply::Text((x.local != Local::None).then(|| "local".into())),
             Query::Contains { a, b } if a == "tip" && b == MAIN => flag(!x.increments),
             Query::Unpushed { sha } if sha == "local" => flag(x.local == Local::Unpushed),
             Query::Dirty => flag(x.dirty),
             Query::OnOrigin => flag(!x.commits),
             Query::ClaimLock { expect } => {
                 let expect = expect.as_deref().map(parse);
-                if x.lock.is_some() && x.lock == expect {
+                let claimed = if x.lock.is_some() && x.lock == expect {
                     x.claimed = x.lock.take();
-                    flag(true)
+                    true
                 } else {
                     // Still unlocked, or claimed already by a run that died.
-                    flag(x.lock.is_none() && x.claimed == expect)
+                    x.lock.is_none() && x.claimed == expect
+                };
+                let occupied = x.occupant;
+                if let Some(sw) = self.sweeps.iter_mut().find(|sw| sw.who == who) {
+                    sw.occupied_at_claim = occupied;
                 }
+                flag(claimed)
             }
-            Query::RemoveWorktree => {
-                if !x.exists || x.lock.is_some() || x.dirty {
-                    return ran(false);
-                }
-                let lost = x.commits || x.on_wb || x.local == Local::Unpushed || x.increments || x.push;
-                let stranded = x.agent.is_some_and(|s| live[s]);
-                *x = Slot { local: x.local, increments: x.increments, fresh: x.fresh, ..EMPTY };
-                self.lost |= lost;
-                self.stranded |= stranded;
-                self.removed = true;
-                ran(true)
-            }
+            Query::Occupied => flag(x.occupant),
             Query::RestoreLock => {
                 if x.lock.is_none() {
                     x.lock = x.claimed;
@@ -278,110 +337,176 @@ impl World {
                 ran(true)
             }
             Query::DropBranches { .. } => {
-                // git refuses to delete a branch a worktree has checked out.
-                if !x.exists {
-                    let lost = x.local == Local::Unpushed || x.increments;
-                    x.local = Local::None;
-                    x.increments = false;
-                    x.fresh = false;
-                    self.lost |= lost;
-                }
+                let lost = x.local == Local::Unpushed || x.increments;
+                x.local = Local::None;
+                x.increments = false;
+                // git refuses to delete the branch a worktree has checked out.
+                x.fresh &= x.tree && !x.on_wb;
+                self.lost |= lost;
                 ran(true)
             }
             q => panic!("prune asked the model {q:?}"),
         }
     }
 
+    /// `git worktree remove` for sweep `i`, one of its three steps: the
+    /// reply once it is done.
+    fn remove(&mut self, i: usize) -> Option<Reply> {
+        let at_claim = self.sweeps[i].occupied_at_claim;
+        let live = self.agent_alive();
+        let x = &mut self.x;
+        match self.sweeps[i].removing {
+            Removing::No => {
+                if !x.exists() || x.lock.is_some() || x.dirty {
+                    return Some(ran(false));
+                }
+                self.sweeps[i].removing = Removing::Checked;
+                None
+            }
+            Removing::Checked => {
+                self.lost |= x.dirty || x.commits || x.on_wb || x.local == Local::Unpushed || x.increments || x.push;
+                self.stranded |= live;
+                self.evicted |= x.occupant && at_claim;
+                x.tree = false;
+                x.dirty = false;
+                x.commits = false;
+                x.on_wb = false;
+                x.agent = None;
+                x.occupant = false;
+                self.sweeps[i].removing = Removing::TreeGone;
+                self.removed = true;
+                None
+            }
+            Removing::TreeGone => {
+                // By name: a worktree of that name added meanwhile loses its.
+                self.stranded |= x.tree && live;
+                x.admin = false;
+                x.lock = None;
+                x.claimed = None;
+                x.deploy_lock = None;
+                self.sweeps[i].removing = Removing::No;
+                Some(ran(true))
+            }
+        }
+    }
+
     fn step_create(&mut self, s: usize) {
         let Some(c) = self.creating[s] else { return };
-        let k = c.slot;
+        let me = Holder::Create(s);
+        let lock = if c.ancestor { Lock::Of(s) } else { Lock::Hand };
+        let again = Some(CStep::Check);
+        let x = &mut self.x;
         let next = match c.step {
-            CStep::Check { reuse, ancestor } => {
-                if reuse && self.slots[k].exists {
-                    Some(CStep::Relock { ancestor })
-                } else if self.slots[k].exists {
-                    // A fresh agent's name is unique; another create for
-                    // this slot would have to have raced it.
-                    panic!("fresh create over an existing worktree");
+            CStep::NameLock => take(&mut x.name_lock, me).then_some(CStep::Check),
+            CStep::Check => {
+                if c.reuse && x.exists() {
+                    Some(CStep::Relock)
                 } else {
-                    Some(CStep::Add { on_branch: self.slots[k].fresh })
+                    // `git worktree prune`: a registration whose tree is
+                    // gone, unless locked.
+                    if !x.tree && x.admin && x.lock.is_none() {
+                        x.admin = false;
+                        x.claimed = None;
+                        x.deploy_lock = None;
+                    }
+                    Some(CStep::Add { on_branch: x.fresh })
                 }
             }
             CStep::Add { on_branch } => {
-                if on_branch && !self.slots[k].fresh || self.slots[k].exists {
-                    // The branch went (or the worktree came) meanwhile: again.
+                if x.tree || x.admin || on_branch && !x.fresh {
+                    // In the way, or the branch went: again.
                     self.raced = true;
-                    Some(CStep::Check { reuse: false, ancestor: true })
+                    again
                 } else {
-                    let keep = (self.slots[k].local, self.slots[k].increments);
-                    self.slots[k] = Slot {
-                        exists: true,
-                        lock: Some(Lock::Of(s)),
+                    *x = Slot {
+                        tree: true,
+                        admin: true,
+                        lock: Some(lock),
                         fresh: true,
-                        local: keep.0,
-                        increments: keep.1,
+                        local: x.local,
+                        increments: x.increments,
+                        name_lock: x.name_lock,
                         agent: Some(s),
                         ..EMPTY
                     };
                     None
                 }
             }
-            CStep::Relock { ancestor } => {
-                let x = &mut self.slots[k];
-                if !x.exists {
-                    self.raced = true;
-                    Some(CStep::Check { reuse: false, ancestor })
-                } else {
-                    x.lock = Some(if ancestor { Lock::Of(s) } else { Lock::Hand });
+            CStep::Relock => {
+                if x.admin {
+                    x.lock = Some(lock);
                     Some(CStep::Verify)
+                } else {
+                    self.raced = true;
+                    again
                 }
             }
             CStep::Verify => {
-                if self.slots[k].exists {
-                    self.slots[k].agent = Some(s);
+                if x.exists() {
+                    x.agent = Some(s);
                     None
                 } else {
                     self.raced = true;
-                    Some(CStep::Check { reuse: false, ancestor: true })
+                    again
                 }
             }
         };
-        self.creating[s] = next.map(|step| Create { slot: k, step });
+        if next.is_none() {
+            release(&mut self.x.name_lock, me);
+        }
+        self.creating[s] = next.map(|step| Create { step, ..c });
     }
 
-    fn step_sweep(&mut self) {
-        let Some(mut sw) = self.sweep.take() else { return };
-        match sw.core.take() {
-            None => match sw.todo.pop() {
-                Some(k) if self.slots[k].exists => sw.core = Some((k, Vec::new())),
-                Some(_) => {}
-                None => {
-                    match sw.who {
-                        Who::First(s) => self.waiters[s] = Waiter::Waiting,
-                        Who::Last(s) => self.waiters[s] = Waiter::Done,
-                        Who::Later => self.later = Some(true),
-                    }
-                    return;
-                }
-            },
-            Some((k, mut replies)) => {
-                let p = Params { name: format!("agent-{k}"), named: false, own_session_ends: false };
-                match resume(&p, program, &replies) {
-                    Next::Ask(q) => {
-                        let r = self.answer(k, &q);
-                        replies.push(r);
-                        sw.core = Some((k, replies));
-                    }
-                    Next::Done(Outcome::Removed | Outcome::Kept(_)) => {}
-                    Next::Die(_) => self.died = true,
-                }
+    fn end_create(&mut self, s: usize) {
+        self.creating[s] = None;
+        release(&mut self.x.name_lock, Holder::Create(s));
+    }
+
+    fn step_sweep(&mut self, i: usize) {
+        let who = self.sweeps[i].who;
+        if !self.sweeps[i].listed {
+            self.sweeps[i].listed = true;
+            if self.x.exists() {
+                self.sweeps[i].core = Some(Vec::new());
+                return;
             }
         }
-        self.sweep = Some(sw);
+        let Some(mut replies) = self.sweeps[i].core.take() else {
+            self.sweeps.remove(i);
+            match who {
+                Who::First(s) => self.waiters[s] = Waiter::Waiting,
+                Who::Last(s) => self.waiters[s] = Waiter::Done,
+                Who::Later => self.later = Some(true),
+            }
+            return;
+        };
+        let p = Params { name: "agent-x".into(), named: false, own_session_ends: false };
+        match resume(&p, program, &replies) {
+            Next::Ask(Query::RemoveWorktree) => {
+                if let Some(r) = self.remove(i) {
+                    replies.push(r);
+                }
+                self.sweeps[i].core = Some(replies);
+            }
+            Next::Ask(q) => {
+                let r = self.answer(who, &q);
+                replies.push(r);
+                self.sweeps[i].core = Some(replies);
+            }
+            Next::Done(Outcome::Removed | Outcome::Kept(_)) => {}
+            Next::Die(_) => self.died = true,
+        }
     }
 }
 
-struct Prune;
+struct Prune {
+    /// Sweeps may overlap.
+    concurrent: bool,
+    /// Agent actions on the worktree, all told, and the other actors' turns.
+    work: u8,
+    reboots: u8,
+    others: u8,
+}
 
 impl Model for Prune {
     type State = World;
@@ -392,18 +517,21 @@ impl Model for Prune {
             sessions: [Session::Unstarted; S],
             waiters: [Waiter::Unstarted; S],
             creating: [None; S],
-            slots: [EMPTY; W],
-            sweep: None,
+            x: EMPTY,
+            sweeps: Vec::new(),
             later: None,
-            work: WORK,
-            reboots: 1,
-            stale_reuse: 1,
-            hand: 1,
+            work: self.work,
+            reboots: self.reboots,
+            stale_reuse: self.others,
+            hand: self.others,
+            enters: self.others,
             stranded: false,
             lost: false,
             died: false,
+            evicted: false,
             removed: false,
             raced: false,
+            deferred: false,
         }]
     }
 
@@ -415,26 +543,25 @@ impl Model for Prune {
             acts.push(Act::Begin(Who::Later));
             return;
         }
+        let x = &w.x;
+        let creating = w.creating.iter().any(Option::is_some);
         for s in 0..S {
             match w.sessions[s] {
                 Session::Unstarted if s == 0 || w.sessions[0] != Session::Unstarted => acts.push(Act::Start(s)),
                 Session::Alive => {
                     acts.push(Act::Exit(s));
-                    if w.creating[s].is_some() {
-                        acts.push(Act::CreateStep(s));
-                    } else {
-                        for k in 0..W {
-                            let busy = w.creating.iter().flatten().any(|c| c.slot == k) || w.agent_of(k).is_some();
-                            if busy {
-                                continue;
+                    match w.creating[s] {
+                        Some(c) if c.step == CStep::NameLock && x.name_lock.is_some() => {}
+                        Some(_) => acts.push(Act::CreateStep(s)),
+                        None if creating || w.agent_alive() => {}
+                        None => {
+                            let idle = !x.tree && !x.admin && x.name_lock.is_none() && w.sweeps.iter().all(|sw| sw.core.is_none());
+                            if idle {
+                                acts.push(Act::Spawn(s));
                             }
-                            if !w.slots[k].exists {
-                                acts.push(Act::Spawn(s, k));
-                            } else {
-                                acts.push(Act::Reuse(s, k, true));
-                                if w.stale_reuse > 0 {
-                                    acts.push(Act::Reuse(s, k, false));
-                                }
+                            acts.push(Act::Reuse(s, true));
+                            if w.stale_reuse > 0 {
+                                acts.push(Act::Reuse(s, false));
                             }
                         }
                     }
@@ -442,39 +569,41 @@ impl Model for Prune {
                 _ => {}
             }
         }
-        for k in 0..W {
-            let x = &w.slots[k];
-            if x.agent.is_some_and(|s| w.alive(s)) && x.exists && w.work > 0 {
-                if !x.dirty {
-                    acts.push(Act::Dirty(k));
-                } else {
-                    acts.push(Act::Commit(k));
-                }
-                if !x.deploy_lock && !x.push && (x.commits || x.dirty) {
-                    acts.push(Act::Deploy(k));
-                }
-                if x.on_wb && !x.dirty {
-                    acts.push(Act::Detach(k));
-                }
+        if w.agent_alive() && x.exists() && w.work > 0 {
+            acts.push(if x.dirty { Act::Commit } else { Act::Dirty });
+            if x.deploy_lock.is_none() && !x.push && (x.commits || x.dirty) {
+                acts.push(Act::Deploy);
             }
-            if x.push {
-                acts.push(Act::PushDone(k, true));
-                acts.push(Act::PushDone(k, false));
-            }
-            if w.hand > 0 && x.exists && matches!(x.lock, Some(Lock::Of(s)) if !w.alive(s)) {
-                acts.push(Act::HandLock(k));
+            if x.on_wb && !x.dirty {
+                acts.push(Act::Detach);
             }
         }
-        if w.sweep.is_none() {
-            for s in 0..S {
-                match w.waiters[s] {
-                    Waiter::WantFirst => acts.push(Act::Begin(Who::First(s))),
-                    Waiter::Waiting if w.sessions[s] == Session::Dead => acts.push(Act::Begin(Who::Last(s))),
-                    _ => {}
-                }
+        if x.push {
+            acts.push(Act::PushDone(true));
+            acts.push(Act::PushDone(false));
+        }
+        if w.hand > 0 && x.exists() && matches!(x.lock, Some(Lock::Of(s)) if !w.alive(s)) {
+            acts.push(Act::HandLock);
+        }
+        // The later sweep is the final check; a shell entering during it
+        // would only make it keep the worktree.
+        let last = w.sweeps.iter().any(|sw| sw.who == Who::Later);
+        if w.enters > 0 && x.exists() && !x.occupant && !last {
+            acts.push(Act::Enter);
+        }
+        if x.occupant {
+            acts.push(Act::Leave);
+        }
+        for s in 0..S {
+            let running = |who| w.sweeps.iter().any(|sw| sw.who == who) || !self.concurrent && !w.sweeps.is_empty();
+            match w.waiters[s] {
+                Waiter::WantFirst if !running(Who::First(s)) => acts.push(Act::Begin(Who::First(s))),
+                Waiter::Waiting if w.sessions[s] == Session::Dead && !running(Who::Last(s)) => acts.push(Act::Begin(Who::Last(s))),
+                _ => {}
             }
-        } else {
-            acts.push(Act::Step);
+        }
+        for i in 0..w.sweeps.len() {
+            acts.push(Act::Step(i));
         }
         if w.reboots > 0 && w.sessions.contains(&Session::Alive) {
             acts.push(Act::Reboot);
@@ -488,49 +617,51 @@ impl Model for Prune {
                 w.sessions[s] = Session::Alive;
                 w.waiters[s] = Waiter::WantFirst;
             }
-            Act::Spawn(s, k) => w.creating[s] = Some(Create { slot: k, step: CStep::Check { reuse: false, ancestor: true } }),
-            Act::Reuse(s, k, ancestor) => {
+            Act::Spawn(s) => {
+                // A new name: its own branches, none yet.
+                w.x = EMPTY;
+                w.creating[s] = Some(Create { reuse: false, ancestor: true, step: CStep::NameLock });
+            }
+            Act::Reuse(s, ancestor) => {
                 if !ancestor {
                     w.stale_reuse -= 1;
                 }
-                w.creating[s] = Some(Create { slot: k, step: CStep::Check { reuse: true, ancestor } });
+                w.creating[s] = Some(Create { reuse: true, ancestor, step: CStep::NameLock });
             }
             Act::CreateStep(s) => w.step_create(s),
-            Act::Dirty(k) => {
+            Act::Dirty => {
                 w.work -= 1;
-                w.slots[k].dirty = true;
+                w.x.dirty = true;
             }
-            Act::Commit(k) => {
+            Act::Commit => {
                 w.work -= 1;
-                w.slots[k].dirty = false;
-                w.slots[k].commits = true;
+                w.x.dirty = false;
+                w.x.commits = true;
             }
-            Act::Deploy(k) => {
+            Act::Deploy => {
                 w.work -= 1;
-                let x = &mut w.slots[k];
+                let x = &mut w.x;
                 x.dirty = false;
                 x.commits = true;
                 x.on_wb = true;
                 x.local = Local::Unpushed;
                 x.push = true;
             }
-            Act::Detach(k) => {
+            Act::Detach => {
                 w.work -= 1;
-                let x = &mut w.slots[k];
-                x.on_wb = false;
-                x.commits = false;
+                w.x.on_wb = false;
+                w.x.commits = false;
             }
-            Act::PushDone(k, ok) => {
-                let x = &mut w.slots[k];
-                x.push = false;
+            Act::PushDone(ok) => {
+                w.x.push = false;
                 if ok {
-                    x.local = Local::Pushed;
-                    x.increments = true;
+                    w.x.local = Local::Pushed;
+                    w.x.increments = true;
                 }
             }
             Act::Exit(s) => {
                 w.sessions[s] = Session::Dead;
-                w.creating[s] = None;
+                w.end_create(s);
             }
             Act::Reboot => {
                 w.reboots -= 1;
@@ -541,56 +672,84 @@ impl Model for Prune {
                     if !matches!(w.waiters[s], Waiter::Unstarted | Waiter::Done) {
                         w.waiters[s] = Waiter::Killed;
                     }
-                    w.creating[s] = None;
+                    w.end_create(s);
                 }
-                w.sweep = None;
-                for x in &mut w.slots {
-                    x.push = false;
-                    x.deploy_lock = false;
-                }
+                w.sweeps.clear();
+                w.x.push = false;
+                w.x.deploy_lock = None;
+                w.x.name_lock = None;
+                w.x.occupant = false;
             }
-            Act::HandLock(k) => {
+            Act::HandLock => {
                 w.hand -= 1;
-                w.slots[k].lock = Some(Lock::Hand);
+                w.x.lock = Some(Lock::Hand);
             }
+            Act::Enter => {
+                w.enters -= 1;
+                w.x.occupant = true;
+            }
+            Act::Leave => w.x.occupant = false,
             Act::Begin(who) => {
                 if let Who::First(s) | Who::Last(s) = who {
                     w.waiters[s] = Waiter::Waiting;
                 }
-                w.sweep = Some(Sweep { who, todo: (0..W).filter(|&k| w.slots[k].exists).collect(), core: None });
+                w.sweeps.push(Sweep { who, listed: false, core: None, removing: Removing::No, occupied_at_claim: false });
             }
-            Act::Step => w.step_sweep(),
+            Act::Step(i) => w.step_sweep(i),
         }
         Some(w)
     }
 
     fn properties(&self) -> Vec<Property<Self>> {
-        vec![
+        let mut ps = vec![
             Property::always("a running or resumable agent keeps its worktree", |_, w: &World| {
-                !w.stranded
-                    && (0..W).all(|k| w.agent_of(k).is_none() || w.slots[k].exists || w.creating.iter().flatten().any(|c| c.slot == k))
+                !w.stranded && (!w.agent_alive() || w.x.exists() || w.creating.iter().any(Option::is_some))
             }),
             Property::always("no work is removed", |_, w: &World| !w.lost),
             Property::always("the core never dies", |_, w: &World| !w.died),
+            Property::always("no worktree is removed under a process that was in it at the claim", |_, w: &World| !w.evicted),
+            Property::always("no create meets a removal half done", |_, w: &World| !w.raced),
             Property::always("once all is quiet, a later session's sweep leaves nothing removable", |_, w: &World| {
+                let x = &w.x;
+                let dead = matches!(x.lock.or(x.claimed), Some(Lock::Of(_)));
                 w.later != Some(true)
-                    || w.slots.iter().all(|x| {
-                        let dead = matches!(x.lock.or(x.claimed), Some(Lock::Of(_)));
-                        !(x.exists && dead && !x.dirty && !x.commits && !x.on_wb && x.local != Local::Unpushed && !x.increments)
-                    })
+                    || !(x.exists()
+                        && dead
+                        && !x.occupant
+                        && !x.dirty
+                        && !x.commits
+                        && !x.on_wb
+                        && x.local != Local::Unpushed
+                        && !x.increments)
             }),
             Property::sometimes("a worktree is removed", |_, w: &World| w.removed),
-            Property::sometimes("a create races a removal and retries", |_, w: &World| w.raced),
-            Property::sometimes("deployed work survives to the end", |_, w: &World| {
-                w.later == Some(true) && w.slots.iter().any(|x| x.exists && x.increments)
-            }),
-        ]
+            Property::sometimes("a sweep defers to a create holding the name", |_, w: &World| w.deferred),
+        ];
+        if self.concurrent {
+            ps.push(Property::sometimes("two sweeps judge the worktree at once", |_, w: &World| {
+                w.sweeps.iter().filter(|sw| sw.core.as_ref().is_some_and(|r| r.len() > 2)).count() > 1
+            }));
+        } else {
+            ps.push(Property::sometimes("deployed work survives to the end", |_, w: &World| {
+                w.later == Some(true) && w.x.exists() && w.x.increments
+            }));
+        }
+        ps
     }
+}
+
+fn check(m: Prune, name: &str) {
+    let checker = m.checker().spawn_dfs().join();
+    eprintln!("{name}: {} unique states, depth {}", checker.unique_state_count(), checker.max_depth());
+    checker.assert_properties();
 }
 
 #[test]
 fn prune_model() {
-    let checker = Prune.checker().spawn_bfs().join();
-    eprintln!("prune model: {} unique states, depth {}", checker.unique_state_count(), checker.max_depth());
-    checker.assert_properties();
+    check(Prune { concurrent: false, work: 3, reboots: 1, others: 1 }, "prune model");
+}
+
+#[test]
+fn prune_model_concurrent() {
+    check(Prune { concurrent: true, work: 0, reboots: 0, others: 0 }, "prune model, concurrent sweeps");
 }

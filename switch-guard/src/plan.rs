@@ -182,8 +182,12 @@ pub enum Query {
         listed: Vec<String>,
     },
 
-    /// The prune core's, in the subagent worktree it judges.  Take its
-    /// deploy lock, without waiting -> Flag: taken.
+    /// The prune core's, in the subagent worktree it judges.  Take the
+    /// lock on its name the create hook also takes, without waiting ->
+    /// Flag: taken.
+    TakeNameLock,
+    ReleaseNameLock,
+    /// Take its deploy lock, without waiting -> Flag: taken.
     TakeDeployLock,
     ReleaseDeployLock,
     /// Its git worktree lock's reason -> Text (None: unlocked).
@@ -208,6 +212,9 @@ pub enum Query {
     },
     /// Whether it has staged, unstaged or untracked changes -> Flag.
     Dirty,
+    /// Whether a process other than nixconvoy's own has its working
+    /// directory in it -> Flag.
+    Occupied,
     /// Rename its lock aside, if it still holds `expect` (None: if it is
     /// still unlocked) -> Flag: claimed.
     ClaimLock {

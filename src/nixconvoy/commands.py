@@ -28,7 +28,6 @@ from .checkout import (
     git_op_in_progress,
     identity_of,
     listed_tips,
-    lock_checkout,
     lock_live,
     lock_pid_alive,
     on_origin,
@@ -154,7 +153,10 @@ def abandon() -> None:
         require_unlocked(Path.cwd())
     if ident.kind == "sub" and ident.wb and current_branch() != ident.wb and sub_parent(here):
         # Never deployed: still on its fresh branch.
-        if (why := prune_one(here, named=True, own_session_ends=True)) is not None:
+        # The CLI holds this worktree's deploy lock, and abandon fetched.
+        fetched: list[dict[str, object]] = [{"ran": True, "detail": ""}]
+        why = prune_one(here, named=True, own_session_ends=True, fetched=fetched, deploy_held=True)
+        if why is not None:
             die(f"this worktree is kept: {why}; then re-run")
         print(f"subagent worktree {sub_label(here)} removed")
         return
@@ -205,34 +207,103 @@ def prune(names: list[str]) -> None:
 
 
 def prune_one(d: Path, *, named: bool, own_session_ends: bool = False,
-              fetched: list[dict[str, object]] | None = None) -> str | None:
+              fetched: list[dict[str, object]] | None = None, deploy_held: bool = False) -> str | None:
     """deploy-plan's prune core on the subagent worktree `d`: None once
-    removed (the process then in its parent), else why it was kept."""
+    removed (the process then in its parent), else why it was kept.
+    `deploy_held`: the caller holds its deploy lock already."""
     os.chdir(d)
-    done = decide("prune", perform=PruneQueries(d, [] if fetched is None else fetched),
-                  name=d.name, named=named, own_session_ends=own_session_ends)
+    perform = PruneQueries(d, [] if fetched is None else fetched, deploy_held=deploy_held)
+    try:
+        done = decide("prune", perform=perform, name=d.name, named=named, own_session_ends=own_session_ends)
+    finally:
+        perform.close()
     assert isinstance(done, dict)
     if done.get("removed"):
         return None
     return str(done.get("kept"))
 
 
-class PruneQueries(GitQueries):
-    """The prune core's queries on the subagent worktree `d`: its lock file
-    claimed by renaming it aside (git refuses to remove a locked worktree,
-    so a lock renamed in meanwhile keeps it), its deploy lock held until
-    released; `fetched` shares one fetch across a run."""
+def name_lock_path(name: str) -> Path:
+    """The lock on a subagent worktree's name that the create hook
+    (worktree-create.sh) takes too: in the common git dir, so it outlives
+    the worktree."""
+    common = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]))
+    return common / "nixconvoy-worktree-locks" / f"{name}.lock"
 
-    def __init__(self, d: Path, fetched: list[dict[str, object]]) -> None:
+
+def occupied(d: Path) -> bool:
+    """Whether a process other than this one and its children has its
+    working directory in `d` (via /proc, else lsof)."""
+    me = os.getpid()
+    cwds: dict[int, str] = {}
+    parents: dict[int, int] = {}
+    if Path("/proc/self").exists():
+        for e in Path("/proc").iterdir():
+            if not e.name.isdigit():
+                continue
+            pid = int(e.name)
+            try:
+                cwds[pid] = str((e / "cwd").readlink())
+            except OSError:
+                continue  # gone, or another user's
+            stat = proc_stat(pid)
+            if stat is not None:
+                parents[pid] = int(stat.split()[1])
+    else:
+        pid = 0
+        for ln in run(["lsof", "-d", "cwd", "-F", "pn"], check=False).stdout.splitlines():
+            if ln.startswith("p"):
+                pid = int(ln[1:])
+            elif ln.startswith("n") and pid:
+                cwds[pid] = ln[1:]
+        for ln in run(["ps", "-A", "-o", "pid=,ppid="], check=False).stdout.splitlines():
+            f = ln.split()
+            if len(f) == 2 and f[0].isdigit() and f[1].isdigit():
+                parents[int(f[0])] = int(f[1])
+    for pid, cwd in cwds.items():
+        if pid == me or parents.get(pid) == me:
+            continue
+        p = Path(cwd)
+        if p == d or d in p.parents:
+            return True
+    return False
+
+
+class PruneQueries(GitQueries):
+    """The prune core's queries on the subagent worktree `d`: its name lock
+    (the create hook's too) and deploy lock held until close(), its lock
+    file claimed by renaming it aside (git refuses to remove a locked
+    worktree, so a lock renamed in meanwhile keeps it); `fetched` shares one
+    fetch across a run."""
+
+    def __init__(self, d: Path, fetched: list[dict[str, object]], *, deploy_held: bool = False) -> None:
         super().__init__()
         self.d = d
         parent = sub_parent(d)
         assert parent is not None
         self.parent = parent
         self.fetched = fetched
+        self.deploy_held = deploy_held
         self.locked = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path", "locked"]))
         self.claimed = self.locked.with_name("locked.prune")
-        self.held: IO[str] | None = None
+        self.name_lock = name_lock_path(d.name)
+        self.held: list[IO[str]] = []
+
+    def close(self) -> None:
+        for f in self.held:
+            f.close()
+        self.held.clear()
+
+    def take(self, path: Path) -> bool:
+        path.parent.mkdir(exist_ok=True)
+        f = path.open("a")
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            f.close()
+            return False
+        self.held.append(f)
+        return True
 
     @staticmethod
     def read(f: Path) -> str | None:
@@ -246,15 +317,32 @@ class PruneQueries(GitQueries):
             os.link(self.claimed, self.locked)
         self.claimed.unlink(missing_ok=True)
 
+    def claim(self, expect: object) -> bool:
+        if expect is None:
+            return not self.locked.exists() and not self.claimed.exists()
+        if not self.locked.exists():
+            return self.read(self.claimed) == expect  # claimed by a run that died
+        if self.read(self.locked) != expect:
+            return False
+        with contextlib.suppress(FileNotFoundError):
+            self.locked.rename(self.claimed)
+        if self.read(self.claimed) == expect:
+            return True
+        self.restore()  # a new lock was renamed in between
+        return False
+
     def __call__(self, ask: dict[str, object]) -> dict[str, object]:
         kind = ask.get("ask")
+        done: dict[str, object] = {"ran": True, "detail": ""}
+        if kind == "take_name_lock":
+            return {"flag": self.take(self.name_lock)}
+        if kind in ("release_name_lock", "release_deploy_lock"):
+            return done  # close() releases both once the core is done
         if kind == "take_deploy_lock":
-            self.held = lock_checkout()
-            return {"flag": self.held is not None}
-        if kind == "release_deploy_lock":
-            if self.held is not None:
-                self.held.close()
-            return {"ran": True, "detail": ""}
+            if self.deploy_held:
+                return {"flag": True}
+            return {"flag": self.take(Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path",
+                                                "nixconvoy-deploy.lock"])))}
         if kind == "lock":
             # A lock a removal claimed before it died still counts.
             return {"text": self.read(self.locked) if self.locked.exists() else self.read(self.claimed)}
@@ -275,33 +363,27 @@ class PruneQueries(GitQueries):
             return {"flag": bool(out(["git", "rev-list", "-n", "1", str(ask.get("sha")), "--not", "--remotes=origin"]))}
         if kind == "dirty":
             return {"flag": bool(out(["git", "status", "--porcelain"]))}
+        if kind == "occupied":
+            return {"flag": occupied(self.d)}
         if kind == "fetch":
             if not self.fetched:
                 self.fetched.append(super().__call__(ask))
             return self.fetched[0]
         if kind == "claim_lock":
-            expect = ask.get("expect")
-            if expect is None:
-                return {"flag": not self.locked.exists() and not self.claimed.exists()}
-            with contextlib.suppress(FileNotFoundError):
-                self.locked.rename(self.claimed)
-            if self.read(self.claimed) == expect:
-                return {"flag": True}
-            self.restore()  # a new lock was renamed in before the claim
-            return {"flag": False}
+            return {"flag": self.claim(ask.get("expect"))}
         if kind == "remove_worktree":
             os.chdir(self.parent)
-            done = git("worktree", "remove", str(self.d), check=False)
-            if done.returncode != 0 and self.d.is_dir():
+            removed = git("worktree", "remove", str(self.d), check=False)
+            if removed.returncode != 0 and self.d.is_dir():
                 os.chdir(self.d)
-            return ran(done)
+            return ran(removed)
         if kind == "restore_lock":
             self.restore()
-            return {"ran": True, "detail": ""}
+            return done
         if kind == "drop_branches":
             cur = ask.get("cur")
-            drop_branches(sub_branches(self.d, cur if isinstance(cur, str) else None, [str(ask.get("wb"))]))
-            return {"ran": True, "detail": ""}
+            failed = drop_branches(sub_branches(self.d, cur if isinstance(cur, str) else None, [str(ask.get("wb"))]))
+            return {"ran": not failed, "detail": "\n".join(failed)}
         return super().__call__(ask)
 
 
@@ -315,8 +397,9 @@ def prune_after(pid: int) -> None:
     past 1 MiB."""
     stat = proc_stat(pid)
     session = f"pid {pid}" + (f" start {stat.split()[19]}" if stat else "")  # as a lock names it
-    here = Path.cwd().resolve()
-    top = sub_parent(here) or here
+    top = Path.cwd().resolve()
+    while (up := sub_parent(top)) is not None:
+        top = up
     common = Path(out(["git", "rev-parse", "--git-common-dir"])).resolve()
     if os.fork():
         return
@@ -387,7 +470,8 @@ def remove_sub(branches: list[str]) -> None:
         git("worktree", "unlock", str(here))
     os.chdir(parent)
     git("worktree", "remove", "--force", str(here))
-    drop_branches(names)
+    if failed := drop_branches(names):
+        die("\n".join(failed))
     print(f"subagent worktree {here.relative_to(parent)} removed, with "
           f"{', '.join(branches)} here and on origin")
 
@@ -405,23 +489,27 @@ def sub_branches(here: Path, cur: str | None, branches: list[str]) -> list[str]:
     return names
 
 
-def drop_branches(names: list[str]) -> None:
+def drop_branches(names: list[str]) -> list[str]:
     """Delete `names` here and on origin, remembering origin's tips in
-    PAST_REFS (on_origin's memory)."""
+    PAST_REFS (on_origin's memory): the origin deletions that failed."""
     gone = {b: rev(f"refs/remotes/origin/{b}") for b in names}
+    failed = []
     for b in names:
         git("branch", "--quiet", "-D", b, check=False)
     for b, old in gone.items():
         if old:
             git("update-ref", "--create-reflog", f"{PAST_REFS}/{b}", old)
-            git("push", "--quiet", "origin", f":refs/heads/{b}",
-                f"--force-with-lease=refs/heads/{b}:{old}")
+            pushed = git("push", "--quiet", "origin", f":refs/heads/{b}",
+                         f"--force-with-lease=refs/heads/{b}:{old}", check=False)
+            if pushed.returncode != 0:
+                failed.append(f"deleting {b} on origin failed: {pushed.stderr.strip()}")
     # A review of a branch gone this long is no longer expected.
     cutoff = time.time() - 90 * 86400
     for ln in out(["git", "for-each-ref", "--format=%(refname) %(committerdate:unix)", PAST_REFS]).splitlines():
         ref, _, when = ln.partition(" ")
         if when and int(when) < cutoff:
             git("update-ref", "-d", ref, check=False)
+    return failed
 
 
 def sub_label(d: Path) -> str:
