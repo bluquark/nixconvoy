@@ -9,12 +9,11 @@
 # same kind of lock Claude Code takes (the spawning claude process's pid and
 # start time), which nixconvoy's status, prune and abandon read.  The hook
 # replaces Claude Code's logic entirely, so neither a finished subagent nor
-# the periodic sweep removes these: subagent-stop.sh prunes a finished
-# agent's when it holds nothing of its own, `nixconvoy status` marks a
-# leftover as such and `nixconvoy prune` or `abandon <name>` removes it
-# (worktree-remove.sh covers the removals Claude Code does make, a `claude
-# --worktree` session's).  hooks.json beside it wires the three hooks up as
-# the nixconvoy plugin.
+# the periodic sweep removes these: once the session exits, the `nixconvoy
+# prune --after` session-start.sh started removes those holding nothing of
+# their own, and land or abandon the others (worktree-remove.sh covers the
+# removals Claude Code does make, a `claude --worktree` session's).
+# hooks.json beside it wires the three hooks up as the nixconvoy plugin.
 set -eu
 command -v jq >/dev/null 2>&1 || { echo "worktree-create: jq missing" >&2; exit 1; }
 INPUT=$(cat)
@@ -27,30 +26,35 @@ base=$(git -C "$root" rev-parse -q --verify refs/remotes/origin/HEAD \
     || git -C "$root" rev-parse HEAD)
 branch="worktree-$name"
 git -C "$root" worktree prune >&2  # a registration whose directory is gone
-if [ "$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" = "$dir" ]; then
-  : # the worktree exists: reused (`claude --worktree <name>` again)
-elif git -C "$root" rev-parse -q --verify "refs/heads/$branch" >/dev/null; then
-  # The branch outlived its worktree: checked out as it is.
-  mkdir -p "$root/.claude/worktrees"
-  git -C "$root" worktree add --quiet "$dir" "$branch" >&2
-else
-  mkdir -p "$root/.claude/worktrees"
-  git -C "$root" worktree add --quiet -b "$branch" "$dir" "$base" >&2
-fi
 
-# The nearest claude ancestor: the session whose lifetime the lock spans.
-# No lock when none is found, rather than one nobody's exit releases.
+# The nearest claude ancestor: the session whose lifetime the lock spans,
+# taken as the worktree is added, so no prune sees it unlocked.  No lock
+# when none is found, rather than one nobody's exit releases.
 pid=$PPID
 while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
   case "$(ps -o comm= -p "$pid" 2>/dev/null)" in *claude*) break ;; esac
   pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
 done
+lock=()
 if [ -n "$pid" ] && [ "$pid" -gt 1 ]; then
-  git -C "$root" worktree unlock "$dir" >/dev/null 2>&1 || true  # a reused one's old lock
   reason="claude agent $name (pid $pid"
   if [ -r "/proc/$pid/stat" ]; then
     reason="$reason start $(sed 's/.*) //' "/proc/$pid/stat" | awk '{print $20}')"
   fi
-  git -C "$root" worktree lock --reason "$reason)" "$dir" >&2 || true
+  lock=(--lock --reason "$reason)")
+fi
+if [ "$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" = "$dir" ]; then
+  # The worktree exists: reused (`claude --worktree <name>` again).
+  if [ ${#lock[@]} -gt 0 ]; then
+    git -C "$root" worktree unlock "$dir" >/dev/null 2>&1 || true  # its old lock
+    git -C "$root" worktree lock --reason "${lock[2]}" "$dir" >&2 || true
+  fi
+elif git -C "$root" rev-parse -q --verify "refs/heads/$branch" >/dev/null; then
+  # The branch outlived its worktree: checked out as it is.
+  mkdir -p "$root/.claude/worktrees"
+  git -C "$root" worktree add --quiet ${lock[@]+"${lock[@]}"} "$dir" "$branch" >&2
+else
+  mkdir -p "$root/.claude/worktrees"
+  git -C "$root" worktree add --quiet ${lock[@]+"${lock[@]}"} -b "$branch" "$dir" "$base" >&2
 fi
 printf '%s\n' "$dir"

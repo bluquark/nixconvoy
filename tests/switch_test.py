@@ -739,6 +739,16 @@ def git_cases(d: Path) -> None:
         assert out.getvalue().endswith("/review: empty, removed\n"), out.getvalue()
         assert not rv.exists() and Path.cwd().resolve() == co.resolve()
         sh(co, "worktree", "add", "--quiet", "--detach", str(rv), "origin/main")
+        # Unlike abandon, prune keeps a worktree whose session still runs even
+        # when that session is the one asking: it may resume the agent.
+        if (parent := os.getppid()) > 1:
+            pstart = Path(f"/proc/{parent}/stat").read_text().rpartition(")")[2].split()[19]
+            sh(co, "worktree", "lock", "--reason", f"claude agent review (pid {parent} start {pstart})", str(rv))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                commands.prune([])
+            assert "/review: kept, the claude session that spawned its agent still runs" in out.getvalue(), out.getvalue()
+            sh(co, "worktree", "unlock", str(rv))
         # Claude Code's lock names the spawning session's process and its start
         # time: refused while that lives, lifted once it is gone (or its pid
         # reused by a process started at another time).

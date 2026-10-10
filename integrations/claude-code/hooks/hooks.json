@@ -1,5 +1,16 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
     "WorktreeCreate": [
       {
         "hooks": [
@@ -8,18 +19,6 @@
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/worktree-create.sh\"",
             "timeout": 120,
             "statusMessage": "Creating the subagent worktree under this checkout"
-          }
-        ]
-      }
-    ],
-    "SubagentStop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/subagent-stop.sh\"",
-            "timeout": 60,
-            "statusMessage": "Pruning the finished subagent's worktree"
           }
         ]
       }

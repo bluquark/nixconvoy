@@ -139,11 +139,15 @@ survive; the old tip remains reachable via the reflog.
 Prune (nixconvoy prune [<name> ...]): remove the subagent worktrees that
 hold nothing of their own - never deployed, no staged, unstaged or
 untracked change, HEAD on origin - with their fresh branch; the named ones,
-or every one under this checkout.  One at work (its agent's claude session
-alive, a nixconvoy or git operation running in it), deployed (on its work
-branch: land or abandon decides it) or holding anything is kept and said
-so.  The Claude Code plugin's SubagentStop hook runs it on a finished
-subagent's worktree, so only one with work outlives its agent.
+or every one under this checkout.  One whose spawning claude session still
+runs is kept, whichever session asks: the session may resume its agent,
+which needs the worktree.  So is one at work (a nixconvoy, git operation or
+push running in it), on a work branch (land or abandon decides it) or
+holding anything; each kept one is said so.  `--after PID` detaches, prunes
+what dead sessions left, waits for the claude session PID to exit and
+prunes again (one waiter per session, logged to nixconvoy-prune.log in the
+git dir): the Claude Code plugin's SessionStart hook starts it, so a
+subagent's worktree with nothing of its own goes when its session ends.
 
 Commit (nixconvoy commit -m "..."): commit + push the staged state onto the
 work branch without probing, building or switching anything - for changes
@@ -200,7 +204,7 @@ USAGE = """usage: nixconvoy apply [-m "msg"] [--reset] [--take-over host] [--dan
        nixconvoy commit -m "msg"
        nixconvoy land [worktree ...]
        nixconvoy abandon [worktree ...]
-       nixconvoy prune [worktree ...]
+       nixconvoy prune [worktree ...] | --after PID
        nixconvoy pull
        nixconvoy status
        nixconvoy review [worktree ...] [diff args]
@@ -250,10 +254,13 @@ def main() -> None:
     dry = False
     take_over: set[str] = set()
     hosts: list[str] = []
+    after = ""
     while args:
         a = args.pop(0)
         if a == "-m" and args:
             msg = args.pop(0)
+        elif a == "--after" and subcmd == "prune" and args and args[0].isdigit():
+            after = args.pop(0)
         elif a == "--reset":
             reset = True
         elif a == NETWORK_FLAG:
@@ -281,9 +288,12 @@ def main() -> None:
         commands.status()
         return
     if subcmd == "prune":
-        if msg or reset or danger or dry or take_over:
+        if msg or reset or danger or dry or take_over or (after and hosts):
             die(USAGE)
-        commands.prune(hosts)
+        if after:
+            commands.prune_after(int(after))
+        else:
+            commands.prune(hosts)
         return
     if subcmd in ("land", "abandon"):
         if msg or reset or danger or dry or take_over:
