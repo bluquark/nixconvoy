@@ -115,12 +115,15 @@ pub enum Query {
         branch: String,
     },
     /// What became of `branch`'s increment at `tip`, which origin's tip of
-    /// the branch no longer is: "kept" (still on the branch: behind its
-    /// tip, or rebased), "landed" (origin/main holds its changes) or
-    /// "abandoned" (on no branch, landed nowhere) -> Text.
+    /// the branch no longer is: "kept" when the branch (on origin, or
+    /// local: a push on its way) still carries it or merging it into
+    /// `union` changes nothing (rebased, redeployed, landed intact), else
+    /// "landed" (an origin/main commit squashed a later tip of it) or
+    /// "abandoned" -> Text.
     Fate {
         branch: String,
         tip: String,
+        union: String,
     },
     /// Point the branch's upstream at origin/main -> Ran.
     SetUpstream {

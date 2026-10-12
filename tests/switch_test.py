@@ -248,7 +248,8 @@ def report(text: str, age: float | None, *, tips: dict[str, str] | None = None,
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
             contextlib.suppress(SystemExit):
         guard.decide(
-            "drift", me=list(ME), listed=sorted(LISTED), tips={BRANCH: BASE} if tips is None else tips,
+            "drift", me=list(ME), union="u" * 40, listed=sorted(LISTED),
+            tips={BRANCH: BASE} if tips is None else tips,
             now=1e6 + 60, tz_offset=0, router="choko", hosts=["side1"], candidates=["side1"],
             reset=reset, named=named, reached=["side1"] if reached else [],
             running={"side1": running},

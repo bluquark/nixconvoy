@@ -151,7 +151,7 @@ def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
                                      {h: probed[h].lineage for h in tops if h in probed})
         last = [h for h in sorted(tops) if tops[h].last]
         verdict = decide(
-            "drift", me=[me, str(Path.cwd())],
+            "drift", me=[me, str(Path.cwd())], union=union,
             listed=sorted({*listed, "main"}), tips=origin_tips(), now=time.time(),
             tz_offset=time.localtime().tm_gmtoff, router=last[0] if last else "",
             hosts=all_hosts, candidates=candidates, reset=reset, named=bool(filter_hosts),

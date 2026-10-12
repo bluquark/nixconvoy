@@ -330,13 +330,13 @@ def main() -> None:
     if subcmd in ("land", "abandon"):
         if msg or reset or dry or (danger and not apply_now):
             die(USAGE)
-        if apply_now:
-            # The deploy runs from this checkout (a subagent's: its parent),
-            # whose staged changes it would have to carry without a message.
-            deploys_from = (sub_parent(here) or here) if not hosts else here
-            if not ok(["git", "diff", "--cached", "--quiet"], cwd=str(deploys_from)):
-                die(f"{deploys_from} has staged changes, which the deploy of {APPLY_NOW_FLAG} "
-                    "would carry: deploy or unstage them first")
+        deploys_from = (sub_parent(here) or here) if not hosts else here
+        # The deploy runs from a checkout the abandon does not reset, whose
+        # staged changes it would have to carry without a message.
+        if (apply_now and (hosts or deploys_from != here)
+                and not ok(["git", "diff", "--cached", "--quiet"], cwd=str(deploys_from))):
+            die(f"{deploys_from} has staged changes, which the deploy of {APPLY_NOW_FLAG} "
+                "would carry: deploy or unstage them first")
         # Several subagent worktrees, one after the other, each under its
         # own checkout's lock.
         for name in hosts:

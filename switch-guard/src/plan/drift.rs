@@ -18,10 +18,16 @@
 //!
 //! A host to be switched may run an increment that left the convoy since:
 //! a branch tip its lineage recorded that origin's tip of the branch no
-//! longer carries.  Query::Fate asks git what became of it - abandoned
-//! (reset or dropped, landed nowhere) or not - and the host's verdict line
-//! names each abandoned increment the switch reverts: abandon itself
-//! touches no host, so this is where the revert shows.
+//! longer carries.  Query::Fate asks git whether this deploy's union still
+//! holds it and, when not, what became of it - abandoned (reset or
+//! dropped, landed nowhere) or landed and since undone - and the host's
+//! verdict line names each abandoned increment the switch reverts:
+//! abandon itself touches no host, so this is where the revert shows.  A
+//! subagent's branch, pushed by its first deploy and deleted with its
+//! worktree, leaves hosts whose lineage holds a pending increment of a
+//! branch origin never had as far as this run can see: the same query
+//! tells a dropped branch (switched over, the increment named) from one
+//! whose first push is on its way (refused, as any in-flight increment).
 use super::{listed, Halt, Query, Run, Script, BRANCHES_FILE};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,8 +46,8 @@ pub struct Lineage {
     /// Every branch the union holds work of (the deployer's own included),
     /// sorted.
     pub branches: Vec<String>,
-    /// The tip of each of those the union held (the deployer's own: its
-    /// staged snapshot when an increment was pending).
+    /// The tip of each of those the union held (the deployer's own: the
+    /// work-branch commit its pending increment became).
     pub tips: BTreeMap<String, String>,
     /// The deployer's own branch when what it unioned of it was not on
     /// origin yet, with the origin tip that push moves.
@@ -213,6 +219,8 @@ pub fn switch_order(names: &[String], router: &str) -> Vec<String> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Params {
     pub cx: Context,
+    /// The union commit this deploy builds.
+    pub union: String,
     pub router: String,
     pub hosts: Vec<String>,
     pub candidates: Vec<String>,
@@ -265,29 +273,34 @@ pub fn refusal(refused: &[(String, Kind)]) -> String {
     )
 }
 
-/// The abandoned increments a switch of a host reverts: each branch tip
-/// its lineage recorded that is not origin's tip now and that Query::Fate
-/// reports abandoned, as "<branch>'s abandoned increment <sha>"; `fates`
-/// memoises the answers across hosts.
-fn reverted(s: &mut Script, lin: &Lineage, cx: &Context, fates: &mut BTreeMap<(String, String), bool>) -> Run<Vec<String>> {
+/// Query::Fate's answer for `branch`'s increment at `tip`, asked once per
+/// tip (`fates` memoises it across hosts): "kept", "landed" or
+/// "abandoned".
+fn fate(s: &mut Script, branch: &str, tip: &str, p: &Params, fates: &mut BTreeMap<(String, String), String>) -> Run<String> {
+    let key = (branch.to_string(), tip.to_string());
+    if let Some(f) = fates.get(&key) {
+        return Ok(f.clone());
+    }
+    let f = s.text(Query::Fate { branch: branch.into(), tip: tip.into(), union: p.union.clone() })?.unwrap_or_default();
+    fates.insert(key, f.clone());
+    Ok(f)
+}
+
+/// The increments a switch of a host reverts: each branch tip its lineage
+/// recorded that is not origin's tip now and that the union no longer
+/// holds, as "<branch>'s abandoned increment <sha>" (or "landed and since
+/// undone").
+fn reverted(s: &mut Script, lin: &Lineage, p: &Params, fates: &mut BTreeMap<(String, String), String>) -> Run<Vec<String>> {
     let mut notes = Vec::new();
     for (b, tip) in &lin.tips {
-        if cx.tips.get(b) == Some(tip) {
+        if p.cx.tips.get(b) == Some(tip) {
             continue;
         }
-        let key = (b.clone(), tip.clone());
-        let abandoned = match fates.get(&key) {
-            Some(a) => *a,
-            None => {
-                let fate = s.text(Query::Fate { branch: b.clone(), tip: tip.clone() })?;
-                let a = fate.as_deref() == Some("abandoned");
-                fates.insert(key, a);
-                a
-            }
-        };
-        if abandoned {
-            let short: String = tip.chars().take(12).collect();
-            notes.push(format!("{b}'s abandoned increment {short}"));
+        let short: String = tip.chars().take(12).collect();
+        match fate(s, b, tip, p, fates)?.as_str() {
+            "abandoned" => notes.push(format!("{b}'s abandoned increment {short}")),
+            "landed" => notes.push(format!("{b}'s increment {short}, landed and since undone")),
+            _ => {}
         }
     }
     Ok(notes)
@@ -312,7 +325,24 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         let lin = p.lineages.get(h).and_then(|(text, age)| parse(text, *age));
         let running = p.running.get(h).cloned().flatten().unwrap_or_default();
         let reached = p.reached.contains(h);
-        let (kind, mut why) = classify(lin.as_ref(), &running, &p.cx, p.reset && (p.named || reached), reached);
+        let (mut kind, mut why) = classify(lin.as_ref(), &running, &p.cx, p.reset && (p.named || reached), reached);
+        // The pending increment of a branch origin has no tip of: its
+        // first push on its way (in flight), or the branch deleted since
+        // with its subagent worktree - then whatever the union lacks of
+        // it is abandoned, and the host catches up.
+        let in_flight = classify(lin.as_ref(), &running, &p.cx, false, true).0 == Kind::InFlight;
+        if let Some(lin) = lin.as_ref().filter(|_| in_flight) {
+            if let Some((b, None)) = &lin.pending {
+                if !p.cx.tips.contains_key(b) {
+                    if let Some(tip) = lin.tips.get(b) {
+                        if fate(s, b, tip, p, &mut fates)? != "kept" {
+                            let who = format!("{}:{} (pid {})", lin.host, lin.checkout, lin.pid);
+                            (kind, why) = (Kind::CatchUp, format!("runs {b}'s increment deployed by {who}, the branch gone since"));
+                        }
+                    }
+                }
+            }
+        }
         if kind.refused() {
             refused.push((h.clone(), kind));
         } else if kind != Kind::LeftAlone {
@@ -321,7 +351,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         // A catch-up to pushed work may be the revert of an abandoned
         // increment; the other kinds revert or refuse in so many words.
         if let (Kind::ThisBranch | Kind::CatchUp, Some(lin)) = (kind, lin.as_ref()) {
-            let notes = reverted(s, lin, &p.cx, &mut fates)?;
+            let notes = reverted(s, lin, p, &mut fates)?;
             if !notes.is_empty() {
                 why = format!("{why}; reverting {}", notes.join(", "));
             }

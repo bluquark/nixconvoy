@@ -199,9 +199,8 @@ def abandon(apply_now: bool = False) -> None:
         if apply_now:
             print(f"deployed to {where}: deploying now to revert it")
         else:
-            keep = "keeps" if len(deployed) == 1 else "keep"
-            print(f"deployed to {where}, which {keep} running it until the next deploy reverts "
-                  f"it (`nixconvoy apply`, or `abandon --apply-now` for both at once)")
+            print(f"deployed to {where}; whichever hosts run it keep it until the next deploy "
+                  f"reverts it (`nixconvoy apply`, or `abandon --apply-now` for both at once)")
     finish(wb)
 
 

@@ -85,6 +85,7 @@ fn drift_params(v: &Value) -> Result<drift::Params, String> {
             now: field(v, "now")?.as_f64().ok_or("now is not a number")?,
             tz_offset: field(v, "tz_offset")?.as_i64().ok_or("tz_offset is not an integer")?,
         },
+        union: text(v, "union")?,
         router: text(v, "router")?,
         hosts: strings(v, "hosts")?,
         candidates: strings(v, "candidates")?,
@@ -165,7 +166,7 @@ pub fn query(q: &Query) -> Value {
         Query::DropWorktree => ("drop_worktree", vec![]),
         Query::Switch { branch, start } => ("switch", vec![("branch", s(branch)), ("start", json!(start))]),
         Query::Upstream { branch } => ("upstream", vec![("branch", s(branch))]),
-        Query::Fate { branch, tip } => ("fate", vec![("branch", s(branch)), ("tip", s(tip))]),
+        Query::Fate { branch, tip, union } => ("fate", vec![("branch", s(branch)), ("tip", s(tip)), ("union", s(union))]),
         Query::SetUpstream { branch } => ("set_upstream", vec![("branch", s(branch))]),
         Query::Listed => ("listed", vec![]),
         Query::Branches => ("branches", vec![]),
@@ -297,7 +298,7 @@ mod tests {
         );
         assert_eq!(reply(r#"{"ran":true,"detail":""}"#).unwrap(), Reply::Ran { ok: true, detail: String::new() });
         assert_eq!(query(&Query::Switch { branch: "b".into(), start: None }).to_string(), r#"{"ask":"switch","branch":"b","start":null}"#);
-        let mut d = start(r#"{"protocol":4,"core":"drift","me":["h","/c"],"listed":["main"],"tips":{},"now":0,"tz_offset":0,"router":"choko","hosts":["a"],"candidates":["a"],"reset":false,"named":false,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"lineages":{"a":{"text":"","age":null}}}"#).unwrap();
+        let mut d = start(r#"{"protocol":4,"core":"drift","me":["h","/c"],"union":"u","listed":["main"],"tips":{},"now":0,"tz_offset":0,"router":"choko","hosts":["a"],"candidates":["a"],"reset":false,"named":false,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"lineages":{"a":{"text":"","age":null}}}"#).unwrap();
         let (line, _) = d.decide(None);
         assert_eq!(
             line,

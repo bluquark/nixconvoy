@@ -296,7 +296,7 @@ class GitQueries:
         if kind == "set_upstream":
             return ran(git("branch", "--set-upstream-to=origin/main", arg("branch"), check=False))
         if kind == "fate":
-            return {"text": increment_fate(arg("branch"), arg("tip"))}
+            return {"text": increment_fate(arg("branch"), arg("tip"), arg("union"))}
         raise ValueError(f"deploy-plan asked {ask!r}")
 
 
@@ -583,35 +583,42 @@ def on_origin(cwd: str | None = None, pats: set[str] | None = None) -> bool:
     return False
 
 
-def increment_fate(branch: str, tip: str) -> str:
+def increment_fate(branch: str, tip: str, union: str) -> str:
     """What became of `branch`'s increment at `tip`, a tip a host's lineage
-    recorded that origin's tip of the branch no longer is (the drift core's
-    Query::Fate): "kept" when origin's branch still carries it - behind a
-    newer tip, or rebased, each of its commits patch-equivalent to one of
-    the branch's - "landed" when origin/main holds its changes (merging it
-    into origin/main changes nothing but MSG_FILE: a landing of it or of a
-    later increment), else "abandoned": reset, dropped with its subagent
-    worktree or force-pushed over, so the switch onto a union without it
-    reverts it.  A tip this repository never fetched (another machine's
-    staged snapshot, committed differently once pushed) or that conflicts
-    with origin/main (superseded somehow) is "kept": nothing to announce."""
-    main = "refs/remotes/origin/main"
+    recorded that origin's tip of the branch no longer is, for the deploy
+    of `union` (the drift core's Query::Fate).  "kept" when the switch
+    reverts none of it: the branch still carries it, on origin or here (a
+    subagent's first push on its way: the branch exists locally), or
+    merging it into the union changes nothing but MSG_FILE (rebased,
+    redeployed after a failed switch, landed intact).  Otherwise the union
+    lacks it: "landed" when a later tip of the branch (one fetched here
+    before, by the remote-tracking ref's reflog or PAST_REFS) carried it and
+    was landed - the increment undone since - else "abandoned": reset,
+    dropped with its subagent worktree or force-pushed over.  A tip this
+    repository never fetched, or one conflicting with the union (its lines
+    changed since, by whatever), is "kept": nothing to announce."""
     if rev(f"{tip}^{{commit}}") is None:
         return "kept"
-    up = f"refs/remotes/origin/{branch}"
-    if rev(up) is None:
-        up = main  # dropped with its subagent worktree
-    if is_ancestor(tip, up):
-        return "kept"
-    marks = run(["git", "cherry", up, tip], check=False).stdout.splitlines()
-    if marks and all(m.startswith("-") for m in marks):
-        return "kept"
-    p = run(["git", "merge-tree", "--write-tree", "--messages", main, tip], check=False)
+    for ref in (f"refs/remotes/origin/{branch}", f"refs/heads/{branch}"):
+        if rev(ref) is not None and is_ancestor(tip, ref):
+            return "kept"
+    p = run(["git", "merge-tree", "--write-tree", "--messages", union, tip], check=False)
     if p.returncode != 0:
         return "kept"
     merged = p.stdout.split("\n", 1)[0].strip()
-    if merged and tree_less_msg(merged) == tree_less_msg(main):
-        return "landed"
+    if not merged or tree_less_msg(merged) == rev(f"{union}^{{tree}}"):
+        return "kept"
+    main = "refs/remotes/origin/main"
+    base = run(["git", "merge-base", tip, main], check=False).stdout.strip()
+    if base:
+        landed = set(out(["git", "log", "--format=%T", f"{base}..{main}"]).split())
+        past: list[str] = []
+        for ref in (f"refs/remotes/origin/{branch}", f"{PAST_REFS}/{branch}"):
+            if rev(ref) is not None:
+                past += out(["git", "log", "-g", "--format=%H", ref]).split()
+        for later in dict.fromkeys(past):
+            if is_ancestor(tip, later) and tree_less_msg(later) in landed:
+                return "landed"
     return "abandoned"
 
 

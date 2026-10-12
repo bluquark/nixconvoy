@@ -139,6 +139,7 @@ fn params(hosts: &[&str], candidates: &[&str], reset: (bool, bool), drifting: &[
     let b = base();
     Params {
         cx: cx(&[(BRANCH, &b)]),
+        union: "u".repeat(40),
         router: "choko".into(),
         hosts: s(hosts),
         candidates: s(candidates),
@@ -182,7 +183,7 @@ fn names_the_abandoned_increments() {
     p.cx = cx(&[(BRANCH, &b), ("chikuwa-deploys1", &"c".repeat(40))]);
     let (asked, fx, out) = run_with(p.clone(), "abandoned");
     assert_eq!(out.unwrap().plan, ["chikuwa", "choko"]);
-    assert_eq!(asked, [Query::Fate { branch: BRANCH.into(), tip: "h".repeat(40) }]);
+    assert_eq!(asked, [Query::Fate { branch: BRANCH.into(), tip: "h".repeat(40), union: "u".repeat(40) }]);
     let line = format!("  chikuwa: will switch (catch-up: runs pushed work deployed by haswell-wsl:/home/blu/projects/homelab2 (pid 4242) at 13:46; reverting {BRANCH}'s abandoned increment hhhhhhhhhhhh)");
     assert_eq!(fx[0], Effect::Print(line));
     assert!(
@@ -190,12 +191,35 @@ fn names_the_abandoned_increments() {
         "{fx:?}"
     );
 
-    // Landed or rebased since: nothing is reverted, so nothing is said.
-    for fate in ["landed", "kept"] {
-        let (asked, fx, _) = run_with(p.clone(), fate);
-        assert_eq!(asked.len(), 1);
-        assert!(matches!(&fx[0], Effect::Print(l) if l.ends_with("at 13:46)")), "{fx:?}");
-    }
+    // Still in the union (rebased, redeployed, landed intact): nothing is
+    // reverted, so nothing is said; landed but undone since is a revert too.
+    let (asked, fx, _) = run_with(p.clone(), "kept");
+    assert_eq!(asked.len(), 1);
+    assert!(matches!(&fx[0], Effect::Print(l) if l.ends_with("at 13:46)")), "{fx:?}");
+    let (_, fx, _) = run_with(p.clone(), "landed");
+    assert!(
+        matches!(&fx[0], Effect::Print(l) if l.ends_with(&format!("; reverting {BRANCH}'s increment hhhhhhhhhhhh, landed and since undone)"))),
+        "{fx:?}"
+    );
+
+    // A pending increment of a branch origin has no tip of: in flight
+    // while its first push is on its way, caught up once the branch is
+    // gone with its subagent worktree and the union lacks the increment.
+    let sub = "haswell-wsl-deploys2-agent-x";
+    let first = doc(OLD, OTHER, Some((sub, None)), &[], T0);
+    let mut p = params(&["chikuwa"], &["chikuwa"], (false, false), &[("chikuwa", Some(first))]);
+    p.cx = cx(&[(BRANCH, &b)]);
+    p.cx.listed.insert(sub.into());
+    let (asked, _, out) = run_with(p.clone(), "kept");
+    assert_eq!(asked.len(), 1);
+    assert!(out.unwrap_err().contains("Re-run once its push lands"));
+    let (asked, fx, out) = run_with(p.clone(), "abandoned");
+    assert_eq!(asked.len(), 1, "one fate per tip: {asked:?}");
+    assert_eq!(out.unwrap().plan, ["chikuwa"]);
+    assert_eq!(fx[0], Effect::Print(format!("  chikuwa: will switch (catch-up: runs {sub}'s increment deployed by haswell-wsl:/home/blu/projects/homelab2 (pid 4242), the branch gone since; reverting {sub}'s abandoned increment hhhhhhhhhhhh)")));
+    p.reached.clear();
+    let (_, _, out) = run_with(p, "abandoned");
+    assert_eq!(out.unwrap().plan, ["chikuwa"]);
 
     // This checkout's own deploy, abandoned here since.
     let mine = doc(OLD, ME, Some((BRANCH, Some(&b))), &[], T0);
@@ -338,6 +362,7 @@ fn arb_params() -> impl Strategy<Value = Params> {
             let hosts: Vec<String> = hosts.into_iter().collect();
             let mut p = Params {
                 cx: Context { tips, now, ..cx(&[]) },
+                union: "u".repeat(40),
                 router: "choko".into(),
                 candidates: cands.into_iter().filter(|c| hosts.contains(c)).collect(),
                 hosts: hosts.clone(),
