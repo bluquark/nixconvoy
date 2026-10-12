@@ -15,6 +15,7 @@ from typing import IO, NamedTuple
 from . import memo, proc, targets
 from .checkout import (
     PAST_REFS,
+    PENDING_REFS,
     SESSIONLESS,
     GitQueries,
     add_worktree,
@@ -778,6 +779,12 @@ def drop_branches(names: list[str]) -> list[str]:
         if pushed.returncode != 0:
             failed.append(f"deleting {', '.join(on_origin)} on origin failed: "
                           f"{(pushed.stderr or '').strip() or 'timed out'}")
+    # A gone branch's announcement goes with it (best effort: origin may
+    # hold none).
+    for b in names:
+        git("update-ref", "-d", f"{PENDING_REFS}/{b}", check=False)
+    run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "origin",
+         *(f":{PENDING_REFS}/{b}" for b in names)], check=False, timeout=30)
     # A review of a branch gone this long is no longer expected.
     cutoff = time.time() - 90 * 86400
     past = run(["git", "for-each-ref", "--format=%(refname) %(committerdate:unix)", PAST_REFS], check=False)
