@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import IO, NoReturn
 
-PERF_FILE = "deploy-perf.jsonl"
+PERF_FILE = "nixconvoy-perf.jsonl"
 TOOL = "nixconvoy"
 
 
