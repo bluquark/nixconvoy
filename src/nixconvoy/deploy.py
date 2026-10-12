@@ -32,18 +32,15 @@ from .union import UnionQueries
 
 
 def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
-           danger: bool = False, take_over: set[str] | None = None,
-           dry: bool = False) -> None:
-    """`dry`: stop after the dry activation of every host that would be
+           danger: bool = False, dry: bool = False) -> None:
+    """`reset`: this checkout's view alone - no other work branch in the
+    union, and a host running another deployer's refused work switched over.
+    `dry`: stop after the dry activation of every host that would be
     switched, printing the units it would stop, restart or reload; nothing
     is switched, committed or pushed."""
     skip = os.environ.get("NIXCONVOY_SKIP_SWITCH") == "1"
     all_hosts = flake_host_names()
-    take_over = take_over or set()
     filter_hosts = expand_targets(filter_hosts, all_hosts)
-    unknown = [h for h in take_over if h not in all_hosts]
-    if unknown:
-        die(f"unknown host(s) {', '.join(unknown)}; the inventory has: {', '.join(all_hosts)}")
     me = proc.this_host()
 
     for h in filter_hosts:
@@ -154,7 +151,7 @@ def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
             "drift", me=[me, str(Path.cwd())],
             listed=sorted({*listed, "main"}), tips=origin_tips(), now=time.time(),
             tz_offset=time.localtime().tm_gmtoff, router=last[0] if last else "",
-            hosts=all_hosts, candidates=candidates, take_over=sorted(take_over),
+            hosts=all_hosts, candidates=candidates, reset=reset,
             reached=sorted(reached), running=running,
             built={h: t.out for h, t in tops.items()},
             lineages={h: {"text": p.lineage, "age": p.age} for h, p in probed.items()})

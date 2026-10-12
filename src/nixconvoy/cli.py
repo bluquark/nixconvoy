@@ -28,7 +28,7 @@ Model:
     performs the git, eval, build and ssh they ask for.
 
 Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
-         [--take-over host] [--dry-activate] [host|@tag ...]):
+         [--dry-activate] [host|@tag ...]):
   1. start fetching origin; enumerate the hosts from the hosts directory
   2. probe every host's running system and its lineage
      (/var/lib/nixconvoy/lineage.json, in the same round trip; a local_only
@@ -65,7 +65,7 @@ Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
      lineage recorded) it is left alone, running that work; when it does,
      the deploy is refused whole.  A refused lineage older than 30 min by
      the host's clock is a dead deployer's and is switched over with a
-     warning, as is a host named to --take-over.  When the configuration
+     warning, as is every refused host of a --reset.  When the configuration
      names a precheck (a flake check), it runs on a thread beside the evals
      unless a pass is already proven for exactly the files it reads, and a
      failure stops the deploy the moment it is known.  A drifting candidate
@@ -166,13 +166,13 @@ work branch without probing, building or switching anything - for changes
 that affect no NixOS host, or to publish work while a host is unreachable.
 A staged change to what the precheck reads is checked on its own first.
 
---take-over HOST switches HOST even though it runs another deployer's
-in-flight or unlisted work (step 5), reverting that work there.
-
---reset deploys ignoring the other work branches.  It is a one-off: the
-others return on their next deploy - the durable fix is to reset the branch
-that carries the unwanted change (git push --force-with-lease origin
-origin/main:<branch>) or repair it in its own checkout.
+--reset deploys this checkout's view alone: the other work branches are
+left out of the union, and a host running another deployer's in-flight or
+unlisted work (step 5) is switched over, reverting that work there (name
+the host to confine it).  It is a one-off: the others return on their next
+deploy - the durable fix is to reset the branch that carries the unwanted
+change (git push --force-with-lease origin origin/main:<branch>) or repair
+it in its own checkout.
 
 --danger-network-config-change admits a switch that would stop, restart or
 reload a protected unit (step 7), for this run only.
@@ -211,9 +211,8 @@ from .checkout import lock_checkout
 from .deploy import deploy
 from .hosts import NETWORK_FLAG, exec_on
 from .proc import PERF, PERF_FILE, die, git, out
-from .switch import TAKE_OVER_FLAG
 
-USAGE = """usage: nixconvoy apply [-m "msg"] [--reset] [--take-over host] [--danger-network-config-change] [--dry-activate] [host|@tag ...]
+USAGE = """usage: nixconvoy apply [-m "msg"] [--reset] [--danger-network-config-change] [--dry-activate] [host|@tag ...]
        nixconvoy commit -m "msg"
        nixconvoy land [worktree ...]
        nixconvoy abandon [worktree ...]
@@ -265,7 +264,6 @@ def main() -> None:
     reset = False
     danger = False
     dry = False
-    take_over: set[str] = set()
     hosts: list[str] = []
     after = ""
     stopped = ""
@@ -283,8 +281,6 @@ def main() -> None:
             danger = True
         elif a == DRY_FLAG:
             dry = True
-        elif a == TAKE_OVER_FLAG and args:
-            take_over.add(args.pop(0))
         elif a in ("-h", "--help"):
             print(USAGE)
             return
@@ -294,17 +290,17 @@ def main() -> None:
             die(USAGE)
 
     if subcmd == "pull":
-        if msg or reset or danger or dry or hosts or take_over:
+        if msg or reset or danger or dry or hosts:
             die(USAGE)
         commands.pull()  # takes each checkout's lock itself, this one included
         return
     if subcmd == "status":
-        if msg or reset or danger or dry or hosts or take_over:
+        if msg or reset or danger or dry or hosts:
             die(USAGE)
         commands.status()
         return
     if subcmd == "prune":
-        if msg or reset or danger or dry or take_over or ((after or stopped) and hosts) or (after and stopped):
+        if msg or reset or danger or dry or ((after or stopped) and hosts) or (after and stopped):
             die(USAGE)
         if stopped:
             stop = json.loads(sys.stdin.read() or "{}")
@@ -315,7 +311,7 @@ def main() -> None:
             commands.prune(hosts)
         return
     if subcmd in ("land", "abandon"):
-        if msg or reset or danger or dry or take_over:
+        if msg or reset or danger or dry:
             die(USAGE)
         act = commands.land if subcmd == "land" else commands.abandon
         # Several subagent worktrees, one after the other, each under its
@@ -342,11 +338,11 @@ def main() -> None:
     elif subcmd == "abandon":
         commands.abandon()
     elif subcmd == "commit":
-        if reset or danger or dry or hosts or take_over:
+        if reset or danger or dry or hosts:
             die(USAGE)
         commands.commit_only(msg)
     else:  # apply
-        deploy(hosts, msg, reset, danger, take_over, dry)
+        deploy(hosts, msg, reset, danger, dry)
 
 
 if __name__ == "__main__":

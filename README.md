@@ -167,7 +167,7 @@ nixconvoy.switchLast = true;                # the router: switched alone, after 
 ## Commands
 
 ```
-nixconvoy apply [-m "msg"] [--reset] [--take-over host] [host|@tag ...]   deploy
+nixconvoy apply [-m "msg"] [--reset] [host|@tag ...]   deploy
 nixconvoy apply --dry-activate [host|@tag ...]   build and copy, then only report what each switch would do
 nixconvoy commit -m "msg"      commit + push the staged state, no build or switch
 nixconvoy land [name ...]      land the work branch on main

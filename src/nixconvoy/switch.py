@@ -18,8 +18,6 @@ from .guard import DEPLOYER_PROTOCOL, drive
 from .hosts import PROBE_TIMEOUT, control_opts, lineage_digest
 from .proc import out, rev, run, stream
 
-TAKE_OVER_FLAG = "--take-over"
-
 
 def lineage_doc(*, union: str, main: str | None, branches: dict[str, str | None],
                 own: str, head: str | None, base: str | None, snap: str,
@@ -209,5 +207,5 @@ def switch(host: str, expected: str, toplevel: str, deployer: str,
                 guard.kill()
 
 
-__all__ = ["TAKE_OVER_FLAG", "lineage_digest", "lineage_doc", "lineage_record", "switch",
+__all__ = ["lineage_digest", "lineage_doc", "lineage_record", "switch",
            "switch_guard_cmd"]

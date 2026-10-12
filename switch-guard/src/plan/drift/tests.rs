@@ -79,10 +79,10 @@ fn classifies_lineages() {
     assert_eq!(k(Some(&young), &at_base, false).0, Kind::InFlight);
 
     let (kind, why) = k(Some(&std_lin()), &at_base, true);
-    assert!(kind == Kind::Overridden && why.contains(TAKE_OVER_FLAG), "{why}");
+    assert!(kind == Kind::Overridden && why.contains(RESET_FLAG), "{why}");
 
     // Refused work on a host this checkout's work does not reach is left
-    // there; age and --take-over still revert it.
+    // there; age and --reset still revert it.
     let (kind, why) = classify(Some(&std_lin()), NEW, &at_base, false, false);
     assert!(kind == Kind::LeftAlone && !kind.refused() && why.contains("does not reach it"), "{why}");
     assert_eq!(classify(Some(&old), NEW, &at_base, false, false).0, Kind::Abandoned);
@@ -121,11 +121,11 @@ fn refusal_advice() {
         a.contains("side1 runs another") && a.contains("reaches it too") && a.contains("Re-run once its push lands (after 30 min"),
         "{a}"
     );
-    assert!(a.contains(&format!("{TAKE_OVER_FLAG} side1")) && !a.contains(BRANCHES_FILE), "{a}");
+    assert!(a.contains(&format!("{RESET_FLAG} side1")) && !a.contains(BRANCHES_FILE), "{a}");
     let a = refusal(&[("side1".into(), Kind::Unlisted), ("side6".into(), Kind::InFlight)]);
     assert!(a.contains("side1, side6 run another") && a.contains("reaches them too"), "{a}");
     assert!(a.contains("Re-run once its push lands or list its branch in deploy-branches"), "{a}");
-    assert!(a.contains(&format!("{TAKE_OVER_FLAG} side1 ")), "{a}");
+    assert!(a.contains(&format!("{RESET_FLAG} side1 ")), "{a}");
 }
 
 #[test]
@@ -134,7 +134,7 @@ fn clock_is_local() {
     assert_eq!(clock(0.0, -3600), "23:00");
 }
 
-fn params(hosts: &[&str], candidates: &[&str], take_over: &[&str], drifting: &[(&str, Option<String>)]) -> Params {
+fn params(hosts: &[&str], candidates: &[&str], reset: bool, drifting: &[(&str, Option<String>)]) -> Params {
     let s = |v: &[&str]| v.iter().map(|h| h.to_string()).collect::<Vec<_>>();
     let b = base();
     Params {
@@ -142,7 +142,7 @@ fn params(hosts: &[&str], candidates: &[&str], take_over: &[&str], drifting: &[(
         router: "choko".into(),
         hosts: s(hosts),
         candidates: s(candidates),
-        take_over: take_over.iter().map(|h| h.to_string()).collect(),
+        reset,
         reached: hosts.iter().map(|h| h.to_string()).collect(),
         running: hosts
             .iter()
@@ -165,7 +165,7 @@ fn reports_the_plan() {
     let p = params(
         &["chikuwa", "choko", "side1"],
         &["choko", "side1"],
-        &["chikuwa"],
+        false,
         &[("choko", None), ("chikuwa", None), ("side1", Some(in_flight.clone()))],
     );
     let (fx, out) = run(p);
@@ -174,12 +174,12 @@ fn reports_the_plan() {
     assert_eq!(fx[0], Effect::Print("  side1: refused: runs an increment of haswell-wsl-deploys2 deployed by haswell-wsl:/home/blu/projects/homelab2 (pid 4242) at 13:46 whose push has not landed (origin/haswell-wsl-deploys2 is still at aaaaaaaaaaaa)".into()));
     assert_eq!(fx[1], Effect::Print("  choko: will switch".into()));
     assert_eq!(fx[2], Effect::Print("  chikuwa: differs but excluded by the host filter".into()));
-    assert_eq!(fx[3], Effect::Warn("warning: --take-over chikuwa: excluded by the host filter, nothing taken over".into()));
+    assert_eq!(fx.len(), 3);
 
     let p = params(
         &["chikuwa", "choko", "side1"],
         &["chikuwa", "choko", "side1"],
-        &["side1"],
+        true,
         &[("choko", None), ("side1", Some(in_flight.clone()))],
     );
     let (fx, out) = run(p);
@@ -192,7 +192,8 @@ fn reports_the_plan() {
 
     // The in-flight host is outside this checkout's work: left alone, the
     // rest switched.
-    let mut p = params(&["chikuwa", "choko", "side1"], &["chikuwa", "choko", "side1"], &[], &[("choko", None), ("side1", Some(in_flight))]);
+    let mut p =
+        params(&["chikuwa", "choko", "side1"], &["chikuwa", "choko", "side1"], false, &[("choko", None), ("side1", Some(in_flight))]);
     p.reached = ["chikuwa".to_string(), "choko".to_string()].into_iter().collect();
     let (fx, out) = run(p);
     let out = out.unwrap();
@@ -239,20 +240,20 @@ fn arb_params() -> impl Strategy<Value = Params> {
     (
         prop::collection::btree_set(host(), 0..5),
         prop::collection::btree_set(host(), 0..5),
-        prop::collection::btree_set(host(), 0..3),
+        any::<bool>(),
         prop::collection::btree_set(host(), 0..5),
         prop::collection::vec((proptest::option::of(arb_top()), arb_top(), arb_lineage(), proptest::option::of(0.0..4000.0f64)), 5),
         prop::collection::btree_map(arb_name(), prop::sample::select(vec!["a", "b"]).prop_map(str::to_string), 0..4),
         0.0..1e7f64,
     )
-        .prop_map(|(hosts, cands, take_over, reached, facts, tips, now)| {
+        .prop_map(|(hosts, cands, reset, reached, facts, tips, now)| {
             let hosts: Vec<String> = hosts.into_iter().collect();
             let mut p = Params {
                 cx: Context { tips, now, ..cx(&[]) },
                 router: "choko".into(),
                 candidates: cands.into_iter().filter(|c| hosts.contains(c)).collect(),
                 hosts: hosts.clone(),
-                take_over,
+                reset,
                 reached,
                 running: BTreeMap::new(),
                 built: BTreeMap::new(),
@@ -280,7 +281,7 @@ proptest! {
     }
 
     /// The verdicts follow from the lineage, and only refusals are
-    /// demoted by age or --take-over.
+    /// demoted by age or --reset.
     #[test]
     fn verdicts(text in arb_lineage(), running in arb_top(), p in arb_params(), age in proptest::option::of(0.0..4000.0f64)) {
         let lin = text.as_deref().and_then(|t| parse(t, age));
@@ -327,7 +328,7 @@ proptest! {
         let verdicts: Vec<(String, Kind)> = affected.iter().filter(|h| p.candidates.contains(h)).map(|h| {
             let lin = p.lineages.get(h).and_then(|(t, a)| parse(t, *a));
             let running = p.running[h].clone().unwrap();
-            (h.clone(), classify(lin.as_ref(), &running, &p.cx, p.take_over.contains(h), p.reached.contains(h)).0)
+            (h.clone(), classify(lin.as_ref(), &running, &p.cx, p.reset, p.reached.contains(h)).0)
         }).collect();
         let refused: Vec<(String, Kind)> = verdicts.iter().filter(|v| v.1.refused()).cloned().collect();
         match out {
@@ -344,10 +345,6 @@ proptest! {
         // One report line per candidate and per excluded drifting host.
         let printed = fx.iter().filter(|e| matches!(e, Effect::Print(_))).count();
         prop_assert_eq!(printed, p.candidates.len() + affected.iter().filter(|h| !p.candidates.contains(h)).count());
-        for h in &p.take_over {
-            let overridden = verdicts.iter().any(|v| &v.0 == h && v.1 == Kind::Overridden);
-            let warned = fx.iter().any(|e| matches!(e, Effect::Warn(w) if w.contains(&format!("{TAKE_OVER_FLAG} {h}:"))));
-            prop_assert_eq!(warned, !overridden);
-        }
+        prop_assert!(!fx.iter().any(|e| matches!(e, Effect::Warn(_))));
     }
 }

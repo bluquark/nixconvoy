@@ -8,7 +8,8 @@
 //! deploy-branches here does not list.  Switching it would revert that work
 //! until its owner redeploys, so it is never switched as is - unless the
 //! lineage is older than PENDING_MAX_AGE by the host's clock (a dead
-//! deployer's) or the host was named to --take-over.  When this checkout's
+//! deployer's) or the deploy is a --reset, which claims every host for this
+//! checkout's view alone.  When this checkout's
 //! own work does not reach the host (Params::reached: no file its
 //! configuration reads changed), the host is simply left running that work
 //! and the deploy goes on without it; when it does, two checkouts are
@@ -24,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// written (by the host's clock) is a dead deployer's, and its host is fair
 /// game again.
 pub const PENDING_MAX_AGE: f64 = 30.0 * 60.0;
-pub const TAKE_OVER_FLAG: &str = "--take-over";
+pub const RESET_FLAG: &str = "--reset";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lineage {
@@ -99,7 +100,7 @@ pub enum Kind {
     LeftAlone,
     /// Refused, but written more than PENDING_MAX_AGE ago.
     Abandoned,
-    /// Refused, but taken over deliberately.
+    /// Refused, but taken over by a --reset.
     Overridden,
 }
 
@@ -143,10 +144,9 @@ fn clock(at: f64, tz_offset: i64) -> String {
 }
 
 /// Whose work a drifting host runs, relative to this deploy's union, and
-/// why; `take_over` when the host was named to --take-over, `reached` when
-/// this checkout's own work changes something the host's configuration
-/// reads.
-pub fn classify(lin: Option<&Lineage>, running: &str, cx: &Context, take_over: bool, reached: bool) -> (Kind, String) {
+/// why; `reset` on a --reset deploy, `reached` when this checkout's own
+/// work changes something the host's configuration reads.
+pub fn classify(lin: Option<&Lineage>, running: &str, cx: &Context, reset: bool, reached: bool) -> (Kind, String) {
     let Some(lin) = lin.filter(|l| l.toplevel == running) else {
         return (Kind::Untracked, String::new());
     };
@@ -180,8 +180,8 @@ pub fn classify(lin: Option<&Lineage>, running: &str, cx: &Context, take_over: b
     if age > PENDING_MAX_AGE {
         return (Kind::Abandoned, format!("{why}; {:.0} min old, so taken as abandoned", age / 60.0));
     }
-    if take_over {
-        return (Kind::Overridden, format!("{why}; taken over by {TAKE_OVER_FLAG}"));
+    if reset {
+        return (Kind::Overridden, format!("{why}; taken over by {RESET_FLAG}"));
     }
     if !reached {
         return (Kind::LeftAlone, format!("{why}; this checkout's work does not reach it"));
@@ -203,7 +203,8 @@ pub struct Params {
     pub router: String,
     pub hosts: Vec<String>,
     pub candidates: Vec<String>,
-    pub take_over: BTreeSet<String>,
+    /// --reset: this checkout's view alone, refused work taken over.
+    pub reset: bool,
     /// The hosts this checkout's own work reaches: those whose
     /// configuration reads a file that work changed (nixconvoy's
     /// reached_hosts, by the eval memo's scan).
@@ -239,7 +240,7 @@ pub fn refusal(refused: &[(String, Kind)]) -> String {
     let mut c = fix.chars();
     let fix: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
     format!(
-        "nothing switched or committed: {} {} another deployer's work this union lacks, and this checkout's work reaches {} too (see above).  {fix} (after {} min it counts as abandoned), or pass {TAKE_OVER_FLAG} {} to revert it deliberately.",
+        "nothing switched or committed: {} {} another deployer's work this union lacks, and this checkout's work reaches {} too (see above).  {fix} (after {} min it counts as abandoned), or deploy with {RESET_FLAG} {} to revert it deliberately.",
         hosts.join(", "),
         if hosts.len() == 1 { "runs" } else { "run" },
         if hosts.len() == 1 { "it" } else { "them" },
@@ -265,7 +266,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     for h in affected.iter().filter(|h| p.candidates.contains(h)) {
         let lin = p.lineages.get(h).and_then(|(text, age)| parse(text, *age));
         let running = p.running.get(h).cloned().flatten().unwrap_or_default();
-        let (kind, why) = classify(lin.as_ref(), &running, &p.cx, p.take_over.contains(h), p.reached.contains(h));
+        let (kind, why) = classify(lin.as_ref(), &running, &p.cx, p.reset, p.reached.contains(h));
         if kind.refused() {
             refused.push((h.clone(), kind));
         } else if kind != Kind::LeftAlone {
@@ -286,13 +287,6 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     for h in &affected {
         if !drift.contains_key(h) {
             s.print(format!("  {h}: differs but excluded by the host filter"));
-        }
-    }
-    for h in &p.take_over {
-        if !p.candidates.contains(h) {
-            s.warn(format!("warning: {TAKE_OVER_FLAG} {h}: excluded by the host filter, nothing taken over"));
-        } else if !matches!(drift.get(h), Some((Kind::Overridden, _))) {
-            s.warn(format!("warning: {TAKE_OVER_FLAG} {h}: it runs no refused work, nothing taken over"));
         }
     }
     if !refused.is_empty() {

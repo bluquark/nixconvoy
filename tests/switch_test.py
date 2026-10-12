@@ -240,7 +240,7 @@ def lineage_line(top: str, *, by: tuple[str, str] = OTHER,
 
 
 def report(text: str, age: float | None, *, tips: dict[str, str] | None = None,
-           take_over: bool = False, reached: bool = True, running: str = NEW) -> tuple[str, str]:
+           reset: bool = False, reached: bool = True, running: str = NEW) -> tuple[str, str]:
     """deploy-plan's drift verdict on one drifting host carrying `text` as
     its lineage file: its report line, and the deploy's die message."""
     out, err = io.StringIO(), io.StringIO()
@@ -249,7 +249,7 @@ def report(text: str, age: float | None, *, tips: dict[str, str] | None = None,
         guard.decide(
             "drift", me=list(ME), listed=sorted(LISTED), tips={BRANCH: BASE} if tips is None else tips,
             now=1e6 + 60, tz_offset=0, router="choko", hosts=["side1"], candidates=["side1"],
-            take_over=["side1"] if take_over else [], reached=["side1"] if reached else [],
+            reset=reset, reached=["side1"] if reached else [],
             running={"side1": running},
             built={"side1": "/nix/store/union-system"},
             lineages={"side1": {"text": text, "age": age}})
@@ -296,7 +296,7 @@ def lineage_cases() -> None:
                            "haswell-wsl:/home/blu/projects/homelab2 (pid 4242) at 13:46"), line
     assert f"origin/{BRANCH} is still at {BASE[:12]}" in line, line
     assert died.startswith("nothing switched or committed: side1 runs another") and \
-        f"{switch.TAKE_OVER_FLAG} side1" in died, died
+        "--reset side1" in died, died
     line, died = report(lineage_line(NEW), 60, reached=False)
     assert line.startswith("side1: left alone: runs an increment of haswell-wsl-deploys2") and \
         line.endswith("this checkout's work does not reach it") and not died, (line, died)
@@ -306,8 +306,8 @@ def lineage_cases() -> None:
     assert line.startswith("side1: will switch (catch-up: ") and not died, (line, died)
     line, _ = report(lineage_line(NEW), 31 * 60)
     assert line.startswith("side1: will switch, reverting it: ") and "taken as abandoned" in line, line
-    line, _ = report(lineage_line(NEW), 60, take_over=True)
-    assert line.endswith(f"taken over by {switch.TAKE_OVER_FLAG}"), line
+    line, _ = report(lineage_line(NEW), 60, reset=True)
+    assert line.endswith("taken over by --reset"), line
     line, _ = report(lineage_line(NEW, pending=None, others=("M3-Air-deploys9",)), 60)
     assert "side1: refused: runs work of M3-Air-deploys9" in line, line
     assert report(lineage_line(NEW, by=ME), 60)[0].startswith("side1: will switch (this-branch: ")
