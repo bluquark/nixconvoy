@@ -1,11 +1,11 @@
-//! nixconvoy's switch of one host (its module docstring, step 7) as a pure
-//! machine: nixconvoy performs each query - the on-host guard, ssh, the
+//! nixconvoy's switch of one target (its module docstring, step 7) as a pure
+//! machine: nixconvoy performs each query - the on-target guard, ssh, the
 //! clock - and feeds the result back, printing and dying as told.
 //!
 //! In a confirmed switch the helper activates under its own lock, so a timer
 //! that fired first refuses the activation and one firing meanwhile waits
 //! for it.  An activation that reports failures is still confirmed when the
-//! host verifies (a plain switch leaves such a host on the new system too),
+//! target verifies (a plain switch leaves such a target on the new system too),
 //! and the deploy then fails; one that exits 100 (an init incompatible with
 //! the running one: nothing activated, a reboot needed) stages the new
 //! system as a plain switch would, and fails.
@@ -14,13 +14,13 @@ mod model;
 pub mod wire;
 
 /// No verification round starts, nor pause ends, within this long of the
-/// host's deadline: the confirm need only take the helper's lock before the
+/// target's deadline: the confirm need only take the helper's lock before the
 /// timer's rollback does.
 pub const VERIFY_MARGIN_MS: u64 = 5_000;
 /// What one probe may take (nixconvoy's PROBE_TIMEOUT), so a stalled ssh
 /// session holds no verification past the deadline.
 pub const PROBE_TIMEOUT_MS: u64 = 20_000;
-/// Every probe ends this long before the host's deadline, whenever its
+/// Every probe ends this long before the target's deadline, whenever its
 /// round began: the confirm's ssh round trip and systemd-run start fit in
 /// it.  Each probe's timeout is cut to that hard stop, so the probes of the
 /// last round (running system, check, the router's internet) cannot add up
@@ -33,11 +33,11 @@ pub const ALREADY_CONFIRMED: i32 = crate::switch::core::ALREADY_CONFIRMED;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Params {
-    pub host: String,
+    pub target: String,
     pub toplevel: String,
-    /// What the host ran when the deploy probed it.
+    /// What the target ran when the deploy probed it.
     pub expected: String,
-    /// "local", or the ssh target.
+    /// "local", or the ssh address.
     pub place: String,
     pub quiet: bool,
     /// The router: verification also needs this machine on the internet.
@@ -49,14 +49,14 @@ pub struct Params {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Guard {
     Locked,
-    /// The host runs something else than what was probed.
+    /// The target runs something else than what was probed.
     Moved(String),
     Failed(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Query {
-    /// Take the on-host switch guard (compare-and-swap on the running
+    /// Take the on-target switch guard (compare-and-swap on the running
     /// system) -> Guard.
     Guard,
     /// Whether the toplevel carries /confirmed-switch -> Code (0/1).
@@ -101,7 +101,7 @@ pub enum Reply {
     /// its rollback goes or went to.
     Said {
         code: i32,
-        target: Option<String>,
+        to: Option<String>,
     },
     Text(String),
     Now(u64),
@@ -118,7 +118,7 @@ pub enum Reply {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Effect {
     Print(String),
-    /// The host is armed: a die() elsewhere leaves it to its timer.
+    /// The target is armed: a die() elsewhere leaves it to its timer.
     Armed,
     Disarmed,
     /// nixconvoy's PERF phase.
@@ -183,7 +183,7 @@ struct Window {
 pub struct Machine {
     p: Params,
     pc: Pc,
-    /// Where a rollback takes the host: the probed system, unless the
+    /// Where a rollback takes the target: the probed system, unless the
     /// helper said otherwise (an arm taking over a dead deploy's pending
     /// rollback, a rollback finding another arm's record).
     rollback_to: String,
@@ -207,7 +207,7 @@ impl Machine {
     fn failed(&self) -> String {
         format!(
             "the build succeeded but the switch of {} failed; nothing was committed or pushed - the changes are still staged.  Fix the problem and re-run the deploy from this checkout.",
-            self.p.host
+            self.p.target
         )
     }
 
@@ -228,28 +228,28 @@ impl Machine {
     }
 
     fn transition(&mut self, pc: Pc, reply: Reply, fx: &mut Vec<Effect>) -> Next {
-        let host = self.p.host.clone();
+        let target = self.p.target.clone();
         match (pc, reply) {
             (Pc::Start, Reply::Start) => self.ask(Pc::Guarding, Query::Guard),
             (Pc::Guarding, Reply::Guard(g)) => match g {
                 Guard::Locked => self.ask(Pc::Probing, Query::ProbeHelper),
                 Guard::Moved(cur) => Next::Die(format!(
-                    "{host} was switched by another deploy while this one ran (now running {cur}).  Nothing was committed; re-run to converge with it."
+                    "{target} was switched by another deploy while this one ran (now running {cur}).  Nothing was committed; re-run to converge with it."
                 )),
                 Guard::Failed(line) => Next::Die(format!(
-                    "could not take {host}'s switch lock ({}); nothing was committed",
+                    "could not take {target}'s switch lock ({}); nothing was committed",
                     if line.is_empty() { "connection failed" } else { &line }
                 )),
             },
             (Pc::Probing, Reply::Code(rc)) => {
                 if rc != 0 && rc != 1 {
                     return Next::Die(format!(
-                        "could not probe {host} for its confirmed-switch helper (exit {rc}); nothing was switched or committed"
+                        "could not probe {target} for its confirmed-switch helper (exit {rc}); nothing was switched or committed"
                     ));
                 }
                 let confirmed = rc == 0;
                 fx.push(Effect::Print(format!(
-                    "switching {host} ({}){}...",
+                    "switching {target} ({}){}...",
                     self.p.place,
                     if confirmed { ", confirmed" } else { "" }
                 )));
@@ -273,17 +273,17 @@ impl Machine {
             }
             (Pc::ReadingDeadline, Reply::Text(t)) => match t.trim().parse::<u64>() {
                 Ok(secs) => self.ask(Pc::Clocking { deadline_ms: secs * 1000 }, Query::Now),
-                Err(_) => Next::Die(format!("{host}'s confirmed-switch helper gave no deadline ({t:?})")),
+                Err(_) => Next::Die(format!("{target}'s confirmed-switch helper gave no deadline ({t:?})")),
             },
-            // Taken before arming, so the host's timer, started later, is
+            // Taken before arming, so the target's timer, started later, is
             // never due before this side's reckoning of it.
             (Pc::Clocking { deadline_ms }, Reply::Now(now)) => {
                 let end = now + deadline_ms;
                 let w = Window { until: end.saturating_sub(VERIFY_MARGIN_MS), hard: end.saturating_sub(CONFIRM_RESERVE_MS) };
                 self.ask(Pc::Arming { w }, Query::Arm)
             }
-            (pc @ (Pc::Arming { .. } | Pc::RollingBack { .. } | Pc::ConfirmRollingBack { .. }), Reply::Said { code, target }) => {
-                if let Some(t) = target.filter(|_| code == 0) {
+            (pc @ (Pc::Arming { .. } | Pc::RollingBack { .. } | Pc::ConfirmRollingBack { .. }), Reply::Said { code, to }) => {
+                if let Some(t) = to.filter(|_| code == 0) {
                     self.rollback_to = t;
                 }
                 self.transition(pc, Reply::Code(code), fx)
@@ -291,7 +291,7 @@ impl Machine {
             (Pc::Arming { w }, Reply::Code(rc)) => {
                 if rc != 0 {
                     return Next::Die(format!(
-                        "could not arm {host}'s rollback timer; nothing was switched or committed"
+                        "could not arm {target}'s rollback timer; nothing was switched or committed"
                     ));
                 }
                 fx.push(Effect::Armed);
@@ -300,16 +300,16 @@ impl Machine {
             }
             (Pc::Activating { w }, Reply::Code(rc)) => {
                 if !self.p.quiet {
-                    fx.push(Effect::Mark(format!("verify:{host}")));
+                    fx.push(Effect::Mark(format!("verify:{target}")));
                 }
                 if rc == 100 {
                     fx.push(Effect::Print(format!(
-                        "{host}'s new system takes effect only at a reboot; staging it"
+                        "{target}'s new system takes effect only at a reboot; staging it"
                     )));
                     let q = self.helper(&["confirm", &self.p.toplevel, "reboot-pending"]);
                     return self.ask(Pc::Staging, q);
                 }
-                fx.push(Effect::Print(format!("verifying {host}...")));
+                fx.push(Effect::Print(format!("verifying {target}...")));
                 if self.p.fail_verify {
                     return self.verify_failed("DEPLOY_FAIL_VERIFY=1".to_string(), fx);
                 }
@@ -318,16 +318,16 @@ impl Machine {
             (Pc::Staging, Reply::Code(c)) => {
                 fx.push(Effect::Disarmed);
                 Next::Die(format!(
-                    "the new system of {host} has an init incompatible with the running one, so it takes effect only at a reboot, which a confirmed switch never does.  {}Nothing was committed or pushed.",
+                    "the new system of {target} has an init incompatible with the running one, so it takes effect only at a reboot, which a confirmed switch never does.  {}Nothing was committed or pushed.",
                     if c == 0 {
-                        format!("Its profile and bootloader entry are set: reboot {host}, then re-run.  ")
+                        format!("Its profile and bootloader entry are set: reboot {target}, then re-run.  ")
                     } else {
                         "Staging it failed (see above).  ".to_string()
                     }
                 ))
             }
 
-            // One round of verification: the host runs the new system and
+            // One round of verification: the target runs the new system and
             // passes its check (internet + homelab.confirmedSwitch.checks),
             // and for the router this machine reaches the internet too.
             (Pc::VerifyNow { w, rc }, Reply::Now(now)) => {
@@ -343,7 +343,7 @@ impl Machine {
                 }
                 if cur.as_deref() != Some(self.p.toplevel.as_str()) {
                     let problem = format!(
-                        "{host} runs {}, not the new system",
+                        "{target} runs {}, not the new system",
                         cur.as_deref().unwrap_or("nothing reachable")
                     );
                     return self.verify_internet(w, rc, vec![problem]);
@@ -358,9 +358,9 @@ impl Machine {
                 let mut problems = Vec::new();
                 if code < 0 {
                     self.cut |= tmo < PROBE_TIMEOUT_MS;
-                    problems.push(format!("{host}: check timed out after {:.0}s", tmo as f64 / 1000.0));
+                    problems.push(format!("{target}: check timed out after {:.0}s", tmo as f64 / 1000.0));
                 } else if code != 0 {
-                    problems.push(format!("{host}: {}", last.as_deref().unwrap_or("check failed")));
+                    problems.push(format!("{target}: {}", last.as_deref().unwrap_or("check failed")));
                 }
                 self.verify_internet(w, rc, problems)
             }
@@ -396,7 +396,7 @@ impl Machine {
                     return self.ask(pc, Query::Running { timeout_ms: None });
                 }
                 Next::Die(format!(
-                    "the switch of {host} did not verify ({problem}); rolled back to {}.  Nothing was committed or pushed - the changes are still staged.",
+                    "the switch of {target} did not verify ({problem}); rolled back to {}.  Nothing was committed or pushed - the changes are still staged.",
                     self.rollback_to
                 ))
             }
@@ -409,7 +409,7 @@ impl Machine {
                 // a timer that fired first, this undoes the activation it
                 // may have missed.  Exit 3: the confirm did land, only its
                 // relay died.
-                fx.push(Effect::Print(format!("{host} could not be confirmed; rolling back")));
+                fx.push(Effect::Print(format!("{target} could not be confirmed; rolling back")));
                 let q = self.helper(&["rollback"]);
                 self.ask(Pc::ConfirmRollingBack { rc }, q)
             }
@@ -420,7 +420,7 @@ impl Machine {
                 }
                 if r == 0 {
                     return Next::Die(format!(
-                        "{host} verified but could not be confirmed (see above: its deadline passed first, or persisting the new system failed); rolled back to {}.  Nothing was committed or pushed.",
+                        "{target} verified but could not be confirmed (see above: its deadline passed first, or persisting the new system failed); rolled back to {}.  Nothing was committed or pushed.",
                         self.rollback_to
                     ));
                 }
@@ -431,10 +431,10 @@ impl Machine {
                 let cur = cur.unwrap_or_else(|| "nothing reachable".to_string());
                 Next::Die(match fallout {
                     Fallout::VerifyFailed => format!(
-                        "the switch of {host} did not verify ({problem}) and rolling it back failed too (see above): it runs {cur}; its timer retries if still pending.  Nothing was committed or pushed."
+                        "the switch of {target} did not verify ({problem}) and rolling it back failed too (see above): it runs {cur}; its timer retries if still pending.  Nothing was committed or pushed."
                     ),
                     Fallout::ConfirmFailed => format!(
-                        "{host} verified but could not be confirmed (see above: its deadline passed first, or persisting the new system failed); rolling it back failed too, it runs {cur}.  Nothing was committed or pushed."
+                        "{target} verified but could not be confirmed (see above: its deadline passed first, or persisting the new system failed); rolling it back failed too, it runs {cur}.  Nothing was committed or pushed."
                     ),
                 })
             }
@@ -450,7 +450,7 @@ impl Machine {
     }
 
     fn out_of_time(&self) -> String {
-        format!("{}: no time left to verify before its rollback deadline", self.p.host)
+        format!("{}: no time left to verify before its rollback deadline", self.p.target)
     }
 
     fn verify_internet(&mut self, w: Window, rc: i32, problems: Vec<String>) -> Next {
@@ -478,7 +478,7 @@ impl Machine {
     }
 
     fn verify_failed(&mut self, problem: String, fx: &mut Vec<Effect>) -> Next {
-        fx.push(Effect::Print(format!("{} failed verification ({problem}); rolling back", self.p.host)));
+        fx.push(Effect::Print(format!("{} failed verification ({problem}); rolling back", self.p.target)));
         let q = self.helper(&["rollback"]);
         self.ask(Pc::RollingBack { problem }, q)
     }

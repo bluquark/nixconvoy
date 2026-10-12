@@ -28,7 +28,7 @@ pub struct Settings {
     date: String,
     notice: String,
     notice_timeout: u64,
-    host: String,
+    hostname: String,
     deadline: u64,
     grace: u64,
     runtime_watchdog: u64,
@@ -60,7 +60,7 @@ impl Settings {
             date: s("date")?,
             notice: s("notice")?,
             notice_timeout: c.num("notice_timeout")?,
-            host: s("host")?,
+            hostname: s("hostname")?,
             deadline: c.num("deadline")?,
             grace: c.num("grace")?,
             runtime_watchdog: c.num("runtime_watchdog")?,
@@ -230,7 +230,7 @@ fn esp_notice(s: &Settings, shortfall: Option<u128>) {
         Some(bytes) => {
             let body = format!(
                 "{host}'s ESP lacks {mib} MiB for the generations its failover needs (target, booted, running, previous): every switch fails to install its boot entry until space is made on {esp}.\n",
-                host = s.host,
+                host = s.hostname,
                 mib = bytes.div_ceil(1 << 20),
                 esp = s.esp.display(),
             );
@@ -326,7 +326,7 @@ fn report(s: &Settings) -> i32 {
          nixconvoy refuses to switch back onto a rejected generation: change the configuration (a new generation gets its own tries), or re-arm the stub to retry it as is (sudo mv of the +0-N stub to +{tries}, then deploy).\n\
          The boot-assessment notice, if set, says why the newest one failed.\n\
          Log: journalctl -u boot-assessment-watch -u boot-assessment\n",
-        host = s.host,
+        host = s.hostname,
         bgen = bgen.map_or_else(|| "?".to_string(), |g| g.to_string()),
         date = date(s),
         tries = s.initial_tries,
@@ -353,7 +353,7 @@ impl Clock {
     }
 }
 
-/// One poll: the host's checks (`fail <reason>` lines on stdout, in order,
+/// One poll: the target's own checks (`fail <reason>` lines on stdout, in order,
 /// and a non-zero exit: a fatal error or a kill fails the poll too), then
 /// the confirmed-switch checks' last stderr line.
 fn failures(s: &Settings) -> Vec<String> {
@@ -361,7 +361,7 @@ fn failures(s: &Settings) -> Vec<String> {
         Ok(o) => {
             let mut f: Vec<String> = String::from_utf8_lossy(&o.stdout).lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
             if !o.status.success() {
-                f.push(format!("host checks exited {}", proc::code(Ok(o.status))));
+                f.push(format!("the boot-assessment checks exited {}", proc::code(Ok(o.status))));
             }
             f
         }
@@ -382,7 +382,7 @@ fn failures(s: &Settings) -> Vec<String> {
 }
 
 /// Judge this boot (boot-assessment.service, required by
-/// boot-complete.target): reachable on the LAN, the host's checks pass.
+/// boot-complete.target): reachable on the LAN, the target's own checks pass.
 fn run_gate(s: &Settings) -> i32 {
     let clock = Clock::new(s);
     if let Some(d) = s.status_file.parent() {
@@ -391,7 +391,7 @@ fn run_gate(s: &Settings) -> i32 {
     loop {
         match gate::gate(&failures(s), clock.elapsed(), s.deadline) {
             Gate::Pass => {
-                say("reachable: sshd, tailscaled, host checks");
+                say("reachable: sshd, tailscaled, the boot-assessment checks pass");
                 let _ = std::fs::remove_file(&s.status_file);
                 return 0;
             }
@@ -484,7 +484,7 @@ fn run_watch(s: &Settings) -> i32 {
                 let body = format!(
                     "{}'s boot of {entry} passed its assessment at {} but systemd-bless-boot failed: the stub keeps its tries counter, and each reboot spends one until the ESP takes the rename.\n\
                      Log: journalctl -u systemd-bless-boot\n",
-                    s.host,
+                    s.hostname,
                     date(s)
                 );
                 notice(s, "set", "boot-assessment", Some(&body));
@@ -499,7 +499,7 @@ fn run_watch(s: &Settings) -> i32 {
         "{}'s boot of {entry} failed its assessment at {}: {status}\n\
          Rebooting: systemd-boot retries the entry until its tries are spent, then boots the generation deployed before it (if it was never booted), then the last blessed one.\n\
          Log: journalctl -u boot-assessment-watch -u boot-assessment\n",
-        s.host,
+        s.hostname,
         date(s)
     );
     notice(s, "set", "boot-assessment", Some(&body));

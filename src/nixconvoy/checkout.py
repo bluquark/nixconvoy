@@ -64,7 +64,7 @@ def listed(name: str, pats: set[str] | None = None) -> bool:
 
 
 def this_prefix() -> str:
-    return cfg().branch_prefix.format(host=proc.this_host())
+    return cfg().branch_prefix.format(machine=proc.this_machine())
 
 
 def owned(name: str, pats: set[str] | None = None) -> bool:
@@ -420,7 +420,7 @@ def staged_snapshot() -> str:
 def deployed_commit(snap: str, msg: str) -> str:
     """The work-branch commit of the increment `snap` deploys: exactly the
     snapshot's tree on HEAD, with the user's identity.  Made before the
-    switch, so the lineage the hosts get names the commit origin will hold
+    switch, so the lineage the targets get names the commit origin will hold
     (a later deploy anywhere can then tell what became of it); dangling if
     the switch fails."""
     tree = out(["git", "rev-parse", f"{snap}^{{tree}}"])
@@ -586,12 +586,12 @@ def on_origin(cwd: str | None = None, pats: set[str] | None = None) -> bool:
 
 
 def increment_fate(branch: str, tip: str, union: str, checkout: str | None) -> str:
-    """What became of `branch`'s increment at `tip`, a tip a host's lineage
+    """What became of `branch`'s increment at `tip`, a tip a target's lineage
     recorded that origin's tip of the branch no longer is, for the deploy
-    of `union` (the drift core's Query::Fate; `checkout` the deployer's
-    when it is on this machine).  "kept" when the switch reverts none of
+    of `union` (the drift core's Query::Fate; `checkout` the deploying one, when
+    it is on this machine).  "kept" when the switch reverts none of
     it: origin's branch still carries it, or origin has no such branch yet
-    while the deployer's checkout has it checked out (its first push on
+    while the deploying checkout has it checked out (its first push on
     its way - the commit reaches the branch only after every switch - or
     that first switch failed and the increment stays staged there; abandon
     removes a subagent's worktree, and an agent checkout's branch is reset

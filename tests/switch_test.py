@@ -1,6 +1,6 @@
-"""nixconvoy's switch step end to end against a fake host: the real
+"""nixconvoy's switch step end to end against a fake target: the real
 deploy-switch binary ($NIXCONVOY_SWITCH_BIN) decides, the switch module's
-effects loop performs, and every ssh call lands in this file's --fake-host
+effects loop performs, and every ssh call lands in this file's --fake-target
 mode, which plays the confirmed-switch helper, systemd-run and nix-env on a
 JSON state file.  Then the lineage records and the drift classification
 other deploys read from them, and deploy-plan's rebase and union cores on
@@ -21,7 +21,7 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from pathlib import Path
 
-from nixconvoy import checkout, commands, config, guard, hosts, memo, proc, switch
+from nixconvoy import checkout, commands, config, guard, memo, proc, switch, targets
 from nixconvoy.union import UnionQueries
 
 REAL_GUARD = switch.switch_guard_cmd
@@ -38,9 +38,9 @@ def load(path: Path) -> dict[str, object]:
     return {str(k): v for k, v in state.items()}
 
 
-def fake_host(argv: list[str]) -> int:
-    """One ssh call to the fake host."""
-    path = Path(os.environ["FAKE_HOST_STATE"])
+def fake_target(argv: list[str]) -> int:
+    """One ssh call to the fake target."""
+    path = Path(os.environ["FAKE_TARGET_STATE"])
     state = load(path)
     calls = state.setdefault("calls", [])
     assert isinstance(calls, list)
@@ -87,7 +87,7 @@ def fake_host(argv: list[str]) -> int:
         case [p, "switch"] if p == f"{NEW}/bin/switch-to-configuration":
             state["running"] = NEW
         case _:
-            print(f"fake host: unexpected {argv}", file=sys.stderr)
+            print(f"fake target: unexpected {argv}", file=sys.stderr)
             rc = 99
     path.write_text(proc.dump_json(state))
     return rc
@@ -95,8 +95,8 @@ def fake_host(argv: list[str]) -> int:
 
 def fake_guard(expected: str, toplevel: str) -> int:
     """switch_guard_cmd's contract: claim the lineage once locked, put it
-    back at the end unless the host runs or boots `toplevel`."""
-    path = Path(os.environ["FAKE_HOST_STATE"])
+    back at the end unless the target runs or boots `toplevel`."""
+    path = Path(os.environ["FAKE_TARGET_STATE"])
     running = load(path)["running"]
     if running != expected:
         print(f"MOVED {running}", flush=True)
@@ -131,9 +131,9 @@ class Clock:
 def scenario(name: str, *, helper: bool = True, check_ok: bool = True, activate_rc: int = 0,
              running: str = OLD, rollback_to: str = OLD, check_killed: bool = False,
              confirm_rc: int = 0, rollback_rc: int = 0,
-             deployer: str = "") -> tuple[str | None, dict[str, object]]:
-    """Run one switch; (the die message or None, the host's final state)."""
-    state_file = Path(os.environ["FAKE_HOST_STATE"])
+             deploy_switch: str = "") -> tuple[str | None, dict[str, object]]:
+    """Run one switch; (the die message or None, the target's final state)."""
+    state_file = Path(os.environ["FAKE_TARGET_STATE"])
     state_file.write_text(proc.dump_json({
         "helper": helper, "check_ok": check_ok, "activate_rc": activate_rc,
         "running": running, "profile": running, "armed": False, "rollback_to": rollback_to,
@@ -145,7 +145,7 @@ def scenario(name: str, *, helper: bool = True, check_ok: bool = True, activate_
     died: str | None = None
     with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
         try:
-            switch.switch("testhost", OLD, NEW, deployer or os.environ["NIXCONVOY_SWITCH_BIN"],
+            switch.switch("testhost", OLD, NEW, deploy_switch or os.environ["NIXCONVOY_SWITCH_BIN"],
                           lineage=LINEAGE)
         except SystemExit:
             died = err.getvalue().strip().splitlines()[0].removeprefix("nixconvoy: ")
@@ -156,18 +156,18 @@ def scenario(name: str, *, helper: bool = True, check_ok: bool = True, activate_
 def main() -> None:
     me = [sys.executable, str(Path(__file__).resolve())]
 
-    def host_cmd(host: str, argv: list[str], sudo: bool = False) -> list[str]:
-        del host, sudo
-        return [*me, "--fake-host", *argv]
+    def target_cmd(target: str, argv: list[str], sudo: bool = False) -> list[str]:
+        del target, sudo
+        return [*me, "--fake-target", *argv]
 
-    def switch_guard_cmd(host: str, expected: str, toplevel: str, digest: str) -> list[str]:
-        del host, digest
+    def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> list[str]:
+        del target, digest
         return [*me, "--fake-guard", expected, toplevel]
 
-    hosts.host_cmd = host_cmd
+    targets.target_cmd = target_cmd
     switch.switch_guard_cmd = switch_guard_cmd
-    proc.this_host = lambda: "tester"
-    hosts.internet_reachable = lambda timeout=8.0: timeout > 0
+    proc.this_machine = lambda: "tester"
+    targets.internet_reachable = lambda timeout=8.0: timeout > 0
     proc.monotonic_ms = Clock()
     time.sleep = lambda _secs: None
 
@@ -185,7 +185,7 @@ def main() -> None:
     died, s = scenario("reboot needed", activate_rc=100)
     assert died is not None and "Its profile and bootloader entry are set: reboot testhost" in died, died
     assert s["running"] == OLD and s["profile"] == NEW, s
-    assert s.get("lineage") == LINEAGE, s  # the reboot takes the host to it
+    assert s.get("lineage") == LINEAGE, s  # the reboot takes the target to it
 
     died, s = scenario("plain", helper=False)
     assert died is None and s["running"] == NEW and s["profile"] == NEW, (died, s)
@@ -216,7 +216,7 @@ def main() -> None:
         crash = Path(d) / "crash"
         crash.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(3)\n")
         crash.chmod(0o755)
-        died, s = scenario("deploy-switch crashes", deployer=str(crash))
+        died, s = scenario("deploy-switch crashes", deploy_switch=str(crash))
     assert died is not None and "deploy-switch stopped answering" in died, died
     assert s["running"] == OLD and s["armed"] is False, s
 
@@ -235,14 +235,14 @@ def lineage_line(top: str, *, by: tuple[str, str] = OTHER,
     doc = switch.lineage_doc(
         union="u" * 40, main="m" * 40, branches={b: "c" * 40 for b in others},
         own=own, head="h" * 40, base=pending[1] if pending else "h" * 40,
-        snap="s" * 40 if pending else "", at=at, host=by[0], checkout=by[1], pid=4242)
+        snap="s" * 40 if pending else "", at=at, machine=by[0], checkout=by[1], pid=4242)
     return proc.dump_json({**doc, "toplevel": top})
 
 
 def report(text: str, age: float | None, *, tips: dict[str, str] | None = None,
            reset: bool = False, named: bool = True, reached: bool = True,
            running: str = NEW) -> tuple[str, str]:
-    """deploy-plan's drift verdict on one drifting host carrying `text` as
+    """deploy-plan's drift verdict on one drifting target carrying `text` as
     its lineage file: its report line, and the deploy's die message."""
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
@@ -250,7 +250,7 @@ def report(text: str, age: float | None, *, tips: dict[str, str] | None = None,
         guard.decide(
             "drift", me=list(ME), union="u" * 40, listed=sorted(LISTED),
             tips={BRANCH: BASE} if tips is None else tips,
-            now=1e6 + 60, tz_offset=0, router="choko", hosts=["side1"], candidates=["side1"],
+            now=1e6 + 60, tz_offset=0, router="choko", targets=["side1"], candidates=["side1"],
             reset=reset, named=named, reached=["side1"] if reached else [],
             running={"side1": running},
             built={"side1": "/nix/store/union-system"},
@@ -261,32 +261,39 @@ def report(text: str, age: float | None, *, tips: dict[str, str] | None = None,
 
 def target_cases() -> None:
     """expand_targets: names and @tags from nixconvoy.toml, once each, a
-    remote-only host dropped from a tag but not from a name."""
-    proc.this_host = lambda: "tester"
+    remote-only target dropped from a tag but not from a name."""
+    proc.this_machine = lambda: "tester"
     config.set_cfg(config.parse(
-        '[hosts.a]\ntags = ["vps"]\n[hosts.b]\ntags = ["vps", "lab"]\n'
-        '[hosts.c]\nlocal_only = true\ntags = ["lab"]\n'))
+        '[targets.a]\ntags = ["vps"]\n[targets.b]\ntags = ["vps", "lab"]\n'
+        '[targets.c]\nlocal_only = true\ntags = ["lab"]\n'))
     inv = ["a", "b", "c"]
-    assert hosts.expand_targets([], inv) == []
-    assert hosts.expand_targets(["@vps"], inv) == ["a", "b"]
-    assert hosts.expand_targets(["b", "@vps"], inv) == ["b", "a"]
-    assert hosts.expand_targets(["@lab", "c"], inv) == ["b", "c"]
-    assert hosts.remote_only("c") and not hosts.remote_only("a")
-    config.set_cfg(config.parse('[hosts.a]\ntags = ["vps"]\n[hosts.zz]\ntags = ["vps"]\n'))
+    assert targets.expand_targets([], inv) == []
+    assert targets.expand_targets(["@vps"], inv) == ["a", "b"]
+    assert targets.expand_targets(["b", "@vps"], inv) == ["b", "a"]
+    assert targets.expand_targets(["@lab", "c"], inv) == ["b", "c"]
+    assert targets.remote_only("c") and not targets.remote_only("a")
+    config.set_cfg(config.parse('[targets.a]\ntags = ["vps"]\n[targets.zz]\ntags = ["vps"]\n'))
     for bad in (["@nope"], ["zz"], ["@vps"]):
         try:
             with contextlib.redirect_stderr(io.StringIO()):
-                hosts.expand_targets(bad, inv)
+                targets.expand_targets(bad, inv)
         except SystemExit:
             pass
         else:
             raise AssertionError(bad)
-    try:
-        config.parse('[hosts.a]\ntag = ["vps"]\n')
-    except config.ConfigError:
-        pass
-    else:
-        raise AssertionError("unknown host key accepted")
+    for bad_cfg, hint in (('[targets.a]\ntag = ["vps"]\n', "unknown key targets.a.tag"),
+                          ('target = "x@{host}"\n', "now ssh_address"),
+                          ('[hosts.a]\n', "now targets"),
+                          ('[build]\nhost = "b"\n', "now build.builder"),
+                          ('[targets.a]\ntarget = "x"\n', "now ssh_address"),
+                          ('ssh_address = "x@{host}"\n', "over {target} alone"),
+                          ('branch_prefix = "{host}-d"\n', "over {machine} alone")):
+        try:
+            config.parse(bad_cfg)
+        except config.ConfigError as e:
+            assert hint in str(e), (bad_cfg, e)
+        else:
+            raise AssertionError(f"accepted: {bad_cfg!r}")
     print("targets: ok")
 
 
@@ -324,11 +331,11 @@ def lineage_cases() -> None:
     assert report(lineage_line(NEW), 60, running="/nix/store/union-system")[0] == "side1: up to date"
 
     text = lineage_line(NEW)
-    p = hosts.parse_probe(f"{NEW}\n1000100\n1000000\n{text}")
+    p = targets.parse_probe(f"{NEW}\n1000100\n1000000\n{text}")
     assert p.running == NEW and p.lineage == text and p.age == 100, p
     assert p.digest == hashlib.sha256(text.encode()).hexdigest(), p
-    p = hosts.parse_probe(f"{OLD}\n1000100\n-\n")
-    assert p == hosts.Probe(OLD, "", None, hashlib.sha256(b"").hexdigest()), p
+    p = targets.parse_probe(f"{OLD}\n1000100\n-\n")
+    assert p == targets.Probe(OLD, "", None, hashlib.sha256(b"").hexdigest()), p
 
     saved = (switch.rev, switch.current_branch)
     try:
@@ -358,9 +365,9 @@ def guard_cases(d: Path) -> None:
     switch left open: B probes while A's switch is between activation and
     confirmation."""
     cur, profile, lineage = d / "current-system", d / "profile", d / "deploy" / "lineage.json"
-    hosts.CURRENT_SYSTEM, hosts.SYSTEM_PROFILE = str(cur), str(profile)
-    hosts.SWITCH_LOCK, hosts.LINEAGE_FILE, hosts.LINEAGE_WRITER = str(d / "lock"), str(lineage), ""
-    proc.this_host = lambda: "tester"
+    targets.CURRENT_SYSTEM, targets.SYSTEM_PROFILE = str(cur), str(profile)
+    targets.SWITCH_LOCK, targets.LINEAGE_FILE, targets.LINEAGE_WRITER = str(d / "lock"), str(lineage), ""
+    proc.this_machine = lambda: "tester"
 
     def point(link: Path, to: str) -> None:
         link.unlink(missing_ok=True)
@@ -385,46 +392,46 @@ def guard_cases(d: Path) -> None:
         g.stdin.flush()
         return g.stdout.readline().strip()
 
-    def drift(p: hosts.Probe) -> str:
+    def drift(p: targets.Probe) -> str:
         return report(p.lineage, p.age, running=p.running or "")[0]
 
     point(cur, OLD)
     point(profile, OLD)
-    b_early = hosts.probe("tester")
+    b_early = targets.probe("tester")
     assert b_early.running == OLD and b_early.lineage == "", b_early
-    a = guard(OLD, NEW, hosts.probe("tester").digest)
+    a = guard(OLD, NEW, targets.probe("tester").digest)
     assert lock(a, lineage_line(NEW)) == "WROTE"
-    b_claimed = hosts.probe("tester")  # A claimed, not yet activated
+    b_claimed = targets.probe("tester")  # A claimed, not yet activated
     point(cur, NEW)  # A's test activation: verification starts
-    b_mid = hosts.probe("tester")
+    b_mid = targets.probe("tester")
     assert b_mid.running == NEW and "refused: runs an increment" in drift(b_mid), b_mid
     # Probes from before the activation wait on A's lock and then abort.
     late = [guard(b.running or "", "/nix/store/b-system", b.digest) for b in (b_early, b_claimed)]
-    assert until_eof(a) == "", "A's claim stands: the host runs NEW"
+    assert until_eof(a) == "", "A's claim stands: the target runs NEW"
     assert [lock(g, lineage_line("/nix/store/b-system")) for g in late] == [f"MOVED {NEW}"] * 2
     for g in late:
         until_eof(g)
-    assert hosts.probe("tester").digest == b_mid.digest
+    assert targets.probe("tester").digest == b_mid.digest
     # A third switch that rolls back puts A's lineage back.
     c = guard(NEW, "/nix/store/c-system", b_mid.digest)
     assert lock(c, lineage_line("/nix/store/c-system")) == "WROTE"
     until_eof(c)
-    assert hosts.probe("tester").digest == b_mid.digest
+    assert targets.probe("tester").digest == b_mid.digest
     # One staged for a reboot keeps its claim: the profile names it.
     c = guard(NEW, "/nix/store/c-system", b_mid.digest)
     assert lock(c, lineage_line("/nix/store/c-system")) == "WROTE"
     point(profile, "/nix/store/c-system")
     until_eof(c)
-    staged = hosts.probe("tester")
+    staged = targets.probe("tester")
     assert '"toplevel": "/nix/store/c-system"' in staged.lineage, staged
     # Same running system, rewritten lineage: B's compare fails.
     g = guard(NEW, "/nix/store/b-system", b_mid.digest)
     assert lock(g, "") == f"MOVED {NEW}, its lineage rewritten by another deploy"
     until_eof(g)
-    # A rolled-back switch onto a host with no lineage leaves none.
+    # A rolled-back switch onto a target with no lineage leaves none.
     lineage.unlink()
     point(profile, NEW)
-    g = guard(NEW, "/nix/store/d-system", hosts.probe("tester").digest)
+    g = guard(NEW, "/nix/store/d-system", targets.probe("tester").digest)
     assert lock(g, lineage_line("/nix/store/d-system")) == "WROTE"
     until_eof(g)
     assert not lineage.exists()
@@ -448,19 +455,19 @@ def scratch_env() -> None:
     os.environ.update({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
                        "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_NOSYSTEM": "1",
                        "GIT_CONFIG_GLOBAL": os.devnull})
-    proc.this_host = lambda: "tester"
+    proc.this_machine = lambda: "tester"
     # The scratch repos keep their flake under nixos/ with a pkgs overlay.
     config.set_cfg(config.parse('flake = "nixos"\n[memo]\noverlay = "nixos/pkgs/default.nix"\n'
                                 'namespace = "homelab"\n'))
     memo.union_objects.cache_clear()
     memo.eval_key_shape.cache_clear()
-    memo.host_eval_reads.cache_clear()
+    memo.target_eval_reads.cache_clear()
 
 
 def reach_cases(d: Path) -> None:
-    """reached_hosts on a scratch repo of two hosts: which of them this
+    """reached_targets on a scratch repo of two targets: which of them this
     checkout's work changes a read file or lock entry of, measured from
-    what each host's lineage recorded of the branch."""
+    what each target's lineage recorded of the branch."""
     scratch_env()
     origin, co = d / "origin.git", d / "homelab9"
     wb = "tester-deploys9"
@@ -488,16 +495,16 @@ def reach_cases(d: Path) -> None:
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             checkout.ensure_on_work_branch(wb)
-        hosts = ["a", "b"]
+        targets = ["a", "b"]
 
         def reached(lineages: dict[str, str] | None = None) -> set[str]:
             tip = sh(co, "rev-parse", "HEAD")
             memo.union_objects.cache_clear()
-            memo.host_eval_reads.cache_clear()
-            return memo.reached_hosts(str(co), tip, hosts, tip, lineages or {})
+            memo.target_eval_reads.cache_clear()
+            return memo.reached_targets(str(co), tip, targets, tip, lineages or {})
 
         def lineage(**tips: str) -> str:
-            return proc.dump_json({"version": 1, "main": sh(co, "rev-parse", "origin/main"),
+            return proc.dump_json({"version": 2, "main": sh(co, "rev-parse", "origin/main"),
                                      "branches": tips})
 
         main0 = sh(co, "rev-parse", "HEAD")
@@ -507,26 +514,26 @@ def reach_cases(d: Path) -> None:
         put(co, "nixos/modules/x.nix", "{ pkgs, ... }: { environment.systemPackages = [ pkgs.homelab.tool ]; x = 1; }\n", "x")
         c_x = sh(co, "rev-parse", "HEAD")
         assert reached() == {"a"}
-        # The overlay's attribute files count for the hosts naming them.
+        # The overlay's attribute files count for the targets naming them.
         put(co, "nixos/pkgs/tool.nix", "2\n", "tool")
         put(co, "nixos/pkgs/other.nix", "2\n", "other")
         assert reached({"a": lineage(**{wb: c_x})}) == {"a"}
         c_tool = sh(co, "rev-parse", "HEAD")
-        # A lock bump reaches the hosts whose files name the input.
+        # A lock bump reaches the targets whose files name the input.
         lock["nodes"]["q"]["locked"]["rev"] = "q2"
         put(co, "nixos/flake.lock", proc.dump_json(lock), "bump q")
         c_q = sh(co, "rev-parse", "HEAD")
         assert reached() == {"a", "b"}
         assert reached({"a": lineage(**{wb: c_tool})}) == {"b"}
-        # What a host already runs of this branch is not new work for it:
+        # What a target already runs of this branch is not new work for it:
         # a recorded tip between the merge base and HEAD narrows the delta,
         # one at HEAD empties it, an unknown or foreign one is ignored.
         assert reached({"a": lineage(**{wb: c_x}), "b": lineage(**{wb: c_q})}) == {"a"}
         assert reached({"a": lineage(**{wb: c_q}), "b": lineage(**{wb: c_q})}) == set()
         assert reached({"a": lineage(**{wb: "f" * 40}), "b": lineage(**{"other-deploys1": c_q})}) == {"a", "b"}
         assert reached({"a": "", "b": "{not json"}) == {"a", "b"}
-        # A file moved out of a directory a host reads whole changes that
-        # host, though the move lists no path it reads any more.
+        # A file moved out of a directory a target reads whole changes that
+        # target, though the move lists no path it reads any more.
         put(co, "nixos/hosts/a/extra.nix", "{ }\n", "extra")
         c_extra = sh(co, "rev-parse", "HEAD")
         sh(co, "mv", "nixos/hosts/a/extra.nix", "nixos/modules/extra.nix")
@@ -914,13 +921,13 @@ def git_cases(d: Path) -> None:
 
 
 if __name__ == "__main__":
-    if sys.argv[1:2] == ["--fake-host"]:
-        sys.exit(fake_host(sys.argv[2:]))
+    if sys.argv[1:2] == ["--fake-target"]:
+        sys.exit(fake_target(sys.argv[2:]))
     if sys.argv[1:2] == ["--fake-guard"]:
         sys.exit(fake_guard(sys.argv[2], sys.argv[3]))
     config.set_cfg(config.Config())
     with tempfile.TemporaryDirectory() as d:
-        os.environ["FAKE_HOST_STATE"] = str(Path(d) / "host.json")
+        os.environ["FAKE_TARGET_STATE"] = str(Path(d) / "target.json")
         main()
     lineage_cases()
     target_cases()

@@ -1,30 +1,30 @@
-//! nixconvoy's step 5 verdict on the hosts whose running system differs
+//! nixconvoy's step 5 verdict on the targets whose running system differs
 //! from the union: whose work each runs (its lineage, as nixconvoy's
 //! lineage_doc wrote it), and so which of them the deploy may switch.
 //!
-//! A host runs another deployer's increment that this union cannot contain
-//! when that deployer's push has not landed (origin's tip of its branch is
+//! A target runs another checkout's increment that this union cannot contain
+//! when that checkout's push has not landed (origin's tip of its branch is
 //! still the one it built on) or when it holds work of a branch
 //! deploy-branches here does not list.  Switching it would revert that work
 //! until its owner redeploys, so it is never switched as is - unless the
-//! lineage is older than PENDING_MAX_AGE by the host's clock (a dead
-//! deployer's) or the deploy is a --reset that names the host or reaches
-//! it.  When this checkout's own work does not reach the host
-//! (Params::reached: no file its configuration reads changed), the host is
+//! lineage is older than PENDING_MAX_AGE by the target's clock (a dead
+//! deploy's) or the deploy is a --reset that names the target or reaches
+//! it.  When this checkout's own work does not reach the target
+//! (Params::reached: no file its configuration reads changed), the target is
 //! simply left running that work and the deploy goes on without it; when it
-//! does, two checkouts are changing the same host and the deploy is refused
+//! does, two checkouts are changing the same target and the deploy is refused
 //! whole: switching the rest would leave them carrying this run's unpushed
 //! claim beside the other's, with neither increment able to land cleanly.
 //!
-//! A host to be switched may run an increment that left the convoy since:
+//! A target to be switched may run an increment that left the convoy since:
 //! a branch tip its lineage recorded that origin's tip of the branch no
 //! longer carries.  Query::Fate asks git whether this deploy's union still
 //! holds it and, when not, what became of it - abandoned (reset or
-//! dropped, landed nowhere) or landed and since undone - and the host's
+//! dropped, landed nowhere) or landed and since undone - and the target's
 //! verdict line names each abandoned increment the switch reverts:
-//! abandon itself touches no host, so this is where the revert shows.  A
+//! abandon itself touches no target, so this is where the revert shows.  A
 //! subagent's branch, pushed by its first deploy and deleted with its
-//! worktree, leaves hosts whose lineage holds a pending increment of a
+//! worktree, leaves targets whose lineage holds a pending increment of a
 //! branch origin never had as far as this run can see: the same query
 //! tells a dropped branch (switched over, the increment named) from one
 //! whose first push is on its way (refused, as any in-flight increment).
@@ -33,8 +33,8 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A push follows its switch within seconds (the nightly's main, once its
-/// four hosts switched): a lineage still refused this long after it was
-/// written (by the host's clock) is a dead deployer's, and its host is fair
+/// four targets switched): a lineage still refused this long after it was
+/// written (by the target's clock) is a dead deploy's, and its target is fair
 /// game again.
 pub const PENDING_MAX_AGE: f64 = 30.0 * 60.0;
 pub const RESET_FLAG: &str = "--reset";
@@ -43,21 +43,21 @@ pub const RESET_FLAG: &str = "--reset";
 pub struct Lineage {
     pub toplevel: String,
     pub union: String,
-    /// Every branch the union holds work of (the deployer's own included),
+    /// Every branch the union holds work of (the deploying checkout's own included),
     /// sorted.
     pub branches: Vec<String>,
-    /// The tip of each of those the union held (the deployer's own: the
+    /// The tip of each of those the union held (the deploying checkout's own: the
     /// work-branch commit its pending increment became).
     pub tips: BTreeMap<String, String>,
-    /// The deployer's own branch when what it unioned of it was not on
+    /// The deploying checkout's own branch when what it unioned of it was not on
     /// origin yet, with the origin tip that push moves.
     pub pending: Option<(String, Option<String>)>,
     pub at: f64,
-    pub host: String,
+    pub machine: String,
     pub checkout: String,
     pub pid: i64,
-    /// Seconds since it was written, by the host's own clock (the file's
-    /// mtime): deployers' clocks drift, a WSL one after every sleep.
+    /// Seconds since it was written, by the target's own clock (the file's
+    /// mtime): the machines' clocks drift, a WSL one after every sleep.
     pub age: Option<f64>,
 }
 
@@ -65,7 +65,9 @@ pub struct Lineage {
 pub fn parse(text: &str, age: Option<f64>) -> Option<Lineage> {
     let v: Value = serde_json::from_str(text).ok()?;
     let o = v.as_object()?;
-    if o.get("version").and_then(Value::as_i64) != Some(1) {
+    // Version 1 named the machine `by.host`; read, never written.
+    let version = o.get("version").and_then(Value::as_i64)?;
+    if !(1..=2).contains(&version) {
         return None;
     }
     let s = |v: Option<&Value>| v.and_then(Value::as_str).map(str::to_string);
@@ -93,7 +95,7 @@ pub fn parse(text: &str, age: Option<f64>) -> Option<Lineage> {
         tips,
         pending,
         at: o.get("at")?.as_f64()?,
-        host: s(by.get("host"))?,
+        machine: s(by.get("machine")).or_else(|| s(by.get("host")))?,
         checkout: s(by.get("checkout"))?,
         pid: by.get("pid").and_then(Value::as_i64).unwrap_or(0),
         age,
@@ -106,19 +108,19 @@ pub enum Kind {
     Untracked,
     /// This checkout deployed it, so its union carries it.
     ThisBranch,
-    /// Another deployer's, all of it pushed (or its pending push landed
+    /// Another checkout's, all of it pushed (or its pending push landed
     /// since): contained in the refs this union reads.
     CatchUp,
-    /// Another deployer's increment whose push has not landed - refused.
+    /// Another checkout's increment whose push has not landed - refused.
     InFlight,
     /// Work of a branch deploy-branches does not list here - refused.
     Unlisted,
-    /// Would be refused, but this checkout's work does not reach the host:
-    /// left running the other deployer's work, not switched.
+    /// Would be refused, but this checkout's work does not reach the target:
+    /// left running the other checkout's work, not switched.
     LeftAlone,
     /// Refused, but written more than PENDING_MAX_AGE ago.
     Abandoned,
-    /// Refused, but taken over by a --reset that names or reaches the host.
+    /// Refused, but taken over by a --reset that names or reaches the target.
     Overridden,
 }
 
@@ -144,7 +146,7 @@ impl Kind {
 /// What the deploy knows when it classifies.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Context {
-    /// This deployer's (host, checkout).
+    /// This checkout: (machine, checkout directory).
     pub me: (String, String),
     /// The branches its union may contain: deploy-branches' patterns plus
     /// main.
@@ -161,19 +163,19 @@ fn clock(at: f64, tz_offset: i64) -> String {
     format!("{:02}:{:02}", t / 3600, t % 3600 / 60)
 }
 
-/// Whose work a drifting host runs, relative to this deploy's union, and
-/// why; `take_over` when a --reset names the host or reaches it, `reached`
-/// when this checkout's own work changes something the host's configuration
+/// Whose work a drifting target runs, relative to this deploy's union, and
+/// why; `take_over` when a --reset names the target or reaches it, `reached`
+/// when this checkout's own work changes something the target's configuration
 /// reads.
 pub fn classify(lin: Option<&Lineage>, running: &str, cx: &Context, take_over: bool, reached: bool) -> (Kind, String) {
     let Some(lin) = lin.filter(|l| l.toplevel == running) else {
         return (Kind::Untracked, String::new());
     };
     let when = clock(lin.at, cx.tz_offset);
-    if (&lin.host, &lin.checkout) == (&cx.me.0, &cx.me.1) {
+    if (&lin.machine, &lin.checkout) == (&cx.me.0, &cx.me.1) {
         return (Kind::ThisBranch, format!("over this checkout's deploy of {when}"));
     }
-    let who = format!("{}:{} (pid {}) at {when}", lin.host, lin.checkout, lin.pid);
+    let who = format!("{}:{} (pid {}) at {when}", lin.machine, lin.checkout, lin.pid);
     let unknown: Vec<&str> = lin.branches.iter().filter(|b| !listed(cx.listed.iter().map(String::as_str), b)).map(String::as_str).collect();
     let (kind, why) = if !unknown.is_empty() {
         (
@@ -208,7 +210,7 @@ pub fn classify(lin: Option<&Lineage>, running: &str, cx: &Context, take_over: b
     (kind, why)
 }
 
-/// The order hosts are switched and reported in: the router last, so
+/// The order targets are switched and reported in: the router last, so
 /// everything else still has connectivity while it copies.
 pub fn switch_order(names: &[String], router: &str) -> Vec<String> {
     let mut v = names.to_vec();
@@ -222,37 +224,37 @@ pub struct Params {
     /// The union commit this deploy builds.
     pub union: String,
     pub router: String,
-    pub hosts: Vec<String>,
+    pub targets: Vec<String>,
     pub candidates: Vec<String>,
     /// --reset: this checkout's view alone - refused work is taken over on
-    /// the hosts it reaches, and on every candidate when `named`.
+    /// the targets it reaches, and on every candidate when `named`.
     pub reset: bool,
     /// The candidates were named on the command line.
     pub named: bool,
-    /// The hosts this checkout's own work reaches: those whose
+    /// The targets this checkout's own work reaches: those whose
     /// configuration reads a file that work changed (nixconvoy's
-    /// reached_hosts, by the eval memo's scan).
+    /// reached_targets, by the eval memo's scan).
     pub reached: BTreeSet<String>,
-    /// Each probed host's running system (None: unreachable).
+    /// Each probed target's running system (None: unreachable).
     pub running: BTreeMap<String, Option<String>>,
-    /// The union's toplevel of each reachable host.
+    /// The union's toplevel of each reachable target.
     pub built: BTreeMap<String, String>,
-    /// Each probed host's lineage file and its age by the host's clock.
+    /// Each probed target's lineage file and its age by the target's clock.
     pub lineages: BTreeMap<String, (String, Option<f64>)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Outcome {
-    /// Hosts whose running system differs from the union.
+    /// Targets whose running system differs from the union.
     pub affected: Vec<String>,
-    /// The hosts to switch, in switch order.
+    /// The targets to switch, in switch order.
     pub plan: Vec<String>,
     pub drift: BTreeMap<String, (Kind, String)>,
 }
 
 /// The die message of a deploy refusing `refused` (in report order).
 pub fn refusal(refused: &[(String, Kind)]) -> String {
-    let hosts: Vec<&str> = refused.iter().map(|(h, _)| h.as_str()).collect();
+    let targets: Vec<&str> = refused.iter().map(|(h, _)| h.as_str()).collect();
     let mut fixes = Vec::new();
     if refused.iter().any(|(_, k)| *k == Kind::InFlight) {
         fixes.push("re-run once its push lands".to_string());
@@ -264,31 +266,31 @@ pub fn refusal(refused: &[(String, Kind)]) -> String {
     let mut c = fix.chars();
     let fix: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
     format!(
-        "nothing switched or committed: {} {} another deployer's work this union lacks, and this checkout's work reaches {} too (see above).  {fix} (after {} min it counts as abandoned), or deploy with {RESET_FLAG} {} to revert it deliberately - along with every other branch's work there, which {RESET_FLAG} leaves out.",
-        hosts.join(", "),
-        if hosts.len() == 1 { "runs" } else { "run" },
-        if hosts.len() == 1 { "it" } else { "them" },
+        "nothing switched or committed: {} {} another checkout's work this union lacks, and this checkout's work reaches {} too (see above).  {fix} (after {} min it counts as abandoned), or deploy with {RESET_FLAG} {} to revert it deliberately - along with every other branch's work there, which {RESET_FLAG} leaves out.",
+        targets.join(", "),
+        if targets.len() == 1 { "runs" } else { "run" },
+        if targets.len() == 1 { "it" } else { "them" },
         PENDING_MAX_AGE as u64 / 60,
-        hosts.first().copied().unwrap_or("")
+        targets.first().copied().unwrap_or("")
     )
 }
 
 /// Query::Fate's answer for `branch`'s increment at `tip` of the lineage
-/// `lin`, asked once per tip (`fates` memoises it across hosts): "kept",
-/// "landed" or "abandoned".  The query names the deployer's checkout when
+/// `lin`, asked once per tip (`fates` memoises it across targets): "kept",
+/// "landed" or "abandoned".  The query names the deploying checkout when
 /// it is on this machine: one still on the branch keeps the increment.
 fn fate(s: &mut Script, branch: &str, tip: &str, lin: &Lineage, p: &Params, fates: &mut BTreeMap<(String, String), String>) -> Run<String> {
     let key = (branch.to_string(), tip.to_string());
     if let Some(f) = fates.get(&key) {
         return Ok(f.clone());
     }
-    let checkout = (lin.host == p.cx.me.0).then(|| lin.checkout.clone());
+    let checkout = (lin.machine == p.cx.me.0).then(|| lin.checkout.clone());
     let f = s.text(Query::Fate { branch: branch.into(), tip: tip.into(), union: p.union.clone(), checkout })?.unwrap_or_default();
     fates.insert(key, f.clone());
     Ok(f)
 }
 
-/// The increments a switch of a host reverts: each branch tip its lineage
+/// The increments a switch of a target reverts: each branch tip its lineage
 /// recorded that is not origin's tip now and that the union no longer
 /// holds, as "<branch>'s abandoned increment <sha>" (or "landed and since
 /// undone").
@@ -310,7 +312,7 @@ fn reverted(s: &mut Script, lin: &Lineage, p: &Params, fates: &mut BTreeMap<(Str
 
 pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     let mut affected = Vec::new();
-    for h in switch_order(&p.hosts, &p.router) {
+    for h in switch_order(&p.targets, &p.router) {
         let Some(Some(running)) = p.running.get(&h) else { continue };
         let Some(built) = p.built.get(&h) else {
             return Err(Halt::Die(format!("deploy-plan was given no evaluated toplevel for {h}")));
@@ -331,14 +333,14 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         // The pending increment of a branch origin has no tip of: its
         // first push on its way (in flight), or the branch deleted since
         // with its subagent worktree - then whatever the union lacks of
-        // it is abandoned, and the host catches up.
+        // it is abandoned, and the target catches up.
         let in_flight = classify(lin.as_ref(), &running, &p.cx, false, true).0 == Kind::InFlight;
         if let Some(lin) = lin.as_ref().filter(|_| in_flight) {
             if let Some((b, None)) = &lin.pending {
                 if !p.cx.tips.contains_key(b) {
                     if let Some(tip) = lin.tips.get(b) {
                         if fate(s, b, tip, lin, p, &mut fates)? != "kept" {
-                            let who = format!("{}:{} (pid {})", lin.host, lin.checkout, lin.pid);
+                            let who = format!("{}:{} (pid {})", lin.machine, lin.checkout, lin.pid);
                             (kind, why) = (Kind::CatchUp, format!("runs {b}'s increment deployed by {who}, the branch gone since"));
                         }
                     }
@@ -372,7 +374,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     }
     for h in &affected {
         if !drift.contains_key(h) {
-            s.print(format!("  {h}: differs but excluded by the host filter"));
+            s.print(format!("  {h}: differs but excluded by the target filter"));
         }
     }
     if !refused.is_empty() {

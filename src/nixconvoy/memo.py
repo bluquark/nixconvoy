@@ -1,6 +1,6 @@
-"""The eval memo: each host's toplevel (and the switch policy its
+"""The eval memo: each target's toplevel (and the switch policy its
 configuration declares) keyed by exactly what its evaluation can read, so a
-change to a module one host imports re-evaluates that host alone and a
+change to a module one target imports re-evaluates that target alone and a
 no-op redeploy evaluates nothing; the precheck gate memoized the same way."""
 
 from __future__ import annotations
@@ -25,17 +25,17 @@ MEMO_MAX_AGE = 30 * 86400
 
 
 class Top(NamedTuple):
-    """A host's evaluated toplevel and the switch policy its configuration
+    """A target's evaluated toplevel and the switch policy its configuration
     declares through the nixconvoy NixOS module."""
     out: str
     drv: str
     # Units whose stop/restart/reload the switch refuses unless admitted.
     protected: tuple[str, ...]
-    # Switched after every other host, alone, with this machine's internet
+    # Switched after every other target, alone, with this machine's internet
     # verified too (the router).
     last: bool
     # systemd-boot boot counting (the boot-assessment module): a generation
-    # the host fell back from is never switched to.
+    # the target fell back from is never switched to.
     assessed: bool
 
 
@@ -71,7 +71,7 @@ def memo_write(path: Path, ent: Top) -> None:
 
 
 def memo_dir() -> Path:
-    """One JSON file per (host, key) under the XDG cache, shared by every
+    """One JSON file per (target, key) under the XDG cache, shared by every
     checkout on the machine (keys are content-addressed), so checkouts
     alternating different trees do not evict each other.  Per-entry files
     written by atomic rename make concurrent deploys safe."""
@@ -100,7 +100,7 @@ def memo_prune(d: Path) -> None:
 # directory).  The lookbehind keeps "foo/../bar" fragments inside strings from
 # matching; a stray shell "../" in a string merely widens the key.
 PATH_LITERAL = re.compile(r"(?<![\w/.\-])(\.\.?/[\w.+\-/]*)")
-# The configured overlay: its attributes are lazy, so a host reads only the
+# The configured overlay: its attributes are lazy, so a target reads only the
 # files behind the attributes its own modules name (`pkgs.<ns>.<x>`, a
 # python set's `ps.<x>`), each defined on one line as `<x> = ... ./<file>.nix`.
 # A name counts where Nix could resolve it to an attribute: after a dot, in
@@ -132,9 +132,9 @@ def union_objects(union: str) -> dict[str, tuple[str, str]]:
 
 @functools.cache
 def eval_key_shape(wt: str) -> dict[str, str] | None:
-    """The overlay's attribute -> file map for host_eval_key (empty with no
+    """The overlay's attribute -> file map for target_eval_key (empty with no
     overlay configured), or None when flake.nix's specialArgs is not
-    `{ inherit <names>; }` (said once, not per host): an alias would hand a
+    `{ inherit <names>; }` (said once, not per target): an alias would hand a
     module an input under a name the scan cannot tie back to the lock,
     `self` or `inputs` the whole tree."""
     c = cfg()
@@ -143,7 +143,7 @@ def eval_key_shape(wt: str) -> dict[str, str] | None:
         if not (re.fullmatch(r"\{\s*inherit(\s+[\w\-]+)+\s*;\s*\}", m.group(1))
                 and not re.search(r"\b(self|inputs)\b", m.group(1))):
             print("eval memo: flake.nix's specialArgs is not an inherit list; "
-                  "keying every host on the whole tree", file=sys.stderr)
+                  "keying every target on the whole tree", file=sys.stderr)
             return None
     if not c.overlay:
         return {}
@@ -153,11 +153,11 @@ def eval_key_shape(wt: str) -> dict[str, str] | None:
 
 
 def lock_part(lock: object, named: Collection[str]) -> str:
-    """flake.lock's share of a host's key: the lock graph pruned to the root
+    """flake.lock's share of a target's key: the lock graph pruned to the root
     inputs in `named` and what they reach (follows paths resolved), hashed.
-    A flake input reaches a host only by name, a module argument out of
+    A flake input reaches a target only by name, a module argument out of
     specialArgs or a use in flake.nix's outputs body, so a bump of an input
-    the host's files never name leaves its key alone.  Anything but a
+    the target's files never name leaves its key alone.  Anything but a
     well-formed lock (a node or follows target missing) hashes whole."""
     whole = hashlib.sha256(dump_json(lock).encode()).hexdigest()
     if not (isinstance(lock, dict) and isinstance(lock.get("nodes"), dict)
@@ -203,12 +203,12 @@ def lock_part(lock: object, named: Collection[str]) -> str:
 
 
 @functools.cache
-def host_eval_reads(wt: str, union: str, host: str) -> tuple[frozenset[str], frozenset[str]] | None:
-    """What `host`'s evaluation can read in the `union` commit checked out
-    in `wt`: the repo paths - flake.nix, the host's directory, transitively
+def target_eval_reads(wt: str, union: str, target: str) -> tuple[frozenset[str], frozenset[str]] | None:
+    """What `target`'s evaluation can read in the `union` commit checked out
+    in `wt`: the repo paths - flake.nix, the target's directory, transitively
     every path any of those .nix files names (a named directory counts
     whole) - and the flake input names those files mention (lock_part's
-    pruning).  In flake.nix the other hosts' directories are skipped.  The
+    pruning).  In flake.nix the other targets' directories are skipped.  The
     scan is lexical (PATH_LITERAL), sound for a path built by concatenation
     as long as its directory is named literally.  No scan can follow a
     module reading another configuration through specialArgs (`self`, or
@@ -225,11 +225,11 @@ def host_eval_reads(wt: str, union: str, host: str) -> tuple[frozenset[str], fro
     inherit_ns = re.compile(rf"inherit\s*\(\s*pkgs\.{re.escape(ns)}\s*\)") if ns else None
     objs = union_objects(union)
     depth = hosts_dir.count("/") + 1
-    other_hosts = tuple(q for q, (t, _) in objs.items()
-                        if t == "tree" and q.count("/") == depth
-                        and q.startswith(hosts_dir + "/") and q != f"{hosts_dir}/{host}")
+    other_targets = tuple(q for q, (t, _) in objs.items()
+                          if t == "tree" and q.count("/") == depth
+                          and q.startswith(hosts_dir + "/") and q != f"{hosts_dir}/{target}")
     seen: set[str] = set()
-    todo = [flake_nix, f"{hosts_dir}/{host}"]
+    todo = [flake_nix, f"{hosts_dir}/{target}"]
     named: set[str] = set()
     while todo:
         path = todo.pop()
@@ -254,7 +254,7 @@ def host_eval_reads(wt: str, union: str, host: str) -> tuple[frozenset[str], fro
                 ref = os.path.normpath(Path(f).parent / m.group(1))
                 if ref.startswith("..") or Path(ref).is_absolute():
                     continue  # outside the repo: not readable by the flake
-                if ref == "." or (f == flake_nix and ref.startswith(other_hosts)):
+                if ref == "." or (f == flake_nix and ref.startswith(other_targets)):
                     continue
                 if overlay and f == overlay and ref in attr_files.values():
                     continue
@@ -269,12 +269,12 @@ def host_eval_reads(wt: str, union: str, host: str) -> tuple[frozenset[str], fro
     return frozenset(seen), frozenset(named)
 
 
-def host_eval_key(wt: str, union: str, host: str) -> str:
-    """Hash of everything `host`'s evaluation can read (host_eval_reads: the
+def target_eval_key(wt: str, union: str, target: str) -> str:
+    """Hash of everything `target`'s evaluation can read (target_eval_reads: the
     paths by git object id, flake.lock pruned by lock_part), so it is
     identical across checkouts and untouched by changes to unrelated
     files; the whole tree when the scan cannot tell."""
-    reads = host_eval_reads(wt, union, host)
+    reads = target_eval_reads(wt, union, target)
     if reads is None:
         return hashlib.sha256(f"tree {out(['git', 'rev-parse', union + '^{tree}'])}"
                               .encode()).hexdigest()
@@ -292,7 +292,7 @@ def host_eval_key(wt: str, union: str, host: str) -> str:
 
 
 def recorded_tip(lineage: str, branch: str) -> str | None:
-    """The tip of `branch` a host's lineage file says its union held (the
+    """The tip of `branch` a target's lineage file says its union held (the
     "main" field for main), or None."""
     try:
         doc = load_json(lineage)
@@ -307,18 +307,18 @@ def recorded_tip(lineage: str, branch: str) -> str | None:
     return tip if isinstance(tip, str) else None
 
 
-def reached_hosts(wt: str, union: str, hosts: list[str], tip: str,
-                  lineages: dict[str, str]) -> set[str]:
-    """The hosts among `hosts` whose evaluation reads something this
-    checkout's own work changed: a path of host_eval_reads, or a lock entry
+def reached_targets(wt: str, union: str, targets: list[str], tip: str,
+                    lineages: dict[str, str]) -> set[str]:
+    """The targets among `targets` whose evaluation reads something this
+    checkout's own work changed: a path of target_eval_reads, or a lock entry
     of an input those files name, differing between `tip` (the commit about
-    to deploy) and what of this branch the host already runs - the tip its
+    to deploy) and what of this branch the target already runs - the tip its
     lineage recorded, when that lies between origin/main's merge base and
     `tip`, else the merge base itself, so main's movement, a rebase or
     another branch's work never counts as this checkout's.  The drift core
-    consults it for a host carrying another deployer's refused work alone:
+    consults it for a target carrying another checkout's refused work alone:
     one this work does not reach is left running that work.  No merge base
-    (nothing to measure from) reaches every host."""
+    (nothing to measure from) reaches every target."""
     from .checkout import current_branch  # noqa: PLC0415 - checkout imports guard, which imports checkout
 
     own = current_branch() or "main"
@@ -326,7 +326,7 @@ def reached_hosts(wt: str, union: str, hosts: list[str], tip: str,
     p = run(["git", "merge-base", tip, "refs/remotes/origin/main"], check=False)
     mb = p.stdout.strip()
     if p.returncode != 0 or not mb:
-        return set(hosts)
+        return set(targets)
     changed: dict[str, set[str]] = {}
     locks: dict[str, object] = {}
 
@@ -341,19 +341,19 @@ def reached_hosts(wt: str, union: str, hosts: list[str], tip: str,
         return locks[ref]
 
     reached: set[str] = set()
-    for h in hosts:
+    for h in targets:
         base = mb
         rec = recorded_tip(lineages.get(h, ""), own)
         if rec and rec != mb and is_ancestor(mb, rec) and is_ancestor(rec, tip):
             base = rec
         if base not in changed:
-            # A rename lists both paths: the one a host read may be the old.
+            # A rename lists both paths: the one a target read may be the old.
             changed[base] = set(out(["git", "diff", "--name-only", "--no-renames",
                                      base, tip]).splitlines())
         delta = changed[base]
         if not delta:
             continue
-        reads = host_eval_reads(wt, union, h)
+        reads = target_eval_reads(wt, union, h)
         if reads is None:
             reached.add(h)
             continue
@@ -367,14 +367,14 @@ def reached_hosts(wt: str, union: str, hosts: list[str], tip: str,
     return reached
 
 
-def eval_expr(host: str, parallel: bool) -> str:
+def eval_expr(target: str, parallel: bool) -> str:
     """The --apply over nixosConfigurations: the toplevel's out/drv (not
     outPath: toJSON collapses any attrset holding an outPath attribute to
     that path string) and the switch policy the nixconvoy module declares.
     With parallel evaluation the nspawn containers' toplevels (nested NixOS
-    evaluations, about a second each) are forced beside the host's - the
+    evaluations, about a second each) are forced beside the target's - the
     only parallelism one configuration offers."""
-    head = (f'cs: let c = cs."{host}".config; top = c.system.build.toplevel; '
+    head = (f'cs: let c = cs."{target}".config; top = c.system.build.toplevel; '
             'ncv = c.nixconvoy or {}; '
             'policy = { out = top.outPath; drv = top.drvPath; protected = ncv.protectedUnits or []; '
             'last = ncv.switchLast or false; assessed = (ncv.bootAssessment or {}).enable or false; }; ')
@@ -385,21 +385,21 @@ def eval_expr(host: str, parallel: bool) -> str:
             "builtins.parallel (containers ++ [ top.outPath ]) policy")
 
 
-def eval_toplevels(wt: str, union: str, hosts: list[str],
+def eval_toplevels(wt: str, union: str, targets: list[str],
                    check: Future[str | None] | None) -> dict[str, Top]:
     """name -> Top, writing the .drv closures the build and switch use.  One
-    `nix eval` process per stale host, all at once: the module system is
+    `nix eval` process per stale target, all at once: the module system is
     CPU-serial per configuration, and one parallel-eval process forcing
-    several hosts overlaps them poorly.  --apply bypasses the flake eval
+    several targets overlaps them poorly.  --apply bypasses the flake eval
     cache, hence memo_dir.  A memo entry is trusted only while its .drv
     exists, which implies its whole closure (GC never breaks references).
     A failing `check` (the precheck) ends the deploy at once rather than
     after the evals."""
     d = memo_dir()
-    keys = {h: host_eval_key(wt, union, h) for h in hosts}
+    keys = {h: target_eval_key(wt, union, h) for h in targets}
     tops: dict[str, Top] = {}
     stale: list[str] = []
-    for h in hosts:
+    for h in targets:
         ent = memo_read(d / f"{h}-{keys[h]}.json")
         if ent is None:
             stale.append(h)
@@ -407,19 +407,19 @@ def eval_toplevels(wt: str, union: str, hosts: list[str],
             tops[h] = ent
     if not stale:
         return tops
-    if len(stale) < len(hosts):
-        print(f"  (memoized: {', '.join(h for h in hosts if h not in stale)})")
+    if len(stale) < len(targets):
+        print(f"  (memoized: {', '.join(h for h in targets if h not in stale)})")
     c = cfg()
     flake = f"{wt}/{c.flake_path}" if c.flake_path != "." else wt
 
-    def eval_host(h: str) -> subprocess.CompletedProcess[str]:
+    def eval_target(h: str) -> subprocess.CompletedProcess[str]:
         par = (["--eval-cores", str(min(8, os.cpu_count() or 1)),
                 "--extra-experimental-features", "parallel-eval"] if c.parallel_eval else [])
         return run(["nix", "eval", "--json", *par, f"{flake}#nixosConfigurations",
                     "--apply", eval_expr(h, c.parallel_eval)], check=False)
 
     with ThreadPoolExecutor(len(stale)) as pool:
-        evals = {h: pool.submit(eval_host, h) for h in stale}
+        evals = {h: pool.submit(eval_target, h) for h in stale}
         pending = set(evals.values())
         while pending:
             # While the precheck is pending, wake to notice its failure early.
@@ -465,8 +465,8 @@ def precheck_gate(wt: str, objs: dict[str, tuple[str, str]]) -> str | None:
     a violation is reported before any package build is scheduled and never
     sways the toplevel build's sandbox decision.  Output is captured (-L:
     the whole report, not nix's log tail) and the caller dies, since this
-    runs on a thread beside the host evals."""
-    from .hosts import build_drvs  # noqa: PLC0415 - hosts imports this module
+    runs on a thread beside the target evals."""
+    from .targets import build_drvs  # noqa: PLC0415 - targets imports this module
 
     c = cfg()
     path = precheck_memo_path(objs)

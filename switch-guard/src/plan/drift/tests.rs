@@ -19,7 +19,7 @@ fn landed() -> String {
 }
 
 /// nixconvoy's lineage_doc with the toplevel added: `pending` is the
-/// deployer's own branch and origin's tip of it.
+/// deploying checkout's own branch and origin's tip of it.
 fn doc(top: &str, by: (&str, &str), pending: Option<(&str, Option<&str>)>, others: &[&str], at: f64) -> String {
     let own = pending.map(|p| p.0).unwrap_or(BRANCH);
     let mut branches = serde_json::Map::new();
@@ -28,10 +28,10 @@ fn doc(top: &str, by: (&str, &str), pending: Option<(&str, Option<&str>)>, other
     }
     branches.insert(own.to_string(), json!("h".repeat(40)));
     json!({
-        "version": 1, "union": "u".repeat(40), "main": "m".repeat(40),
+        "version": 2, "union": "u".repeat(40), "main": "m".repeat(40),
         "branches": branches,
         "pending": pending.map(|(b, base)| json!({"branch": b, "base": base, "head": "s".repeat(40)})),
-        "at": at, "by": {"host": by.0, "checkout": by.1, "pid": 4242},
+        "at": at, "by": {"machine": by.0, "checkout": by.1, "pid": 4242},
         "toplevel": top,
     })
     .to_string()
@@ -71,7 +71,7 @@ fn classifies_lineages() {
     assert!(why.contains(&format!("origin/{BRANCH} is still at {}", &b[..12])), "{why}");
     assert_eq!(k(Some(&std_lin()), &cx(&[(BRANCH, &landed())]), false).0, Kind::CatchUp);
 
-    // Age is the host's (the file's mtime); the writer's `at` is display only.
+    // Age is the target's (the file's mtime); the writer's `at` is display only.
     let old = lin(NEW, OTHER, Some((BRANCH, Some(&b))), &["chikuwa-deploys1"], PENDING_MAX_AGE + 60.0, T0 + 7200.0);
     let (kind, why) = k(Some(&old), &at_base, false);
     assert!(kind == Kind::Abandoned && why.contains("taken as abandoned"), "{why}");
@@ -81,7 +81,7 @@ fn classifies_lineages() {
     let (kind, why) = k(Some(&std_lin()), &at_base, true);
     assert!(kind == Kind::Overridden && why.contains(RESET_FLAG), "{why}");
 
-    // Refused work on a host this checkout's work does not reach is left
+    // Refused work on a target this checkout's work does not reach is left
     // there; age and --reset still revert it.
     let (kind, why) = classify(Some(&std_lin()), NEW, &at_base, false, false);
     assert!(kind == Kind::LeftAlone && !kind.refused() && why.contains("does not reach it"), "{why}");
@@ -100,7 +100,10 @@ fn classifies_lineages() {
     assert_eq!(k(None, &at_base, false), (Kind::Untracked, String::new()));
     assert_eq!(parse("", None), None);
     assert_eq!(parse("{not json", None), None);
-    assert_eq!(parse(r#"{"version": 2}"#, None), None);
+    assert_eq!(parse(r#"{"version": 3}"#, None), None);
+    // A version-1 file, from before by.host became by.machine, still counts.
+    let v1 = doc(NEW, OTHER, None, &[], T0).replace(r#""version":2"#, r#""version":1"#).replace(r#""machine":"#, r#""host":"#);
+    assert_eq!(parse(&v1, None).map(|l| l.machine), Some(OTHER.0.to_string()));
     assert_eq!(k(Some(&lin(OLD, OTHER, None, &[], 60.0, T0)), &at_base, false).0, Kind::Untracked);
     assert_eq!(k(Some(&lin(NEW, ME, Some((BRANCH, Some(&b))), &[], 60.0, T0)), &at_base, false).0, Kind::ThisBranch);
     assert_eq!(k(Some(&lin(NEW, OTHER, None, &["chikuwa-deploys1"], 60.0, T0)), &at_base, false).0, Kind::CatchUp);
@@ -134,23 +137,23 @@ fn clock_is_local() {
     assert_eq!(clock(0.0, -3600), "23:00");
 }
 
-fn params(hosts: &[&str], candidates: &[&str], reset: (bool, bool), drifting: &[(&str, Option<String>)]) -> Params {
+fn params(targets: &[&str], candidates: &[&str], reset: (bool, bool), drifting: &[(&str, Option<String>)]) -> Params {
     let s = |v: &[&str]| v.iter().map(|h| h.to_string()).collect::<Vec<_>>();
     let b = base();
     Params {
         cx: cx(&[(BRANCH, &b)]),
         union: "u".repeat(40),
         router: "choko".into(),
-        hosts: s(hosts),
+        targets: s(targets),
         candidates: s(candidates),
         reset: reset.0,
         named: reset.1,
-        reached: hosts.iter().map(|h| h.to_string()).collect(),
-        running: hosts
+        reached: targets.iter().map(|h| h.to_string()).collect(),
+        running: targets
             .iter()
             .map(|h| (h.to_string(), Some(if drifting.iter().any(|d| d.0 == *h) { OLD } else { NEW }.to_string())))
             .collect(),
-        built: hosts.iter().map(|h| (h.to_string(), NEW.to_string())).collect(),
+        built: targets.iter().map(|h| (h.to_string(), NEW.to_string())).collect(),
         lineages: drifting.iter().filter_map(|(h, l)| l.clone().map(|l| (h.to_string(), (l, Some(60.0))))).collect(),
     }
 }
@@ -213,7 +216,7 @@ fn names_the_abandoned_increments() {
     let (asked, _, out) = run_with(p.clone(), "kept");
     assert_eq!(asked.len(), 1);
     assert!(out.unwrap_err().contains("Re-run once its push lands"));
-    // Another machine's deployer: no checkout here to look at.
+    // Deployed from another machine: no checkout here to look at.
     let elsewhere = doc(OLD, ("chikuwa", "/var/lib/homelab"), Some((sub, None)), &[], T0);
     let mut q = p.clone();
     q.lineages.insert("chikuwa".into(), (elsewhere, Some(60.0)));
@@ -238,7 +241,7 @@ fn names_the_abandoned_increments() {
         "{fx:?}"
     );
 
-    // A refused or left-alone host, and one whose lineage tips origin
+    // A refused or left-alone target, and one whose lineage tips origin
     // still has, asks nothing.
     let in_flight = doc(OLD, OTHER, Some((BRANCH, Some(&b))), &[], T0);
     let mut p = params(&["chikuwa"], &["chikuwa"], (false, false), &[("chikuwa", Some(in_flight))]);
@@ -271,7 +274,7 @@ fn reports_the_plan() {
     assert!(msg.starts_with("nothing switched or committed: side1 runs another"), "{msg}");
     assert_eq!(fx[0], Effect::Print("  side1: refused: runs an increment of haswell-wsl-deploys2 deployed by haswell-wsl:/home/blu/projects/homelab2 (pid 4242) at 13:46 whose push has not landed (origin/haswell-wsl-deploys2 is still at aaaaaaaaaaaa)".into()));
     assert_eq!(fx[1], Effect::Print("  choko: will switch".into()));
-    assert_eq!(fx[2], Effect::Print("  chikuwa: differs but excluded by the host filter".into()));
+    assert_eq!(fx[2], Effect::Print("  chikuwa: differs but excluded by the target filter".into()));
     assert_eq!(fx.len(), 3);
 
     let p = params(
@@ -288,7 +291,7 @@ fn reports_the_plan() {
     assert!(matches!(&fx[1], Effect::Print(l) if l.starts_with("  side1: will switch, reverting it: runs an increment")), "{fx:?}");
     assert_eq!(fx.len(), 3);
 
-    // The in-flight host is outside this checkout's work: left alone, the
+    // The in-flight target is outside this checkout's work: left alone, the
     // rest switched.
     let mut p = params(
         &["chikuwa", "choko", "side1"],
@@ -308,7 +311,7 @@ fn reports_the_plan() {
     );
     assert_eq!(fx[2], Effect::Print("  choko: will switch".into()));
 
-    // An unnamed --reset leaves it alone too; one naming the hosts takes it over.
+    // An unnamed --reset leaves it alone too; one naming the targets takes it over.
     p.reset = true;
     let (_, out) = run(p.clone());
     assert_eq!(out.unwrap().drift["side1"].0, Kind::LeftAlone);
@@ -318,11 +321,11 @@ fn reports_the_plan() {
     assert_eq!(out.drift["side1"].0, Kind::Overridden);
     assert_eq!(out.plan, ["side1", "choko"]);
 
-    // Named or not, a --reset never takes over a host outside the filter.
+    // Named or not, a --reset never takes over a target outside the filter.
     p.candidates = vec!["choko".into()];
     let (fx, out) = run(p);
     assert_eq!(out.unwrap().plan, ["choko"]);
-    assert!(fx.contains(&Effect::Print("  side1: differs but excluded by the host filter".into())), "{fx:?}");
+    assert!(fx.contains(&Effect::Print("  side1: differs but excluded by the target filter".into())), "{fx:?}");
 }
 
 fn arb_name() -> impl Strategy<Value = String> {
@@ -351,27 +354,27 @@ fn arb_lineage() -> impl Strategy<Value = Option<String>> {
     ]
 }
 
-const HOSTS: [&str; 5] = ["chikuwa", "choko", "haswell-wsl", "side1", "side6"];
+const TARGETS: [&str; 5] = ["chikuwa", "choko", "haswell-wsl", "side1", "side6"];
 
 fn arb_params() -> impl Strategy<Value = Params> {
-    let host = || prop::sample::select(HOSTS.to_vec()).prop_map(str::to_string);
+    let target = || prop::sample::select(TARGETS.to_vec()).prop_map(str::to_string);
     (
-        prop::collection::btree_set(host(), 0..5),
-        prop::collection::btree_set(host(), 0..5),
+        prop::collection::btree_set(target(), 0..5),
+        prop::collection::btree_set(target(), 0..5),
         (any::<bool>(), any::<bool>()),
-        prop::collection::btree_set(host(), 0..5),
+        prop::collection::btree_set(target(), 0..5),
         prop::collection::vec((proptest::option::of(arb_top()), arb_top(), arb_lineage(), proptest::option::of(0.0..4000.0f64)), 5),
         prop::collection::btree_map(arb_name(), prop::sample::select(vec!["a", "b"]).prop_map(str::to_string), 0..4),
         0.0..1e7f64,
     )
-        .prop_map(|(hosts, cands, (reset, named), reached, facts, tips, now)| {
-            let hosts: Vec<String> = hosts.into_iter().collect();
+        .prop_map(|(targets, cands, (reset, named), reached, facts, tips, now)| {
+            let targets: Vec<String> = targets.into_iter().collect();
             let mut p = Params {
                 cx: Context { tips, now, ..cx(&[]) },
                 union: "u".repeat(40),
                 router: "choko".into(),
-                candidates: cands.into_iter().filter(|c| hosts.contains(c)).collect(),
-                hosts: hosts.clone(),
+                candidates: cands.into_iter().filter(|c| targets.contains(c)).collect(),
+                targets: targets.clone(),
                 reset,
                 named,
                 reached,
@@ -379,7 +382,7 @@ fn arb_params() -> impl Strategy<Value = Params> {
                 built: BTreeMap::new(),
                 lineages: BTreeMap::new(),
             };
-            for (h, (running, built, lineage, age)) in hosts.iter().zip(facts) {
+            for (h, (running, built, lineage, age)) in targets.iter().zip(facts) {
                 if running.is_some() {
                     p.built.insert(h.clone(), built);
                 }
@@ -419,7 +422,7 @@ proptest! {
         let tracked = lin.as_ref().filter(|l| l.toplevel == running);
         prop_assert_eq!(kind == Kind::Untracked, tracked.is_none());
         if let Some(l) = tracked {
-            let mine = (l.host.as_str(), l.checkout.as_str()) == ME;
+            let mine = (l.machine.as_str(), l.checkout.as_str()) == ME;
             prop_assert_eq!(kind == Kind::ThisBranch, mine);
             let unlisted = l.branches.iter().any(|b| !p.cx.listed.contains(b));
             if kind == Kind::Unlisted { prop_assert!(unlisted); }
@@ -445,7 +448,7 @@ proptest! {
     #[test]
     fn plans(p in arb_params(), fate in prop::sample::select(vec!["kept", "landed", "abandoned"])) {
         let (_, fx, out) = run_with(p.clone(), fate);
-        let affected: Vec<String> = switch_order(&p.hosts, &p.router).into_iter()
+        let affected: Vec<String> = switch_order(&p.targets, &p.router).into_iter()
             .filter(|h| matches!((p.running.get(h), p.built.get(h)), (Some(Some(r)), Some(b)) if r != b))
             .collect();
         let verdicts: Vec<(String, Kind)> = affected.iter().filter(|h| p.candidates.contains(h)).map(|h| {
@@ -459,7 +462,7 @@ proptest! {
             (h.clone(), classify(lin.as_ref(), &running, &p.cx, p.reset && (p.named || reached), reached).0)
         }).collect();
         let refused: Vec<(String, Kind)> = verdicts.iter().filter(|v| v.1.refused()).cloned().collect();
-        // A refusal needs a reached host, which a --reset takes over.
+        // A refusal needs a reached target, which a --reset takes over.
         if p.reset { prop_assert!(refused.is_empty()); }
         match out {
             Ok(o) => {
@@ -472,7 +475,7 @@ proptest! {
                 prop_assert_eq!(msg, refusal(&refused));
             }
         }
-        // One report line per candidate and per excluded drifting host.
+        // One report line per candidate and per excluded drifting target.
         let printed = fx.iter().filter(|e| matches!(e, Effect::Print(_))).count();
         prop_assert_eq!(printed, p.candidates.len() + affected.iter().filter(|h| !p.candidates.contains(h)).count());
         prop_assert!(!fx.iter().any(|e| matches!(e, Effect::Warn(_))));

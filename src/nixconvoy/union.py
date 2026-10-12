@@ -42,9 +42,9 @@ class UnionQueries(GitQueries):
             return {"names": sorted(allowed_branches())}
         if kind == "branches":
             # Every work-branch-shaped ref: the listed ones, and the ones
-            # shaped like this machine's (any host's), so the core can warn
+            # shaped like this machine's (any machine's), so the core can warn
             # of a pushed work branch nobody registered.
-            shape = cfg().branch_prefix.replace("{host}", "*") + "*"
+            shape = cfg().branch_prefix.replace("{machine}", "*") + "*"
             pats = {*allowed_branches(), shape}
             listing = out(["git", "for-each-ref", "--format=%(refname:strip=3)%09%(objectname)",
                            "refs/remotes/origin/"])

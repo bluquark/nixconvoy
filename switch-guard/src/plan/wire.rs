@@ -1,5 +1,5 @@
 //! deploy-plan's protocol with nixconvoy: JSON lines, as deploy-switch's
-//! (deployer/wire.rs).  nixconvoy writes the core's name and parameters,
+//! (control/wire.rs).  nixconvoy writes the core's name and parameters,
 //! then one reply per query; the binary answers each with
 //! `{"effects": [...], "next": {"ask": ...} | {"done": ...} | {"die": ...}}`.
 use super::{drift, prune, rebase, union, Effect, Next, Query, Replay, Reply, Step};
@@ -56,7 +56,7 @@ fn pairs(v: &Value) -> Result<Vec<(String, String)>, String> {
 
 fn drift_params(v: &Value) -> Result<drift::Params, String> {
     let me = strings(v, "me")?;
-    let [host, checkout] = me.as_slice() else { return Err("me is not [host, checkout]".into()) };
+    let [machine, checkout] = me.as_slice() else { return Err("me is not [machine, checkout]".into()) };
     let mut running = BTreeMap::new();
     for (h, r) in object(v, "running")? {
         running.insert(h.clone(), opt_text(r)?);
@@ -79,7 +79,7 @@ fn drift_params(v: &Value) -> Result<drift::Params, String> {
     }
     Ok(drift::Params {
         cx: drift::Context {
-            me: (host.clone(), checkout.clone()),
+            me: (machine.clone(), checkout.clone()),
             listed: strings(v, "listed")?.into_iter().collect(),
             tips,
             now: field(v, "now")?.as_f64().ok_or("now is not a number")?,
@@ -87,7 +87,7 @@ fn drift_params(v: &Value) -> Result<drift::Params, String> {
         },
         union: text(v, "union")?,
         router: text(v, "router")?,
-        hosts: strings(v, "hosts")?,
+        targets: strings(v, "targets")?,
         candidates: strings(v, "candidates")?,
         reset: flag(v, "reset")?,
         named: flag(v, "named")?,
@@ -300,7 +300,7 @@ mod tests {
         );
         assert_eq!(reply(r#"{"ran":true,"detail":""}"#).unwrap(), Reply::Ran { ok: true, detail: String::new() });
         assert_eq!(query(&Query::Switch { branch: "b".into(), start: None }).to_string(), r#"{"ask":"switch","branch":"b","start":null}"#);
-        let mut d = start(r#"{"protocol":4,"core":"drift","me":["h","/c"],"union":"u","listed":["main"],"tips":{},"now":0,"tz_offset":0,"router":"choko","hosts":["a"],"candidates":["a"],"reset":false,"named":false,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"lineages":{"a":{"text":"","age":null}}}"#).unwrap();
+        let mut d = start(r#"{"protocol":4,"core":"drift","me":["h","/c"],"union":"u","listed":["main"],"tips":{},"now":0,"tz_offset":0,"router":"choko","targets":["a"],"candidates":["a"],"reset":false,"named":false,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"lineages":{"a":{"text":"","age":null}}}"#).unwrap();
         let (line, _) = d.decide(None);
         assert_eq!(
             line,

@@ -1,12 +1,12 @@
-//! nixconvoy's switch step and the host's helper composed: the real
-//! deployer `Machine`s drive the real helper `Machine`s through ssh calls
-//! that may be delayed or lost (before or after reaching the host), against a
+//! nixconvoy's switch step and the target's helper composed: the real
+//! control `Machine`s drive the real helper `Machine`s through ssh calls
+//! that may be delayed or lost (before or after reaching the target), against a
 //! one-second clock, the dead-man timer due exactly at its arming plus the
 //! deadline, probe timeouts, a crash of the deploying machine and a crash
-//! (reboot) of the host.  A probe of the host answers at once or at its
+//! (reboot) of the target.  A probe of the target answers at once or at its
 //! timeout.  Two deploys in turn, the second taking the guard
 //! once the first finished or died, each its own toplevel.
-use super::{Guard, Machine as Deployer, Next as DNext, Params, Query as DQuery, Reply as DReply};
+use super::{Guard, Machine as Control, Next as CNext, Params, Query as CQuery, Reply as CReply};
 use crate::record::{Phase, Record};
 use crate::switch::core::{Action, Effect as HEffect, Machine as Helper, Next as HNext, Query as HQuery, Reply as HReply, Verb};
 use stateright::{Checker, Model, Property};
@@ -46,11 +46,11 @@ struct Run {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Wait {
-    /// A local query, or a probe of the host, asked at this second.
-    Local(DQuery, u64),
-    /// A helper call not yet on the host.
-    Sending(DQuery, u64),
-    /// On the host, as a run.
+    /// A local query, or a probe of the target, asked at this second.
+    Local(CQuery, u64),
+    /// A helper call not yet on the target.
+    Sending(CQuery, u64),
+    /// On the target, as a run.
     Remote,
 }
 
@@ -59,7 +59,7 @@ enum Wait {
 #[allow(clippy::large_enum_variant)]
 enum Status {
     Idle,
-    Active { m: Deployer, wait: Wait },
+    Active { m: Control, wait: Wait },
     Done { success: bool },
     Dead,
 }
@@ -82,8 +82,8 @@ struct World {
     last_arm: Option<usize>,
     success: [bool; 2],
     false_success: bool,
-    /// nixconvoy reported rolling back to a system the host does not run.
-    wrong_target: bool,
+    /// nixconvoy reported rolling back to a system the target does not run.
+    wrong_rollback: bool,
     timely: bool,
     confirm_sent: Option<u64>,
     lost_race: bool,
@@ -114,11 +114,11 @@ enum Act {
     /// Answer deploy `d`'s local query or probe; `.1` picks a failure.
     Answer(usize, bool),
     Deliver(usize),
-    /// The ssh call is lost: before reaching the host if still sending,
+    /// The ssh call is lost: before reaching the target if still sending,
     /// else its reply.
     Lose(usize),
     CrashDeploy(usize),
-    CrashHost,
+    CrashTarget,
     Step(usize, u8),
     Fire,
     Tick,
@@ -143,27 +143,27 @@ fn spawn(w: &mut World, owner: Owner, verb: Verb<Sys>, confirm: bool) {
 }
 
 /// Feeds deploy `d` its reply and records what it asks next.
-fn advance(w: &mut World, d: usize, reply: DReply) {
+fn advance(w: &mut World, d: usize, reply: CReply) {
     let Status::Active { m, .. } = &mut w.deploys[d] else { return };
     let step = m.decide(reply);
     match step.next {
-        DNext::Done => finish(w, d, true),
-        DNext::Die(msg) => {
+        CNext::Done => finish(w, d, true),
+        CNext::Die(msg) => {
             if let Some(t) = msg.split("rolled back to ").nth(1).and_then(|r| r.split(".  ").next()) {
                 if t != SYS[w.running] {
-                    w.wrong_target = true;
+                    w.wrong_rollback = true;
                 }
             }
             finish(w, d, false)
         }
-        DNext::Ask(q) => {
-            if let DQuery::Helper(args) = &q {
+        CNext::Ask(q) => {
+            if let CQuery::Helper(args) = &q {
                 if args.len() == 2 && args[0] == "confirm" {
                     w.confirm_sent = Some(w.clock);
                 }
             }
             let wait = match &q {
-                DQuery::Arm | DQuery::Helper(_) => Wait::Sending(q, w.clock),
+                CQuery::Arm | CQuery::Helper(_) => Wait::Sending(q, w.clock),
                 _ => Wait::Local(q, w.clock),
             };
             if let Status::Active { wait: wt, .. } = &mut w.deploys[d] {
@@ -202,20 +202,20 @@ fn end_run(w: &mut World, i: usize, code: i32) {
         }
     }
     if let Owner::Deploy(d) = run.owner {
-        // What the helper prints: an arm's record, a rollback's target.
+        // What the helper prints: an arm's record, the system a rollback goes to.
         let reply = match (run.m.verb(), &w.record) {
             (Verb::Arm | Verb::Rollback, Some(Record { previous, phase: Phase::Armed | Phase::RolledBack })) if code == 0 => {
-                DReply::Said { code, target: Some(SYS[*previous].into()) }
+                CReply::Said { code, to: Some(SYS[*previous].into()) }
             }
-            _ => DReply::Code(code),
+            _ => CReply::Code(code),
         };
         advance(w, d, reply);
     }
 }
 
-/// The host's answer to run `i`'s query under outcome `o` (0: normal, 1-3:
+/// The target's answer to run `i`'s query under outcome `o` (0: normal, 1-3:
 /// the failures that query admits), or None when `o` is not possible.
-fn host_answer(w: &mut World, i: usize, o: u8) -> Option<HReply<Sys>> {
+fn target_answer(w: &mut World, i: usize, o: u8) -> Option<HReply<Sys>> {
     let activation = matches!(w.runs[i].m.verb(), Verb::Activate(_));
     let q = w.runs[i].q.clone();
     Some(match (q, o) {
@@ -293,9 +293,9 @@ fn host_answer(w: &mut World, i: usize, o: u8) -> Option<HReply<Sys>> {
     })
 }
 
-fn host_step(w: &mut World, i: usize, o: u8) -> bool {
+fn target_step(w: &mut World, i: usize, o: u8) -> bool {
     let mut probe = w.clone();
-    let Some(reply) = host_answer(&mut probe, i, o) else { return false };
+    let Some(reply) = target_answer(&mut probe, i, o) else { return false };
     *w = probe;
     let step = w.runs[i].m.decide(reply);
     for e in step.effects {
@@ -320,8 +320,8 @@ fn host_step(w: &mut World, i: usize, o: u8) -> bool {
 }
 
 /// A probe or sleep must be answered at its deadline, the timer fire when
-/// due, a request reach the host within its round trip: the clock waits for
-/// them.  Host steps other than an activation or a wait for the lock take no
+/// due, a request reach the target within its round trip: the clock waits for
+/// them.  Target steps other than an activation or a wait for the lock take no
 /// time.
 fn due(w: &World) -> bool {
     if w.timer_due.is_some_and(|t| w.clock >= t) {
@@ -332,10 +332,10 @@ fn due(w: &World) -> bool {
     }
     w.deploys.iter().any(|s| match s {
         Status::Active { wait: Wait::Local(q, at), .. } => match q {
-            DQuery::Running { timeout_ms: Some(t) } | DQuery::Check { timeout_ms: t } | DQuery::Internet { timeout_ms: t } => {
+            CQuery::Running { timeout_ms: Some(t) } | CQuery::Check { timeout_ms: t } | CQuery::Internet { timeout_ms: t } => {
                 w.clock >= at + t / 1000
             }
-            DQuery::Sleep { ms } => w.clock >= at + ms / 1000,
+            CQuery::Sleep { ms } => w.clock >= at + ms / 1000,
             _ => true,
         },
         Status::Active { wait: Wait::Sending(_, at), .. } => w.clock >= at + ROUND_TRIP,
@@ -369,7 +369,7 @@ impl Model for Composed {
             last_arm: None,
             success: [false, false],
             false_success: false,
-            wrong_target: false,
+            wrong_rollback: false,
             timely: true,
             confirm_sent: None,
             lost_race: false,
@@ -410,7 +410,7 @@ impl Model for Composed {
             acts.push(Act::Fire);
         }
         if w.faults > 0 {
-            acts.push(Act::CrashHost);
+            acts.push(Act::CrashTarget);
         }
         let busy = w.timer_due.is_some() || !w.runs.is_empty() || w.deploys.iter().any(|d| matches!(d, Status::Active { .. }));
         if busy && w.clock < HORIZON && !due(w) {
@@ -422,7 +422,7 @@ impl Model for Composed {
         let mut w = w.clone();
         match act {
             Act::Start(d) => {
-                // Only the first deploy's leftovers on the host (a pending
+                // Only the first deploy's leftovers on the target (a pending
                 // timer) reach past its end: time restarts with the second,
                 // which merges every state its start could be reached from.
                 if d == 1 {
@@ -432,7 +432,7 @@ impl Model for Composed {
                     w.confirm_sent = w.confirm_sent.map(|t| t.saturating_sub(offset));
                 }
                 let p = Params {
-                    host: "choko".into(),
+                    target: "choko".into(),
                     toplevel: SYS[TOPLEVEL[d]].into(),
                     expected: SYS[w.running].into(),
                     place: "local".into(),
@@ -440,8 +440,8 @@ impl Model for Composed {
                     router: true,
                     fail_verify: false,
                 };
-                w.deploys[d] = Status::Active { m: Deployer::new(p), wait: Wait::Local(DQuery::Now, 0) };
-                advance(&mut w, d, DReply::Start);
+                w.deploys[d] = Status::Active { m: Control::new(p), wait: Wait::Local(CQuery::Now, 0) };
+                advance(&mut w, d, CReply::Start);
             }
             Act::Answer(d, fail) => {
                 let Status::Active { m, wait: Wait::Local(q, at) } = &w.deploys[d] else { return None };
@@ -450,35 +450,35 @@ impl Model for Composed {
                 let timed_out = |t: u64| clock >= at + t / 1000;
                 // A probe answers at once or takes its whole timeout: the
                 // durations in between start the next probe in between.
-                if let DQuery::Running { timeout_ms: Some(t) } | DQuery::Check { timeout_ms: t } | DQuery::Internet { timeout_ms: t } = q {
+                if let CQuery::Running { timeout_ms: Some(t) } | CQuery::Check { timeout_ms: t } | CQuery::Internet { timeout_ms: t } = q {
                     if clock != at && !timed_out(t) {
                         return None;
                     }
                 }
                 let reply = match (q, fail) {
-                    (DQuery::Guard, false) => {
+                    (CQuery::Guard, false) => {
                         if w.guard.is_some() {
                             return None;
                         }
                         if w.running != expected {
-                            DReply::Guard(Guard::Moved(SYS[w.running].into()))
+                            CReply::Guard(Guard::Moved(SYS[w.running].into()))
                         } else {
                             w.guard = Some(d);
-                            DReply::Guard(Guard::Locked)
+                            CReply::Guard(Guard::Locked)
                         }
                     }
-                    (DQuery::ProbeHelper, false) => DReply::Code(0),
-                    (DQuery::ProbeHelper, true) if w.fault() => DReply::Code(255),
-                    (DQuery::Deadline, false) => DReply::Text(DEADLINE.to_string()),
-                    (DQuery::Now, false) => DReply::Now(w.clock * 1000),
-                    (DQuery::Running { .. }, false) => DReply::Running(Some(SYS[w.running].into())),
-                    (DQuery::Running { timeout_ms }, true) if timeout_ms.is_none_or(timed_out) => DReply::Running(None),
-                    // The host's own checks pass or not, at any moment.
-                    (DQuery::Check { .. }, false) => DReply::Check { code: 0, last: None },
-                    (DQuery::Check { .. }, true) => DReply::Check { code: 1, last: Some("x".into()) },
-                    (DQuery::Internet { .. }, false) => DReply::Flag(true),
-                    (DQuery::Internet { timeout_ms }, true) if timed_out(timeout_ms) => DReply::Flag(false),
-                    (DQuery::Sleep { ms }, false) if timed_out(ms) => DReply::Done,
+                    (CQuery::ProbeHelper, false) => CReply::Code(0),
+                    (CQuery::ProbeHelper, true) if w.fault() => CReply::Code(255),
+                    (CQuery::Deadline, false) => CReply::Text(DEADLINE.to_string()),
+                    (CQuery::Now, false) => CReply::Now(w.clock * 1000),
+                    (CQuery::Running { .. }, false) => CReply::Running(Some(SYS[w.running].into())),
+                    (CQuery::Running { timeout_ms }, true) if timeout_ms.is_none_or(timed_out) => CReply::Running(None),
+                    // The target's own checks pass or not, at any moment.
+                    (CQuery::Check { .. }, false) => CReply::Check { code: 0, last: None },
+                    (CQuery::Check { .. }, true) => CReply::Check { code: 1, last: Some("x".into()) },
+                    (CQuery::Internet { .. }, false) => CReply::Flag(true),
+                    (CQuery::Internet { timeout_ms }, true) if timed_out(timeout_ms) => CReply::Flag(false),
+                    (CQuery::Sleep { ms }, false) if timed_out(ms) => CReply::Done,
                     _ => return None,
                 };
                 advance(&mut w, d, reply);
@@ -487,8 +487,8 @@ impl Model for Composed {
                 let Status::Active { wait, .. } = &mut w.deploys[d] else { return None };
                 let Wait::Sending(q, _) = std::mem::replace(wait, Wait::Remote) else { return None };
                 match q {
-                    DQuery::Arm => spawn(&mut w, Owner::Deploy(d), Verb::Arm, false),
-                    DQuery::Helper(args) => {
+                    CQuery::Arm => spawn(&mut w, Owner::Deploy(d), Verb::Arm, false),
+                    CQuery::Helper(args) => {
                         let confirm = args.len() == 2 && args[0] == "confirm";
                         spawn(&mut w, Owner::Deploy(d), verb_of(&args), confirm);
                     }
@@ -505,7 +505,7 @@ impl Model for Composed {
                     }
                 }
                 w.confirm_sent = None;
-                advance(&mut w, d, DReply::Code(255));
+                advance(&mut w, d, CReply::Code(255));
             }
             Act::CrashDeploy(d) => {
                 w.deploys[d] = Status::Dead;
@@ -519,7 +519,7 @@ impl Model for Composed {
                     }
                 }
             }
-            Act::CrashHost => {
+            Act::CrashTarget => {
                 if !w.fault() {
                     return None;
                 }
@@ -535,11 +535,11 @@ impl Model for Composed {
                 w.runs.clear();
                 w.confirm_sent = None;
                 for d in waiting {
-                    advance(&mut w, d, DReply::Code(255));
+                    advance(&mut w, d, CReply::Code(255));
                 }
             }
             Act::Step(i, o) => {
-                if i >= w.runs.len() || !host_step(&mut w, i, o) {
+                if i >= w.runs.len() || !target_step(&mut w, i, o) {
                     return None;
                 }
             }
@@ -570,8 +570,8 @@ impl Model for Composed {
             Property::always("quiescent: profile matches running unless reboot-pending", |_, w: &World| {
                 !w.quiescent() || w.profile() == w.running || w.staged == Some(w.current)
             }),
-            Property::always("nixconvoy reports success only when the host runs and boots its toplevel", |_, w: &World| !w.false_success),
-            Property::always("a reported rollback names the system the host runs", |_, w: &World| !w.wrong_target),
+            Property::always("nixconvoy reports success only when the target runs and boots its toplevel", |_, w: &World| !w.false_success),
+            Property::always("a reported rollback names the system the target runs", |_, w: &World| !w.wrong_rollback),
             Property::always("a reported success is never rolled back", |_, w: &World| {
                 !w.quiescent()
                     || (0..2).all(|d| !w.success[d] || w.last_arm != Some(d) || (w.running == TOPLEVEL[d] && w.profile() == TOPLEVEL[d]))
@@ -581,7 +581,7 @@ impl Model for Composed {
             Property::sometimes("a failed verification rolls back", |_, w: &World| {
                 w.quiescent() && matches!(w.record, Some(Record { phase: Phase::RolledBack, .. })) && w.faults == 1
             }),
-            Property::sometimes("the host crashed mid-switch", |_, w: &World| {
+            Property::sometimes("the target crashed mid-switch", |_, w: &World| {
                 w.quiescent() && w.faults == 0 && w.record.is_none() && w.last_arm.is_some()
             }),
         ]

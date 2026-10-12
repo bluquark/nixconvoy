@@ -1,6 +1,6 @@
 # The repo's own checks: ruff and pyrefly over the Python, rustfmt and
 # clippy over the crate (cargo test runs in the crate build itself), and
-# the switch test driving the real deploy-switch against a fake host.
+# the switch test driving the real deploy-switch against a fake target.
 { pkgs, switch-guard, nixconvoy }:
 let
   inherit (pkgs) lib;

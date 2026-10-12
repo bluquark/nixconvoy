@@ -38,12 +38,12 @@ in
   # The timer covers a switch that cut its own path in, or a deploying
   # machine that died; no reboot is ever automatic.  The helper is linked
   # into the toplevel rather than put on PATH so the new closure carries it
-  # before the host has switched once.
+  # before the target has switched once.
   options.nixconvoy.confirmedSwitch = {
     enable = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Switch this host confirmed (see the module).  Off, nixconvoy switches it plainly, as nixos-rebuild switch would.";
+      description = "Switch this target confirmed (see the module).  Off, nixconvoy switches it plainly, as nixos-rebuild switch would.";
     };
     deadline = lib.mkOption {
       type = lib.types.ints.positive;
@@ -53,7 +53,7 @@ in
     checks = lib.mkOption {
       type = lib.types.lines;
       default = "";
-      description = "Bash run by the helper's `check` verb (as root, errexit) after the internet probe: the host's own assertions on the new system, whose last stderr line is what a failed verification reports.";
+      description = "Bash run by the helper's `check` verb (as root, errexit) after the internet probe: the target's own assertions on the new system, whose last stderr line is what a failed verification reports.";
     };
     checksCommand = lib.mkOption {
       type = lib.types.package;

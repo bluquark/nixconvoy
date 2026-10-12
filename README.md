@@ -1,14 +1,14 @@
 # nixconvoy
 
-Deploy a NixOS flake to a few hosts from several checkouts at once, without
+Deploy a NixOS flake to a few targets from several checkouts at once, without
 one checkout ever reverting what another already switched.
 
 nixconvoy is for the way a homelab actually evolves: lots of small,
 experimental changes, tested in production, kept honest by NixOS's atomic
 switches and generations.  You stage a change, run `nixconvoy apply`, and the
-hosts that differ from the result are switched.  If the host does not come
+targets that differ from the result are switched.  If the target does not come
 back reachable and healthy, the switch rolls itself back.  Only after the
-hosts run the change is it committed, so a branch never claims more than
+targets run the change is it committed, so a branch never claims more than
 what is deployed.
 
 ## The model in git terms
@@ -17,50 +17,51 @@ what is deployed.
   owns one, listed by pattern in `deploy-branches` at the repo root.  A
   deploy commits the staged state onto it and pushes it; nothing else
   writes there.
-- **The hosts run the convoy: origin/main plus every open work branch.**
+- **The targets run the convoy: origin/main plus every open work branch.**
   Each deploy union-merges the pushed work branches (mergiraf resolves
   structural conflicts) and builds that.  Two checkouts changing unrelated
   modules both stay deployed; a real conflict stops the deploy and names
   the branch.
-- **Targets are inferred.**  Each host's ground truth is its running
+- **Targets are inferred.**  Each target's ground truth is its running
   system.  Whatever differs from the union is switched; a no-op deploy
   evaluates and switches nothing.
 - **`land` lands a branch on main**, as one commit whose message is the
   branch's `COMMIT_MSG.md`; **`abandon`** discards it.  Either way the
   checkout stays on its work branch, reset onto the new main, and every
   other checkout on the machine is rebased onto it.  Neither touches a
-  host: abandoned work stays deployed until the next deploy by anyone,
+  target: abandoned work stays deployed until the next deploy by anyone,
   which says what it reverts - `abandon --apply-now` runs that deploy at
   once.
 
 A checkout on `main` (or any branch `deploy-branches` does not list) is a
-plain checkout: it deploys the convoy too, catching the hosts up, but owns
+plain checkout: it deploys the convoy too, catching the targets up, but owns
 no work.
 
 ## What keeps it safe
 
 - **Compare-and-swap switches.**  The switch runs under a lock held on the
-  target host that first re-checks the host still runs what this deploy
-  probed.  A deploy that raced another aborts cleanly instead of reverting
-  it, and a re-run converges.
-- **Lineage.**  Every host records where its system came from: the union,
-  each branch's tip, and the deployer.  A deploy that would overwrite
-  another checkout's not-yet-pushed increment is refused (or leaves that
-  host alone when its own work does not reach it).  A lineage older than
-  30 minutes is a dead deployer's and is taken over with a warning.
+  target that first re-checks it still runs what this deploy probed.  A
+  deploy that raced another aborts cleanly instead of reverting it, and a
+  re-run converges.
+- **Lineage.**  Every target records where its system came from: the union,
+  each branch's tip, and the machine and checkout that deployed it.  A
+  deploy that would overwrite another checkout's not-yet-pushed increment
+  is refused (or leaves that target alone when its own work does not reach
+  it).  A lineage older than 30 minutes is a dead deploy's and is taken
+  over with a warning.
 - **Confirmed switches.**  With the NixOS module, a switch activates the
   new system with `switch-to-configuration test` under a dead-man timer,
   verifies it from the deploying machine (reachable, on the internet, its
   own checks pass), and only then sets the profile and bootloader entry;
-  otherwise the host rolls back to what it ran.  No reboot is ever
+  otherwise the target rolls back to what it ran.  No reboot is ever
   automatic.
-- **Protected units.**  A host can declare units a deploy must never
+- **Protected units.**  A target can declare units a deploy must never
   restart unasked (a router's networkd, nftables, dnsmasq).  The new system
   is dry-activated first; a switch that would touch one stops the whole
   deploy unless `--danger-network-config-change` is given.
 - **Boot assessment** (optional, with lanzaboote).  systemd-boot's boot
   counting as a failover to the last proven generation; a generation the
-  host fell back from is never switched to again.
+  target fell back from is never switched to again.
 - **Commit after switch.**  An increment that fails to evaluate, build or
   switch is never committed anywhere; its changes stay staged for the
   re-run.
@@ -68,8 +69,8 @@ no work.
 ## Installation
 
 nixconvoy is a flake.  Add it as an input, import the NixOS module on each
-host, and re-export the command from your own flake so the deployer and the
-host-side helper are pinned together by your `flake.lock`:
+target, and re-export the command from your own flake so nixconvoy and the
+target-side helper are pinned together by your `flake.lock`:
 
 ```nix
 {
@@ -102,9 +103,9 @@ That is the running system's build, which trails the lock until the
 machine itself switches; an unattended deploy that first moves the lock
 should run the lock's build (`nix run .#nixconvoy -- apply ...`).
 
-Requirements on each host: `/run/current-system` reachable over ssh with
+Requirements on each target: `/run/current-system` reachable over ssh with
 passwordless sudo for the deploying user (a switch, the lineage file under
-`/var/lib/nixconvoy` and a dry activation all need root), and the host's
+`/var/lib/nixconvoy` and a dry activation all need root), and the target's
 nixosConfiguration named after its directory under `hosts/`.
 
 ## Layout nixconvoy expects
@@ -125,10 +126,11 @@ Every key is optional.
 flake = "nixos"              # directory holding flake.nix (default ".")
 hosts_dir = "nixos/hosts"    # default "<flake>/hosts"
 system = "x86_64-linux"
-target = "me@{host}.lan"     # ssh target template (default "{host}")
-branch_prefix = "{host}-deploys"   # a worktree under a plain checkout owns "<prefix>-<name>"
+ssh_address = "me@{target}.lan"   # ssh address template (default "{target}"); the builder's too
+branch_prefix = "{machine}-deploys"   # {machine}: this machine's hostname; a worktree under
+                                      # a plain checkout owns "<prefix>-<name>"
 
-[precheck]                   # a flake check proven before any host build
+[precheck]                   # a flake check proven before any build
 attr = "repo-lint"           # checks.<system>.<attr>
 globs = ["nixos/*.nix", "*.py"]   # the files it reads: its memo keys on exactly these
 
@@ -140,24 +142,24 @@ namespace = "homelab"        # named as pkgs.homelab.<attr>
 parallel = true              # Determinate Nix's parallel evaluation
 
 [build]
-host = { darwin = "builder" }      # realise closures there (per platform)
+builder = { darwin = "builder" }     # realise closures there (per platform)
 unreachable_hint = "asleep? wake it first"
 public_substituters = "https://cache.nixos.org"
 [[build.caches]]             # your own caches, asked first
 url = "http://builder.lan:5000"
-served_by = "builder"        # skipped when building on that host
+served_by = "builder"        # skipped when building on that builder
 
-[hosts.laptop]
+[targets.laptop]
 local_only = true            # deployable only from itself
-target = "root@10.0.0.9"     # overrides the template
-tags = ["portable"]          # `@portable` on the command line names every host tagged so
+ssh_address = "root@10.0.0.9"   # overrides the template
+tags = ["portable"]          # `@portable` on the command line names every target tagged so
 ```
 
 ### The NixOS module
 
 ```nix
 nixconvoy.confirmedSwitch.deadline = 120;   # seconds before an unconfirmed switch rolls back
-nixconvoy.confirmedSwitch.checks = ''       # bash, as root, errexit: the host's own assertions
+nixconvoy.confirmedSwitch.checks = ''       # bash, as root, errexit: the target's own assertions
   systemctl is-active -q nginx.service
 '';
 nixconvoy.protectedUnits = [ "systemd-networkd.service" "nftables.service" ];
@@ -170,8 +172,8 @@ nixconvoy.switchLast = true;                # the router: switched alone, after 
 ## Commands
 
 ```
-nixconvoy apply [-m "msg"] [--reset] [host|@tag ...]   deploy
-nixconvoy apply --dry-activate [host|@tag ...]   build and copy, then only report what each switch would do
+nixconvoy apply [-m "msg"] [--reset] [target|@tag ...]   deploy
+nixconvoy apply --dry-activate [target|@tag ...]   build and copy, then only report what each switch would do
 nixconvoy commit -m "msg"      commit + push the staged state, no build or switch
 nixconvoy land [name ...]      land the work branch on main
 nixconvoy abandon [--apply-now] [name ...]   discard it (--apply-now: and deploy, reverting it now)
@@ -179,7 +181,7 @@ nixconvoy prune [name ...]     remove the finished subagents' worktrees holding 
 nixconvoy pull                 rebase every checkout on this machine onto origin/main
 nixconvoy status               every checkout on this machine, and origin's other branches
 nixconvoy review               the pending landing: COMMIT_MSG.md, then the diff
-nixconvoy exec [host|@tag ...] -- cmd [arg ...]   run a command on each host, concurrently
+nixconvoy exec [target|@tag ...] -- cmd [arg ...]   run a command on each target, concurrently
 ```
 
 `nixconvoy --help` and the docstring of `src/nixconvoy/cli.py` describe each
@@ -218,8 +220,8 @@ both would run).
   rebase, the union, the drift verdicts, a subagent worktree's pruning
   against the create hook, the sessions and its agent's stops and
   resumes), `deploy-switch` (the switch protocol), `confirmed-switch` (the
-  host-side helper) and `boot-assessment`.
-- `tests/switch_test.py`: the switch driven end to end against a fake host,
+  target-side helper) and `boot-assessment`.
+- `tests/switch_test.py`: the switch driven end to end against a fake target,
   the lineage classification, and the git cores on scratch repositories.
 - `nix flake check` runs all of it.
 
@@ -227,7 +229,7 @@ both would run).
 
 nixos-rebuild, deploy-rs and colmena each do things nixconvoy does not,
 and nixconvoy exists for the last group, which none of them cover: several checkouts
-deploying unmerged work to the same hosts, each safe from the others.
+deploying unmerged work to the same targets, each safe from the others.
 
 ### Targets
 
@@ -248,7 +250,7 @@ deploying unmerged work to the same hosts, each safe from the others.
 | | nixos-rebuild | deploy-rs | colmena | nixconvoy |
 |---|:-:|:-:|:-:|:-:|
 | Build locally | ✓ | ✓ | ✓ | ✓ |
-| Build on a designated build host | ✓ |   |   | ✓ |
+| Build on a designated builder | ✓ |   |   | ✓ |
 | Each target builds its own closures | ✓ | ✓ | ✓ |   |
 
 ### Performance
@@ -263,11 +265,11 @@ deploying unmerged work to the same hosts, each safe from the others.
 
 | | nixos-rebuild | deploy-rs | colmena | nixconvoy |
 |---|:-:|:-:|:-:|:-:|
-| Roll back when the deployer cannot confirm the switch |   | ✓ |   | ✓ |
-| Host-side checks decide the confirmation |   |   |   | ✓ |
+| Roll back when nixconvoy cannot confirm the switch |   | ✓ |   | ✓ |
+| Target-side checks decide the confirmation |   |   |   | ✓ |
 | A flake check gates the deploy |   | ✓ |   | ✓ |
 | Refuses a switch that would restart protected units |   |   |   | ✓ |
-| Switches the router (or any host) last |   |   |   | ✓ |
+| Switches the router (or any target) last |   |   |   | ✓ |
 | Commits and pushes only after the switch succeeded |   |   |   | ✓ |
 | Boot counting: an unreachable boot falls back to the last proven generation |   |   |   | ✓ |
 
@@ -275,8 +277,8 @@ deploying unmerged work to the same hosts, each safe from the others.
 
 | | nixos-rebuild | deploy-rs | colmena | nixconvoy |
 |---|:-:|:-:|:-:|:-:|
-| Several checkouts deploy unmerged work to the same hosts |   |   |   | ✓ |
-| Refuses to revert another deployer's in-flight work |   |   |   | ✓ |
+| Several checkouts deploy unmerged work to the same targets |   |   |   | ✓ |
+| Refuses to revert another checkout's in-flight work |   |   |   | ✓ |
 
 ## License
 

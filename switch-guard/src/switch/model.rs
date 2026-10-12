@@ -1,12 +1,12 @@
-//! Exhaustive model of confirmed switches on one host: two deploys (each
-//! nixconvoy's switch() for its own toplevel) racing for the host's switch
+//! Exhaustive model of confirmed switches on one target: two deploys (each
+//! nixconvoy's switch() for its own toplevel) racing for the target's switch
 //! guard, either of which may die at any point (its detached helper runs
 //! carry on, and so does its attached `arm`, which ignores the session's
 //! end), the dead-man timer firing
 //! whenever it is pending, every activation outcome, a failing bootloader
 //! install, and one further fault (a failed rollback attempt, a rollback
 //! whose every attempt fails, a profile set or a timer start).  After an
-//! exhausted rollback the host may be fixed by hand (its profile set to what
+//! exhausted rollback the target may be fixed by hand (its profile set to what
 //! it runs) before the next deploy.  The helper runs are the real `Machine`s, stepped one query
 //! at a time so every interleaving under the helper's lock is explored.
 use super::core::{Action, Machine, Next, Query, Reply, Verb, ALREADY_CONFIRMED};
@@ -37,7 +37,7 @@ struct Run {
     locked: bool,
 }
 
-/// nixconvoy's switch() for one host, from taking the guard to its verdict.
+/// nixconvoy's switch() for one target, from taking the guard to its verdict.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Deploy {
     Idle,
@@ -74,7 +74,7 @@ struct World {
     staged: Option<usize>,
     /// The run whose rollback attempts all fail.
     stuck: Option<usize>,
-    /// A rollback gave up with the host off its record's previous system,
+    /// A rollback gave up with the target off its record's previous system,
     /// not handled since.
     exhausted: bool,
     /// Fixed by hand after that, and not re-armed since.
@@ -121,7 +121,7 @@ enum Act {
     HandFix,
 }
 
-struct Host;
+struct Target;
 
 const DEADLINE: u64 = 120;
 /// Bounds the check fails at rather than miss part of the space (it holds
@@ -293,7 +293,7 @@ fn finish(w: &mut World, d: usize, success: bool) {
     }
 }
 
-impl Model for Host {
+impl Model for Target {
     type State = World;
     type Action = Act;
 
@@ -462,7 +462,7 @@ impl Model for Host {
                     || w.hand_fixed
                     || (0..2).all(|d| !(w.fired_early[d] && w.last_arm == Some(d)) || w.running != TOPLEVEL[d])
             }),
-            Property::always("nixconvoy reports success only when the host runs and boots its toplevel", |_, w: &World| !w.false_success),
+            Property::always("nixconvoy reports success only when the target runs and boots its toplevel", |_, w: &World| !w.false_success),
             Property::sometimes("both deploys confirmed in turn", |_, w: &World| {
                 matches!(w.deploys, [Deploy::Done { success: true }, Deploy::Done { success: true }])
             }),
@@ -492,7 +492,7 @@ impl Model for Host {
 
 #[test]
 fn model_checks() {
-    let checker = Host
+    let checker = Target
         .checker()
         .threads(std::thread::available_parallelism().map_or(1, |n| n.get()).min(4))
         .target_state_count(MAX_STATES)
@@ -505,7 +505,7 @@ fn model_checks() {
         checker.unique_state_count(),
         checker.max_depth()
     );
-    for p in Host.properties() {
+    for p in Target.properties() {
         if let (stateright::Expectation::Always, Some(path)) = (&p.expectation, checker.discovery(p.name)) {
             let v = path.into_vec();
             let skip = v.len().saturating_sub(30);

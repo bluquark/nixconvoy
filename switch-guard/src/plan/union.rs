@@ -9,7 +9,7 @@
 //! run's fetch is still in flight; once it lands, a moved origin/main or
 //! work branch redoes the union (and so does a conflict, which the fetch
 //! may have resolved).  A work branch that moves while the union builds
-//! would be reverted on its hosts by switching without it, so the build is
+//! would be reverted on its targets by switching without it, so the build is
 //! redone then too, up to ATTEMPTS times.
 use super::{failed, listed, Halt, Query, Run, Script, BRANCHES_FILE, MAIN, MSG_FILE};
 use std::collections::BTreeSet;
@@ -119,7 +119,7 @@ fn guidance(s: &mut Script, c: &Conflict) -> Run<String> {
     let summary = s.text(Query::Summary { sha: c.sha.clone() })?.unwrap_or_default();
     let name = &c.name;
     Ok(format!(
-        "cannot union work branch {name}; mergiraf could not resolve:\n  {}\nits last deploy: {summary}\noptions:\n  - fix or rebase that branch in its own checkout, redeploy from there, re-run here\n  - if that work is abandoned: git push --force-with-lease origin origin/main:{name}\n  - --reset deploys ignoring all other branches (one-off; they return next deploy), reverting their work on every host it switches",
+        "cannot union work branch {name}; mergiraf could not resolve:\n  {}\nits last deploy: {summary}\noptions:\n  - fix or rebase that branch in its own checkout, redeploy from there, re-run here\n  - if that work is abandoned: git push --force-with-lease origin origin/main:{name}\n  - --reset deploys ignoring all other branches (one-off; they return next deploy), reverting their work on every target it switches",
         c.files.join(", ")
     ))
 }

@@ -1,4 +1,4 @@
-"""One host's switch: the lineage it claims, the on-host compare-and-swap
+"""One target's switch: the lineage it claims, the on-target compare-and-swap
 guard, and the deploy-switch core's protocol performed over ssh."""
 
 from __future__ import annotations
@@ -12,26 +12,26 @@ import sys
 import time
 from pathlib import Path
 
-from . import hosts, proc
+from . import proc, targets
 from .checkout import current_branch
-from .guard import DEPLOYER_PROTOCOL, drive
-from .hosts import PROBE_TIMEOUT, control_opts, lineage_digest
+from .guard import CONTROL_PROTOCOL, drive
 from .proc import out, rev, run, stream
+from .targets import PROBE_TIMEOUT, control_opts, lineage_digest
 
 
 def lineage_doc(*, union: str, main: str | None, branches: dict[str, str | None],
                 own: str, head: str | None, base: str | None, snap: str,
-                at: float, host: str, checkout: str, pid: int) -> dict[str, object]:
+                at: float, machine: str, checkout: str, pid: int) -> dict[str, object]:
     """The lineage of a deploy's union, before its toplevel is added:
     `branches` the other work branches' unioned tips, `own` the checked-out
     branch the union was built on (`head`, or `snap`, the commit the branch
     gets once the staged increment runs), `base` origin's tip of it."""
     pending = bool(snap) or head != base
     return {
-        "version": 1, "union": union, "main": main,
+        "version": 2, "union": union, "main": main,
         "branches": {**branches, own: snap or head},
         "pending": {"branch": own, "base": base, "head": snap or head} if pending else None,
-        "at": round(at), "by": {"host": host, "checkout": checkout, "pid": pid},
+        "at": round(at), "by": {"machine": machine, "checkout": checkout, "pid": pid},
     }
 
 
@@ -42,27 +42,27 @@ def lineage_record(union: str, branches: list[tuple[str, str]], snap: str) -> di
     return lineage_doc(
         union=union, main=rev("refs/remotes/origin/main"), branches=dict(branches),
         own=own, head=rev("HEAD"), base=rev(f"refs/remotes/origin/{own}"), snap=snap,
-        at=time.time(), host=proc.this_host(), checkout=str(Path.cwd()), pid=os.getpid())
+        at=time.time(), machine=proc.this_machine(), checkout=str(Path.cwd()), pid=os.getpid())
 
 
-def switch_guard_cmd(host: str, expected: str, toplevel: str, digest: str) -> list[str]:
-    """The on-host lock of a switch: a process holding fd 9 that first
-    re-verifies the host still runs `expected` with the lineage whose
+def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> list[str]:
+    """The on-target lock of a switch: a process holding fd 9 that first
+    re-verifies the target still runs `expected` with the lineage whose
     lineage_digest the probe read (else MOVED, so a deploy that probed in
     another's switch-to-verify window aborts instead of reverting it), prints
     LOCKED and holds the lock until its stdin closes.  The first line sent
     is the lineage of `toplevel`, claimed in LINEAGE_FILE at once (WROTE):
     from then on a probe that finds `toplevel` running reads it.  At the
-    end, unless the host runs `toplevel` or its profile names it (a reboot
+    end, unless the target runs `toplevel` or its profile names it (a reboot
     takes it there), the previous file is put back."""
-    f, cur_sys = hosts.LINEAGE_FILE, hosts.CURRENT_SYSTEM
+    f, cur_sys = targets.LINEAGE_FILE, targets.CURRENT_SYSTEM
     claim = (f"umask 022; mkdir -p {Path(f).parent} && "
              f"{{ cp -p {f} {f}.prev 2>/dev/null || rm -f {f}.prev; }} && "
              f"cat >{f}.tmp && mv -f {f}.tmp {f}")
     restore = f"if [ -e {f}.prev ]; then mv -f {f}.prev {f}; else rm -f {f}; fi"
-    w = hosts.LINEAGE_WRITER
+    w = targets.LINEAGE_WRITER
     script = (
-        f"exec 9>{hosts.SWITCH_LOCK}; "
+        f"exec 9>{targets.SWITCH_LOCK}; "
         "flock -w 900 9 || { echo TIMEOUT; exit 1; }; "
         f"cur=$(readlink {cur_sys}); "
         f'[ "$cur" = "{expected}" ] || {{ echo "MOVED $cur"; exit 1; }}; '
@@ -76,27 +76,27 @@ def switch_guard_cmd(host: str, expected: str, toplevel: str, digest: str) -> li
         "read -r _ || true; "
         '[ -n "$claimed" ] || exit 0; '
         f'[ "$(readlink {cur_sys})" = "{toplevel}" ] || '
-        f'[ "$(readlink -f {hosts.SYSTEM_PROFILE})" = "{toplevel}" ] || '
+        f'[ "$(readlink -f {targets.SYSTEM_PROFILE})" = "{toplevel}" ] || '
         f"{w} sh -c {shlex.quote(restore)}"
     )
-    if host == proc.this_host():
+    if target == proc.this_machine():
         return ["bash", "-c", script]
-    return ["ssh", "-o", "BatchMode=yes", *control_opts(), hosts.target(host), script]
+    return ["ssh", "-o", "BatchMode=yes", *control_opts(), targets.ssh_address(target), script]
 
 
-def switch(host: str, expected: str, toplevel: str, deployer: str,
+def switch(target: str, expected: str, toplevel: str, deploy_switch: str,
            quiet: bool = False, lineage: str = "", digest: str = "",
            needs_internet: bool = False) -> None:
-    """Switch `host` to `toplevel` as deploy-switch decides.  `quiet`
+    """Switch `target` to `toplevel` as deploy-switch decides.  `quiet`
     (several switches at once) prints the activation output afterwards,
-    prefixed with the host.  Activation, confirm and rollback run in a
-    transient unit on the host (as nixos-rebuild does), so they complete
+    prefixed with the target.  Activation, confirm and rollback run in a
+    transient unit on the target (as nixos-rebuild does), so they complete
     even if this ssh session dies.  `lineage` (one JSON line) is claimed on
-    the host under the switch lock, `digest` the lineage_digest the probe
+    the target under the switch lock, `digest` the lineage_digest the probe
     read (switch_guard_cmd).  `needs_internet`: verification also requires
     this machine to reach the internet (the router)."""
-    local = host == proc.this_host()
-    held = f"[{host}] " if quiet else None
+    local = target == proc.this_machine()
+    held = f"[{target}] " if quiet else None
     helper = f"{toplevel}/confirmed-switch"
     guard: subprocess.Popen[str] | None = None
 
@@ -104,7 +104,7 @@ def switch(host: str, expected: str, toplevel: str, deployer: str,
                  sink: list[str] | None = None) -> int:
         # A named unit refuses a second activation while one runs; the
         # helper's runs follow each other closely, so theirs are generated.
-        return stream(hosts.host_cmd(host, [
+        return stream(targets.target_cmd(target, [
             "systemd-run", "--quiet", "--collect", "--wait", "--pipe",
             "--service-type=exec", *([f"--unit={unit}"] if unit else []), *argv],
             sudo=True), held_as=held, sink=sink)
@@ -121,7 +121,7 @@ def switch(host: str, expected: str, toplevel: str, deployer: str,
         nonlocal guard
         kind = ask.get("ask")
         if kind == "guard":
-            guard = subprocess.Popen(switch_guard_cmd(host, expected, toplevel, digest),
+            guard = subprocess.Popen(switch_guard_cmd(target, expected, toplevel, digest),
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
             assert guard.stdin is not None and guard.stdout is not None
             line = guard.stdout.readline().strip()
@@ -133,7 +133,7 @@ def switch(host: str, expected: str, toplevel: str, deployer: str,
                 except OSError:
                     claimed = ""
                 if lineage and claimed != "WROTE":
-                    print(f"note: could not claim {host}'s lineage in {hosts.LINEAGE_FILE}; until "
+                    print(f"note: could not claim {target}'s lineage in {targets.LINEAGE_FILE}; until "
                           f"its next switch, other deploys treat its system as untracked",
                           file=sys.stderr)
                 return {"guard": "locked"}
@@ -142,21 +142,21 @@ def switch(host: str, expected: str, toplevel: str, deployer: str,
                 return {"guard": "moved", "running": now_running}
             return {"guard": "failed", "line": line}
         if kind == "probe_helper":
-            return {"code": run(hosts.host_cmd(host, ["test", "-e", helper]), check=False,
+            return {"code": run(targets.target_cmd(target, ["test", "-e", helper]), check=False,
                                 timeout=PROBE_TIMEOUT).returncode}
         if kind == "set_profile":
-            return {"code": stream(hosts.host_cmd(host, ["nix-env", "-p", hosts.SYSTEM_PROFILE,
-                                                         "--set", toplevel], sudo=True), held_as=held)}
+            return {"code": stream(targets.target_cmd(target, ["nix-env", "-p", targets.SYSTEM_PROFILE,
+                                                              "--set", toplevel], sudo=True), held_as=held)}
         if kind == "activate":
             action = str(ask.get("action"))
             return {"code": detached([f"{toplevel}/bin/switch-to-configuration", action],
                                      unit="nixconvoy-switch-to-configuration")}
         if kind == "deadline":
-            return {"text": out(hosts.host_cmd(host, [helper, "deadline"]))}
+            return {"text": out(targets.target_cmd(target, [helper, "deadline"]))}
         if kind == "arm":
             lines: list[str] = []
-            rc = stream(hosts.host_cmd(host, [helper, "arm"], sudo=True), held_as=held, sink=lines)
-            return {"code": rc, "target": said(lines, r"armed, rolling back to (\S+) in ")}
+            rc = stream(targets.target_cmd(target, [helper, "arm"], sudo=True), held_as=held, sink=lines)
+            return {"code": rc, "to": said(lines, r"armed, rolling back to (\S+) in ")}
         if kind == "helper":
             args = ask.get("args")
             assert isinstance(args, list)
@@ -164,20 +164,20 @@ def switch(host: str, expected: str, toplevel: str, deployer: str,
                 return {"code": detached([helper, *map(str, args)])}
             rb_lines: list[str] = []
             rc = detached([helper, "rollback"], sink=rb_lines)
-            return {"code": rc, "target": said(rb_lines, r"rolled back to (\S+)$")}
+            return {"code": rc, "to": said(rb_lines, r"rolled back to (\S+)$")}
         if kind == "now":
             return {"now": proc.monotonic_ms()}
         if kind == "running":
-            return {"running": hosts.running_system(host, cleanup=True,
+            return {"running": targets.running_system(target, cleanup=True,
                                                     timeout=secs(ask.get("timeout_ms")))}
         if kind == "check":
             t = secs(ask.get("timeout_ms"))
-            p = run(hosts.host_cmd(host, [helper, "check"], sudo=True), check=False, timeout=t,
+            p = run(targets.target_cmd(target, [helper, "check"], sudo=True), check=False, timeout=t,
                     cleanup=True)
             lines = (p.stderr or "").strip().splitlines()
             return {"check": p.returncode, "last": lines[-1] if lines else None}
         if kind == "internet":
-            return {"flag": hosts.internet_reachable(secs(ask.get("timeout_ms")))}
+            return {"flag": targets.internet_reachable(secs(ask.get("timeout_ms")))}
         if kind == "sleep":
             time.sleep(secs(ask.get("ms")))
             return {"done": True}
@@ -185,18 +185,18 @@ def switch(host: str, expected: str, toplevel: str, deployer: str,
 
     def effect(e: dict[str, object]) -> None:
         if e.get("armed") is True:
-            proc.ARMED.add(host)
+            proc.ARMED.add(target)
         elif e.get("armed") is False:
-            proc.ARMED.discard(host)
+            proc.ARMED.discard(target)
 
     try:
-        drive(deployer, {
-            "protocol": DEPLOYER_PROTOCOL, "host": host, "toplevel": toplevel,
+        drive(deploy_switch, {
+            "protocol": CONTROL_PROTOCOL, "target": target, "toplevel": toplevel,
             "expected": expected,
-            "place": "local" if local else hosts.target(host),
+            "place": "local" if local else targets.ssh_address(target),
             "quiet": quiet, "router": needs_internet,
             "fail_verify": os.environ.get("NIXCONVOY_FAIL_VERIFY") == "1"},
-            perform, "deploy-switch", f" while switching {host}", effect)
+            perform, "deploy-switch", f" while switching {target}", effect)
     finally:
         if guard is not None:
             if guard.stdin is not None:

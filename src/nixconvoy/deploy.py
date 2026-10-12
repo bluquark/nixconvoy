@@ -8,7 +8,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
-from . import hosts, memo, proc
+from . import memo, proc, targets
 from .checkout import (
     adopt_commit,
     await_background_push,
@@ -24,41 +24,41 @@ from .checkout import (
     staged_snapshot,
     work_branch,
 )
-from .config import build_host
+from .config import builder
 from .guard import binary, decide
-from .hosts import Probe, expand_targets, flake_host_names, remote_only
 from .memo import Top
 from .proc import PERF, die, dump_json, git, rev
 from .switch import lineage_record, switch
+from .targets import Probe, expand_targets, flake_target_names, remote_only
 from .union import UnionQueries
 
 
-def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
+def deploy(filter_targets: list[str], msg: str | None, reset: bool,
            danger: bool = False, dry: bool = False) -> None:
     """`reset`: this checkout's view alone - no other work branch in the
-    union, and a host running another deployer's refused work switched over
-    when this work reaches it or `filter_hosts` names it.
-    `dry`: stop after the dry activation of every host that would be
+    union, and a target running another checkout's refused work switched over
+    when this work reaches it or `filter_targets` names it.
+    `dry`: stop after the dry activation of every target that would be
     switched, printing the units it would stop, restart or reload; nothing
     is switched, committed or pushed."""
     skip = os.environ.get("NIXCONVOY_SKIP_SWITCH") == "1"
-    all_hosts = flake_host_names()
-    filter_hosts = expand_targets(filter_hosts, all_hosts)
-    me = proc.this_host()
+    all_targets = flake_target_names()
+    filter_targets = expand_targets(filter_targets, all_targets)
+    me = proc.this_machine()
 
-    for h in filter_hosts:
+    for h in filter_targets:
         if remote_only(h):
             die(f"{h} is deployable only from itself (nixconvoy.toml: local_only); run nixconvoy there")
-    candidates = filter_hosts or [h for h in all_hosts if not remote_only(h)]
+    candidates = filter_targets or [h for h in all_targets if not remote_only(h)]
 
     await_background_push()
     main0 = rev("refs/remotes/origin/main")
     # Non-candidates are probed best-effort so the Affected: trailer can
     # still cover them.
-    probe_names: list[str] = [] if skip else [n for n in all_hosts if not remote_only(n)]
+    probe_names: list[str] = [] if skip else [n for n in all_targets if not remote_only(n)]
     pool = ThreadPoolExecutor(1 + len(probe_names))
     fetch = pool.submit(git, "fetch", "--quiet", "--no-auto-gc", "origin")
-    probes: dict[str, Future[Probe]] = {n: pool.submit(hosts.probe, n) for n in probe_names}
+    probes: dict[str, Future[Probe]] = {n: pool.submit(targets.probe, n) for n in probe_names}
     pool.shutdown(wait=False)
 
     pop_tmp_commits()
@@ -99,8 +99,8 @@ def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
         dead = [h for h in candidates if running.get(h) is None]
         if dead:
             die(f"unreachable: {', '.join(dead)} - nothing was committed; "
-                f"fix connectivity (or restrict hosts / use `commit`) and re-run")
-        hosts.check_build_host()
+                f"fix connectivity (or restrict targets / use `commit`) and re-run")
+        targets.check_builder()
 
     plan: list[str] = []
     affected: list[str] = []
@@ -140,21 +140,21 @@ def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
             check_pool = ThreadPoolExecutor(1)
             check = check_pool.submit(memo.precheck_gate, wt, objs)
             check_pool.shutdown(wait=False)
-        print("evaluating hosts..." if check is None else "evaluating hosts, running the precheck...")
-        tops = memo.eval_toplevels(wt, union, [h for h in all_hosts if running.get(h) is not None],
+        print("evaluating targets..." if check is None else "evaluating targets, running the precheck...")
+        tops = memo.eval_toplevels(wt, union, [h for h in all_targets if running.get(h) is not None],
                                    check)
         if check is not None:
             err = check.result()
             if err:
                 die(f"{err}; nothing was pushed or switched")
-        reached = memo.reached_hosts(wt, union, sorted(tops), snap or "HEAD",
+        reached = memo.reached_targets(wt, union, sorted(tops), snap or "HEAD",
                                      {h: probed[h].lineage for h in tops if h in probed})
         last = [h for h in sorted(tops) if tops[h].last]
         verdict = decide(
             "drift", me=[me, str(Path.cwd())], union=union,
             listed=sorted({*listed, "main"}), tips=origin_tips(), now=time.time(),
             tz_offset=time.localtime().tm_gmtoff, router=last[0] if last else "",
-            hosts=all_hosts, candidates=candidates, reset=reset, named=bool(filter_hosts),
+            targets=all_targets, candidates=candidates, reset=reset, named=bool(filter_targets),
             reached=sorted(reached), running=running,
             built={h: t.out for h, t in tops.items()},
             lineages={h: {"text": p.lineage, "age": p.age} for h, p in probed.items()})
@@ -165,27 +165,27 @@ def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
         assert isinstance(drift, dict)
         left_alone = [str(h) for h, v in drift.items() if v[0] == "left-alone"]
 
-        # The host fell back from this very toplevel: switching onto it
+        # The target fell back from this very toplevel: switching onto it
         # would run a configuration known not to boot.
         for name in plan:
             if not tops[name].assessed:
                 continue
-            stub = hosts.rejected_generation(name, tops[name].out)
+            stub = targets.rejected_generation(name, tops[name].out)
             if stub:
                 die(f"{name}'s bootloader rejected the very generation this "
                     f"deploy would switch it to ({stub}): it failed its boot "
-                    f"assessment and the host fell back.  Nothing was built, "
+                    f"assessment and the target fell back.  Nothing was built, "
                     f"switched or committed.  See `journalctl -u boot-assessment-watch "
                     f"-u boot-assessment` on {name}; then change the configuration, or "
                     f"re-arm the stub to retry it as is (sudo mv of the +0-N stub to +2 "
                     f"under /boot/EFI/Linux).")
 
         if plan:
-            bh = build_host()
-            where = f" on {bh}" if bh else ""
+            b = builder()
+            where = f" on {b}" if b else ""
             PERF.mark("build")
             print(f"building {', '.join(plan)}{where}...")
-            err = hosts.build_drvs([tops[h].drv for h in plan], f"build of {', '.join(plan)}")
+            err = targets.build_drvs([tops[h].drv for h in plan], f"build of {', '.join(plan)}")
             if err:
                 die(f"{err}; nothing was pushed or switched")
 
@@ -195,12 +195,12 @@ def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
         PERF.mark("copy")
 
         def copy_then_gate(name: str, top: Top, quiet: bool) -> str | None:
-            hosts.copy_closure(name, top.out, quiet)
+            targets.copy_closure(name, top.out, quiet)
             if dry:
                 # The gate's verdict is part of the report, not a stop.
-                return hosts.protected_units_gate(name, top.out, top.protected, danger)
+                return targets.protected_units_gate(name, top.out, top.protected, danger)
             if top.protected:
-                return hosts.protected_units_gate(name, top.out, top.protected, danger)
+                return targets.protected_units_gate(name, top.out, top.protected, danger)
             return None
 
         if dry and plan:
@@ -219,7 +219,7 @@ def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
                       f"nothing was switched, committed or pushed")
             elif left_alone:
                 print(f"--dry-activate: nothing would be switched: {', '.join(left_alone)} left "
-                      f"alone, running another deployer's work this checkout's does not reach "
+                      f"alone, running another checkout's work this checkout's does not reach "
                       f"(union {union})")
             else:
                 print(f"--dry-activate: nothing drifts from the union ({union}); nothing to switch")
@@ -245,9 +245,9 @@ def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
                     f"\nDeployed: {fmt(plan) or 'none'}")
             committed = deployed_commit(snap, full)
         record = lineage_record(union, branches, committed)
-        deployer = binary("deploy-switch") if plan else ""
+        deploy_switch = binary("deploy-switch") if plan else ""
 
-        # The switch-last hosts alone, one by one, once everything else has
+        # The switch-last targets alone, one by one, once everything else has
         # finished talking to them.  A failed switch dies once the others in
         # its batch finish.
         first = [h for h in plan if not tops[h].last]
@@ -258,7 +258,7 @@ def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
             expected: dict[str, str] = {}
             for name in batch:
                 r = running.get(name)
-                assert r is not None  # unreachable hosts never enter the plan
+                assert r is not None  # unreachable targets never enter the plan
                 expected[name] = r
             PERF.mark("switch:" + "+".join(batch))
 
@@ -267,11 +267,11 @@ def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
 
             if len(batch) == 1:
                 n = batch[0]
-                switch(n, expected[n], tops[n].out, deployer, lineage=line(n),
+                switch(n, expected[n], tops[n].out, deploy_switch, lineage=line(n),
                        digest=probed[n].digest, needs_internet=tops[n].last)
                 continue
             with ThreadPoolExecutor(len(batch)) as pool:
-                switches = [pool.submit(switch, n, expected[n], tops[n].out, deployer, True,
+                switches = [pool.submit(switch, n, expected[n], tops[n].out, deploy_switch, True,
                                         line(n), probed[n].digest, tops[n].last)
                             for n in batch]
             for f in switches:
@@ -284,13 +284,13 @@ def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
         if wb is not None and current_branch() == wb:
             push_work_branch(wb, background=True)
         # A local main ahead of origin is pushed by its owner once every
-        # host it targets has switched.
+        # target it affects has switched.
 
         if plan:
             print(f"deployed {', '.join(plan)}: union {union}")
         elif left_alone:
             print(f"nothing switched: {', '.join(left_alone)} left alone, running another "
-                  f"deployer's work this checkout's does not reach (union {union})")
+                  f"checkout's work this checkout's does not reach (union {union})")
         else:
             print(f"nothing drifts from the union ({union}); nothing to switch")
     finally:

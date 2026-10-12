@@ -83,8 +83,8 @@ def dump_json(obj: object) -> str:
 CHILDREN: set[subprocess.Popen[str]] = set()
 CHILDREN_LOCK = threading.Lock()
 DYING = False
-# Hosts armed for a confirmed switch and neither confirmed nor rolled back
-# yet: a die() for another host in their batch leaves them to their timers.
+# Targets armed for a confirmed switch and neither confirmed nor rolled back
+# yet: a die() for another target in their batch leaves them to their timers.
 ARMED: set[str] = set()
 
 
@@ -181,7 +181,7 @@ def is_ancestor(a: str, b: str) -> bool:
     return ok(["git", "merge-base", "--is-ancestor", a, b])
 
 
-def this_host() -> str:
+def this_machine() -> str:
     return socket.gethostname().split(".")[0]
 
 

@@ -1,5 +1,5 @@
-//! nixconvoy's decisions about the checkout and the hosts as Sans-I/O cores
-//! (deploy-plan): which hosts a deploy may switch (drift), how a checkout is
+//! nixconvoy's decisions about the checkout and the targets as Sans-I/O cores
+//! (deploy-plan): which targets a deploy may switch (drift), how a checkout is
 //! brought onto origin/main (rebase), how the union of the work branches
 //! is built and kept current (union) and whether a subagent worktree is
 //! removed (prune).  nixconvoy performs each query - git,
@@ -116,7 +116,7 @@ pub enum Query {
     },
     /// What became of `branch`'s increment at `tip`, which origin's tip of
     /// the branch no longer is: "kept" when origin's branch still carries
-    /// it, or `checkout` (the deployer's, on this machine) still has the
+    /// it, or `checkout` (the deploying one, on this machine) still has the
     /// branch checked out - its first push on its way, or its switch
     /// failed - or merging it into `union` changes nothing (rebased,
     /// redeployed, landed intact), else "landed" (an origin/main commit

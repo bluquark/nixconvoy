@@ -1,6 +1,6 @@
-//! nixconvoy's switch step, one host per process: see deployer/wire.rs.
+//! nixconvoy's switch step, one target per process: see control/wire.rs.
 use std::io::{BufRead, Write};
-use switch_guard::deployer::{wire, Machine, Next, Reply};
+use switch_guard::control::{wire, Machine, Next, Reply};
 
 fn main() {
     let stdin = std::io::stdin();

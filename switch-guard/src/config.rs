@@ -1,4 +1,4 @@
-//! The `key = value` file a module renders, so per-host settings and tool
+//! The `key = value` file a module renders, so per-target settings and tool
 //! paths reach the binary without a wrapper environment.
 use std::collections::BTreeMap;
 use std::path::Path;

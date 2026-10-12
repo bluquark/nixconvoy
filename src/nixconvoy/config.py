@@ -1,5 +1,5 @@
 """nixconvoy.toml at the repo root: the fleet-level settings the git-side
-verbs need before any Nix runs, and the per-host facts a deploy needs before
+verbs need before any Nix runs, and the per-target facts a deploy needs before
 probing.  Every key is optional; a missing file is the defaults."""
 
 from __future__ import annotations
@@ -18,19 +18,19 @@ BRANCHES_FILE = "deploy-branches"
 @dataclass(frozen=True)
 class Cache:
     """A binary cache of the fleet's own builds, asked before the public
-    substituters - except when building on `served_by`, the host whose store
+    substituters - except when building on `served_by`, the builder whose store
     it serves (there its name may not even resolve to the cache)."""
     url: str
     served_by: str = ""
 
 
 @dataclass(frozen=True)
-class HostConfig:
+class TargetConfig:
     # Deployable only from itself: never probed or named from elsewhere.
     local_only: bool = False
-    # ssh target, overriding Config.target's template.
-    target: str = ""
-    # `@tag` on the command line names every host carrying it.
+    # ssh address, overriding Config.ssh_address's template.
+    ssh_address: str = ""
+    # `@tag` on the command line names every target carrying it.
     tags: tuple[str, ...] = ()
 
 
@@ -41,37 +41,39 @@ class Config:
     # The directory whose subdirectories name the nixosConfigurations.
     hosts_dir: str = ""
     system: str = "x86_64-linux"
-    # The ssh target of a host: a template over {host}.
-    target: str = "{host}"
-    # A subagent worktree of the main checkout owns "<prefix>-<name>".
-    branch_prefix: str = "{host}-deploys"
-    # A flake check (checks.<system>.<attr>) proven before any host build,
+    # A target's ssh address (user@name): nixconvoy.toml's ssh_address, a
+    # template over {target}; the builder is addressed through it too.
+    ssh_template: str = "{target}"
+    # A subagent worktree of the main checkout owns "<prefix>-<name>";
+    # {machine} is this machine's hostname.
+    branch_prefix: str = "{machine}-deploys"
+    # A flake check (checks.<system>.<attr>) proven before any build,
     # memoized on the git object ids of the files matching `globs`.
     precheck_attr: str = ""
     precheck_globs: tuple[str, ...] = ()
-    # The overlay whose attributes map one-to-one onto files, so a host's
+    # The overlay whose attributes map one-to-one onto files, so a target's
     # eval memo keys only on the attribute files its modules name:
     # `<x> = ... ./<file>.nix` lines, named as pkgs.<namespace>.<x>.
     overlay: str = ""
     overlay_namespace: str = ""
     # Determinate Nix's parallel evaluation (builtins.parallel, --eval-cores).
     parallel_eval: bool = False
-    # Where the closures are realised, by sys.platform ("darwin", "linux");
-    # absent means here.
-    build_host: dict[str, str] = field(default_factory=dict)
+    # The builder the closures are realised on, by sys.platform ("darwin",
+    # "linux"); absent means here.
+    builder: dict[str, str] = field(default_factory=dict)
     build_unreachable_hint: str = ""
     caches: tuple[Cache, ...] = ()
     public_substituters: str = "https://cache.nixos.org"
-    hosts: dict[str, HostConfig] = field(default_factory=dict)
+    targets: dict[str, TargetConfig] = field(default_factory=dict)
 
-    def host(self, name: str) -> HostConfig:
-        return self.hosts.get(name, HostConfig())
+    def target(self, name: str) -> TargetConfig:
+        return self.targets.get(name, TargetConfig())
 
-    def ssh_target(self, name: str) -> str:
-        return self.host(name).target or self.target.format(host=name)
+    def ssh_address(self, name: str) -> str:
+        return self.target(name).ssh_address or self.ssh_template.format(target=name)
 
     def tagged(self, tag: str) -> list[str]:
-        return [n for n, h in self.hosts.items() if tag in h.tags]
+        return [n for n, h in self.targets.items() if tag in h.tags]
 
     @property
     def hosts_path(self) -> str:
@@ -121,6 +123,28 @@ def _strs(t: dict[str, object], k: str, where: str) -> tuple[str, ...]:
     return tuple(v)
 
 
+# The keys the target/builder/machine vocabulary renamed, for the error a
+# config still using one gets.
+_RENAMED = {"target": "ssh_address (over {target}, not {host})", "hosts": "targets",
+            "build.host": "build.builder"}
+
+
+def _renamed(k: str) -> str:
+    new = _RENAMED.get(k)
+    return f" (now {new})" if new else ""
+
+
+def _template(t: dict[str, object], k: str, default: str, placeholder: str) -> str:
+    """A template setting, proven here to format with `placeholder` alone,
+    so a stale placeholder fails as a ConfigError rather than in a probe."""
+    v = _str(t, k, CONFIG_FILE, default)
+    try:
+        v.format(**{placeholder: "x"})
+    except (KeyError, IndexError, ValueError) as e:
+        raise ConfigError(f"{CONFIG_FILE}: {k} is a template over {{{placeholder}}} alone ({e!r})") from e
+    return v
+
+
 def parse(text: str) -> Config:
     try:
         doc = tomllib.loads(text)
@@ -129,20 +153,22 @@ def parse(text: str) -> Config:
     version = doc.get("version", 1)
     if version != 1:
         raise ConfigError(f"{CONFIG_FILE}: version {version} is not supported (1 is)")
-    known = {"version", "flake", "hosts_dir", "system", "target", "branch_prefix",
-             "precheck", "memo", "eval", "build", "hosts"}
+    known = {"version", "flake", "hosts_dir", "system", "ssh_address", "branch_prefix",
+             "precheck", "memo", "eval", "build", "targets"}
     for k in doc:
         if k not in known:
-            raise ConfigError(f"{CONFIG_FILE}: unknown key {k}")
+            raise ConfigError(f"{CONFIG_FILE}: unknown key {k}{_renamed(k)}")
     pre = _table(doc.get("precheck", {}), "precheck")
     memo = _table(doc.get("memo", {}), "memo")
     ev = _table(doc.get("eval", {}), "eval")
     build = _table(doc.get("build", {}), "build")
-    raw_host = build.get("host", {})
-    if isinstance(raw_host, str):
-        build_host = {"linux": raw_host, "darwin": raw_host}
+    if "host" in build:
+        raise ConfigError(f"{CONFIG_FILE}: unknown key build.host{_renamed('build.host')}")
+    raw_builder = build.get("builder", {})
+    if isinstance(raw_builder, str):
+        builder = {"linux": raw_builder, "darwin": raw_builder}
     else:
-        build_host = {k: v for k, v in _table(raw_host, "build.host").items() if isinstance(v, str)}
+        builder = {k: v for k, v in _table(raw_builder, "build.builder").items() if isinstance(v, str)}
     caches = []
     raw_caches = build.get("caches", [])
     if not isinstance(raw_caches, list):
@@ -150,15 +176,15 @@ def parse(text: str) -> Config:
     for i, c in enumerate(raw_caches):
         t = _table(c, f"build.caches[{i}]")
         caches.append(Cache(_str(t, "url", "build.caches"), _str(t, "served_by", "build.caches")))
-    hosts: dict[str, HostConfig] = {}
-    for name, h in _table(doc.get("hosts", {}), "hosts").items():
-        t = _table(h, f"hosts.{name}")
+    targets: dict[str, TargetConfig] = {}
+    for name, h in _table(doc.get("targets", {}), "targets").items():
+        t = _table(h, f"targets.{name}")
         for k in t:
-            if k not in ("local_only", "target", "tags"):
-                raise ConfigError(f"{CONFIG_FILE}: unknown key hosts.{name}.{k}")
-        hosts[name] = HostConfig(local_only=_bool(t, "local_only", f"hosts.{name}"),
-                                 target=_str(t, "target", f"hosts.{name}"),
-                                 tags=_strs(t, "tags", f"hosts.{name}"))
+            if k not in ("local_only", "ssh_address", "tags"):
+                raise ConfigError(f"{CONFIG_FILE}: unknown key targets.{name}.{k}{_renamed(k)}")
+        targets[name] = TargetConfig(local_only=_bool(t, "local_only", f"targets.{name}"),
+                                     ssh_address=_str(t, "ssh_address", f"targets.{name}"),
+                                     tags=_strs(t, "tags", f"targets.{name}"))
     overlay = _str(memo, "overlay", "memo")
     namespace = _str(memo, "namespace", "memo")
     if bool(overlay) != bool(namespace):
@@ -167,17 +193,17 @@ def parse(text: str) -> Config:
         flake=_str(doc, "flake", CONFIG_FILE, "."),
         hosts_dir=_str(doc, "hosts_dir", CONFIG_FILE),
         system=_str(doc, "system", CONFIG_FILE, "x86_64-linux"),
-        target=_str(doc, "target", CONFIG_FILE, "{host}"),
-        branch_prefix=_str(doc, "branch_prefix", CONFIG_FILE, "{host}-deploys"),
+        ssh_template=_template(doc, "ssh_address", "{target}", "target"),
+        branch_prefix=_template(doc, "branch_prefix", "{machine}-deploys", "machine"),
         precheck_attr=_str(pre, "attr", "precheck"),
         precheck_globs=_strs(pre, "globs", "precheck"),
         overlay=overlay, overlay_namespace=namespace,
         parallel_eval=_bool(ev, "parallel", "eval"),
-        build_host=build_host,
+        builder=builder,
         build_unreachable_hint=_str(build, "unreachable_hint", "build"),
         caches=tuple(caches),
         public_substituters=_str(build, "public_substituters", "build", "https://cache.nixos.org"),
-        hosts=hosts,
+        targets=targets,
     )
 
 
@@ -210,10 +236,10 @@ def set_cfg(c: Config) -> None:
     _CFG = c
 
 
-def build_host() -> str:
-    """Where the closures are realised: NIXCONVOY_BUILD_HOST, else the config's
+def builder() -> str:
+    """Where the closures are realised: NIXCONVOY_BUILDER, else the config's
     entry for this platform; empty means here."""
-    env = os.environ.get("NIXCONVOY_BUILD_HOST")
+    env = os.environ.get("NIXCONVOY_BUILDER")
     if env is not None:
         return env
-    return cfg().build_host.get("darwin" if sys.platform == "darwin" else "linux", "")
+    return cfg().builder.get("darwin" if sys.platform == "darwin" else "linux", "")

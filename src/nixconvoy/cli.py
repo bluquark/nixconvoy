@@ -1,7 +1,7 @@
 """nixconvoy - clobber-safe nixos-rebuild, branch-based, target-inferring.
 
 Problem: several checkouts of one NixOS flake repo (worktrees, machines)
-deploy work in progress to the same hosts, so a plain nixos-rebuild from
+deploy work in progress to the same targets, so a plain nixos-rebuild from
 one tree silently reverts what another tree already deployed.
 
 Model:
@@ -19,22 +19,22 @@ Model:
   - COMMIT_MSG.md at a work branch's root describes the branch's work since
     its last landing.  It never reaches main's tree: `land` consumes it as
     the commit message.
-  - Targets are inferred: each host's ground truth is its running system
+  - Targets are inferred: each target's ground truth is its running system
     (/run/current-system), compared against the union build.  Every deploy
     converges whatever differs.
   - The decisions - rebasing a checkout, the union and its retries, which
-    drifting hosts may be switched, the switch itself - are the switch-guard
+    drifting targets may be switched, the switch itself - are the switch-guard
     crate's (deploy-plan, deploy-switch: Sans-I/O cores); this program
     performs the git, eval, build and ssh they ask for.
 
 Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
-         [--dry-activate] [host|@tag ...]):
-  1. start fetching origin; enumerate the hosts from the hosts directory
-  2. probe every host's running system and its lineage
+         [--dry-activate] [target|@tag ...]):
+  1. start fetching origin; enumerate the targets from the hosts directory
+  2. probe every target's running system and its lineage
      (/var/lib/nixconvoy/lineage.json, in the same round trip; a local_only
-     host participates only when the checkout is on it), concurrently with
-     steps 3-4.  Candidates default to all hosts; naming hosts (or @tag, every
-     host nixconvoy.toml gives that tag) restricts switching to (at most)
+     target participates only when the checkout is on it), concurrently with
+     steps 3-4.  Candidates default to all targets; naming targets (or @tag, every
+     target nixconvoy.toml gives that tag) restricts switching to (at most)
      those.  An unreachable candidate fails the deploy before anything is
      evaluated
   3. snapshot the staged state (index) as an ephemeral deterministic commit
@@ -47,54 +47,54 @@ Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
      deterministic (fixed identity/date, parent = origin/main), so the eval
      memo stays valid across retries and no-op redeploys.  Once step 1's
      fetch lands, steps 3-4 are redone if it moved origin/main or a work branch
-  5. evaluate every reachable host's toplevel for the union, one nix eval
-     process per stale host, concurrently, memoized per host by the git
+  5. evaluate every reachable target's toplevel for the union, one nix eval
+     process per stale target, concurrently, memoized per target by the git
      hashes of the files its configuration references and the lock entries
      of the flake inputs those files name: a change to a module only one
-     host imports re-evaluates that host alone, and a no-op redeploy
-     evaluates nothing.  The same eval reads the switch policy the host's
+     target imports re-evaluates that target alone, and a no-op redeploy
+     evaluates nothing.  The same eval reads the switch policy the target's
      configuration declares through the nixconvoy NixOS module (protected
-     units, switch last, boot assessment).  Hosts whose running system
+     units, switch last, boot assessment).  Targets whose running system
      matches are up to date; the rest will be switched (their drift may be
      catch-up to main or other branches, not just this increment) - unless
-     the lineage shows the host runs another deployer's increment that this
+     the lineage shows the target runs another checkout's increment that this
      union cannot contain: a switch whose push has not landed yet, or one
-     of a branch deploy-branches here does not list.  Such a host is never
+     of a branch deploy-branches here does not list.  Such a target is never
      switched as is: when this checkout's own work does not reach it (no
      file its configuration reads changed since the tip of this branch its
      lineage recorded) it is left alone, running that work; when it does,
      the deploy is refused whole.  A refused lineage older than 30 min by
-     the host's clock is a dead deployer's and is switched over with a
-     warning; so is a refused host under --reset, when this work reaches it
-     or the host was named.  When the configuration
+     the target's clock is a dead deploy's and is switched over with a
+     warning; so is a refused target under --reset, when this work reaches it
+     or the target was named.  When the configuration
      names a precheck (a flake check), it runs on a thread beside the evals
      unless a pass is already proven for exactly the files it reads, and a
      failure stops the deploy the moment it is known.  A drifting candidate
      whose boot counting rejected its new toplevel stops the deploy before
      anything is built
   6. build the drifting candidates' closures straight from the evaluated
-     .drvs (no re-eval), on the configured build host if any, unsandboxed
+     .drvs (no re-eval), on the configured builder if any, unsandboxed
      when a dry-run shows only trivial builders left.  Nothing drifting and
      no precheck to run means no build
   7. copy the closures over, concurrently, while re-fetching to check that
-     no work branch moved during the build.  A host with protected units is
+     no work branch moved during the build.  A target with protected units is
      dry-activated once its closure has landed: if the switch would stop,
-     restart or reload one of them, the deploy stops before any host is
+     restart or reload one of them, the deploy stops before any target is
      switched unless --danger-network-config-change was given.  Then every
-     host not marked switch-last is switched at once and the switch-last
+     target not marked switch-last is switched at once and the switch-last
      ones alone after, activating the exact evaluated toplevel under a flock
-     held ON THE TARGET HOST that first re-verifies the host still runs what
+     held ON THE TARGET that first re-verifies the target still runs what
      step 2 probed.  This compare-and-swap makes a deploy abort cleanly
      instead of reverting a switch another machine made meanwhile.  The
      guard compares the lineage too, then claims the lineage file for the
      new toplevel before activation with its provenance: the toplevel, the
      union, origin/main and each unioned branch's tip, this checkout's
      branch as pending when what it unioned of it is not on origin yet, the
-     time and this deployer.  A host whose toplevel carries
+     time and this machine and checkout.  A target whose toplevel carries
      /confirmed-switch (the confirmed-switch module) is switched confirmed:
      a rollback timer is armed, the toplevel activated with `test`, and
-     only once the host runs it, reaches the internet and passes its own
-     checks (for a switch-last host, this machine must reach the internet
+     only once the target runs it, reaches the internet and passes its own
+     checks (for a switch-last target, this machine must reach the internet
      too) are its profile and bootloader entry set - otherwise it is rolled
      back to the probed system, never rebooted
   8. only now commit the staged state onto the work branch - the -m message
@@ -136,11 +136,11 @@ Abandon (nixconvoy abandon [--apply-now] [<name> ...]): discard this
 checkout's work instead of landing it: hard-reset the checkout and reset
 the work branch (local and origin) onto origin/main, staying on it.
 Untracked files survive; the old tip remains reachable via the reflog.
-No host is touched: the ones its increments were deployed to (named from
+No target is touched: the ones its increments were deployed to (named from
 their Deployed: trailers) keep running them until the next deploy by
 anyone, whose verdict names what it reverts ("will switch (catch-up: ...;
 reverting <branch>'s abandoned increment <sha>)").  --apply-now runs that
-deploy at once, so the hosts drop the work now - from the checkout abandon
+deploy at once, so the targets drop the work now - from the checkout abandon
 ran in, a subagent worktree's parent once the worktree is removed; it
 takes --danger-network-config-change.
 
@@ -171,14 +171,14 @@ SendMessage).  It keeps a worktree whose lock names no session.
 
 Commit (nixconvoy commit -m "..."): commit + push the staged state onto the
 work branch without probing, building or switching anything - for changes
-that affect no NixOS host, or to publish work while a host is unreachable.
+that affect no NixOS target, or to publish work while a target is unreachable.
 A staged change to what the precheck reads is checked on its own first.
 
 --reset deploys this checkout's view alone: the other work branches are
-left out of the union, so every host switched loses their work, and a host
-running another deployer's in-flight or unlisted work (step 5) is switched
+left out of the union, so every target switched loses their work, and a target
+running another checkout's in-flight or unlisted work (step 5) is switched
 over too, reverting that work, when this checkout's work reaches it or the
-host is named (one left alone otherwise stays as it is).  It is a one-off:
+target is named (one left alone otherwise stays as it is).  It is a one-off:
 the others return on their next deploy - the durable fix is to reset the
 branch that carries the unwanted change (git push --force-with-lease origin
 origin/main:<branch>) or repair it in its own checkout.
@@ -187,22 +187,22 @@ origin/main:<branch>) or repair it in its own checkout.
 reload a protected unit (step 7), for this run only.
 
 --dry-activate runs steps 1-7 up to the switch (the checkout is rebased and
-the closures copied as for a deploy), dry-activating every host that would
+the closures copied as for a deploy), dry-activating every target that would
 be switched instead, and prints the units each would stop, restart or
 reload.  Nothing is switched, committed or pushed, and the staged changes
 need no -m; the run fails where a deploy would stop: a dry activation that
 fails, or protected units the switch would touch without the flag.
 
-Exec (nixconvoy exec [host|@tag ...] -- command [arg ...]): the command on
-each named host (every host addressable from here when none is named),
-concurrently, each host's output printed under its name once it finishes.
+Exec (nixconvoy exec [target|@tag ...] -- command [arg ...]): the command on
+each named target (every target addressable from here when none is named),
+concurrently, each target's output printed under its name once it finishes.
 Arguments are passed as they are (a pipeline wants `sh -c '...'`); the exit
 status is non-zero when it failed anywhere.
 
 Env: NIXCONVOY_SKIP_SWITCH=1 exercises only the branch/union machinery: no
 probe, eval, build or switch.  NIXCONVOY_FAIL_VERIFY=1 fails a confirmed
-switch's verification, exercising the rollback.  NIXCONVOY_BUILD_HOST
-overrides the build host ("" builds locally).  NIXCONVOY_HOLD_PUSH=N delays
+switch's verification, exercising the rollback.  NIXCONVOY_BUILDER
+overrides the builder ("" builds locally).  NIXCONVOY_HOLD_PUSH=N delays
 the background push N seconds, keeping the switched increment in flight.
 NIXCONVOY_GUARD_DIR names the directory holding deploy-plan and
 deploy-switch (the nix package sets it)."""
@@ -218,10 +218,10 @@ from pathlib import Path
 from . import commands, proc
 from .checkout import lock_checkout, sub_parent
 from .deploy import deploy
-from .hosts import NETWORK_FLAG, exec_on
 from .proc import PERF, PERF_FILE, die, git, ok, out
+from .targets import NETWORK_FLAG, exec_on
 
-USAGE = """usage: nixconvoy apply [-m "msg"] [--reset] [--danger-network-config-change] [--dry-activate] [host|@tag ...]
+USAGE = """usage: nixconvoy apply [-m "msg"] [--reset] [--danger-network-config-change] [--dry-activate] [target|@tag ...]
        nixconvoy commit -m "msg"
        nixconvoy land [worktree ...]
        nixconvoy abandon [--apply-now] [worktree ...]
@@ -229,14 +229,14 @@ USAGE = """usage: nixconvoy apply [-m "msg"] [--reset] [--danger-network-config-
        nixconvoy pull
        nixconvoy status
        nixconvoy review [worktree ...] [diff args]
-       nixconvoy exec [host|@tag ...] -- command [arg ...]
-With no hosts named, every host whose running system differs from the union
-is switched; naming hosts, or @tag for the hosts nixconvoy.toml tags so,
+       nixconvoy exec [target|@tag ...] -- command [arg ...]
+With no targets named, every target whose running system differs from the union
+is switched; naming targets, or @tag for the targets nixconvoy.toml tags so,
 restricts switching to (at most) those.
 --danger-network-config-change admits a switch that would stop, restart or
-reload a unit the host's configuration protects (nixconvoy.protectedUnits).
+reload a unit the target's configuration protects (nixconvoy.protectedUnits).
 --dry-activate stops before any switch, printing what each would do.
-abandon --apply-now deploys at once, so the hosts drop the abandoned work
+abandon --apply-now deploys at once, so the targets drop the abandoned work
 now rather than at the next deploy."""
 DRY_FLAG = "--dry-activate"
 APPLY_NOW_FLAG = "--apply-now"
@@ -277,7 +277,7 @@ def main() -> None:
     danger = False
     dry = False
     apply_now = False
-    hosts: list[str] = []
+    names: list[str] = []
     after = ""
     stopped = ""
     while args:
@@ -300,22 +300,22 @@ def main() -> None:
             print(USAGE)
             return
         elif not a.startswith("-"):
-            hosts.append(a)
+            names.append(a)
         else:
             die(USAGE)
 
     if subcmd == "pull":
-        if msg or reset or danger or dry or hosts:
+        if msg or reset or danger or dry or names:
             die(USAGE)
         commands.pull()  # takes each checkout's lock itself, this one included
         return
     if subcmd == "status":
-        if msg or reset or danger or dry or hosts:
+        if msg or reset or danger or dry or names:
             die(USAGE)
         commands.status()
         return
     if subcmd == "prune":
-        if msg or reset or danger or dry or ((after or stopped) and hosts) or (after and stopped):
+        if msg or reset or danger or dry or ((after or stopped) and names) or (after and stopped):
             die(USAGE)
         if stopped:
             stop = json.loads(sys.stdin.read() or "{}")
@@ -323,25 +323,25 @@ def main() -> None:
         elif after:
             commands.prune_after(int(after))
         else:
-            commands.prune(hosts)
+            commands.prune(names)
         return
     top = Path.cwd()
     here = top.resolve()
     if subcmd in ("land", "abandon"):
         if msg or reset or dry or (danger and not apply_now):
             die(USAGE)
-        named = [commands.find_sub(n) for n in hosts]
-        deploys_from = here if hosts and here not in named else sub_parent(here) or here
+        named = [commands.find_sub(n) for n in names]
+        deploys_from = here if names and here not in named else sub_parent(here) or here
         # The deploy runs from a checkout the abandon does not reset, whose
         # staged changes it would have to carry without a message.
-        if (apply_now and (hosts or deploys_from != here)
+        if (apply_now and (names or deploys_from != here)
                 and not ok(["git", "diff", "--cached", "--quiet"], cwd=str(deploys_from))):
             die(f"{deploys_from} has staged changes, which the deploy of {APPLY_NOW_FLAG} "
                 "would carry: deploy or unstage them first")
         # Several subagent worktrees, one after the other, each under its
         # own checkout's lock.
-        for name in hosts:
-            if len(hosts) > 1:
+        for name in names:
+            if len(names) > 1:
                 print(f"== {name}")
             os.chdir(top)  # the previous one's removal moved into its parent
             commands.enter_sub(name)
@@ -353,7 +353,7 @@ def main() -> None:
             else:
                 commands.abandon(apply_now)
             lock.close()
-        if hosts:
+        if names:
             if apply_now:
                 os.chdir(deploys_from)  # the parent's, when the named worktree was this one
                 take_lock()
@@ -369,11 +369,11 @@ def main() -> None:
                 take_lock()  # a subagent worktree's removal moved into its parent
             deploy([], None, False, danger)
     elif subcmd == "commit":
-        if reset or danger or dry or hosts:
+        if reset or danger or dry or names:
             die(USAGE)
         commands.commit_only(msg)
     else:  # apply
-        deploy(hosts, msg, reset, danger, dry)
+        deploy(names, msg, reset, danger, dry)
 
 
 def take_lock() -> None:

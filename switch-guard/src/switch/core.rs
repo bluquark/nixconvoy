@@ -251,7 +251,7 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
             // back to the system it would have, never to an unconfirmed one.
             // Only while that duty is live - its timer pending or firing, or
             // the profile still naming its previous system: a record left
-            // by an exhausted rollback outlives a host fixed by hand since.
+            // by an exhausted rollback outlives a target fixed by hand since.
             (ArmLocked, Reply::Locked(rec)) => match rec {
                 Some(Record { previous, phase: Phase::Armed }) => self.ask(ArmTimerLive(previous), Query::TimerLive),
                 _ => self.ask(ArmRunning(None), Query::Running),
@@ -441,7 +441,7 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
         self.ask(Pc::RbWaited { previous, n, then }, Query::WaitSwitchLock)
     }
 
-    /// Recorded, and the timer stopped, only once the host demonstrably runs
+    /// Recorded, and the timer stopped, only once the target demonstrably runs
     /// the previous system again, so a still-pending timer gets its retry.
     fn rolled_back(&mut self, previous: S, then: Then, fx: &mut Vec<Effect<S>>) -> Next<S> {
         fx.push(Effect::Persist(Some(Record { previous: previous.clone(), phase: Phase::RolledBack })));

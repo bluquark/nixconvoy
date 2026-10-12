@@ -257,8 +257,8 @@ impl Host for System<'_> {
 pub const USAGE: &str =
     "usage: confirmed-switch arm | activate <toplevel> | confirm <toplevel> [reboot-pending] | rollback | check | deadline";
 
-/// The `check` verb: nixconvoy reports its last stderr line.  Root, so a
-/// host's checks can attribute sockets (ss -p) and read state.
+/// The `check` verb: nixconvoy reports its last stderr line.  Root, so the
+/// target's checks can attribute sockets (ss -p) and read state.
 fn check(s: &Settings) -> i32 {
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } != 0 {

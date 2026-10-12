@@ -11,7 +11,7 @@ pub enum Phase<S> {
     Armed,
     /// The profile and bootloader entry name `.0`.
     Confirmed(S),
-    /// The host demonstrably ran `previous` again; nothing more is admitted.
+    /// The target demonstrably ran `previous` again; nothing more is admitted.
     RolledBack,
 }
 

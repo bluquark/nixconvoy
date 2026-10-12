@@ -12,7 +12,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import IO, NamedTuple
 
-from . import hosts, memo, proc
+from . import memo, proc, targets
 from .checkout import (
     PAST_REFS,
     SESSIONLESS,
@@ -71,7 +71,7 @@ def commit_only(msg: str | None) -> None:
         snap = staged_snapshot()
         objs = memo.union_objects(snap)
         if memo.precheck_unproven(objs):
-            hosts.check_build_host()
+            targets.check_builder()
             wt = add_worktree(snap)
             try:
                 print("running the precheck...")
@@ -146,8 +146,8 @@ def pull() -> None:
         sys.exit(1)
 
 
-def deployed_hosts(commits: str) -> list[str]:
-    """The hosts the deploys of the commits in the range `commits` switched
+def deployed_targets(commits: str) -> list[str]:
+    """The targets the deploys of the commits in the range `commits` switched
     (their Deployed: trailers), sorted."""
     names: set[str] = set()
     for ln in out(["git", "log", "--format=%(trailers:key=Deployed,valueonly)", commits]).splitlines():
@@ -156,7 +156,7 @@ def deployed_hosts(commits: str) -> list[str]:
 
 
 def abandon(apply_now: bool = False) -> None:
-    """Discard the work branch (cli docstring: Abandon).  The hosts keep
+    """Discard the work branch (cli docstring: Abandon).  The targets keep
     running its increments until a deploy reverts them: `apply_now` when
     the caller deploys right after, for the message."""
     await_background_push()
@@ -189,7 +189,7 @@ def abandon(apply_now: bool = False) -> None:
     if prev == main and ok(["git", "diff", "--quiet", "HEAD"]) and checkout_identity().kind != "sub":
         die("nothing to abandon")
 
-    deployed = deployed_hosts(f"{main}..{prev}")
+    deployed = deployed_targets(f"{main}..{prev}")
     git("reset", "--quiet", "--hard", main)
     Path(MSG_FILE).unlink(missing_ok=True)  # an uncommitted copy survives the hard reset
     git("branch", "-f", "main", main, check=False)
@@ -199,7 +199,7 @@ def abandon(apply_now: bool = False) -> None:
         if apply_now:
             print(f"deployed to {where}: deploying now to revert it")
         else:
-            print(f"deployed to {where}; whichever hosts run it keep it until the next deploy "
+            print(f"deployed to {where}; whichever targets run it keep it until the next deploy "
                   f"reverts it (`nixconvoy apply`, or `abandon --apply-now` for both at once)")
     finish(wb)
 

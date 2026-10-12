@@ -1,5 +1,5 @@
 {
-  description = "nixconvoy: clobber-safe NixOS deploys for hosts shared by several checkouts";
+  description = "nixconvoy: clobber-safe NixOS deploys for targets shared by several checkouts";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -28,7 +28,7 @@
       };
     });
 
-    # The host side: the switch policy options nixconvoy reads at eval time,
+    # The target side: the switch policy options nixconvoy reads at eval time,
     # the confirmed-switch helper, and (optionally) boot assessment.
     nixosModules = {
       default = { pkgs, ... }: {

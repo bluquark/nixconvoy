@@ -2,7 +2,7 @@
 let
   cfg = config.nixconvoy.bootAssessment;
   cs = config.nixconvoy.confirmedSwitch;
-  host = config.networking.hostName;
+  hostname = config.networking.hostName;
   # The judge raises a notice on a boot it is about to reboot out of, where
   # a publisher's network timeouts would keep the box down that much
   # longer.  A backstop over ntfy_notice.py's own 3 s per server.
@@ -24,9 +24,9 @@ let
   confirmed = options ? nixconvoy.confirmedSwitch && cs.enable;
   switchChecks = lib.optionalString confirmed cs.checks;
 
-  # The gate's poll: the box's own reachability and the host's checks, one
+  # The gate's poll: the box's own reachability and the target's own checks, one
   # failure per line on stdout (everything else they print goes to stderr).
-  hostChecks = pkgs.writeShellApplication {
+  ownChecks = pkgs.writeShellApplication {
     name = "boot-assessment-checks";
     runtimeInputs = [ pkgs.coreutils pkgs.iproute2 pkgs.gnugrep pkgs.systemd ];
     bashOptions = [ "nounset" ];
@@ -74,14 +74,14 @@ let
     date = ${pkgs.coreutils}/bin/date
     notice = ${lib.getExe cfg.notice}
     notice_timeout = ${toString noticeTimeout}
-    host = ${host}
+    hostname = ${hostname}
     deadline = ${toString deadline}
     grace = ${toString grace}
     runtime_watchdog = ${toString runtimeWatchdogSec}
     panic = ${toString panicSec}
     status_file = ${statusFile}
     count_path = ${countPath}
-    checks = ${lib.getExe hostChecks}
+    checks = ${lib.getExe ownChecks}
     switch_check = ${lib.optionalString (switchChecks != "") (lib.getExe cs.checksCommand)}
     initial_tries = ${toString initialTries}
     reported = ${reported}
@@ -133,7 +133,7 @@ in
     checks = lib.mkOption {
       type = lib.types.lines;
       default = "";
-      description = "Bash inlined into the gate's poll loop (as root, nounset, not errexit), before the host's confirmed-switch checks: the host's own assertions on a good boot, each naming its failure through `fail <reason>` so a poll reports every failing one.";
+      description = "Bash inlined into the gate's poll loop (as root, nounset, not errexit), before the confirmed-switch checks: the target's own assertions on a good boot, each naming its failure through `fail <reason>` so a poll reports every failing one.";
     };
     notice = lib.mkOption {
       type = lib.types.package;
@@ -218,11 +218,11 @@ in
     };
 
     # Only the box's own reachability and services - nothing that depends
-    # on another host answering, so a neighbour's outage cannot condemn a
+    # on another machine answering, so a neighbour's outage cannot condemn a
     # generation.  Pulled in only on counted boots, through
     # boot-complete.target.
     systemd.services.boot-assessment = {
-      description = "Judge this boot: reachable on the LAN, the host's checks pass";
+      description = "Judge this boot: reachable on the LAN, the target's own checks pass";
       requiredBy = [ "boot-complete.target" ];
       before = [ "boot-complete.target" ];
       wants = [ "network-online.target" ];

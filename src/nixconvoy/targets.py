@@ -1,5 +1,5 @@
-"""The hosts: inventory, probes, builds, closure copies, and the dry
-activation gate over a host's protected units."""
+"""The targets: inventory, probes, builds, closure copies, and the dry
+activation gate over a target's protected units."""
 
 from __future__ import annotations
 
@@ -16,19 +16,19 @@ from pathlib import Path
 from typing import NamedTuple
 
 from . import proc
-from .config import build_host, cfg
+from .config import builder, cfg
 from .proc import die, load_json, ok, run, stream
 
-# Seconds one probe of a host may take, so a stalled ssh session holds
+# Seconds one probe of a target may take, so a stalled ssh session holds
 # neither a deploy's start nor verification past the deadline.
 PROBE_TIMEOUT = 20
-# Where a host keeps the provenance of the system it runs (switch.lineage_doc),
+# Where a target keeps the provenance of the system it runs (switch.lineage_doc),
 # claimed under the switch lock before activation, read by every probe.
 # Persistent, so a reboot keeps it beside the system it describes.
 LINEAGE_FILE: str = "/var/lib/nixconvoy/lineage.json"
 CURRENT_SYSTEM: str = "/run/current-system"
 SYSTEM_PROFILE: str = "/nix/var/nix/profiles/system"
-SWITCH_LOCK: str = "/tmp/nixconvoy-switch.lock"  # noqa: S108 - every deployer shares it
+SWITCH_LOCK: str = "/tmp/nixconvoy-switch.lock"  # noqa: S108 - every deploy shares it
 LINEAGE_WRITER: str = "sudo -n"
 # Restricted settings for the build phase alone, honoured only from a
 # trusted user (elsewhere Nix warns and ignores them); every other nix
@@ -40,8 +40,8 @@ BUILD_OPTS = ("--option", "always-allow-substitutes", "false")
 # Added by sandbox_opts when only trivial builders are left: the toplevel
 # chain's derivations have the whole system as input closure, which the
 # sandbox bind-mounts first, ~0.65 s per derivation.  A real package build
-# must keep the sandbox: unsandboxed builders share the host's /tmp across
-# build users.
+# must keep the sandbox: unsandboxed builds share the building machine's
+# /tmp across build users.
 UNSANDBOXED = ("--option", "sandbox", "false")
 NETWORK_FLAG = "--danger-network-config-change"
 # Seconds a dry-activate may take: it only computes the unit diff, so a
@@ -49,66 +49,66 @@ NETWORK_FLAG = "--danger-network-config-change"
 DRY_ACTIVATE_TIMEOUT = 120
 
 
-def flake_host_names() -> list[str]:
-    """The deployable hosts: <hosts_dir>/<name>/ maps 1:1 to nixosConfigurations."""
+def flake_target_names() -> list[str]:
+    """The deployable targets: <hosts_dir>/<name>/ maps 1:1 to nixosConfigurations."""
     d = cfg().hosts_path
     try:
         names = sorted(e.name for e in Path(d).iterdir() if e.is_dir())
     except OSError as error:
-        die(f"cannot read the host inventory under {d}/: {error}")
+        die(f"cannot read the target inventory under {d}/: {error}")
     if not names:
-        die(f"no hosts found under {d}/")
+        die(f"no targets found under {d}/")
     return names
 
 
 def local_only(name: str) -> bool:
-    return cfg().host(name).local_only
+    return cfg().target(name).local_only
 
 
 def remote_only(name: str) -> bool:
     """Deployable (and addressed) only from itself, and this is not it."""
-    return local_only(name) and name != proc.this_host()
+    return local_only(name) and name != proc.this_machine()
 
 
-def expand_targets(names: list[str], all_hosts: list[str]) -> list[str]:
-    """The hosts `names` designate, in order and once each: a host by name,
-    or `@tag` for every host nixconvoy.toml tags so (a remote-only one is
-    dropped from a tag, as from the default of every host, since it cannot
+def expand_targets(names: list[str], all_targets: list[str]) -> list[str]:
+    """The targets `names` designate, in order and once each: a target by name,
+    or `@tag` for every target nixconvoy.toml tags so (a remote-only one is
+    dropped from a tag, as from the default of every target, since it cannot
     be addressed from here; named outright it is reported by the caller)."""
     found: list[str] = []
     for n in names:
         if n.startswith("@"):
             tagged = [h for h in cfg().tagged(n[1:]) if not remote_only(h)]
             if not tagged:
-                die(f"no host reachable from here carries the tag {n[1:]} (nixconvoy.toml: "
-                    f"hosts.<name>.tags)")
-            phantom = [h for h in tagged if h not in all_hosts]
+                die(f"no target reachable from here carries the tag {n[1:]} (nixconvoy.toml: "
+                    f"targets.<name>.tags)")
+            phantom = [h for h in tagged if h not in all_targets]
             if phantom:
                 die(f"nixconvoy.toml tags {', '.join(phantom)} as {n[1:]}, but the inventory "
-                    f"has no such host (it has: {', '.join(all_hosts)})")
+                    f"has no such target (it has: {', '.join(all_targets)})")
             found.extend(tagged)
         else:
             found.append(n)
-    unknown = [h for h in found if h not in all_hosts]
+    unknown = [h for h in found if h not in all_targets]
     if unknown:
-        die(f"unknown host(s) {', '.join(unknown)}; the inventory has: {', '.join(all_hosts)}")
+        die(f"unknown target(s) {', '.join(unknown)}; the inventory has: {', '.join(all_targets)}")
     return list(dict.fromkeys(found))
 
 
 def exec_on(names: list[str], argv: list[str]) -> None:
-    """`argv` on each host `names` designate (every host addressable from
+    """`argv` on each target `names` designate (every target addressable from
     here when none), concurrently, the output of each held and printed
-    under its name once it finishes; dies naming the hosts where it failed."""
-    all_hosts = flake_host_names()
-    targets = expand_targets(names, all_hosts) or [h for h in all_hosts if not remote_only(h)]
+    under its name once it finishes; dies naming the targets where it failed."""
+    all_targets = flake_target_names()
+    targets = expand_targets(names, all_targets) or [h for h in all_targets if not remote_only(h)]
     for h in targets:
         if remote_only(h):
             die(f"{h} is reachable only from itself (nixconvoy.toml: local_only)")
     def on(h: str) -> int:
         held = f"[{h}] " if len(targets) > 1 else ""
         try:
-            return stream(host_cmd(h, argv), held_as=held or None)
-        except FileNotFoundError:  # this very host, no shell to say so
+            return stream(target_cmd(h, argv), held_as=held or None)
+        except FileNotFoundError:  # this machine itself, no shell to say so
             print(f"{held}{argv[0]}: command not found")
             return 127
 
@@ -119,32 +119,32 @@ def exec_on(names: list[str], argv: list[str]) -> None:
         die(f"failed on {', '.join(failed)}")
 
 
-def target(name: str) -> str:
-    return cfg().ssh_target(name)
+def ssh_address(name: str) -> str:
+    return cfg().ssh_address(name)
 
 
 def control_opts() -> list[str]:
-    # One master connection per host for the several ssh sessions of a
+    # One master connection per target for the several ssh sessions of a
     # deploy, kept for back-to-back deploys too.
     return ["-o", "ControlMaster=auto",
             "-o", f"ControlPath={Path.home()}/.ssh/nixconvoy-%C",
             "-o", "ControlPersist=60"]
 
 
-def host_cmd(host: str, argv: list[str], sudo: bool = False) -> list[str]:
-    """`argv` on `host`: directly when it is this machine, else over ssh."""
+def target_cmd(target: str, argv: list[str], sudo: bool = False) -> list[str]:
+    """`argv` on `target`: directly when it is this machine, else over ssh."""
     pre = ["sudo"] if sudo else []
-    if host == proc.this_host():
+    if target == proc.this_machine():
         return [*pre, *argv]
     # The remote shell re-parses ssh's command line, hence the quoting.
     return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *control_opts(),
-            target(host), *pre, *map(shlex.quote, argv)]
+            ssh_address(target), *pre, *map(shlex.quote, argv)]
 
 
 class Probe(NamedTuple):
     running: str | None
-    # LINEAGE_FILE as read ("" when absent) and its age by the host's clock
-    # (its mtime): deployers' clocks drift, a WSL one after every sleep.
+    # LINEAGE_FILE as read ("" when absent) and its age by the target's clock
+    # (its mtime): the machines' clocks drift, a WSL one after every sleep.
     lineage: str
     age: float | None
     # switch.lineage_digest of it, for the guard's compare.
@@ -160,7 +160,7 @@ def lineage_digest(text: str) -> str:
 
 
 def parse_probe(stdout: str) -> Probe:
-    """The remote probe's output: the running system, the host's clock, the
+    """The remote probe's output: the running system, the target's clock, the
     lineage file's mtime ("-" when absent) and then the file verbatim."""
     cur, _, rest = stdout.partition("\n")
     now, _, rest = rest.partition("\n")
@@ -173,9 +173,9 @@ def parse_probe(stdout: str) -> Probe:
 
 
 def probe(name: str) -> Probe:
-    """The host's running system and its lineage, in one round trip;
+    """The target's running system and its lineage, in one round trip;
     running None when it cannot be read."""
-    if name == proc.this_host():
+    if name == proc.this_machine():
         try:
             cur = str(Path(CURRENT_SYSTEM).readlink())
         except OSError:
@@ -191,7 +191,7 @@ def probe(name: str) -> Probe:
     f = LINEAGE_FILE
     script = (f"readlink {CURRENT_SYSTEM} && date +%s && "
               f"{{ stat -c %Y {f} 2>/dev/null || echo -; }} && {{ cat {f} 2>/dev/null || true; }}")
-    p = run(host_cmd(name, ["sh", "-c", script]), check=False, timeout=PROBE_TIMEOUT)
+    p = run(target_cmd(name, ["sh", "-c", script]), check=False, timeout=PROBE_TIMEOUT)
     if p.returncode != 0:
         return Probe(None, "", None, "")
     return parse_probe(p.stdout)
@@ -199,15 +199,15 @@ def probe(name: str) -> Probe:
 
 def running_system(name: str, cleanup: bool = False,
                    timeout: float = PROBE_TIMEOUT) -> str | None:
-    """The host's /run/current-system, or None if it cannot be read."""
-    if name == proc.this_host():
+    """The target's /run/current-system, or None if it cannot be read."""
+    if name == proc.this_machine():
         try:
             return str(Path(CURRENT_SYSTEM).readlink())
         except OSError:
             return None
     if local_only(name):
         return None
-    p = run(host_cmd(name, ["readlink", CURRENT_SYSTEM]),
+    p = run(target_cmd(name, ["readlink", CURRENT_SYSTEM]),
             check=False, timeout=timeout, cleanup=cleanup)
     if p.returncode != 0:
         return None
@@ -252,7 +252,7 @@ def build_on(builder: str, drvs: list[str], what: str,
              opts: tuple[str, ...], capture: bool) -> str | None:
     """Realise `drvs` on `builder`.  A .drv closure is self-authenticating,
     so the copy needs no signing or trusted user there."""
-    tgt = target(builder)
+    tgt = ssh_address(builder)
     sshopts = " ".join(["-o", "BatchMode=yes", *control_opts()])
     p = run(["nix", "copy", "--derivation", "--to", f"ssh://{tgt}", *drvs],
             env={"NIX_SSHOPTS": sshopts}, check=False, capture=capture, merged=True)
@@ -270,15 +270,15 @@ def build_on(builder: str, drvs: list[str], what: str,
 
 def build_drvs(drvs: list[str], what: str, opts: tuple[str, ...] = (),
                capture: bool = False) -> str | None:
-    """Realise `drvs` on the build host when set, else here.  The failure
+    """Realise `drvs` on the builder when set, else here.  The failure
     text (naming `what`, with the build output when `capture` kept it off
     the terminal) or None; the caller dies, since this also runs on the
     precheck thread."""
-    bh = build_host()
-    if bh:
-        return build_on(bh, drvs, what, opts, capture)
+    b = builder()
+    if b:
+        return build_on(b, drvs, what, opts, capture)
     build = ["nix", "build", "--no-link", *BUILD_OPTS, *opts,
-             "--option", "substituters", cfg().build_substituters(proc.this_host())]
+             "--option", "substituters", cfg().build_substituters(proc.this_machine())]
     p = run([*build, *sandbox_opts(build, drvs), *(f"{d}^out" for d in drvs)],
             check=False, capture=capture, merged=True)
     if p.returncode != 0:
@@ -298,23 +298,23 @@ def off_lan(tgt: str) -> bool:
                for a in addrs)
 
 
-def copy_closure(host: str, toplevel: str, quiet: bool = False) -> None:
-    """Copy `toplevel`'s closure to `host`, outside the switch lock (a union
+def copy_closure(target: str, toplevel: str, quiet: bool = False) -> None:
+    """Copy `toplevel`'s closure to `target`, outside the switch lock (a union
     rebuilt after it merely leaves a few extra paths there).  `quiet` keeps
     nix's progress output for the failure message."""
-    if host == proc.this_host():
+    if target == proc.this_machine():
         return
-    tgt = target(host)
-    print(f"copying closure to {host}...")
+    tgt = ssh_address(target)
+    print(f"copying closure to {target}...")
     # Off-LAN targets (a VPS over the tailnet) substitute what they can
     # themselves, so only custom-built paths cross the slow uplink; on a
     # LAN a straight copy beats any download and per-path probe.
     subst = ["-s"] if off_lan(tgt) else []
     sshopts = " ".join(["-o", "BatchMode=yes", *control_opts()])
-    bh = build_host()
-    if bh:
+    b = builder()
+    if b:
         # The outputs live on the builder, not here.
-        p = run(["ssh", "-o", "BatchMode=yes", *control_opts(), target(bh),
+        p = run(["ssh", "-o", "BatchMode=yes", *control_opts(), ssh_address(b),
                  ("NIX_SSHOPTS='-o BatchMode=yes' "
                   f"nix copy {' '.join(subst)} --to ssh://{tgt} {toplevel}")],
                 check=False, capture=quiet, merged=True)
@@ -322,24 +322,24 @@ def copy_closure(host: str, toplevel: str, quiet: bool = False) -> None:
         p = run(["nix", "copy", *subst, "--to", f"ssh://{tgt}", toplevel],
                 env={"NIX_SSHOPTS": sshopts}, check=False, capture=quiet, merged=True)
     if p.returncode != 0:
-        die(f"copying the closure to {host} failed; nothing was committed "
+        die(f"copying the closure to {target} failed; nothing was committed "
             f"or pushed - the changes are still staged"
             + (f"\n{p.stdout.strip()}" if p.stdout else ""))
 
 
-def check_build_host() -> None:
-    """Fail before any nix work when the build host is set but unreachable,
+def check_builder() -> None:
+    """Fail before any nix work when a builder is set but unreachable,
     rather than on ssh's own timeout without the configured hint."""
-    bh = build_host()
-    if bh and not ok(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
-                      *control_opts(), target(bh), "true"]):
+    b = builder()
+    if b and not ok(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+                      *control_opts(), ssh_address(b), "true"]):
         hint = cfg().build_unreachable_hint
-        die(f"build host {bh} unreachable" + (f" ({hint})" if hint else "")
+        die(f"builder {b} unreachable" + (f" ({hint})" if hint else "")
             + " - nothing was committed")
 
 
-def rejected_generation(host: str, toplevel: str) -> str | None:
-    """The ESP stub of `toplevel` on `host` when systemd-boot has spent its
+def rejected_generation(target: str, toplevel: str) -> str | None:
+    """The ESP stub of `toplevel` on `target` when systemd-boot has spent its
     boot tries on it (the boot-assessment module: a `+0[-N]` counter), else
     None.  The ESP is root-only, hence sudo."""
     script = (
@@ -348,9 +348,9 @@ def rejected_generation(host: str, toplevel: str) -> str | None:
         f'[ "$(readlink -f /nix/var/nix/profiles/system-$g-link 2>/dev/null)" = "{toplevel}" ] '
         '&& { echo "${s##*/}"; exit 0; }; done; exit 0'
     )
-    p = run(host_cmd(host, ["sh", "-c", script], sudo=True), check=False, timeout=PROBE_TIMEOUT)
+    p = run(target_cmd(target, ["sh", "-c", script], sudo=True), check=False, timeout=PROBE_TIMEOUT)
     if p.returncode != 0:
-        die(f"could not scan {host}'s ESP for rejected generations (exit {p.returncode}); "
+        die(f"could not scan {target}'s ESP for rejected generations (exit {p.returncode}); "
             f"nothing was switched or committed")
     return p.stdout.strip() or None
 
@@ -377,37 +377,37 @@ def unit_changes(dry_activate: str) -> dict[str, list[str]]:
     return found
 
 
-def dry_activate(host: str, toplevel: str) -> tuple[dict[str, list[str]], str | None]:
-    """Dry-activate `toplevel` on `host` (its closure already copied): the
-    unit changes it reports (unit_changes), printed under the host's name,
+def dry_activate(target: str, toplevel: str) -> tuple[dict[str, list[str]], str | None]:
+    """Dry-activate `toplevel` on `target` (its closure already copied): the
+    unit changes it reports (unit_changes), printed under the target's name,
     or why it could not be run.  Runs in the copy pool, so it only reports;
     the caller dies once the other copies have finished."""
-    p = run(host_cmd(host, [f"{toplevel}/bin/switch-to-configuration", "dry-activate"],
+    p = run(target_cmd(target, [f"{toplevel}/bin/switch-to-configuration", "dry-activate"],
                      sudo=True), check=False, merged=True, timeout=DRY_ACTIVATE_TIMEOUT)
     if proc.DYING:  # another thread's die() killed the child; it reports, not us
         return {}, None
     if p.returncode == -signal.SIGKILL:
-        return {}, (f"dry-activating the new system on {host} did not finish within "
+        return {}, (f"dry-activating the new system on {target} did not finish within "
                     f"{DRY_ACTIVATE_TIMEOUT} s (a stalled ssh connection?); nothing was "
                     f"switched or committed")
     if p.returncode != 0:
-        return {}, (f"dry-activating the new system on {host} failed (exit {p.returncode}); "
+        return {}, (f"dry-activating the new system on {target} failed (exit {p.returncode}); "
                     f"nothing was switched or committed"
                     + (f"\n{p.stdout.strip()}" if p.stdout else ""))
     changes = unit_changes(p.stdout)
     for verb, units in changes.items():
-        print(f"  {host}: would {verb} {', '.join(units)}")
+        print(f"  {target}: would {verb} {', '.join(units)}")
     if not changes:
-        print(f"  {host}: would stop, restart or reload no unit")
+        print(f"  {target}: would stop, restart or reload no unit")
     return changes, None
 
 
-def protected_units_gate(host: str, toplevel: str, protected: tuple[str, ...],
+def protected_units_gate(target: str, toplevel: str, protected: tuple[str, ...],
                          allowed: bool) -> str | None:
-    """Dry-activate `toplevel` on `host`: why the deploy must stop (it would
-    stop, restart or reload one of the host's `protected` units and not
+    """Dry-activate `toplevel` on `target`: why the deploy must stop (it would
+    stop, restart or reload one of the target's `protected` units and not
     `allowed`, or it fails), else None."""
-    changes, err = dry_activate(host, toplevel)
+    changes, err = dry_activate(target, toplevel)
     if err:
         return err
     hits = [f"{verb} {u}" for verb, units in changes.items()
@@ -415,8 +415,8 @@ def protected_units_gate(host: str, toplevel: str, protected: tuple[str, ...],
     if not hits:
         return None
     if allowed:
-        print(f"  {host}: {NETWORK_FLAG} admits: {', '.join(hits)}")
+        print(f"  {target}: {NETWORK_FLAG} admits: {', '.join(hits)}")
         return None
-    return (f"switching {host} would {', '.join(hits)}, which its configuration protects "
+    return (f"switching {target} would {', '.join(hits)}, which its configuration protects "
             f"(nixconvoy.protectedUnits); nothing was switched or committed.  Re-run with "
             f"{NETWORK_FLAG} to do it deliberately.")

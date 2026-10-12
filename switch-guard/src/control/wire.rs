@@ -27,7 +27,7 @@ pub fn params(line: &str) -> Result<Params, String> {
         return Err(format!("deploy-switch speaks protocol {PROTOCOL}, nixconvoy {protocol:?}"));
     }
     Ok(Params {
-        host: text(&v, "host")?,
+        target: text(&v, "target")?,
         toplevel: text(&v, "toplevel")?,
         expected: text(&v, "expected")?,
         place: text(&v, "place")?,
@@ -55,8 +55,8 @@ pub fn reply(line: &str) -> Result<Reply, String> {
             Some("failed") => Guard::Failed(text(&v, "line")?),
             _ => return Err(format!("bad guard reply {v}")),
         })
-    } else if o.contains_key("target") {
-        Reply::Said { code: int("code")? as i32, target: opt("target")? }
+    } else if o.contains_key("to") {
+        Reply::Said { code: int("code")? as i32, to: opt("to")? }
     } else if o.contains_key("code") {
         Reply::Code(int("code")? as i32)
     } else if o.contains_key("text") {
@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn round_trip() {
         let p = params(
-            r#"{"protocol":1,"host":"h","toplevel":"/t","expected":"/e","place":"local","quiet":false,"router":true,"fail_verify":false}"#,
+            r#"{"protocol":1,"target":"h","toplevel":"/t","expected":"/e","place":"local","quiet":false,"router":true,"fail_verify":false}"#,
         )
         .unwrap();
         assert!(p.router && p.place == "local");
@@ -148,7 +148,7 @@ mod tests {
         assert_eq!(reply(r#"{"guard":"moved","running":"/x"}"#).unwrap(), Reply::Guard(Guard::Moved("/x".into())));
         assert_eq!(reply(r#"{"check":-9,"last":null}"#).unwrap(), Reply::Check { code: -9, last: None });
         assert_eq!(reply(r#"{"running":null}"#).unwrap(), Reply::Running(None));
-        assert_eq!(reply(r#"{"code":0,"target":"/p"}"#).unwrap(), Reply::Said { code: 0, target: Some("/p".into()) });
+        assert_eq!(reply(r#"{"code":0,"to":"/p"}"#).unwrap(), Reply::Said { code: 0, to: Some("/p".into()) });
         let s = super::super::Step { effects: vec![Effect::Armed], next: Next::Ask(Query::Check { timeout_ms: 3000 }) };
         assert_eq!(step(&s), r#"{"effects":[{"armed":true}],"next":{"ask":"check","timeout_ms":3000}}"#);
     }

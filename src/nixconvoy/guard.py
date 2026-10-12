@@ -1,6 +1,6 @@
 """The switch-guard binaries (the crate under switch-guard/): deploy-plan
 makes the git and drift decisions, deploy-switch the switch's.  Both are
-Sans-I/O cores speaking JSON lines (src/plan/wire.rs, src/deployer/wire.rs);
+Sans-I/O cores speaking JSON lines (src/plan/wire.rs, src/control/wire.rs);
 this module runs one to its end, performing what it asks."""
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from . import proc
 from .proc import die, dump_json, load_json
 
 PLAN_PROTOCOL = 4
-DEPLOYER_PROTOCOL = 1
+CONTROL_PROTOCOL = 1
 
 Perform = Callable[[dict[str, object]], dict[str, object]]
 
