@@ -60,6 +60,9 @@ FETCH_REFSPECS = ("+refs/heads/*:refs/remotes/origin/*",
 # the machines' clocks need not agree.
 HEARTBEAT = 10
 WAIT_STALE = 30
+# A renewal push slower than this is given up (the next renewal retries):
+# one hanging past WAIT_STALE would have the deploy taken for dead.
+PUSH_TIMEOUT = 15
 
 
 def fetch_args(*flags: str) -> list[str]:
@@ -522,7 +525,7 @@ def push_work_branch(wb: str) -> None:
             f"only writer.  Investigate:\n{p.stderr.strip()}")
     clear = clear_refspec(wb)
     if clear:
-        git("push", "--quiet", "--force", "origin", *clear, check=False)
+        git("push", "--quiet", "origin", *clear, check=False)
     print(f"pushed {wb} ({head[:12] if head else '?'})")
 
 
@@ -545,31 +548,42 @@ class Announce:
 
     def __init__(self, branch: str, base: str) -> None:
         self.branch = branch
-        # The snapshot (or HEAD) whose tree is announced; a refresh moves it.
-        self.base = base
-        self.since = int(time.time())
+        self.key = announce_key(branch)
+        self.target = ("", "")
+        self.retarget(base)
+        # A re-run keeps the rank of the announcement it renews.
+        prev = next((p for p in pending_announcements() if p.key == self.key), None)
+        self.since = prev.since if prev else int(time.time())
         self.sha = ""
         self.detail = ""
-        # The targets switched onto this state so far (deploy keeps the
-        # announcement when it ends unsettled after one).
-        self.switched: list[str] = []
+        # The targets running this checkout's pending state, or whose
+        # switch onto it was started: deploy keeps the announcement when it
+        # ends unsettled with one.
+        self.claimed: list[str] = []
         self._ok: bool | None = None
         self._landed = threading.Event()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._beat, daemon=True)
         self._thread.start()
 
-    def _push(self) -> bool:
+    def retarget(self, base: str) -> None:
+        """What the renewals commit, resolved on the main thread: HEAD as
+        the parent and `base`'s tree (the snapshot's, or HEAD's) - never
+        read by the thread itself, since a rebase under way has temporary
+        commits on HEAD."""
+        self.target = (rev("HEAD") or "", rev(f"{base}^{{tree}}") or "")
+
+    def _push(self, settled: bool = False) -> bool:
         # Off the main thread: nothing here may die().
+        parent, tree = self.target
         subject = (f"pending increment of {self.branch} from {proc.this_machine()}:{Path.cwd()} "
-                   f"(pid {os.getpid()})")
-        tree = run(["git", "rev-parse", f"{self.base}^{{tree}}"], check=False)
-        commit = run(["git", "commit-tree", tree.stdout.strip(), "-p", "HEAD", "-m", subject],
+                   f"(pid {os.getpid()})" + (" settled" if settled else ""))
+        commit = run(["git", "commit-tree", tree, "-p", parent, "-m", subject],
                      env={**DATELESS_ENV, "GIT_AUTHOR_DATE": f"{self.since} +0000"}, check=False)
         sha = commit.stdout.strip()
         p = run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--force", "origin",
-                 f"{sha}:{PENDING_REFS}/{self.branch}"], check=False, timeout=60)
-        for step in (tree, commit, p):
+                 f"{sha}:{PENDING_REFS}/{self.key}"], check=False, timeout=PUSH_TIMEOUT)
+        for step in (commit, p):
             if step.returncode != 0:
                 self.detail = (step.stderr or "").strip() or f"{step.args[1]} failed"
                 return False
@@ -602,6 +616,14 @@ class Announce:
         self._stop.set()
         self._thread.join(70)
 
+    def settle(self) -> None:
+        """A last renewal marked settled: the deploy is over, its push
+        pending (a main checkout's, which its owner makes), so nobody waits
+        for it or takes it for dead; its targets stay refused until then."""
+        self.stop()
+        if self._ok:
+            self._push(settled=True)
+
     def withdraw(self) -> None:
         """Point the announcement at origin/main: the deploy ended without
         a switch, so the next deploy anywhere need not wait for it; after
@@ -614,7 +636,16 @@ class Announce:
                  f"{main}:{PENDING_REFS}/{self.branch}"], check=False, cleanup=True, timeout=60)
 
 
+def announce_key(branch: str) -> str:
+    """The pending ref's name for `branch`'s announcement: the branch - its
+    one checkout is the ref's one writer - or, for main, main@<machine>:
+    every machine's main checkout has a pending state of its own."""
+    return branch if branch != "main" else f"main@{proc.this_machine()}"
+
+
 class Pending(NamedTuple):
+    # The ref's name (announce_key) and the branch it announces.
+    key: str
     branch: str
     sha: str
     # The deploy's start (the author date) and its last renewal (the
@@ -623,9 +654,11 @@ class Pending(NamedTuple):
     at: int
     machine: str
     pid: int
+    # Its deploy is over, its push pending (Announce.settle).
+    settled: bool
 
 
-ANNOUNCE_SUBJECT = re.compile(r"^pending increment of \S+ from ([^:\s]+):\S+ \(pid (\d+)\)$")
+ANNOUNCE_SUBJECT = re.compile(r"^pending increment of \S+ from ([^:\s]+):\S+ \(pid (\d+)\)( settled)?$")
 
 
 def pending_announcements() -> list[Pending]:
@@ -636,29 +669,36 @@ def pending_announcements() -> list[Pending]:
     listing = out(["git", "for-each-ref", f"--format={fmt}", PENDING_REFS])
     found = []
     for ln in listing.splitlines():
-        branch, sha, since, at, subject = ln.split("\t", 4)
+        key, sha, since, at, subject = ln.split("\t", 4)
+        branch = key.partition("@")[0]
         if is_ancestor(sha, "refs/remotes/origin/main"):
             continue
         if branch == "main" and is_ancestor(f"{sha}^", "refs/remotes/origin/main"):
             continue
         m = ANNOUNCE_SUBJECT.match(subject)
         machine, pid = (m.group(1), int(m.group(2))) if m else ("", 0)
-        found.append(Pending(branch, sha, int(since), int(at), machine, pid))
+        found.append(Pending(key, branch, sha, int(since), int(at), machine, pid,
+                             bool(m and m.group(3))))
     return found
 
 
 def announced(own: str | None) -> dict[str, str]:
-    """The uncleared announcements, branch -> commit, this run's own branch
-    left out: the drift core's in_flight.  A lineage naming an announcement
-    of a branch with none is abandoned (its deploy is over, the push never
-    landed); one of a branch still announced is in flight, dead or not."""
-    return {p.branch: p.sha for p in pending_announcements() if p.branch != own}
+    """The uncleared announcements, key -> commit, this run's own (by its
+    key) left out: the drift core's in_flight.  A lineage naming an
+    announcement whose key has none is abandoned (its deploy is over, the
+    push never landed); one whose key is still announced is in flight,
+    dead or not."""
+    return {p.key: p.sha for p in pending_announcements() if p.key != own}
 
 
 def announcer_dead(p: Pending) -> bool:
     """Whether the announcing deploy demonstrably died: on this machine,
-    with its pid gone."""
-    if p.machine != proc.this_machine() or p.pid <= 0:
+    its pid gone and (by the clock the two share) no renewal for
+    WAIT_STALE - a deploy just over may still have its background push
+    in flight, which clears the announcement within seconds."""
+    if p.settled or p.machine != proc.this_machine() or p.pid <= 0:
+        return False
+    if time.time() - p.at <= WAIT_STALE:
         return False
     try:
         os.kill(p.pid, 0)
@@ -670,12 +710,12 @@ def announcer_dead(p: Pending) -> bool:
 
 
 def clear_refspec(wb: str) -> list[str]:
-    """The push refspec clearing `wb`'s announcement, when one is uncleared
-    as fetched here (a retry of a failed push clears it too)."""
+    """The (forced) push refspec clearing `wb`'s announcement, when one is
+    uncleared as fetched here (a retry of a failed push clears it too)."""
     main = rev("refs/remotes/origin/main")
     sha = rev(f"{PENDING_REFS}/{wb}")
     if main and sha and not is_ancestor(sha, "refs/remotes/origin/main"):
-        return [f"{main}:{PENDING_REFS}/{wb}"]
+        return [f"+{main}:{PENDING_REFS}/{wb}"]
     return []
 
 
@@ -721,7 +761,10 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str])
     after = [f"{sha}:refs/heads/{DEPLOYED_PREFIX}/{h}" for h, sha in records.items()]
     what += [f"{DEPLOYED_PREFIX}/{h}" for h in records]
     if ann is not None:
-        ann.stop()
+        if wb:
+            ann.stop()
+        else:
+            ann.settle()
     if wb:
         main = rev("refs/remotes/origin/main")
         after += ([f"{main}:{PENDING_REFS}/{wb}"] if ann is not None and main

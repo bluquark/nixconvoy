@@ -230,13 +230,14 @@ LISTED = {"main", BRANCH, "haswell-wsl-deploys3", "chikuwa-deploys1"}
 
 def lineage_line(top: str, *, by: tuple[str, str] = OTHER,
                  pending: tuple[str, str | None] | None = (BRANCH, BASE), announce: str = "",
-                 others: tuple[str, ...] = ("chikuwa-deploys1",), at: float = 1e6) -> str:
+                 others: tuple[str, ...] = ("chikuwa-deploys1",), at: float = 1e6,
+                 key: str = "") -> str:
     own = pending[0] if pending else BRANCH
     doc = switch.lineage_doc(
         union="u" * 40, main="m" * 40, branches={b: "c" * 40 for b in others},
         own=own, head="h" * 40, base=pending[1] if pending else "h" * 40,
         snap="s" * 40 if pending else "", announce=announce, at=at, machine=by[0], checkout=by[1],
-        pid=4242)
+        pid=4242, key=key)
     return proc.dump_json({**doc, "toplevel": top})
 
 
@@ -319,7 +320,7 @@ def lineage_cases() -> None:
     assert proc.load_json(announced)["pending"]["announce"] == "p" * 40  # type: ignore[index]
     line, died = report(announced, in_flight={BRANCH: "q" * 40})
     assert line.startswith("side1: refused: ") and "dead" not in line and \
-        "Re-run once that deploy ends; or deploy with --reset side1" in died, (line, died)
+        "Re-run once that deploy ends, or push its branch from its checkout; or deploy with --reset side1" in died, (line, died)
     line, died = report(announced, in_flight={BRANCH: "q" * 40}, dead=[BRANCH])
     assert line.endswith("that deploy looks dead, its announcement no longer renewed") and \
         f"The deploy of {BRANCH} looks dead" in died and \
@@ -327,6 +328,17 @@ def lineage_cases() -> None:
     line, died = report(announced)
     assert line.startswith("side1: will switch, reverting it: ") and "its deploy is over" in line and \
         not died, (line, died)
+    # A main checkout's, under its own ref.
+    nightly = lineage_line(NEW, by=("chikuwa", "/var/lib/homelab"), pending=("main", BASE),
+                           announce="p" * 40, key="main@chikuwa")
+    assert proc.load_json(nightly)["pending"]["key"] == "main@chikuwa"  # type: ignore[index]
+    line, died = report(nightly, tips={"main": BASE}, in_flight={"main@chikuwa": "q" * 40}, dead=["main@chikuwa"])
+    assert line.startswith("side1: refused: ") and "The deploy of main looks dead" in died and \
+        f"{checkout.PENDING_REFS}/main@chikuwa - or push main from" in died, (line, died)
+    line, died = report(nightly, tips={"main": BASE}, in_flight={"main@haswell-wsl": "q" * 40})
+    assert line.startswith("side1: will switch, reverting it: ") and not died, (line, died)
+    line, died = report(lineage_line(NEW), in_flight={BRANCH: "q" * 40}, dead=[BRANCH])
+    assert "dead" not in line and "push its branch from its checkout" in died, (line, died)
     line, _ = report(lineage_line(NEW), reset=True)
     assert line.endswith("taken over by --reset"), line
     line, _ = report(lineage_line(NEW), reset=True, named=False, reached=False)
@@ -362,7 +374,10 @@ def lineage_cases() -> None:
             "branch": "haswell-wsl-deploys3", "base": "h", "head": "s"}
         switch.current_branch = lambda: "haswell-wsl-deploys3"
         assert switch.lineage_record("u", [], "s", "p")["pending"] == {
-            "branch": "haswell-wsl-deploys3", "base": "h", "head": "s", "announce": "p"}
+            "branch": "haswell-wsl-deploys3", "base": "h", "head": "s", "announce": "p",
+            "key": "haswell-wsl-deploys3"}
+        assert switch.lineage_record("u", [], "s", "p", "k")["pending"] == {
+            "branch": "haswell-wsl-deploys3", "base": "h", "head": "s", "announce": "p", "key": "k"}
         assert record("haswell-wsl-deploys3", "h2", "h", "") == {
             "branch": "haswell-wsl-deploys3", "base": "h", "head": "h2"}
         assert record("main", "lock", "m", "") == {"branch": "main", "base": "m", "head": "lock"}
@@ -970,18 +985,23 @@ def announce_cases(d: Path) -> None:
         # Announced: listed as under way by a fetch anywhere, the author
         # date the deploy's start, this run's own branch left out.
         ann = checkout.Announce(wb, snap)
-        assert ann.collect()
+        assert ann.collect() and ann.key == wb
         first = ann.sha
         sh(co, *checkout.fetch_args())
         assert sh(co, "rev-parse", f"{first}^{{tree}}") == sh(co, "rev-parse", f"{snap}^{{tree}}")
+        assert sh(co, "rev-parse", f"{first}^") == sh(co, "rev-parse", "HEAD")
         assert sh(co, "log", "-1", "--format=%s", first) == \
             f"pending increment of {wb} from tester:{co} (pid {os.getpid()})"
         (pend,) = checkout.pending_announcements()
-        assert pend.branch == wb and pend.sha == first and t0 <= pend.since <= pend.at <= t0 + 60 \
-            and (pend.machine, pend.pid) == ("tester", os.getpid()), pend
+        assert pend.key == pend.branch == wb and pend.sha == first and not pend.settled and \
+            t0 <= pend.since <= pend.at <= t0 + 60 and (pend.machine, pend.pid) == ("tester", os.getpid()), pend
+        # Dead here: its pid gone and no renewal for WAIT_STALE (one clock).
         assert not checkout.announcer_dead(pend)
-        assert checkout.announcer_dead(pend._replace(pid=2 ** 22 - 1))
-        assert not checkout.announcer_dead(pend._replace(machine="elsewhere", pid=2 ** 22 - 1))
+        assert not checkout.announcer_dead(pend._replace(pid=2 ** 22 - 1))
+        old = pend._replace(pid=2 ** 22 - 1, at=int(time.time()) - checkout.WAIT_STALE - 5)
+        assert checkout.announcer_dead(old)
+        assert not checkout.announcer_dead(old._replace(machine="elsewhere"))
+        assert not checkout.announcer_dead(old._replace(settled=True))
         assert checkout.announced(wb) == {}
         assert checkout.announced(None) == {wb: first}
         # Renewed while the deploy runs: a fresh commit of the same tree on
@@ -993,6 +1013,10 @@ def announce_cases(d: Path) -> None:
         (renewed,) = checkout.pending_announcements()
         assert renewed.sha != first and renewed.since == pend.since and \
             sh(co, "rev-parse", f"{renewed.sha}^{{tree}}") == sh(co, "rev-parse", f"{snap}^{{tree}}"), renewed
+        # A re-run announces with the rank of the announcement it renews.
+        again = checkout.Announce(wb, snap)
+        assert again.collect() and again.since == pend.since
+        again.stop()
         # Withdrawn (the deploy ended without a switch): cleared onto
         # origin/main, the renewals over.
         ann.withdraw()
@@ -1041,13 +1065,16 @@ def announce_cases(d: Path) -> None:
         # Nothing to push: no background push started.
         checkout.push_deployed(wb, None, {})
         assert not Path(checkout.push_state("pid")).exists()
-        # A main checkout's announcement (its HEAD origin lacks) is cleared
-        # by the push of main that lands that HEAD, not by nixconvoy.
+        # A main checkout's announcement (its HEAD origin lacks), under
+        # main@<machine>, is cleared by the push of main that lands that
+        # HEAD, not by nixconvoy; settled, it marks the deploy as over.
         ann = checkout.Announce("main", "HEAD")
-        assert ann.collect()
-        ann.stop()
+        assert ann.collect() and ann.key == "main@tester"
+        ann.settle()
         sh(co, *checkout.fetch_args())
-        assert [p.branch for p in checkout.pending_announcements()] == ["main"]
+        (pend,) = checkout.pending_announcements()
+        assert (pend.key, pend.branch, pend.settled) == ("main@tester", "main", True), pend
+        assert not checkout.announcer_dead(pend._replace(pid=2 ** 22 - 1, at=0))
         sh(co, "push", "--quiet", "origin", "HEAD:main")
         sh(co, *checkout.fetch_args())
         assert checkout.pending_announcements() == []
@@ -1069,7 +1096,7 @@ def announce_cases(d: Path) -> None:
         assert "background push failed" in err.getvalue(), err.getvalue()
         sh(co, *checkout.fetch_args())
         assert list(checkout.announced(None)) == [wb]
-        assert checkout.clear_refspec(wb) == [f"{proc.rev('refs/remotes/origin/main')}:{checkout.PENDING_REFS}/{wb}"]
+        assert checkout.clear_refspec(wb) == [f"+{proc.rev('refs/remotes/origin/main')}:{checkout.PENDING_REFS}/{wb}"]
     finally:
         os.chdir(prev)
     print("announcements: ok")

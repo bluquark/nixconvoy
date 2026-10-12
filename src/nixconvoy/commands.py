@@ -777,10 +777,14 @@ def drop_branches(names: list[str]) -> list[str]:
     clears = [spec for b in names for spec in clear_refspec(b)]
     if on_origin or clears:
         # One push, bounded: prune holds the worktree's name lock meanwhile.
-        pushed = run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--force",
-                      "origin", *(f":refs/heads/{b}" for b in on_origin), *clears,
-                      *(f"--force-with-lease=refs/heads/{b}:{old}" for b, old in on_origin.items())],
-                     check=False, timeout=30)
+        # Retried once: origin has rejected a deletion out of the blue.
+        cmd = ["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "origin",
+               *(f":refs/heads/{b}" for b in on_origin), *clears,
+               *(f"--force-with-lease=refs/heads/{b}:{old}" for b, old in on_origin.items())]
+        pushed = run(cmd, check=False, timeout=30)
+        if pushed.returncode != 0:
+            time.sleep(2)
+            pushed = run(cmd, check=False, timeout=30)
         if pushed.returncode != 0:
             failed.append(f"deleting {', '.join(on_origin)} on origin failed: "
                           f"{(pushed.stderr or '').strip() or 'timed out'}")
@@ -959,10 +963,12 @@ def status() -> None:
         print(paint("deploys under way (announced increments):", "dim"))
         now = time.time()
         for a in pending:
-            entry = f"{a.branch}: {summarize(a.sha)}"
+            entry = f"{a.key}: {summarize(a.sha)}" + (" (settled, awaiting its push)" if a.settled else "")
             # Display only: the announcer's clock, not this machine's.
             silent = now - a.at
-            if announcer_dead(a):
+            if a.settled:
+                print(f"  {paint(entry, 'yellow')}")
+            elif announcer_dead(a):
                 print(f"  {paint(f'{entry} - its process (pid {a.pid} here) is gone', 'red')}")
             elif silent > WAIT_STALE:
                 print(f"  {paint(f'{entry} - not renewed for {silent / 60:.0f} min: dead?', 'red')}")

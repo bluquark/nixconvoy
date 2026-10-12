@@ -8,10 +8,12 @@
 //! deploy-branches here does not list.  Switching it would revert that work
 //! until its owner redeploys, so it is never switched as is - unless that
 //! deploy is over: the lineage names its increment's announcement
-//! (`pending.announce`) and origin's pending ref of the branch is cleared
-//! (Context::in_flight lacks it), which only the push that ends a deploy,
-//! or a hand clear, does - or the deploy is a --reset that names the
-//! target or reaches it.  A deploy that died leaves its announcement up
+//! (`pending.announce`, its ref `pending.key`) and that ref is cleared
+//! (Context::in_flight lacks it), which only the deploy's own end does -
+//! its push, or its withdrawal having switched nothing - or the removal
+//! of its branch, or a hand clear; or the deploy is a --reset that names
+//! the target or reaches it.  Work of a branch deploy-branches here does
+//! not list stays refused until listed.  A deploy that died leaves its announcement up
 //! (nixconvoy tells one from its stopped renewals: Context::dead), so
 //! its target stays refused, the refusal naming the deploy and the
 //! clear that ends it; nothing is taken over on a clock.  When this
@@ -57,8 +59,10 @@ pub struct Lineage {
     /// origin yet, with the origin tip that push moves.
     pub pending: Option<(String, Option<String>)>,
     /// The pending increment's announcement on origin as the deploy made
-    /// it (renewed since; what counts is whether the branch's is cleared).
+    /// it (renewed since; what counts is whether its ref is cleared) and
+    /// that ref's name (nixconvoy's announce_key; the branch when absent).
     pub announce: Option<String>,
+    pub key: Option<String>,
     pub at: f64,
     pub machine: String,
     pub checkout: String,
@@ -78,6 +82,7 @@ pub fn parse(text: &str) -> Option<Lineage> {
     let s = |v: Option<&Value>| v.and_then(Value::as_str).map(str::to_string);
     let by = o.get("by")?.as_object()?;
     let mut announce = None;
+    let mut key = None;
     let pending = match o.get("pending") {
         None | Some(Value::Null) => None,
         Some(Value::Object(p)) => {
@@ -89,6 +94,11 @@ pub fn parse(text: &str) -> Option<Lineage> {
             announce = match p.get("announce") {
                 None | Some(Value::Null) => None,
                 Some(Value::String(a)) => Some(a.clone()),
+                Some(_) => return None,
+            };
+            key = match p.get("key") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(k)) => Some(k.clone()),
                 Some(_) => return None,
             };
             Some((s(p.get("branch"))?, base))
@@ -106,6 +116,7 @@ pub fn parse(text: &str) -> Option<Lineage> {
         tips,
         pending,
         announce,
+        key,
         at: o.get("at")?.as_f64()?,
         machine: s(by.get("machine")).or_else(|| s(by.get("host")))?,
         checkout: s(by.get("checkout"))?,
@@ -165,12 +176,11 @@ pub struct Context {
     pub listed: BTreeSet<String>,
     /// This run's fetched origin tip of each branch.
     pub tips: BTreeMap<String, String>,
-    /// Each branch's uncleared announcement: origin's pending refs as
-    /// fetched, this run's own left out.
+    /// The uncleared announcements by ref name (a lineage's `key`):
+    /// origin's pending refs as fetched, this run's own left out.
     pub in_flight: BTreeMap<String, String>,
-    /// The announced branches whose deploy nixconvoy found dead: its
-    /// process gone on this machine, or its announcement not renewed
-    /// while waited for.
+    /// The announcements (by ref name) whose deploy nixconvoy found dead:
+    /// its process gone on this machine, or no renewal while waited for.
     pub dead: BTreeSet<String>,
     /// Seconds east of UTC, for the times shown.
     pub tz_offset: i64,
@@ -211,13 +221,14 @@ pub fn classify(lin: Option<&Lineage>, running: &str, cx: &Context, take_over: b
         let mut why =
             format!("runs an increment of {branch} deployed by {who} whose push has not landed (origin/{branch} is still at {at})");
         if lin.announce.is_some() {
-            if !cx.in_flight.contains_key(branch) {
+            let key = lin.key.as_deref().unwrap_or(branch);
+            if !cx.in_flight.contains_key(key) {
                 return (
                     Kind::Abandoned,
                     format!("{why}; its deploy is over, the announcement cleared without the push, so taken as abandoned"),
                 );
             }
-            if cx.dead.contains(branch) {
+            if cx.dead.contains(key) {
                 why = format!("{why}; that deploy looks dead, its announcement no longer renewed");
             }
         }
@@ -277,17 +288,18 @@ pub struct Outcome {
 }
 
 /// The die message of a deploy refusing `refused` (in report order), each
-/// with the branch of its dead deploy when the refusal is one.
+/// with the announcement ref of its dead deploy when the refusal is one.
 pub fn refusal(refused: &[(String, Kind, Option<String>)]) -> String {
     let targets: Vec<&str> = refused.iter().map(|(h, _, _)| h.as_str()).collect();
     let mut fixes = Vec::new();
     if refused.iter().any(|(_, k, d)| *k == Kind::InFlight && d.is_none()) {
-        fixes.push("re-run once that deploy ends".to_string());
+        fixes.push("re-run once that deploy ends, or push its branch from its checkout".to_string());
     }
     let dead: BTreeSet<&str> = refused.iter().filter_map(|(_, _, d)| d.as_deref()).collect();
-    for b in dead {
+    for key in dead {
+        let branch = key.split('@').next().unwrap_or(key);
         fixes.push(format!(
-            "the deploy of {b} looks dead (its announcement is no longer renewed): clear it to have the next deploy revert its increment - git push --force origin origin/main:{PENDING_REFS}/{b} - or push {b} from its checkout to keep it"
+            "the deploy of {branch} looks dead (its announcement is no longer renewed): clear it to have the next deploy revert its increment - git push --force origin origin/main:{PENDING_REFS}/{key} - or push {branch} from its checkout to keep it"
         ));
     }
     if refused.iter().any(|(_, k, _)| *k == Kind::Unlisted) {
@@ -380,10 +392,9 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         if kind.refused() {
             let dead = lin
                 .as_ref()
-                .and_then(|l| l.pending.as_ref())
-                .map(|(b, _)| b)
-                .filter(|b| kind == Kind::InFlight && p.cx.dead.contains(*b))
-                .cloned();
+                .filter(|l| l.announce.is_some())
+                .and_then(|l| l.pending.as_ref().map(|(b, _)| l.key.clone().unwrap_or_else(|| b.clone())))
+                .filter(|k| kind == Kind::InFlight && p.cx.dead.contains(k));
             refused.push((h.clone(), kind, dead));
         } else if kind != Kind::LeftAlone {
             plan.push(h.clone());

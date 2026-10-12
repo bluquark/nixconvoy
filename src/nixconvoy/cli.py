@@ -43,11 +43,13 @@ Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
      The pending state - the increment, or a HEAD origin lacks (the
      nightly's lock commit on main) - is announced: its tree as a commit
      of its own, pushed to origin's refs/nixconvoy/pending/<branch> and
-     renewed there every 10 s for as long as this run lives, so a deploy
-     starting elsewhere sees this one under way (step 4a) until the push
-     that ends this deploy clears it (step 8) - or this run withdraws it,
-     ending without a switch.  Its author date is the run's start: its
-     rank among the deploys under way
+     renewed there every 10 s for as long as this run lives (a main
+     checkout's under main@<machine>), so a deploy starting elsewhere sees
+     this one under way (step 4a) until the push that ends this deploy
+     clears it (step 8; a main checkout's, the push of main by its owner
+     that lands the announced HEAD) - or this run withdraws it, ending
+     without a switch.  Its author date is the run's start (a re-run keeps
+     it): its rank among the deploys under way
   4. in a temporary worktree on that snapshot, union-merge every other
      pushed, listed work branch that still declares changes (mergiraf
      resolves structural conflicts; real conflicts abort with per-branch
@@ -64,7 +66,8 @@ Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
      deploys announced before this one are waited for (two never wait for
      each other); one whose announcement goes 30 s without a renewal, or
      whose process is gone on this machine, is taken for dead and gone on
-     without, with a warning; --reset waits for nobody
+     without, with a warning; one settled (over, its push pending) is not
+     waited for; --reset waits for nobody
   5. evaluate every reachable target's toplevel for the union, one nix eval
      process per stale target, concurrently, memoized per target by the git
      hashes of the files its configuration references and the lock entries
@@ -88,7 +91,8 @@ Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
      A dead deploy's announcement stays up, so its increment stays
      refused: the refusal names the deploy and the clear that ends it
      (git push --force origin origin/main:refs/nixconvoy/pending/<branch>),
-     or the push of its branch that keeps it.  When the configuration
+     or the push of its branch that keeps it.  Work of a branch
+     deploy-branches does not list stays refused until listed.  When the configuration
      names a precheck (a flake check), it runs on a thread beside the evals
      unless a pass is already proven for exactly the files it reads, and a
      failure stops the deploy the moment it is known.  A drifting candidate
@@ -135,9 +139,9 @@ Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
      is never committed, so other checkouts cannot pull a broken commit and
      pushed tips never overestimate what is running; its changes stay staged
      for the re-run, and its announcement is withdrawn - unless a target
-     was switched onto it already: then it stays, so a deploy elsewhere is
-     refused there rather than reverting the increment, until the re-run
-     ends with the push (or a hand clear)
+     runs it already, or a switch onto it was started: then it stays, so
+     a deploy elsewhere is refused there rather than reverting the
+     increment, until the re-run ends with the push (or a hand clear)
 
 Land (nixconvoy land [<name> ...]): commit the work branch's tree minus
 COMMIT_MSG.md onto origin/main with COMMIT_MSG.md as the message, push main,

@@ -51,7 +51,8 @@ no work.
   what it pushed - instead of building without it to be refused once it
   switched.  One whose announcement goes 30 seconds without a renewal is
   taken for dead and no longer waited for.  The push that ends the deploy
-  clears the announcement; a deploy ending without a switch withdraws it.
+  clears the announcement (a main checkout's: the push of main that lands
+  its HEAD, by its owner); a deploy ending without a switch withdraws it.
 - **Lineage.**  Every target records where its system came from: the union,
   each branch's tip, and the machine and checkout that deployed it.  A
   deploy that would overwrite another checkout's not-yet-pushed increment
@@ -61,7 +62,8 @@ no work.
   is abandoned and taken over with a warning.  A deploy that died leaves
   its announcement up, so its targets stay refused - the refusal names the
   dead deploy and the clear that ends it - and nothing is ever taken over
-  on a clock.
+  on a clock.  Work of a branch `deploy-branches` does not list stays
+  refused until listed.
 - **Deploy records.**  Before a target is switched, its deploy record - a
   commit of the exact tree it will run, on its previous record, main, the
   unioned branches and the increment - is pushed to origin, so no target

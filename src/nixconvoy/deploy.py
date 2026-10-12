@@ -42,7 +42,7 @@ from .checkout import (
 from .config import builder
 from .guard import binary, decide
 from .memo import Top
-from .proc import PERF, die, dump_json, git, load_json, rev
+from .proc import PERF, die, dump_json, git, is_ancestor, load_json, rev
 from .switch import lineage_record, switch
 from .targets import Probe, expand_targets, flake_target_names, remote_only
 from .union import UnionQueries
@@ -52,9 +52,26 @@ WAIT_POLL = 5
 
 
 def exit_on_signal(signum: int, _frame: object) -> None:
-    """SIGTERM and SIGHUP end the run as SystemExit, so a deploy's finally
-    clauses (the announcement's withdrawal) still run."""
+    """SIGTERM and SIGHUP end the run as die() would - the children killed,
+    no switch left to finish on its own - and as SystemExit, so a deploy's
+    finally clauses (the announcement's withdrawal) still run."""
+    proc.abort_children()
     raise SystemExit(128 + signum)
+
+
+def claims(lineage: str, me: str, branch: str) -> bool:
+    """Whether a target's lineage is this checkout's announced, unpushed
+    increment of `branch`."""
+    try:
+        doc = load_json(lineage)
+    except ValueError:
+        return False
+    if not isinstance(doc, dict):
+        return False
+    pend, by = doc.get("pending"), doc.get("by")
+    return (isinstance(pend, dict) and isinstance(by, dict) and bool(pend.get("announce"))
+            and pend.get("branch") == branch
+            and (by.get("machine"), by.get("checkout")) == (me, str(Path.cwd())))
 
 
 def previous_record(lineage: str) -> str:
@@ -140,15 +157,17 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
                              me, main0, wb, snap, ann, fetch, probes)
     finally:
         if ann is not None and not settled:
-            if ann.switched:
-                # Those targets run the increment: the announcement stays,
-                # dead, so a deploy elsewhere is refused there rather than
-                # reverting it, until a re-run here ends with the push.
+            if ann.claimed:
+                # Those targets run the increment (or a switch onto it was
+                # started): the announcement stays, dead, so a deploy
+                # elsewhere is refused there rather than reverting it,
+                # until a re-run here ends with the push.
                 ann.stop()
-                print(f"note: {', '.join(ann.switched)} already run this increment, so its "
-                      f"announcement stays: re-run to finish the deploy, or clear it to have the "
-                      f"increment reverted by the next deploy there (git push --force origin "
-                      f"origin/main:{PENDING_REFS}/{own})", file=sys.stderr)
+                print(f"note: {', '.join(ann.claimed)} run this checkout's unpushed increment "
+                      f"(or a switch onto it was started), so its announcement stays: re-run "
+                      f"to finish the deploy, or clear it to have the increment reverted by the "
+                      f"next deploy there (git push --force origin "
+                      f"origin/main:{PENDING_REFS}/{ann.key})", file=sys.stderr)
             else:
                 ann.withdraw()
 
@@ -166,10 +185,16 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         nonlocal running, probed
         probed = {n: f.result() for n, f in probes.items()}
         running = {n: p.running for n, p in probed.items()}
-        dead = [h for h in candidates if running.get(h) is None]
-        if dead:
-            die(f"unreachable: {', '.join(dead)} - nothing was committed; "
+        unreachable = [h for h in candidates if running.get(h) is None]
+        if unreachable:
+            die(f"unreachable: {', '.join(unreachable)} - nothing was committed; "
                 f"fix connectivity (or restrict targets / use `commit`) and re-run")
+        if ann is not None:
+            # A target running this checkout's announced increment from
+            # an earlier run that ended unsettled: still its claim.
+            for h, pr in probed.items():
+                if h not in ann.claimed and claims(pr.lineage, me, ann.branch):
+                    ann.claimed.append(h)
 
     if not skip:
         PERF.mark("probe")
@@ -189,14 +214,13 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         ensure_rebased()
         if snap:
             snap = staged_snapshot()
-            if ann is not None:
-                ann.base = snap
+        if ann is not None:
+            ann.retarget(snap or "HEAD")
 
-    # The branches whose announced deploy is dead as far as this run can
-    # tell (its process gone on this machine, or its announcement not
-    # renewed for WAIT_STALE seconds while waited for): told to the drift
-    # core, which names the dead deploy when it refuses a target running
-    # its increment.
+    # The announcements (by key) whose deploy is dead as far as this run
+    # can tell (its process gone on this machine, or no renewal for
+    # WAIT_STALE seconds while waited for): told to the drift core, which
+    # names the dead deploy when it refuses a target running its increment.
     dead: set[str] = set()
 
     def await_pending(wt: str, union: str) -> bool:
@@ -207,57 +231,62 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         build without it and be refused (or rebuild) once it switched.
         Only deploys announced before this one are waited for, so two never
         wait for each other; one that stops renewing its announcement is
-        given up on after WAIT_STALE seconds.  Whether it waited: the
-        targets are then probed again, and the union redone with what
-        landed."""
+        given up on after WAIT_STALE seconds of successful looks at origin;
+        one settled (over, its push pending) is not waited for.  Whether it
+        waited: the targets are then probed again, and the union redone
+        with what landed."""
         nonlocal probes
         if reset or skip:
             return False
-        own = ann.branch if ann is not None else None
+        own = ann.key if ann is not None else None
         rank = (ann.since, ann.branch) if ann is not None else None
         mine: list[str] | None = None
-        # (branch, origin's tip of it, announced tree) -> the candidates both
-        # reach: the renewals change the commit, rarely the tree.
+        # (key, diff base, announced tree) -> the candidates both reach:
+        # the renewals change the commit, rarely the tree.
         overlap: dict[tuple[str, str, str], set[str]] = {}
         # Each announcement as last seen, and when it last changed (this
-        # machine's clock).
+        # machine's clock, as of a successful fetch).
         seen: dict[str, tuple[str, float]] = {}
         told: set[str] = set()
         waited = False
-        failed_polls = 0
+        started = status_at = time.monotonic()
         while True:
             waiting: dict[str, list[str]] = {}
             now = time.monotonic()
             for p in pending_announcements():
-                if p.branch == own or p.branch in dead or (rank is not None and (p.since, p.branch) >= rank):
+                if p.key == own or p.key in dead or p.settled or \
+                        (rank is not None and (p.since, p.branch) >= rank):
                     continue
                 if announcer_dead(p):
-                    if p.branch not in dead:
-                        print(f"warning: {p.branch}'s deploy (pid {p.pid} here) is gone with its "
-                              f"announcement still up; going on without it", flush=True)
-                    dead.add(p.branch)
+                    print(f"warning: {p.key}'s deploy (pid {p.pid} here) is gone with its "
+                          f"announcement still up; going on without it", flush=True)
+                    dead.add(p.key)
                     continue
-                sha, changed = seen.get(p.branch, ("", now))
+                sha, changed = seen.get(p.key, ("", now))
                 if sha != p.sha:
-                    seen[p.branch] = (p.sha, now)
+                    seen[p.key] = (p.sha, now)
                     changed = now
                 elif now - changed > WAIT_STALE:
-                    if p.branch not in dead:
-                        print(f"warning: no news of {p.branch}'s deploy for {WAIT_STALE} s (its "
-                              f"announcement is no longer renewed): taken as dead, going on "
-                              f"without it", flush=True)
-                    dead.add(p.branch)
+                    print(f"warning: no news of {p.key}'s deploy for {WAIT_STALE} s (its "
+                          f"announcement is no longer renewed): taken as dead, going on "
+                          f"without it", flush=True)
+                    dead.add(p.key)
                     continue
                 if mine is None:
                     mine = sorted(memo.reached_targets(
                         wt, union, candidates, snap or "HEAD",
                         {h: probed[h].lineage for h in candidates if h in probed}))
-                base = rev(f"refs/remotes/origin/{p.branch}") or f"{p.sha}^"
-                key = (p.branch, base, rev(f"{p.sha}^{{tree}}") or p.sha)
+                # The announced state against what the union has of the
+                # branch: its parent (the announcer's HEAD) when origin has
+                # that, else origin's tip of the branch - a wider diff, so
+                # main's changes count too, but never a narrower one.
+                tip = rev(f"refs/remotes/origin/{p.branch}")
+                base = f"{p.sha}^" if tip is None or is_ancestor(f"{p.sha}^", tip) else tip
+                key = (p.key, base, rev(f"{p.sha}^{{tree}}") or p.sha)
                 if key not in overlap:
                     overlap[key] = memo.reached_between(wt, union, mine, base, p.sha)
                 if overlap[key]:
-                    waiting[p.branch] = sorted(overlap[key])
+                    waiting[p.key] = sorted(overlap[key])
             if not waiting:
                 break
             for b, hs in waiting.items():
@@ -265,11 +294,18 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                     told.add(b)
                     print(f"waiting for {b}'s deploy under way: its increment and this "
                           f"checkout's both reach {', '.join(hs)}...", flush=True)
+            if now - status_at >= 60:
+                status_at = now
+                print(f"still waiting for {', '.join(waiting)} ({(now - started) / 60:.0f} min)",
+                      flush=True)
             waited = True
-            time.sleep(WAIT_POLL)
-            if git(*fetch_args("--no-auto-gc"), check=False).returncode == 0:
-                failed_polls = 0
-            else:
+            # Announcements are judged as of a successful look at origin:
+            # a blip here must not make a live deploy look dead.
+            failed_polls = 0
+            while True:
+                time.sleep(WAIT_POLL)
+                if git(*fetch_args("--no-auto-gc"), check=False).returncode == 0:
+                    break
                 failed_polls += 1
                 if failed_polls >= 12:
                     die("origin stopped answering while waiting for the deploy under way; "
@@ -330,7 +366,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             reached=sorted(reached), running=running,
             built={h: t.out for h, t in tops.items()},
             lineages={h: p.lineage for h, p in probed.items()},
-            in_flight=announced(ann.branch if ann is not None else None), dead=sorted(dead))
+            in_flight=announced(ann.key if ann is not None else None), dead=sorted(dead))
         assert isinstance(verdict, dict)
         plan = [str(h) for h in verdict["plan"]]
         affected = [str(h) for h in verdict["affected"]]
@@ -365,7 +401,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                     f"\nDeployed: {fmt(plan) or 'none'}")
             committed = deployed_commit(snap, full)
             subject = (msg or "").partition("\n")[0] or subject
-        doc = lineage_record(union, branches, committed, ann.sha if ann else "")
+        doc = lineage_record(union, branches, committed, ann.sha if ann else "", ann.key if ann else "")
         records, lineages = {}, {}
         if not dry:
             for h in plan:
@@ -450,28 +486,21 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                 assert r is not None  # unreachable targets never enter the plan
                 expected[name] = r
             PERF.mark("switch:" + "+".join(batch))
+            # Claimed before the switch starts: a switch cut short (a signal,
+            # a batch sibling's die) may still leave the target running it.
+            if ann is not None:
+                ann.claimed += [n for n in batch if n not in ann.claimed]
             if len(batch) == 1:
                 n = batch[0]
                 switch(n, expected[n], tops[n].out, deploy_switch, lineage=lineages[n],
                        digest=probed[n].digest, needs_internet=tops[n].last)
-                if ann is not None:
-                    ann.switched.append(n)
                 continue
             with ThreadPoolExecutor(len(batch)) as pool:
-                switches = {n: pool.submit(switch, n, expected[n], tops[n].out, deploy_switch, True,
-                                           lineages[n], probed[n].digest, tops[n].last)
-                            for n in batch}
-            failed: BaseException | None = None
-            for n, f in switches.items():
-                try:
-                    f.result()
-                except BaseException as e:  # noqa: BLE001 - die() in the switch's thread
-                    failed = failed or e
-                else:
-                    if ann is not None:
-                        ann.switched.append(n)
-            if failed is not None:
-                raise failed
+                switches = [pool.submit(switch, n, expected[n], tops[n].out, deploy_switch, True,
+                                        lineages[n], probed[n].digest, tops[n].last)
+                            for n in batch]
+            for f in switches:
+                f.result()
 
         PERF.mark("commit-push")
         if committed:

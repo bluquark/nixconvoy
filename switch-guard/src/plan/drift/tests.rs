@@ -32,6 +32,9 @@ fn doc_ann(top: &str, by: (&str, &str), pending: Option<(&str, Option<&str>)>, a
         let mut p = json!({"branch": b, "base": base, "head": "s".repeat(40)});
         if let Some(a) = announce {
             p["announce"] = json!(a);
+            if b == "main" {
+                p["key"] = json!("main@chikuwa");
+            }
         }
         p
     });
@@ -161,6 +164,16 @@ fn classifies_lineages() {
     let nightly = lin(NEW, ("chikuwa", "/var/lib/homelab"), Some(("main", Some(&b))), &[], T0);
     assert_eq!(k(Some(&nightly), &cx(&[("main", &b)]), false).0, Kind::InFlight);
     assert_eq!(k(Some(&nightly), &cx(&[("main", &landed())]), false).0, Kind::CatchUp);
+    // Announced under its own ref (main@<machine>): judged by that ref,
+    // not by another main checkout's.
+    let nightly = lin_ann(NEW, ("chikuwa", "/var/lib/homelab"), Some(("main", Some(&b))), Some("p"), &[], T0);
+    assert_eq!(nightly.key.as_deref(), Some("main@chikuwa"));
+    let mut live = cx(&[("main", &b)]);
+    live.in_flight.insert("main@chikuwa".into(), "q".into());
+    assert_eq!(k(Some(&nightly), &live, false).0, Kind::InFlight);
+    let mut other = cx(&[("main", &b)]);
+    other.in_flight.insert("main@haswell-wsl".into(), "q".into());
+    assert_eq!(k(Some(&nightly), &other, false).0, Kind::Abandoned);
     // A branch whose very first push has not landed.
     let first = lin(NEW, OTHER, Some((BRANCH, None)), &[], T0);
     assert_eq!(k(Some(&first), &cx(&[]), false).0, Kind::InFlight);
@@ -170,13 +183,15 @@ fn classifies_lineages() {
 fn refusal_advice() {
     let a = refusal(&[("side1".into(), Kind::InFlight, None)]);
     assert!(
-        a.contains("side1 runs another") && a.contains("reaches it too") && a.contains("Re-run once that deploy ends; or deploy with"),
+        a.contains("side1 runs another")
+            && a.contains("reaches it too")
+            && a.contains("Re-run once that deploy ends, or push its branch from its checkout; or deploy with"),
         "{a}"
     );
     assert!(a.contains(&format!("{RESET_FLAG} side1")) && !a.contains(BRANCHES_FILE) && !a.contains("dead"), "{a}");
     let a = refusal(&[("side1".into(), Kind::Unlisted, None), ("side6".into(), Kind::InFlight, None)]);
     assert!(a.contains("side1, side6 run another") && a.contains("reaches them too"), "{a}");
-    assert!(a.contains("Re-run once that deploy ends; or list its branch in deploy-branches"), "{a}");
+    assert!(a.contains("Re-run once that deploy ends, or push its branch from its checkout; or list its branch in deploy-branches"), "{a}");
     assert!(a.contains(&format!("{RESET_FLAG} side1 ")), "{a}");
     // A dead deploy's: the clear that ends it, named once per branch.
     let a = refusal(&[("side1".into(), Kind::InFlight, Some(BRANCH.into())), ("side6".into(), Kind::InFlight, Some(BRANCH.into()))]);
@@ -187,8 +202,12 @@ fn refusal_advice() {
         "{a}"
     );
     assert!(!a.contains("Re-run once"), "{a}");
-    let a = refusal(&[("side1".into(), Kind::InFlight, Some("main".into())), ("side6".into(), Kind::InFlight, None)]);
-    assert!(a.contains("Re-run once that deploy ends; or the deploy of main looks dead"), "{a}");
+    let a = refusal(&[("side1".into(), Kind::InFlight, Some("main@chikuwa".into())), ("side6".into(), Kind::InFlight, None)]);
+    assert!(
+        a.contains("from its checkout; or the deploy of main looks dead")
+            && a.contains(&format!("{PENDING_REFS}/main@chikuwa - or push main from")),
+        "{a}"
+    );
 }
 
 #[test]
@@ -512,7 +531,7 @@ proptest! {
             // An announced increment is judged by its branch's announcement
             // alone: uncleared, in flight (dead or not); cleared, abandoned.
             // One without is in flight until its push lands or a --reset.
-            let announced_live = l.announce.is_some() && l.pending.as_ref().is_some_and(|(b, _)| p.cx.in_flight.contains_key(b));
+            let announced_live = l.announce.is_some() && l.pending.as_ref().is_some_and(|(b, _)| p.cx.in_flight.contains_key(l.key.as_deref().unwrap_or(b)));
             if kind == Kind::InFlight {
                 let (b, base) = l.pending.clone().unwrap();
                 prop_assert_eq!(p.cx.tips.get(&b), base.as_ref());
@@ -548,7 +567,7 @@ proptest! {
         }).collect();
         let refused: Vec<(String, Kind, Option<String>)> = verdicts.iter().filter(|v| v.1.refused()).map(|(h, k)| {
             let lin = p.lineages.get(h).and_then(|t| parse(t));
-            let dead = lin.and_then(|l| l.pending).map(|(b, _)| b).filter(|b| *k == Kind::InFlight && p.cx.dead.contains(b));
+            let dead = lin.filter(|l| l.announce.is_some()).and_then(|l| l.pending.as_ref().map(|(b, _)| l.key.clone().unwrap_or_else(|| b.clone()))).filter(|key| *k == Kind::InFlight && p.cx.dead.contains(key));
             (h.clone(), *k, dead)
         }).collect();
         // A refusal needs a reached target, which a --reset takes over.

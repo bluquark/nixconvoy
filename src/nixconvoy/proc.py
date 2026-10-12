@@ -3,6 +3,7 @@ runs its commands through here, so die() can kill what is in flight."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -86,6 +87,19 @@ DYING = False
 # Targets armed for a confirmed switch and neither confirmed nor rolled back
 # yet: a die() for another target in their batch leaves them to their timers.
 ARMED: set[str] = set()
+
+
+def abort_children() -> None:
+    """die()'s kill of the children, for a signal handler: it takes no lock,
+    since the frame it interrupted may hold CHILDREN_LOCK."""
+    global DYING
+    DYING = True
+    try:
+        for c in list(CHILDREN):
+            with contextlib.suppress(OSError):
+                c.kill()
+    except RuntimeError:  # the set changed under the copy
+        pass
 
 
 def die(msg: str) -> NoReturn:

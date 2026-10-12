@@ -21,14 +21,14 @@ from .targets import PROBE_TIMEOUT, control_opts, lineage_digest
 
 def lineage_doc(*, union: str, main: str | None, branches: dict[str, str | None],
                 own: str, head: str | None, base: str | None, snap: str, announce: str,
-                at: float, machine: str, checkout: str, pid: int) -> dict[str, object]:
+                at: float, machine: str, checkout: str, pid: int, key: str = "") -> dict[str, object]:
     """The lineage of a deploy's union, before its toplevel and record are
     added: `branches` the other work branches' unioned tips, `own` the
     checked-out branch the union was built on (`head`, or `snap`, the commit
     the branch gets once the staged increment runs), `base` origin's tip of
-    it, `announce` the increment's announcement (checkout.Announce: the
-    drift core takes the increment as abandoned once the branch's
-    announcement is cleared; a version-2 reader may ignore the field)."""
+    it, `announce` the increment's announcement and `key` its ref's name
+    (checkout.Announce: the drift core takes the increment as abandoned
+    once that ref is cleared; a version-2 reader may ignore both)."""
     pending = bool(snap) or head != base
     doc: dict[str, object] = {
         "version": 2, "union": union, "main": main,
@@ -40,19 +40,20 @@ def lineage_doc(*, union: str, main: str | None, branches: dict[str, str | None]
         p = doc["pending"]
         assert isinstance(p, dict)
         p["announce"] = announce
+        p["key"] = key or own
     return doc
 
 
 def lineage_record(union: str, branches: list[tuple[str, str]], snap: str,
-                   announce: str = "") -> dict[str, object]:
+                   announce: str = "", key: str = "") -> dict[str, object]:
     """lineage_doc for this deploy, from the refs it built its union on;
     `snap` the increment's work-branch commit (deployed_commit), or ""."""
     own = current_branch() or "main"  # detached: at origin/main (ensure_rebased)
     return lineage_doc(
         union=union, main=rev("refs/remotes/origin/main"), branches=dict(branches),
         own=own, head=rev("HEAD"), base=rev(f"refs/remotes/origin/{own}"), snap=snap,
-        announce=announce, at=time.time(), machine=proc.this_machine(), checkout=str(Path.cwd()),
-        pid=os.getpid())
+        announce=announce, key=key, at=time.time(), machine=proc.this_machine(),
+        checkout=str(Path.cwd()), pid=os.getpid())
 
 
 def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> list[str]:
