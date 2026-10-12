@@ -134,7 +134,7 @@ fn clock_is_local() {
     assert_eq!(clock(0.0, -3600), "23:00");
 }
 
-fn params(hosts: &[&str], candidates: &[&str], reset: bool, drifting: &[(&str, Option<String>)]) -> Params {
+fn params(hosts: &[&str], candidates: &[&str], reset: (bool, bool), drifting: &[(&str, Option<String>)]) -> Params {
     let s = |v: &[&str]| v.iter().map(|h| h.to_string()).collect::<Vec<_>>();
     let b = base();
     Params {
@@ -142,7 +142,8 @@ fn params(hosts: &[&str], candidates: &[&str], reset: bool, drifting: &[(&str, O
         router: "choko".into(),
         hosts: s(hosts),
         candidates: s(candidates),
-        reset,
+        reset: reset.0,
+        named: reset.1,
         reached: hosts.iter().map(|h| h.to_string()).collect(),
         running: hosts
             .iter()
@@ -165,7 +166,7 @@ fn reports_the_plan() {
     let p = params(
         &["chikuwa", "choko", "side1"],
         &["choko", "side1"],
-        false,
+        (false, true),
         &[("choko", None), ("chikuwa", None), ("side1", Some(in_flight.clone()))],
     );
     let (fx, out) = run(p);
@@ -179,7 +180,7 @@ fn reports_the_plan() {
     let p = params(
         &["chikuwa", "choko", "side1"],
         &["chikuwa", "choko", "side1"],
-        true,
+        (true, false),
         &[("choko", None), ("side1", Some(in_flight.clone()))],
     );
     let (fx, out) = run(p);
@@ -192,10 +193,14 @@ fn reports_the_plan() {
 
     // The in-flight host is outside this checkout's work: left alone, the
     // rest switched.
-    let mut p =
-        params(&["chikuwa", "choko", "side1"], &["chikuwa", "choko", "side1"], false, &[("choko", None), ("side1", Some(in_flight))]);
+    let mut p = params(
+        &["chikuwa", "choko", "side1"],
+        &["chikuwa", "choko", "side1"],
+        (false, false),
+        &[("choko", None), ("side1", Some(in_flight.clone()))],
+    );
     p.reached = ["chikuwa".to_string(), "choko".to_string()].into_iter().collect();
-    let (fx, out) = run(p);
+    let (fx, out) = run(p.clone());
     let out = out.unwrap();
     assert_eq!(out.plan, ["choko"]);
     assert_eq!(out.affected, ["side1", "choko"]);
@@ -205,6 +210,22 @@ fn reports_the_plan() {
         "{fx:?}"
     );
     assert_eq!(fx[2], Effect::Print("  choko: will switch".into()));
+
+    // An unnamed --reset leaves it alone too; one naming the hosts takes it over.
+    p.reset = true;
+    let (_, out) = run(p.clone());
+    assert_eq!(out.unwrap().drift["side1"].0, Kind::LeftAlone);
+    p.named = true;
+    let (_, out) = run(p.clone());
+    let out = out.unwrap();
+    assert_eq!(out.drift["side1"].0, Kind::Overridden);
+    assert_eq!(out.plan, ["side1", "choko"]);
+
+    // Named or not, a --reset never takes over a host outside the filter.
+    p.candidates = vec!["choko".into()];
+    let (fx, out) = run(p);
+    assert_eq!(out.unwrap().plan, ["choko"]);
+    assert!(fx.contains(&Effect::Print("  side1: differs but excluded by the host filter".into())), "{fx:?}");
 }
 
 fn arb_name() -> impl Strategy<Value = String> {
@@ -240,13 +261,13 @@ fn arb_params() -> impl Strategy<Value = Params> {
     (
         prop::collection::btree_set(host(), 0..5),
         prop::collection::btree_set(host(), 0..5),
-        any::<bool>(),
+        (any::<bool>(), any::<bool>()),
         prop::collection::btree_set(host(), 0..5),
         prop::collection::vec((proptest::option::of(arb_top()), arb_top(), arb_lineage(), proptest::option::of(0.0..4000.0f64)), 5),
         prop::collection::btree_map(arb_name(), prop::sample::select(vec!["a", "b"]).prop_map(str::to_string), 0..4),
         0.0..1e7f64,
     )
-        .prop_map(|(hosts, cands, reset, reached, facts, tips, now)| {
+        .prop_map(|(hosts, cands, (reset, named), reached, facts, tips, now)| {
             let hosts: Vec<String> = hosts.into_iter().collect();
             let mut p = Params {
                 cx: Context { tips, now, ..cx(&[]) },
@@ -254,6 +275,7 @@ fn arb_params() -> impl Strategy<Value = Params> {
                 candidates: cands.into_iter().filter(|c| hosts.contains(c)).collect(),
                 hosts: hosts.clone(),
                 reset,
+                named,
                 reached,
                 running: BTreeMap::new(),
                 built: BTreeMap::new(),
@@ -328,9 +350,12 @@ proptest! {
         let verdicts: Vec<(String, Kind)> = affected.iter().filter(|h| p.candidates.contains(h)).map(|h| {
             let lin = p.lineages.get(h).and_then(|(t, a)| parse(t, *a));
             let running = p.running[h].clone().unwrap();
-            (h.clone(), classify(lin.as_ref(), &running, &p.cx, p.reset, p.reached.contains(h)).0)
+            let reached = p.reached.contains(h);
+            (h.clone(), classify(lin.as_ref(), &running, &p.cx, p.reset && (p.named || reached), reached).0)
         }).collect();
         let refused: Vec<(String, Kind)> = verdicts.iter().filter(|v| v.1.refused()).cloned().collect();
+        // A refusal needs a reached host, which a --reset takes over.
+        if p.reset { prop_assert!(refused.is_empty()); }
         match out {
             Ok(o) => {
                 prop_assert!(refused.is_empty());

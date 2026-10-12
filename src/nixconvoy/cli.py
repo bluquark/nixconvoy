@@ -65,7 +65,8 @@ Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
      lineage recorded) it is left alone, running that work; when it does,
      the deploy is refused whole.  A refused lineage older than 30 min by
      the host's clock is a dead deployer's and is switched over with a
-     warning, as is every refused host of a --reset.  When the configuration
+     warning; so is a refused host under --reset, when this work reaches it
+     or the host was named.  When the configuration
      names a precheck (a flake check), it runs on a thread beside the evals
      unless a pass is already proven for exactly the files it reads, and a
      failure stops the deploy the moment it is known.  A drifting candidate
@@ -167,12 +168,13 @@ that affect no NixOS host, or to publish work while a host is unreachable.
 A staged change to what the precheck reads is checked on its own first.
 
 --reset deploys this checkout's view alone: the other work branches are
-left out of the union, and a host running another deployer's in-flight or
-unlisted work (step 5) is switched over, reverting that work there (name
-the host to confine it).  It is a one-off: the others return on their next
-deploy - the durable fix is to reset the branch that carries the unwanted
-change (git push --force-with-lease origin origin/main:<branch>) or repair
-it in its own checkout.
+left out of the union, so every host switched loses their work, and a host
+running another deployer's in-flight or unlisted work (step 5) is switched
+over too, reverting that work, when this checkout's work reaches it or the
+host is named (one left alone otherwise stays as it is).  It is a one-off:
+the others return on their next deploy - the durable fix is to reset the
+branch that carries the unwanted change (git push --force-with-lease origin
+origin/main:<branch>) or repair it in its own checkout.
 
 --danger-network-config-change admits a switch that would stop, restart or
 reload a protected unit (step 7), for this run only.

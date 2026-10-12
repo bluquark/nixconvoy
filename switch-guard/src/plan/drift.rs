@@ -8,14 +8,13 @@
 //! deploy-branches here does not list.  Switching it would revert that work
 //! until its owner redeploys, so it is never switched as is - unless the
 //! lineage is older than PENDING_MAX_AGE by the host's clock (a dead
-//! deployer's) or the deploy is a --reset, which claims every host for this
-//! checkout's view alone.  When this checkout's
-//! own work does not reach the host (Params::reached: no file its
-//! configuration reads changed), the host is simply left running that work
-//! and the deploy goes on without it; when it does, two checkouts are
-//! changing the same host and the deploy is refused whole: switching the
-//! rest would leave them carrying this run's unpushed claim beside the
-//! other's, with neither increment able to land cleanly.
+//! deployer's) or the deploy is a --reset that names the host or reaches
+//! it.  When this checkout's own work does not reach the host
+//! (Params::reached: no file its configuration reads changed), the host is
+//! simply left running that work and the deploy goes on without it; when it
+//! does, two checkouts are changing the same host and the deploy is refused
+//! whole: switching the rest would leave them carrying this run's unpushed
+//! claim beside the other's, with neither increment able to land cleanly.
 use super::{listed, Halt, Run, Script, BRANCHES_FILE};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -100,7 +99,7 @@ pub enum Kind {
     LeftAlone,
     /// Refused, but written more than PENDING_MAX_AGE ago.
     Abandoned,
-    /// Refused, but taken over by a --reset.
+    /// Refused, but taken over by a --reset that names or reaches the host.
     Overridden,
 }
 
@@ -144,9 +143,10 @@ fn clock(at: f64, tz_offset: i64) -> String {
 }
 
 /// Whose work a drifting host runs, relative to this deploy's union, and
-/// why; `reset` on a --reset deploy, `reached` when this checkout's own
-/// work changes something the host's configuration reads.
-pub fn classify(lin: Option<&Lineage>, running: &str, cx: &Context, reset: bool, reached: bool) -> (Kind, String) {
+/// why; `take_over` when a --reset names the host or reaches it, `reached`
+/// when this checkout's own work changes something the host's configuration
+/// reads.
+pub fn classify(lin: Option<&Lineage>, running: &str, cx: &Context, take_over: bool, reached: bool) -> (Kind, String) {
     let Some(lin) = lin.filter(|l| l.toplevel == running) else {
         return (Kind::Untracked, String::new());
     };
@@ -180,7 +180,7 @@ pub fn classify(lin: Option<&Lineage>, running: &str, cx: &Context, reset: bool,
     if age > PENDING_MAX_AGE {
         return (Kind::Abandoned, format!("{why}; {:.0} min old, so taken as abandoned", age / 60.0));
     }
-    if reset {
+    if take_over {
         return (Kind::Overridden, format!("{why}; taken over by {RESET_FLAG}"));
     }
     if !reached {
@@ -203,8 +203,11 @@ pub struct Params {
     pub router: String,
     pub hosts: Vec<String>,
     pub candidates: Vec<String>,
-    /// --reset: this checkout's view alone, refused work taken over.
+    /// --reset: this checkout's view alone - refused work is taken over on
+    /// the hosts it reaches, and on every candidate when `named`.
     pub reset: bool,
+    /// The candidates were named on the command line.
+    pub named: bool,
     /// The hosts this checkout's own work reaches: those whose
     /// configuration reads a file that work changed (nixconvoy's
     /// reached_hosts, by the eval memo's scan).
@@ -240,7 +243,7 @@ pub fn refusal(refused: &[(String, Kind)]) -> String {
     let mut c = fix.chars();
     let fix: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
     format!(
-        "nothing switched or committed: {} {} another deployer's work this union lacks, and this checkout's work reaches {} too (see above).  {fix} (after {} min it counts as abandoned), or deploy with {RESET_FLAG} {} to revert it deliberately.",
+        "nothing switched or committed: {} {} another deployer's work this union lacks, and this checkout's work reaches {} too (see above).  {fix} (after {} min it counts as abandoned), or deploy with {RESET_FLAG} {} to revert it deliberately - along with every other branch's work there, which {RESET_FLAG} leaves out.",
         hosts.join(", "),
         if hosts.len() == 1 { "runs" } else { "run" },
         if hosts.len() == 1 { "it" } else { "them" },
@@ -266,7 +269,8 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     for h in affected.iter().filter(|h| p.candidates.contains(h)) {
         let lin = p.lineages.get(h).and_then(|(text, age)| parse(text, *age));
         let running = p.running.get(h).cloned().flatten().unwrap_or_default();
-        let (kind, why) = classify(lin.as_ref(), &running, &p.cx, p.reset, p.reached.contains(h));
+        let reached = p.reached.contains(h);
+        let (kind, why) = classify(lin.as_ref(), &running, &p.cx, p.reset && (p.named || reached), reached);
         if kind.refused() {
             refused.push((h.clone(), kind));
         } else if kind != Kind::LeftAlone {

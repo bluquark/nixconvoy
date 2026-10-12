@@ -119,7 +119,7 @@ fn guidance(s: &mut Script, c: &Conflict) -> Run<String> {
     let summary = s.text(Query::Summary { sha: c.sha.clone() })?.unwrap_or_default();
     let name = &c.name;
     Ok(format!(
-        "cannot union work branch {name}; mergiraf could not resolve:\n  {}\nits last deploy: {summary}\noptions:\n  - fix or rebase that branch in its own checkout, redeploy from there, re-run here\n  - if that work is abandoned: git push --force-with-lease origin origin/main:{name}\n  - --reset deploys ignoring all other branches (one-off; they return next deploy)",
+        "cannot union work branch {name}; mergiraf could not resolve:\n  {}\nits last deploy: {summary}\noptions:\n  - fix or rebase that branch in its own checkout, redeploy from there, re-run here\n  - if that work is abandoned: git push --force-with-lease origin origin/main:{name}\n  - --reset deploys ignoring all other branches (one-off; they return next deploy), reverting their work on every host it switches",
         c.files.join(", ")
     ))
 }

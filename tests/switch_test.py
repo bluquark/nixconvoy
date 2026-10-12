@@ -240,7 +240,8 @@ def lineage_line(top: str, *, by: tuple[str, str] = OTHER,
 
 
 def report(text: str, age: float | None, *, tips: dict[str, str] | None = None,
-           reset: bool = False, reached: bool = True, running: str = NEW) -> tuple[str, str]:
+           reset: bool = False, named: bool = True, reached: bool = True,
+           running: str = NEW) -> tuple[str, str]:
     """deploy-plan's drift verdict on one drifting host carrying `text` as
     its lineage file: its report line, and the deploy's die message."""
     out, err = io.StringIO(), io.StringIO()
@@ -249,7 +250,7 @@ def report(text: str, age: float | None, *, tips: dict[str, str] | None = None,
         guard.decide(
             "drift", me=list(ME), listed=sorted(LISTED), tips={BRANCH: BASE} if tips is None else tips,
             now=1e6 + 60, tz_offset=0, router="choko", hosts=["side1"], candidates=["side1"],
-            reset=reset, reached=["side1"] if reached else [],
+            reset=reset, named=named, reached=["side1"] if reached else [],
             running={"side1": running},
             built={"side1": "/nix/store/union-system"},
             lineages={"side1": {"text": text, "age": age}})
@@ -307,6 +308,10 @@ def lineage_cases() -> None:
     line, _ = report(lineage_line(NEW), 31 * 60)
     assert line.startswith("side1: will switch, reverting it: ") and "taken as abandoned" in line, line
     line, _ = report(lineage_line(NEW), 60, reset=True)
+    assert line.endswith("taken over by --reset"), line
+    line, _ = report(lineage_line(NEW), 60, reset=True, named=False, reached=False)
+    assert line.startswith("side1: left alone: "), line
+    line, _ = report(lineage_line(NEW), 60, reset=True, named=False)
     assert line.endswith("taken over by --reset"), line
     line, _ = report(lineage_line(NEW, pending=None, others=("M3-Air-deploys9",)), 60)
     assert "side1: refused: runs work of M3-Air-deploys9" in line, line

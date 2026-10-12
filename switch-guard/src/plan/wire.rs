@@ -89,6 +89,7 @@ fn drift_params(v: &Value) -> Result<drift::Params, String> {
         hosts: strings(v, "hosts")?,
         candidates: strings(v, "candidates")?,
         reset: flag(v, "reset")?,
+        named: flag(v, "named")?,
         reached: strings(v, "reached")?.into_iter().collect(),
         running,
         built,
@@ -295,7 +296,7 @@ mod tests {
         );
         assert_eq!(reply(r#"{"ran":true,"detail":""}"#).unwrap(), Reply::Ran { ok: true, detail: String::new() });
         assert_eq!(query(&Query::Switch { branch: "b".into(), start: None }).to_string(), r#"{"ask":"switch","branch":"b","start":null}"#);
-        let mut d = start(r#"{"protocol":3,"core":"drift","me":["h","/c"],"listed":["main"],"tips":{},"now":0,"tz_offset":0,"router":"choko","hosts":["a"],"candidates":["a"],"reset":false,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"lineages":{"a":{"text":"","age":null}}}"#).unwrap();
+        let mut d = start(r#"{"protocol":3,"core":"drift","me":["h","/c"],"listed":["main"],"tips":{},"now":0,"tz_offset":0,"router":"choko","hosts":["a"],"candidates":["a"],"reset":false,"named":false,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"lineages":{"a":{"text":"","age":null}}}"#).unwrap();
         let (line, _) = d.decide(None);
         assert_eq!(
             line,
