@@ -508,7 +508,7 @@ fn run_watch(s: &Settings) -> i32 {
     proc::run(&s.systemctl, &["reboot"])
 }
 
-pub const USAGE: &str = "usage: boot-assessment --config <file> install <toplevel> | prune | report | gate | watch";
+pub const USAGE: &str = "usage: nixconvoy-boot-assessment --config <file> install <toplevel> | prune | report | gate | watch";
 
 pub fn main(args: &[String]) -> i32 {
     let (config, rest) = match args {

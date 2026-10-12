@@ -86,7 +86,7 @@ let
     initial_tries = ${toString initialTries}
     reported = ${reported}
   '';
-  run = verb: "${config.nixconvoy.switchGuardPackage}/bin/boot-assessment --config ${conf} ${verb}";
+  run = verb: "${config.nixconvoy.switchGuardPackage}/bin/nixconvoy-boot-assessment --config ${conf} ${verb}";
 
   # Seconds since stage 2 began: an initrd that waited for a manual LUKS
   # unlock (or a slow fsck) must not eat into a counted boot's deadline.

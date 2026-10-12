@@ -5,7 +5,7 @@
   options.nixconvoy = {
     switchGuardPackage = lib.mkOption {
       type = lib.types.package;
-      description = "The switch-guard build whose confirmed-switch and boot-assessment binaries this target runs; the flake's nixosModules.default sets it to the same build the nixconvoy command drives.";
+      description = "The switch-guard build whose nixconvoy-confirmed-switch and nixconvoy-boot-assessment binaries this target runs; the flake's nixosModules.default sets it to the same build the nixconvoy command drives.";
     };
     protectedUnits = lib.mkOption {
       type = lib.types.listOf lib.types.str;

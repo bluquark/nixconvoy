@@ -255,7 +255,7 @@ impl Host for System<'_> {
 }
 
 pub const USAGE: &str =
-    "usage: confirmed-switch arm | activate <toplevel> | confirm <toplevel> [reboot-pending] | rollback | check | deadline";
+    "usage: nixconvoy-confirmed-switch arm | activate <toplevel> | confirm <toplevel> [reboot-pending] | rollback | check | deadline";
 
 /// The `check` verb: nixconvoy reports its last stderr line.  Root, so the
 /// target's checks can attribute sockets (ss -p) and read state.
@@ -276,7 +276,7 @@ fn check(s: &Settings) -> i32 {
     1
 }
 
-/// `confirmed-switch --config <file> <verb> ...`
+/// `nixconvoy-confirmed-switch --config <file> <verb> ...`
 pub fn main(args: &[String]) -> i32 {
     // nixconvoy runs `arm` over a plain ssh session: losing it must not
     // stop the run between stopping the old timer and recording the new.

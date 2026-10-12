@@ -241,8 +241,8 @@ both would run).
   machines, with stateright models and property tests: `nixconvoy-plan` (the
   rebase, the union, the drift verdicts, a subagent worktree's pruning
   against the create hook, the sessions and its agent's stops and
-  resumes), `nixconvoy-switch` (the switch protocol), `confirmed-switch` (the
-  target-side helper) and `boot-assessment`.
+  resumes), `nixconvoy-switch` (the switch protocol), `nixconvoy-confirmed-switch` (the
+  target-side helper) and `nixconvoy-boot-assessment`.
 - `tests/switch_test.py`: the switch driven end to end against a fake target,
   the lineage classification, and the git cores on scratch repositories.
 - `nix flake check` runs all of it.

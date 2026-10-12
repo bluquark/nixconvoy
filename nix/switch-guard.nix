@@ -1,4 +1,4 @@
-# The crate behind the confirmed-switch helper, boot-assessment and
+# The crate behind nixconvoy-confirmed-switch (the helper), nixconvoy-boot-assessment and
 # nixconvoy's nixconvoy-switch and nixconvoy-plan (switch-guard/, one crate: see
 # its src/lib.rs).  checkPhase's `cargo test` runs the stateright models and
 # the property tests.
@@ -31,5 +31,5 @@ pkgs.rustPlatform.buildRustPackage {
   dontUseCargoParallelTests = true;
   # Cargo.toml's `checked` profile: overflow fails a test.
   checkType = "checked";
-  meta.mainProgram = "confirmed-switch";
+  meta.mainProgram = "nixconvoy-confirmed-switch";
 }

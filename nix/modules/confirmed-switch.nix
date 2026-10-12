@@ -27,7 +27,7 @@ let
   helper = pkgs.writeShellApplication {
     name = "confirmed-switch";
     bashOptions = [ "errexit" "nounset" "pipefail" ];
-    text = ''exec ${config.nixconvoy.switchGuardPackage}/bin/confirmed-switch --config ${conf} "$@"'';
+    text = ''exec ${config.nixconvoy.switchGuardPackage}/bin/nixconvoy-confirmed-switch --config ${conf} "$@"'';
   };
 in
 {
