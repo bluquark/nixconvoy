@@ -10,9 +10,11 @@ from pathlib import Path
 
 from . import hosts, memo, proc
 from .checkout import (
+    adopt_commit,
     await_background_push,
     commit_deployed,
     current_branch,
+    deployed_commit,
     ensure_on_work_branch,
     ensure_rebased,
     origin_tips,
@@ -235,7 +237,14 @@ def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
         union = str(done["union"])
         branches = [(str(n), str(t)) for n, t in done["branches"]]
 
-        record = lineage_record(union, branches, snap)
+        committed = ""
+        if snap:
+            assert wb is not None  # a snapshot needs the work branch (above)
+            fmt = ", ".join
+            full = (f"{msg}\n\nAffected: {fmt(affected) or 'none'}"
+                    f"\nDeployed: {fmt(plan) or 'none'}")
+            committed = deployed_commit(snap, full)
+        record = lineage_record(union, branches, committed)
         deployer = binary("deploy-switch") if plan else ""
 
         # The switch-last hosts alone, one by one, once everything else has
@@ -269,12 +278,9 @@ def deploy(filter_hosts: list[str], msg: str | None, reset: bool,
                 f.result()
 
         PERF.mark("commit-push")
-        if snap:
-            assert wb is not None  # a snapshot needs the work branch (above)
-            fmt = ", ".join
-            full = (f"{msg}\n\nAffected: {fmt(affected) or 'none'}"
-                    f"\nDeployed: {fmt(plan) or 'none'}")
-            commit_deployed(wb, snap, full)
+        if committed:
+            assert wb is not None
+            adopt_commit(wb, committed)
         if wb is not None and current_branch() == wb:
             push_work_branch(wb, background=True)
         # A local main ahead of origin is pushed by its owner once every

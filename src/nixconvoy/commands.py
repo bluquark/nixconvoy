@@ -146,7 +146,19 @@ def pull() -> None:
         sys.exit(1)
 
 
-def abandon() -> None:
+def deployed_hosts(commits: str) -> list[str]:
+    """The hosts the deploys of the commits in the range `commits` switched
+    (their Deployed: trailers), sorted."""
+    names: set[str] = set()
+    for ln in out(["git", "log", "--format=%(trailers:key=Deployed,valueonly)", commits]).splitlines():
+        names.update(h.strip() for h in ln.split(",") if h.strip() and h.strip() != "none")
+    return sorted(names)
+
+
+def abandon(apply_now: bool = False) -> None:
+    """Discard the work branch (cli docstring: Abandon).  The hosts keep
+    running its increments until a deploy reverts them: `apply_now` when
+    the caller deploys right after, for the message."""
     await_background_push()
     git("fetch", "--quiet", "origin")
     pop_tmp_commits()
@@ -177,10 +189,19 @@ def abandon() -> None:
     if prev == main and ok(["git", "diff", "--quiet", "HEAD"]) and checkout_identity().kind != "sub":
         die("nothing to abandon")
 
+    deployed = deployed_hosts(f"{main}..{prev}")
     git("reset", "--quiet", "--hard", main)
     Path(MSG_FILE).unlink(missing_ok=True)  # an uncommitted copy survives the hard reset
     git("branch", "-f", "main", main, check=False)
     print(f"abandoned {wb} (was {prev[:12]}, see reflog): {summarize(main)}")
+    if deployed:
+        where = ", ".join(deployed)
+        if apply_now:
+            print(f"deployed to {where}: deploying now to revert it")
+        else:
+            keep = "keeps" if len(deployed) == 1 else "keep"
+            print(f"deployed to {where}, which {keep} running it until the next deploy reverts "
+                  f"it (`nixconvoy apply`, or `abandon --apply-now` for both at once)")
     finish(wb)
 
 

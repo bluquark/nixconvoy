@@ -114,6 +114,14 @@ pub enum Query {
     Upstream {
         branch: String,
     },
+    /// What became of `branch`'s increment at `tip`, which origin's tip of
+    /// the branch no longer is: "kept" (still on the branch: behind its
+    /// tip, or rebased), "landed" (origin/main holds its changes) or
+    /// "abandoned" (on no branch, landed nowhere) -> Text.
+    Fate {
+        branch: String,
+        tip: String,
+    },
     /// Point the branch's upstream at origin/main -> Ran.
     SetUpstream {
         branch: String,

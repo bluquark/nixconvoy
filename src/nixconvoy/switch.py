@@ -24,8 +24,8 @@ def lineage_doc(*, union: str, main: str | None, branches: dict[str, str | None]
                 at: float, host: str, checkout: str, pid: int) -> dict[str, object]:
     """The lineage of a deploy's union, before its toplevel is added:
     `branches` the other work branches' unioned tips, `own` the checked-out
-    branch the union was built on (`head`, plus `snap` when an increment is
-    staged), `base` origin's tip of it."""
+    branch the union was built on (`head`, or `snap`, the commit the branch
+    gets once the staged increment runs), `base` origin's tip of it."""
     pending = bool(snap) or head != base
     return {
         "version": 1, "union": union, "main": main,
@@ -36,7 +36,8 @@ def lineage_doc(*, union: str, main: str | None, branches: dict[str, str | None]
 
 
 def lineage_record(union: str, branches: list[tuple[str, str]], snap: str) -> dict[str, object]:
-    """lineage_doc for this deploy, from the refs it built its union on."""
+    """lineage_doc for this deploy, from the refs it built its union on;
+    `snap` the increment's work-branch commit (deployed_commit), or ""."""
     own = current_branch() or "main"  # detached: at origin/main (ensure_rebased)
     return lineage_doc(
         union=union, main=rev("refs/remotes/origin/main"), branches=dict(branches),

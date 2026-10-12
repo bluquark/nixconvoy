@@ -132,10 +132,17 @@ work branches only origin holds (other machines' checkouts).
 Review (nixconvoy review [<name> ...] [args]): `git review`
 (integrations/claude-code/bin/git-review), the review of the pending landing.
 
-Abandon (nixconvoy abandon [<name> ...]): discard this checkout's work
-instead of landing it: hard-reset the checkout and reset the work branch
-(local and origin) onto origin/main, staying on it.  Untracked files
-survive; the old tip remains reachable via the reflog.
+Abandon (nixconvoy abandon [--apply-now] [<name> ...]): discard this
+checkout's work instead of landing it: hard-reset the checkout and reset
+the work branch (local and origin) onto origin/main, staying on it.
+Untracked files survive; the old tip remains reachable via the reflog.
+No host is touched: the ones its increments were deployed to (named from
+their Deployed: trailers) keep running them until the next deploy by
+anyone, whose verdict names what it reverts ("will switch (catch-up: ...;
+reverting <branch>'s abandoned increment <sha>)").  --apply-now runs that
+deploy at once, so the hosts drop the work now - from the checkout abandon
+ran in, a subagent worktree's parent once the worktree is removed; it
+takes --danger-network-config-change.
 
 Prune (nixconvoy prune [<name> ...]): remove the subagent worktrees that
 hold nothing of their own - never deployed, no staged, unstaged or
@@ -209,15 +216,15 @@ import sys
 from pathlib import Path
 
 from . import commands, proc
-from .checkout import lock_checkout
+from .checkout import lock_checkout, sub_parent
 from .deploy import deploy
 from .hosts import NETWORK_FLAG, exec_on
-from .proc import PERF, PERF_FILE, die, git, out
+from .proc import PERF, PERF_FILE, die, git, ok, out
 
 USAGE = """usage: nixconvoy apply [-m "msg"] [--reset] [--danger-network-config-change] [--dry-activate] [host|@tag ...]
        nixconvoy commit -m "msg"
        nixconvoy land [worktree ...]
-       nixconvoy abandon [worktree ...]
+       nixconvoy abandon [--apply-now] [worktree ...]
        nixconvoy prune [worktree ...] | --after PID | --stopped PID < hook-input
        nixconvoy pull
        nixconvoy status
@@ -228,8 +235,11 @@ is switched; naming hosts, or @tag for the hosts nixconvoy.toml tags so,
 restricts switching to (at most) those.
 --danger-network-config-change admits a switch that would stop, restart or
 reload a unit the host's configuration protects (nixconvoy.protectedUnits).
---dry-activate stops before any switch, printing what each would do."""
+--dry-activate stops before any switch, printing what each would do.
+abandon --apply-now deploys at once, so the hosts drop the abandoned work
+now rather than at the next deploy."""
 DRY_FLAG = "--dry-activate"
+APPLY_NOW_FLAG = "--apply-now"
 
 
 def main() -> None:
@@ -266,6 +276,7 @@ def main() -> None:
     reset = False
     danger = False
     dry = False
+    apply_now = False
     hosts: list[str] = []
     after = ""
     stopped = ""
@@ -283,6 +294,8 @@ def main() -> None:
             danger = True
         elif a == DRY_FLAG:
             dry = True
+        elif a == APPLY_NOW_FLAG and subcmd == "abandon":
+            apply_now = True
         elif a in ("-h", "--help"):
             print(USAGE)
             return
@@ -312,13 +325,20 @@ def main() -> None:
         else:
             commands.prune(hosts)
         return
+    top = Path.cwd()
+    here = top.resolve()
     if subcmd in ("land", "abandon"):
-        if msg or reset or danger or dry:
+        if msg or reset or dry or (danger and not apply_now):
             die(USAGE)
-        act = commands.land if subcmd == "land" else commands.abandon
+        if apply_now:
+            # The deploy runs from this checkout (a subagent's: its parent),
+            # whose staged changes it would have to carry without a message.
+            deploys_from = (sub_parent(here) or here) if not hosts else here
+            if not ok(["git", "diff", "--cached", "--quiet"], cwd=str(deploys_from)):
+                die(f"{deploys_from} has staged changes, which the deploy of {APPLY_NOW_FLAG} "
+                    "would carry: deploy or unstage them first")
         # Several subagent worktrees, one after the other, each under its
         # own checkout's lock.
-        top = Path.cwd()
         for name in hosts:
             if len(hosts) > 1:
                 print(f"== {name}")
@@ -327,24 +347,40 @@ def main() -> None:
             lock = lock_checkout()
             if lock is None:
                 die(f"another nixconvoy is running in {name}'s worktree")
-            act()
+            if subcmd == "land":
+                commands.land()
+            else:
+                commands.abandon(apply_now)
             lock.close()
         if hosts:
+            if apply_now:
+                os.chdir(top)
+                take_lock()
+                deploy([], None, False, danger)
             return
-    lock = lock_checkout()
-    if lock is None:
-        die("another nixconvoy is running in this checkout")
-    proc.HELD.append(lock)  # held until exit
+    take_lock()
     if subcmd == "land":
         commands.land()
     elif subcmd == "abandon":
-        commands.abandon()
+        commands.abandon(apply_now)
+        if apply_now:
+            if Path.cwd().resolve() != here:
+                take_lock()  # a subagent worktree's removal moved into its parent
+            deploy([], None, False, danger)
     elif subcmd == "commit":
         if reset or danger or dry or hosts:
             die(USAGE)
         commands.commit_only(msg)
     else:  # apply
         deploy(hosts, msg, reset, danger, dry)
+
+
+def take_lock() -> None:
+    """The current checkout's deploy lock, held until exit."""
+    lock = lock_checkout()
+    if lock is None:
+        die("another nixconvoy is running in this checkout")
+    proc.HELD.append(lock)
 
 
 if __name__ == "__main__":

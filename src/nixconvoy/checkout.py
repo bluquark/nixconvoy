@@ -295,6 +295,8 @@ class GitQueries:
             return {"text": merge or None}
         if kind == "set_upstream":
             return ran(git("branch", "--set-upstream-to=origin/main", arg("branch"), check=False))
+        if kind == "fate":
+            return {"text": increment_fate(arg("branch"), arg("tip"))}
         raise ValueError(f"deploy-plan asked {ask!r}")
 
 
@@ -413,14 +415,26 @@ def staged_snapshot() -> str:
                 "-m", "staged snapshot (not yet committed)"], env=MACHINE_ENV)
 
 
-def commit_deployed(wb: str, snap: str, msg: str) -> None:
-    """The work-branch commit of an increment that just deployed: exactly the
-    snapshot's tree, with the user's identity.  The soft reset leaves the
-    index alone, so anything staged mid-deploy stays staged on top."""
+def deployed_commit(snap: str, msg: str) -> str:
+    """The work-branch commit of the increment `snap` deploys: exactly the
+    snapshot's tree on HEAD, with the user's identity.  Made before the
+    switch, so the lineage the hosts get names the commit origin will hold
+    (a later deploy anywhere can then tell what became of it); dangling if
+    the switch fails."""
     tree = out(["git", "rev-parse", f"{snap}^{{tree}}"])
-    c = out(["git", "commit-tree", tree, "-p", "HEAD", "-m", msg])
+    return out(["git", "commit-tree", tree, "-p", "HEAD", "-m", msg])
+
+
+def adopt_commit(wb: str, c: str) -> None:
+    """`c` (deployed_commit) onto the work branch once its increment runs.
+    The soft reset leaves the index alone, so anything staged mid-deploy
+    stays staged on top."""
     git("reset", "--quiet", "--soft", c)
     warn_no_msgfile(wb)
+
+
+def commit_deployed(wb: str, snap: str, msg: str) -> None:
+    adopt_commit(wb, deployed_commit(snap, msg))
 
 
 def push_state(kind: str) -> str:
@@ -567,6 +581,38 @@ def on_origin(cwd: str | None = None, pats: set[str] | None = None) -> bool:
         if marks and len(marks) == n and all(m.startswith("-") for m in marks):
             return True
     return False
+
+
+def increment_fate(branch: str, tip: str) -> str:
+    """What became of `branch`'s increment at `tip`, a tip a host's lineage
+    recorded that origin's tip of the branch no longer is (the drift core's
+    Query::Fate): "kept" when origin's branch still carries it - behind a
+    newer tip, or rebased, each of its commits patch-equivalent to one of
+    the branch's - "landed" when origin/main holds its changes (merging it
+    into origin/main changes nothing but MSG_FILE: a landing of it or of a
+    later increment), else "abandoned": reset, dropped with its subagent
+    worktree or force-pushed over, so the switch onto a union without it
+    reverts it.  A tip this repository never fetched (another machine's
+    staged snapshot, committed differently once pushed) or that conflicts
+    with origin/main (superseded somehow) is "kept": nothing to announce."""
+    main = "refs/remotes/origin/main"
+    if rev(f"{tip}^{{commit}}") is None:
+        return "kept"
+    up = f"refs/remotes/origin/{branch}"
+    if rev(up) is None:
+        up = main  # dropped with its subagent worktree
+    if is_ancestor(tip, up):
+        return "kept"
+    marks = run(["git", "cherry", up, tip], check=False).stdout.splitlines()
+    if marks and all(m.startswith("-") for m in marks):
+        return "kept"
+    p = run(["git", "merge-tree", "--write-tree", "--messages", main, tip], check=False)
+    if p.returncode != 0:
+        return "kept"
+    merged = p.stdout.split("\n", 1)[0].strip()
+    if merged and tree_less_msg(merged) == tree_less_msg(main):
+        return "landed"
+    return "abandoned"
 
 
 def worktree_lock(d: Path) -> str | None:

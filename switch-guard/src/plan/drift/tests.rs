@@ -1,5 +1,5 @@
 use super::*;
-use crate::plan::{drive, Effect, Replay};
+use crate::plan::{drive, Effect, Query, Replay, Reply};
 use proptest::prelude::*;
 use serde_json::json;
 
@@ -154,9 +154,76 @@ fn params(hosts: &[&str], candidates: &[&str], reset: (bool, bool), drifting: &[
     }
 }
 
+/// The core run with every increment that left origin's tips `fate`
+/// ("kept", "landed" or "abandoned"); it asks nothing else.
+fn run_with(p: Params, fate: &str) -> (Vec<Query>, Vec<Effect>, Result<Outcome, String>) {
+    drive(Replay::new(p, program), 64, |q| match q {
+        Query::Fate { .. } => Reply::Text(Some(fate.into())),
+        q => panic!("drift asked {q:?}"),
+    })
+}
+
 fn run(p: Params) -> (Vec<Effect>, Result<Outcome, String>) {
-    let (_, fx, out) = drive(Replay::new(p, program), 0, |q| panic!("drift asked {q:?}"));
+    let (_, fx, out) = run_with(p, "kept");
     (fx, out)
+}
+
+/// A switch to pushed work names the abandoned increments it reverts: the
+/// lineage's branch tips origin no longer has, whose fate git reports
+/// abandoned - asked once per tip, never for a tip origin still has.
+#[test]
+fn names_the_abandoned_increments() {
+    let b = base();
+    let pushed = doc(OLD, OTHER, None, &["chikuwa-deploys1"], T0);
+    let mut p =
+        params(&["chikuwa", "choko"], &["chikuwa", "choko"], (false, false), &[("chikuwa", Some(pushed.clone())), ("choko", Some(pushed))]);
+    // The lineage holds BRANCH at h..h and chikuwa-deploys1 at c..c; origin
+    // has BRANCH reset (at `b`) and chikuwa-deploys1 still at c..c.
+    p.cx = cx(&[(BRANCH, &b), ("chikuwa-deploys1", &"c".repeat(40))]);
+    let (asked, fx, out) = run_with(p.clone(), "abandoned");
+    assert_eq!(out.unwrap().plan, ["chikuwa", "choko"]);
+    assert_eq!(asked, [Query::Fate { branch: BRANCH.into(), tip: "h".repeat(40) }]);
+    let line = format!("  chikuwa: will switch (catch-up: runs pushed work deployed by haswell-wsl:/home/blu/projects/homelab2 (pid 4242) at 13:46; reverting {BRANCH}'s abandoned increment hhhhhhhhhhhh)");
+    assert_eq!(fx[0], Effect::Print(line));
+    assert!(
+        matches!(&fx[1], Effect::Print(l) if l.ends_with("reverting haswell-wsl-deploys2's abandoned increment hhhhhhhhhhhh)")),
+        "{fx:?}"
+    );
+
+    // Landed or rebased since: nothing is reverted, so nothing is said.
+    for fate in ["landed", "kept"] {
+        let (asked, fx, _) = run_with(p.clone(), fate);
+        assert_eq!(asked.len(), 1);
+        assert!(matches!(&fx[0], Effect::Print(l) if l.ends_with("at 13:46)")), "{fx:?}");
+    }
+
+    // This checkout's own deploy, abandoned here since.
+    let mine = doc(OLD, ME, Some((BRANCH, Some(&b))), &[], T0);
+    let mut p = params(&["chikuwa"], &["chikuwa"], (false, false), &[("chikuwa", Some(mine))]);
+    p.cx = cx(&[(BRANCH, &b)]);
+    let (asked, fx, _) = run_with(p, "abandoned");
+    assert_eq!(asked.len(), 1);
+    assert!(
+        matches!(&fx[0], Effect::Print(l) if l.starts_with("  chikuwa: will switch (this-branch: over this checkout's deploy of 13:46; reverting")),
+        "{fx:?}"
+    );
+
+    // A refused or left-alone host, and one whose lineage tips origin
+    // still has, asks nothing.
+    let in_flight = doc(OLD, OTHER, Some((BRANCH, Some(&b))), &[], T0);
+    let mut p = params(&["chikuwa"], &["chikuwa"], (false, false), &[("chikuwa", Some(in_flight))]);
+    p.cx = cx(&[(BRANCH, &b)]);
+    let (asked, _, out) = run_with(p.clone(), "abandoned");
+    assert!(out.is_err() && asked.is_empty());
+    p.reached.clear();
+    let (asked, _, out) = run_with(p, "abandoned");
+    assert!(out.is_ok() && asked.is_empty());
+    let pushed = doc(OLD, OTHER, None, &[], T0);
+    let mut p = params(&["chikuwa"], &["chikuwa"], (false, false), &[("chikuwa", Some(pushed))]);
+    p.cx = cx(&[(BRANCH, &"h".repeat(40))]);
+    let (asked, fx, _) = run_with(p, "abandoned");
+    assert!(asked.is_empty());
+    assert!(matches!(&fx[0], Effect::Print(l) if l.ends_with("at 13:46)")), "{fx:?}");
 }
 
 #[test]

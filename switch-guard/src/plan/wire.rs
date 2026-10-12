@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 /// Bumped on any change of the messages below; nixconvoy sends the version
 /// it speaks.
-pub const PROTOCOL: u64 = 3;
+pub const PROTOCOL: u64 = 4;
 
 fn field<'a>(v: &'a Value, k: &str) -> Result<&'a Value, String> {
     v.get(k).ok_or_else(|| format!("missing {k} in {v}"))
@@ -165,6 +165,7 @@ pub fn query(q: &Query) -> Value {
         Query::DropWorktree => ("drop_worktree", vec![]),
         Query::Switch { branch, start } => ("switch", vec![("branch", s(branch)), ("start", json!(start))]),
         Query::Upstream { branch } => ("upstream", vec![("branch", s(branch))]),
+        Query::Fate { branch, tip } => ("fate", vec![("branch", s(branch)), ("tip", s(tip))]),
         Query::SetUpstream { branch } => ("set_upstream", vec![("branch", s(branch))]),
         Query::Listed => ("listed", vec![]),
         Query::Branches => ("branches", vec![]),
@@ -281,7 +282,7 @@ mod tests {
     #[test]
     fn round_trip() {
         assert!(start(r#"{"protocol":0,"core":"rebase","mode":"pop_tmp"}"#).is_err());
-        let mut c = start(r#"{"protocol":3,"core":"rebase","mode":"pop_tmp"}"#).unwrap();
+        let mut c = start(r#"{"protocol":4,"core":"rebase","mode":"pop_tmp"}"#).unwrap();
         assert_eq!(c.decide(None), (r#"{"effects":[],"next":{"ask":"head_subject"}}"#.to_string(), true));
         assert_eq!(reply(r#"{"text":null}"#).unwrap(), Reply::Text(None));
         let (line, more) = c.decide(Some(Reply::Text(None)));
@@ -296,16 +297,16 @@ mod tests {
         );
         assert_eq!(reply(r#"{"ran":true,"detail":""}"#).unwrap(), Reply::Ran { ok: true, detail: String::new() });
         assert_eq!(query(&Query::Switch { branch: "b".into(), start: None }).to_string(), r#"{"ask":"switch","branch":"b","start":null}"#);
-        let mut d = start(r#"{"protocol":3,"core":"drift","me":["h","/c"],"listed":["main"],"tips":{},"now":0,"tz_offset":0,"router":"choko","hosts":["a"],"candidates":["a"],"reset":false,"named":false,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"lineages":{"a":{"text":"","age":null}}}"#).unwrap();
+        let mut d = start(r#"{"protocol":4,"core":"drift","me":["h","/c"],"listed":["main"],"tips":{},"now":0,"tz_offset":0,"router":"choko","hosts":["a"],"candidates":["a"],"reset":false,"named":false,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"lineages":{"a":{"text":"","age":null}}}"#).unwrap();
         let (line, _) = d.decide(None);
         assert_eq!(
             line,
             r#"{"effects":[{"print":"  a: will switch"}],"next":{"done":{"affected":["a"],"drift":{"a":["untracked",""]},"plan":["a"]}}}"#
         );
-        let mut u = start(r#"{"protocol":3,"core":"union","wb":"w","reset":true,"main0":null}"#).unwrap();
+        let mut u = start(r#"{"protocol":4,"core":"union","wb":"w","reset":true,"main0":null}"#).unwrap();
         assert_eq!(u.decide(None).0, r#"{"effects":[{"mark":"union"}],"next":{"ask":"listed"}}"#);
         let mut p =
-            start(r#"{"protocol":3,"core":"prune","name":"agent-x","named":false,"own_session_ends":false,"stopped":null}"#).unwrap();
+            start(r#"{"protocol":4,"core":"prune","name":"agent-x","named":false,"own_session_ends":false,"stopped":null}"#).unwrap();
         assert_eq!(p.decide(None).0, r#"{"effects":[],"next":{"ask":"lock"}}"#);
         assert_eq!(
             p.decide(Some(Reply::Text(Some("pid 7".into())))).0,

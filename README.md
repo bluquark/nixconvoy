@@ -28,7 +28,10 @@ what is deployed.
 - **`land` lands a branch on main**, as one commit whose message is the
   branch's `COMMIT_MSG.md`; **`abandon`** discards it.  Either way the
   checkout stays on its work branch, reset onto the new main, and every
-  other checkout on the machine is rebased onto it.
+  other checkout on the machine is rebased onto it.  Neither touches a
+  host: abandoned work stays deployed until the next deploy by anyone,
+  which says what it reverts - `abandon --apply-now` runs that deploy at
+  once.
 
 A checkout on `main` (or any branch `deploy-branches` does not list) is a
 plain checkout: it deploys the convoy too, catching the hosts up, but owns
@@ -171,7 +174,7 @@ nixconvoy apply [-m "msg"] [--reset] [host|@tag ...]   deploy
 nixconvoy apply --dry-activate [host|@tag ...]   build and copy, then only report what each switch would do
 nixconvoy commit -m "msg"      commit + push the staged state, no build or switch
 nixconvoy land [name ...]      land the work branch on main
-nixconvoy abandon [name ...]   discard it
+nixconvoy abandon [--apply-now] [name ...]   discard it (--apply-now: and deploy, reverting it now)
 nixconvoy prune [name ...]     remove the finished subagents' worktrees holding nothing of their own
 nixconvoy pull                 rebase every checkout on this machine onto origin/main
 nixconvoy status               every checkout on this machine, and origin's other branches
