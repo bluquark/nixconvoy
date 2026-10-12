@@ -55,7 +55,7 @@ fn cx(tips: &[(&str, &str)]) -> Context {
         listed: ["main", BRANCH, "haswell-wsl-deploys3", "chikuwa-deploys1"].iter().map(|s| s.to_string()).collect(),
         tips: tips.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
         in_flight: BTreeMap::new(),
-        now: T0 + 60.0,
+        dead: BTreeSet::new(),
         tz_offset: 0,
     }
 }
@@ -66,22 +66,21 @@ fn lin_ann(
     pending: Option<(&str, Option<&str>)>,
     announce: Option<&str>,
     others: &[&str],
-    age: f64,
     at: f64,
 ) -> Lineage {
-    let l = parse(&doc_ann(top, by, pending, announce, others, at), Some(age)).expect("a lineage_doc parses");
+    let l = parse(&doc_ann(top, by, pending, announce, others, at)).expect("a lineage_doc parses");
     assert_eq!(l.pending, pending.map(|(b, base)| (b.to_string(), base.map(str::to_string))));
     assert_eq!(l.announce.as_deref(), announce.filter(|_| pending.is_some()));
     l
 }
 
-fn lin(top: &str, by: (&str, &str), pending: Option<(&str, Option<&str>)>, others: &[&str], age: f64, at: f64) -> Lineage {
-    lin_ann(top, by, pending, None, others, age, at)
+fn lin(top: &str, by: (&str, &str), pending: Option<(&str, Option<&str>)>, others: &[&str], at: f64) -> Lineage {
+    lin_ann(top, by, pending, None, others, at)
 }
 
 fn std_lin() -> Lineage {
     let b = base();
-    lin(NEW, OTHER, Some((BRANCH, Some(&b))), &["chikuwa-deploys1"], 60.0, T0)
+    lin(NEW, OTHER, Some((BRANCH, Some(&b))), &["chikuwa-deploys1"], T0)
 }
 
 #[test]
@@ -97,79 +96,99 @@ fn classifies_lineages() {
     assert!(why.contains(&format!("origin/{BRANCH} is still at {}", &b[..12])), "{why}");
     assert_eq!(k(Some(&std_lin()), &cx(&[(BRANCH, &landed())]), false).0, Kind::CatchUp);
 
-    // Age is the target's (the file's mtime); the writer's `at` is display only.
-    let old = lin(NEW, OTHER, Some((BRANCH, Some(&b))), &["chikuwa-deploys1"], PENDING_MAX_AGE + 60.0, T0 + 7200.0);
-    let (kind, why) = k(Some(&old), &at_base, false);
-    assert!(kind == Kind::Abandoned && why.contains("taken as abandoned"), "{why}");
-    let young = lin(NEW, OTHER, Some((BRANCH, Some(&b))), &["chikuwa-deploys1"], 10.0, T0 - 7200.0);
-    assert_eq!(k(Some(&young), &at_base, false).0, Kind::InFlight);
+    // A lineage without an announcement (nothing tells its deploy's end)
+    // stays in flight however old; the writer's `at` is display only.
+    let old = lin(NEW, OTHER, Some((BRANCH, Some(&b))), &["chikuwa-deploys1"], T0 - 7200.0);
+    assert_eq!(k(Some(&old), &at_base, false).0, Kind::InFlight);
 
-    // An announced increment is in flight while origin's pending ref still
-    // carries its announcement, whatever the lineage's age, and abandoned
-    // the moment it does not: its deploy ended without the push.
-    let announced = lin_ann(NEW, OTHER, Some((BRANCH, Some(&b))), Some("p"), &["chikuwa-deploys1"], PENDING_MAX_AGE + 60.0, T0);
+    // An announced increment is in flight while origin's pending ref of
+    // its branch is uncleared - whatever commit the renewals left there,
+    // dead or not (then said so) - and abandoned the moment it is cleared:
+    // its deploy ended without the push.
+    let announced = lin_ann(NEW, OTHER, Some((BRANCH, Some(&b))), Some("p"), &["chikuwa-deploys1"], T0);
     let mut live = at_base.clone();
     live.in_flight.insert(BRANCH.into(), "p".into());
-    assert_eq!(k(Some(&announced), &live, false).0, Kind::InFlight);
-    let (kind, why) = k(Some(&announced), &at_base, false);
-    assert!(kind == Kind::Abandoned && why.contains("its deploy is over without one"), "{why}");
+    let (kind, why) = k(Some(&announced), &live, false);
+    assert!(kind == Kind::InFlight && !why.contains("dead"), "{why}");
     live.in_flight.insert(BRANCH.into(), "q".into());
-    assert_eq!(k(Some(&announced), &live, false).0, Kind::Abandoned);
+    assert_eq!(k(Some(&announced), &live, false).0, Kind::InFlight);
+    live.dead.insert(BRANCH.into());
+    let (kind, why) = k(Some(&announced), &live, false);
+    assert!(kind == Kind::InFlight && why.contains("that deploy looks dead"), "{why}");
+    assert_eq!(classify(Some(&announced), NEW, &live, false, false).0, Kind::LeftAlone);
+    let (kind, why) = k(Some(&announced), &at_base, false);
+    assert!(kind == Kind::Abandoned && why.contains("the announcement cleared without the push"), "{why}");
     assert_eq!(classify(Some(&announced), NEW, &at_base, false, false).0, Kind::Abandoned);
     assert_eq!(k(Some(&announced), &cx(&[(BRANCH, &landed())]), false).0, Kind::CatchUp);
+    // A dead deploy's lineage without an announcement: nothing to go by.
+    let mut dead = at_base.clone();
+    dead.dead.insert(BRANCH.into());
+    let (kind, why) = k(Some(&std_lin()), &dead, false);
+    assert!(kind == Kind::InFlight && !why.contains("dead"), "{why}");
 
     let (kind, why) = k(Some(&std_lin()), &at_base, true);
     assert!(kind == Kind::Overridden && why.contains(RESET_FLAG), "{why}");
 
     // Refused work on a target this checkout's work does not reach is left
-    // there; age and --reset still revert it.
+    // there; --reset still reverts it.
     let (kind, why) = classify(Some(&std_lin()), NEW, &at_base, false, false);
     assert!(kind == Kind::LeftAlone && !kind.refused() && why.contains("does not reach it"), "{why}");
-    assert_eq!(classify(Some(&old), NEW, &at_base, false, false).0, Kind::Abandoned);
+    assert_eq!(classify(Some(&old), NEW, &at_base, false, false).0, Kind::LeftAlone);
     assert_eq!(classify(Some(&std_lin()), NEW, &at_base, true, false).0, Kind::Overridden);
     assert_eq!(classify(Some(&std_lin()), NEW, &cx(&[(BRANCH, &landed())]), false, false).0, Kind::CatchUp);
 
-    let unl = lin(NEW, OTHER, Some(("M3-Air-deploys9", Some(&b))), &["chikuwa-deploys1"], 60.0, T0);
+    let unl = lin(NEW, OTHER, Some(("M3-Air-deploys9", Some(&b))), &["chikuwa-deploys1"], T0);
     let (kind, why) = k(Some(&unl), &cx(&[("M3-Air-deploys9", &b)]), false);
     assert!(kind == Kind::Unlisted && why.contains("M3-Air-deploys9"), "{why}");
     assert_eq!(k(Some(&unl), &cx(&[("M3-Air-deploys9", &landed())]), false).0, Kind::Unlisted);
     // Pushed work of a branch not listed here is refused too.
-    let pushed_unl = lin(NEW, OTHER, None, &["M3-Air-deploys9"], 60.0, T0);
+    let pushed_unl = lin(NEW, OTHER, None, &["M3-Air-deploys9"], T0);
     assert_eq!(k(Some(&pushed_unl), &at_base, false).0, Kind::Unlisted);
 
     assert_eq!(k(None, &at_base, false), (Kind::Untracked, String::new()));
-    assert_eq!(parse("", None), None);
-    assert_eq!(parse("{not json", None), None);
-    assert_eq!(parse(r#"{"version": 3}"#, None), None);
-    assert_eq!(parse(&doc(NEW, OTHER, None, &[], T0).replace(r#""version":2"#, r#""version":3"#), None), None);
+    assert_eq!(parse(""), None);
+    assert_eq!(parse("{not json"), None);
+    assert_eq!(parse(r#"{"version": 3}"#), None);
+    assert_eq!(parse(&doc(NEW, OTHER, None, &[], T0).replace(r#""version":2"#, r#""version":3"#)), None);
     // A version-1 file, from before by.host became by.machine, still counts.
     let v1 = doc(NEW, OTHER, None, &[], T0).replace(r#""version":2"#, r#""version":1"#).replace(r#""machine":"#, r#""host":"#);
-    assert_eq!(parse(&v1, None).map(|l| l.machine), Some(OTHER.0.to_string()));
-    assert_eq!(k(Some(&lin(OLD, OTHER, None, &[], 60.0, T0)), &at_base, false).0, Kind::Untracked);
-    assert_eq!(k(Some(&lin(NEW, ME, Some((BRANCH, Some(&b))), &[], 60.0, T0)), &at_base, false).0, Kind::ThisBranch);
-    assert_eq!(k(Some(&lin(NEW, OTHER, None, &["chikuwa-deploys1"], 60.0, T0)), &at_base, false).0, Kind::CatchUp);
+    assert_eq!(parse(&v1).map(|l| l.machine), Some(OTHER.0.to_string()));
+    assert_eq!(k(Some(&lin(OLD, OTHER, None, &[], T0)), &at_base, false).0, Kind::Untracked);
+    assert_eq!(k(Some(&lin(NEW, ME, Some((BRANCH, Some(&b))), &[], T0)), &at_base, false).0, Kind::ThisBranch);
+    assert_eq!(k(Some(&lin(NEW, OTHER, None, &["chikuwa-deploys1"], T0)), &at_base, false).0, Kind::CatchUp);
 
     // The nightly's unpushed lock commit on main.
-    let nightly = lin(NEW, ("chikuwa", "/var/lib/homelab"), Some(("main", Some(&b))), &[], 60.0, T0);
+    let nightly = lin(NEW, ("chikuwa", "/var/lib/homelab"), Some(("main", Some(&b))), &[], T0);
     assert_eq!(k(Some(&nightly), &cx(&[("main", &b)]), false).0, Kind::InFlight);
     assert_eq!(k(Some(&nightly), &cx(&[("main", &landed())]), false).0, Kind::CatchUp);
     // A branch whose very first push has not landed.
-    let first = lin(NEW, OTHER, Some((BRANCH, None)), &[], 60.0, T0);
+    let first = lin(NEW, OTHER, Some((BRANCH, None)), &[], T0);
     assert_eq!(k(Some(&first), &cx(&[]), false).0, Kind::InFlight);
 }
 
 #[test]
 fn refusal_advice() {
-    let a = refusal(&[("side1".into(), Kind::InFlight)]);
+    let a = refusal(&[("side1".into(), Kind::InFlight, None)]);
     assert!(
-        a.contains("side1 runs another") && a.contains("reaches it too") && a.contains("Re-run once that deploy ends (an increment"),
+        a.contains("side1 runs another") && a.contains("reaches it too") && a.contains("Re-run once that deploy ends; or deploy with"),
         "{a}"
     );
-    assert!(a.contains(&format!("{RESET_FLAG} side1")) && !a.contains(BRANCHES_FILE), "{a}");
-    let a = refusal(&[("side1".into(), Kind::Unlisted), ("side6".into(), Kind::InFlight)]);
+    assert!(a.contains(&format!("{RESET_FLAG} side1")) && !a.contains(BRANCHES_FILE) && !a.contains("dead"), "{a}");
+    let a = refusal(&[("side1".into(), Kind::Unlisted, None), ("side6".into(), Kind::InFlight, None)]);
     assert!(a.contains("side1, side6 run another") && a.contains("reaches them too"), "{a}");
-    assert!(a.contains("Re-run once that deploy ends or list its branch in deploy-branches"), "{a}");
+    assert!(a.contains("Re-run once that deploy ends; or list its branch in deploy-branches"), "{a}");
     assert!(a.contains(&format!("{RESET_FLAG} side1 ")), "{a}");
+    // A dead deploy's: the clear that ends it, named once per branch.
+    let a = refusal(&[("side1".into(), Kind::InFlight, Some(BRANCH.into())), ("side6".into(), Kind::InFlight, Some(BRANCH.into()))]);
+    assert!(a.starts_with(&format!("nothing switched or committed: side1, side6 run another checkout's work this union lacks, and this checkout's work reaches them too (see above).  The deploy of {BRANCH} looks dead")), "{a}");
+    assert_eq!(a.matches("looks dead").count(), 1);
+    assert!(
+        a.contains(&format!("git push --force origin origin/main:{PENDING_REFS}/{BRANCH} - or push {BRANCH} from its checkout")),
+        "{a}"
+    );
+    assert!(!a.contains("Re-run once"), "{a}");
+    let a = refusal(&[("side1".into(), Kind::InFlight, Some("main".into())), ("side6".into(), Kind::InFlight, None)]);
+    assert!(a.contains("Re-run once that deploy ends; or the deploy of main looks dead"), "{a}");
 }
 
 #[test]
@@ -195,7 +214,7 @@ fn params(targets: &[&str], candidates: &[&str], reset: (bool, bool), drifting: 
             .map(|h| (h.to_string(), Some(if drifting.iter().any(|d| d.0 == *h) { OLD } else { NEW }.to_string())))
             .collect(),
         built: targets.iter().map(|h| (h.to_string(), NEW.to_string())).collect(),
-        lineages: drifting.iter().filter_map(|(h, l)| l.clone().map(|l| (h.to_string(), (l, Some(60.0))))).collect(),
+        lineages: drifting.iter().filter_map(|(h, l)| l.clone().map(|l| (h.to_string(), l))).collect(),
     }
 }
 
@@ -260,7 +279,7 @@ fn names_the_abandoned_increments() {
     // Deployed from another machine: no checkout here to look at.
     let elsewhere = doc(OLD, ("chikuwa", "/var/lib/homelab"), Some((sub, None)), &[], T0);
     let mut q = p.clone();
-    q.lineages.insert("chikuwa".into(), (elsewhere, Some(60.0)));
+    q.lineages.insert("chikuwa".into(), elsewhere);
     let (asked, _, _) = run_with(q, "kept");
     assert!(matches!(&asked[0], Query::Fate { checkout: None, .. }), "{asked:?}");
     let (asked, fx, out) = run_with(p.clone(), "abandoned");
@@ -310,13 +329,26 @@ fn reports_the_plan() {
         (false, true),
         &[("choko", None), ("chikuwa", None), ("side1", Some(in_flight.clone()))],
     );
-    let (fx, out) = run(p);
+    let (fx, out) = run(p.clone());
     let msg = out.unwrap_err();
     assert!(msg.starts_with("nothing switched or committed: side1 runs another"), "{msg}");
     assert_eq!(fx[0], Effect::Print("  side1: refused: runs an increment of haswell-wsl-deploys2 deployed by haswell-wsl:/home/blu/projects/homelab2 (pid 4242) at 13:46 whose push has not landed (origin/haswell-wsl-deploys2 is still at aaaaaaaaaaaa)".into()));
     assert_eq!(fx[1], Effect::Print("  choko: will switch".into()));
     assert_eq!(fx[2], Effect::Print("  chikuwa: differs but excluded by the target filter".into()));
     assert_eq!(fx.len(), 3);
+    // The announced increment of a deploy found dead: refused still, the
+    // refusal naming the deploy and the clear that ends it.
+    let mut q = p.clone();
+    q.lineages.insert("side1".into(), doc_ann(OLD, OTHER, Some((BRANCH, Some(&b))), Some("p"), &[], T0));
+    q.cx.in_flight.insert(BRANCH.into(), "q".into());
+    q.cx.dead.insert(BRANCH.into());
+    let (fx, out) = run(q);
+    let msg = out.unwrap_err();
+    assert!(msg.contains(&format!("The deploy of {BRANCH} looks dead")) && !msg.contains("Re-run once"), "{msg}");
+    assert!(
+        matches!(&fx[0], Effect::Print(l) if l.starts_with("  side1: refused: ") && l.ends_with("that deploy looks dead, its announcement no longer renewed")),
+        "{fx:?}"
+    );
 
     let p = params(
         &["chikuwa", "choko", "side1"],
@@ -412,15 +444,15 @@ fn arb_params() -> impl Strategy<Value = Params> {
         prop::collection::btree_set(target(), 0..5),
         (any::<bool>(), any::<bool>()),
         prop::collection::btree_set(target(), 0..5),
-        prop::collection::vec((proptest::option::of(arb_top()), arb_top(), arb_lineage(), proptest::option::of(0.0..4000.0f64)), 5),
+        prop::collection::vec((proptest::option::of(arb_top()), arb_top(), arb_lineage()), 5),
         prop::collection::btree_map(arb_name(), prop::sample::select(vec!["a", "b"]).prop_map(str::to_string), 0..4),
         prop::collection::btree_map(arb_name(), prop::sample::select(vec!["p", "q"]).prop_map(str::to_string), 0..3),
-        0.0..1e7f64,
+        prop::collection::btree_set(arb_name(), 0..3),
     )
-        .prop_map(|(targets, cands, (reset, named), reached, facts, tips, in_flight, now)| {
+        .prop_map(|(targets, cands, (reset, named), reached, facts, tips, in_flight, dead)| {
             let targets: Vec<String> = targets.into_iter().collect();
             let mut p = Params {
-                cx: Context { tips, in_flight, now, ..cx(&[]) },
+                cx: Context { tips, in_flight, dead, ..cx(&[]) },
                 union: "u".repeat(40),
                 router: "choko".into(),
                 candidates: cands.into_iter().filter(|c| targets.contains(c)).collect(),
@@ -432,13 +464,13 @@ fn arb_params() -> impl Strategy<Value = Params> {
                 built: BTreeMap::new(),
                 lineages: BTreeMap::new(),
             };
-            for (h, (running, built, lineage, age)) in targets.iter().zip(facts) {
+            for (h, (running, built, lineage)) in targets.iter().zip(facts) {
                 if running.is_some() {
                     p.built.insert(h.clone(), built);
                 }
                 p.running.insert(h.clone(), running);
                 if let Some(l) = lineage {
-                    p.lineages.insert(h.clone(), (l, age));
+                    p.lineages.insert(h.clone(), l);
                 }
             }
             p
@@ -449,15 +481,15 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: 4000, failure_persistence: None, ..ProptestConfig::default() })]
 
     #[test]
-    fn parse_never_panics(text in any::<String>(), age in proptest::option::of(any::<f64>())) {
-        let _ = parse(&text, age);
+    fn parse_never_panics(text in any::<String>()) {
+        let _ = parse(&text);
     }
 
     /// The verdicts follow from the lineage, and only refusals are
-    /// demoted by age or --reset.
+    /// demoted by a cleared announcement or --reset.
     #[test]
-    fn verdicts(text in arb_lineage(), running in arb_top(), p in arb_params(), age in proptest::option::of(0.0..4000.0f64)) {
-        let lin = text.as_deref().and_then(|t| parse(t, age));
+    fn verdicts(text in arb_lineage(), running in arb_top(), p in arb_params()) {
+        let lin = text.as_deref().and_then(parse);
         let (kind, _) = classify(lin.as_ref(), &running, &p.cx, false, true);
         let (over, _) = classify(lin.as_ref(), &running, &p.cx, true, true);
         let (alone, _) = classify(lin.as_ref(), &running, &p.cx, false, false);
@@ -477,18 +509,16 @@ proptest! {
             let unlisted = l.branches.iter().any(|b| !p.cx.listed.contains(b));
             if kind == Kind::Unlisted { prop_assert!(unlisted); }
             if !mine && unlisted { prop_assert!(matches!(kind, Kind::Unlisted | Kind::Abandoned)); }
-            // An announced increment is judged by its announcement alone
-            // (nixconvoy ages those by their commits); one without, by
-            // the lineage's age.
-            let announced_live = l.announce.as_ref().is_some_and(|a| l.pending.as_ref().is_some_and(|(b, _)| p.cx.in_flight.get(b) == Some(a)));
+            // An announced increment is judged by its branch's announcement
+            // alone: uncleared, in flight (dead or not); cleared, abandoned.
+            // One without is in flight until its push lands or a --reset.
+            let announced_live = l.announce.is_some() && l.pending.as_ref().is_some_and(|(b, _)| p.cx.in_flight.contains_key(b));
             if kind == Kind::InFlight {
                 let (b, base) = l.pending.clone().unwrap();
                 prop_assert_eq!(p.cx.tips.get(&b), base.as_ref());
                 prop_assert!(l.announce.is_none() || announced_live);
             }
-            let stale = l.age.unwrap_or(p.cx.now - l.at) > PENDING_MAX_AGE;
-            if kind == Kind::Abandoned { prop_assert!(stale || (l.announce.is_some() && !announced_live)); }
-            if kind == Kind::Unlisted || (kind == Kind::InFlight && l.announce.is_none()) { prop_assert!(!stale); }
+            prop_assert_eq!(kind == Kind::Abandoned, !mine && !unlisted && l.announce.is_some() && !announced_live && l.pending.as_ref().is_some_and(|(b, base)| p.cx.tips.get(b) == base.as_ref()));
         }
         if kind.refused() {
             prop_assert_eq!(over, Kind::Overridden);
@@ -507,7 +537,7 @@ proptest! {
             .filter(|h| matches!((p.running.get(h), p.built.get(h)), (Some(Some(r)), Some(b)) if r != b))
             .collect();
         let verdicts: Vec<(String, Kind)> = affected.iter().filter(|h| p.candidates.contains(h)).map(|h| {
-            let lin = p.lineages.get(h).and_then(|(t, a)| parse(t, *a));
+            let lin = p.lineages.get(h).and_then(|t| parse(t));
             let running = p.running[h].clone().unwrap();
             let reached = p.reached.contains(h);
             let gone = lin.as_ref().is_some_and(|l| matches!(&l.pending, Some((b, None)) if !p.cx.tips.contains_key(b) && l.tips.contains_key(b)));
@@ -516,7 +546,11 @@ proptest! {
             }
             (h.clone(), classify(lin.as_ref(), &running, &p.cx, p.reset && (p.named || reached), reached).0)
         }).collect();
-        let refused: Vec<(String, Kind)> = verdicts.iter().filter(|v| v.1.refused()).cloned().collect();
+        let refused: Vec<(String, Kind, Option<String>)> = verdicts.iter().filter(|v| v.1.refused()).map(|(h, k)| {
+            let lin = p.lineages.get(h).and_then(|t| parse(t));
+            let dead = lin.and_then(|l| l.pending).map(|(b, _)| b).filter(|b| *k == Kind::InFlight && p.cx.dead.contains(b));
+            (h.clone(), *k, dead)
+        }).collect();
         // A refusal needs a reached target, which a --reset takes over.
         if p.reset { prop_assert!(refused.is_empty()); }
         match out {

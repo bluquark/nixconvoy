@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -41,7 +42,7 @@ SUB_DIR = Path(".claude/worktrees")
 # checkout, whatever `git worktree list` says.
 TMP_PREFIX = "nixconvoy-"
 # Origin's refs beside the branches: a deploy's announcement of its
-# increment (PENDING_REFS/<work branch>, pushed before anything is built and
+# pending state (PENDING_REFS/<branch>, pushed before anything is built and
 # pointed at origin/main once the deploy ends) and each target's deploy
 # record (DEPLOYING_REFS/<target>, pushed before its switch; then
 # refs/heads/<DEPLOYED_PREFIX>/<target> once the target runs it).
@@ -51,9 +52,14 @@ DEPLOYED_PREFIX = "deployed"
 FETCH_REFSPECS = ("+refs/heads/*:refs/remotes/origin/*",
                   f"+{PENDING_REFS}/*:{PENDING_REFS}/*",
                   f"+{DEPLOYING_REFS}/*:{DEPLOYING_REFS}/*")
-# An announcement this old (its commit's date) whose deploy never ended
-# is a dead deploy's; drift.rs's PENDING_MAX_AGE for a lineage without one.
-PENDING_MAX_AGE = 30 * 60
+# A deploy renews its announcement every HEARTBEAT seconds while it runs; a
+# deploy waiting for it (deploy.await_pending) that has seen no renewal for
+# WAIT_STALE seconds takes it for dead and goes on without it - to be
+# refused by the drift core, which names the dead deploy, if a target it
+# reaches still runs that increment.  Both by the waiter's own clock, so
+# the machines' clocks need not agree.
+HEARTBEAT = 10
+WAIT_STALE = 30
 
 
 def fetch_args(*flags: str) -> list[str]:
@@ -514,97 +520,163 @@ def push_work_branch(wb: str) -> None:
     if p.returncode != 0:
         die(f"pushing {wb} failed - it moved on origin, but this checkout is its "
             f"only writer.  Investigate:\n{p.stderr.strip()}")
+    clear = clear_refspec(wb)
+    if clear:
+        git("push", "--quiet", "--force", "origin", *clear, check=False)
     print(f"pushed {wb} ({head[:12] if head else '?'})")
 
 
-class Announce(NamedTuple):
-    """A deploy's announcement of its increment: the commit on origin's
-    pending ref and the push that put it there."""
-    sha: str
-    push: subprocess.Popen[bytes]
+DATELESS_ENV = {k: v for k, v in MACHINE_ENV.items() if not k.endswith("_DATE")}
 
 
-def announce_increment(wb: str, snap: str) -> Announce:
-    """`snap`'s tree as a commit of its own, dated now (a dead deploy's is
-    told by its age), pushed to PENDING_REFS/<wb> in the background before
-    anything is evaluated: a deploy starting elsewhere meanwhile waits for
-    this one when their changes reach a common target (deploy.await_pending)
-    instead of building without it to be refused.  push_deployed clears it
-    once the branch is pushed, withdraw_announcement when the deploy ends
-    without a switch."""
-    tree = out(["git", "rev-parse", f"{snap}^{{tree}}"])
-    env = {k: v for k, v in MACHINE_ENV.items() if not k.endswith("_DATE")}
-    subject = f"pending increment of {wb} from {proc.this_machine()}:{Path.cwd()} (pid {os.getpid()})"
-    sha = out(["git", "commit-tree", tree, "-p", "HEAD", "-m", subject], env=env)
-    push = subprocess.Popen(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--force",
-                             "origin", f"{sha}:{PENDING_REFS}/{wb}"],
-                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.PIPE)
-    return Announce(sha, push)
+class Announce:
+    """A deploy's announcement of its pending state - the staged increment,
+    or a HEAD origin lacks: a commit of its tree on origin's
+    PENDING_REFS/<branch>, pushed before anything is evaluated and renewed
+    every HEARTBEAT seconds on a thread for as long as the deploy runs.  A
+    deploy starting elsewhere waits for this one while it lives when their
+    changes reach a common target (deploy.await_pending), and takes it for
+    dead once the renewals stop.  The author date is the deploy's start,
+    its rank among the deploys under way (the older one is waited for);
+    the subject names this machine, checkout and pid.  The push that ends
+    the deploy clears it (push_deployed; for main, the owner's push of
+    main does, landing the announced HEAD: pending_announcements);
+    withdraw clears one whose deploy ended without switching anything."""
 
+    def __init__(self, branch: str, base: str) -> None:
+        self.branch = branch
+        # The snapshot (or HEAD) whose tree is announced; a refresh moves it.
+        self.base = base
+        self.since = int(time.time())
+        self.sha = ""
+        self.detail = ""
+        # The targets switched onto this state so far (deploy keeps the
+        # announcement when it ends unsettled after one).
+        self.switched: list[str] = []
+        self._ok: bool | None = None
+        self._landed = threading.Event()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._beat, daemon=True)
+        self._thread.start()
 
-def collect_announce(ann: Announce) -> None:
-    """Wait for the announcement's push (the clear must follow it)."""
-    try:
-        _, err = ann.push.communicate(timeout=60)
-    except subprocess.TimeoutExpired:
-        ann.push.kill()
-        _, err = ann.push.communicate()
-    if ann.push.returncode != 0:
-        detail = err.decode(errors="replace").strip()
-        print("note: the announcement of this increment did not reach origin; a deploy "
-              "elsewhere cannot wait for this one" + (f":\n{detail}" if detail else ""),
-              file=sys.stderr)
+    def _push(self) -> bool:
+        # Off the main thread: nothing here may die().
+        subject = (f"pending increment of {self.branch} from {proc.this_machine()}:{Path.cwd()} "
+                   f"(pid {os.getpid()})")
+        tree = run(["git", "rev-parse", f"{self.base}^{{tree}}"], check=False)
+        commit = run(["git", "commit-tree", tree.stdout.strip(), "-p", "HEAD", "-m", subject],
+                     env={**DATELESS_ENV, "GIT_AUTHOR_DATE": f"{self.since} +0000"}, check=False)
+        sha = commit.stdout.strip()
+        p = run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--force", "origin",
+                 f"{sha}:{PENDING_REFS}/{self.branch}"], check=False, timeout=60)
+        for step in (tree, commit, p):
+            if step.returncode != 0:
+                self.detail = (step.stderr or "").strip() or f"{step.args[1]} failed"
+                return False
+        self.sha = sha
+        return True
 
+    def _beat(self) -> None:
+        try:
+            self._ok = self._push()
+        except Exception:  # noqa: BLE001 - die() killed the push
+            self._ok = False
+        finally:
+            self._landed.set()
+        while self._ok and not self._stop.wait(HEARTBEAT):
+            try:
+                if not self._push():
+                    print(f"note: renewing this deploy's announcement failed; a deploy "
+                          f"elsewhere may take this one for dead:\n{self.detail}", file=sys.stderr)
+            except Exception:  # noqa: BLE001
+                return
 
-def withdraw_announcement(wb: str, ann: Announce) -> None:
-    """Point the announcement at origin/main: the deploy ended without a
-    switch (so the next deploy anywhere does not wait for it); after die()
-    too."""
-    collect_announce(ann)
-    main = run(["git", "rev-parse", "-q", "--verify", "refs/remotes/origin/main"], check=False,
-               cleanup=True).stdout.strip()
-    if main:
-        run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--force", "origin",
-             f"{main}:{PENDING_REFS}/{wb}"], check=False, cleanup=True, timeout=60)
+    def collect(self) -> bool:
+        """Whether the announcement reached origin, waiting for its first
+        push (a lineage names only an announcement origin got)."""
+        self._landed.wait(70)
+        return bool(self._ok)
+
+    def stop(self) -> None:
+        """End the renewals (the announcement stays as it is)."""
+        self._stop.set()
+        self._thread.join(70)
+
+    def withdraw(self) -> None:
+        """Point the announcement at origin/main: the deploy ended without
+        a switch, so the next deploy anywhere need not wait for it; after
+        die() too."""
+        self.stop()
+        main = run(["git", "rev-parse", "-q", "--verify", "refs/remotes/origin/main"],
+                   check=False, cleanup=True).stdout.strip()
+        if main:
+            run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--force", "origin",
+                 f"{main}:{PENDING_REFS}/{self.branch}"], check=False, cleanup=True, timeout=60)
 
 
 class Pending(NamedTuple):
     branch: str
     sha: str
-    # Seconds since its commit was made, by this machine's clock.
-    age: float
+    # The deploy's start (the author date) and its last renewal (the
+    # committer date), by the announcing machine's clock.
+    since: int
+    at: int
+    machine: str
+    pid: int
 
 
-def pending_announcements(now: float) -> list[Pending]:
-    """Origin's announcements as fetched, the cleared ones (on origin/main)
-    left out."""
-    listing = out(["git", "for-each-ref",
-                   "--format=%(refname:strip=3)%09%(objectname)%09%(committerdate:unix)",
-                   PENDING_REFS])
+ANNOUNCE_SUBJECT = re.compile(r"^pending increment of \S+ from ([^:\s]+):\S+ \(pid (\d+)\)$")
+
+
+def pending_announcements() -> list[Pending]:
+    """Origin's announcements as fetched, the cleared ones left out: one on
+    origin/main, or main's whose announced HEAD origin/main holds (a main
+    checkout's push, outside nixconvoy, is what ends its pending state)."""
+    fmt = "%(refname:strip=3)%09%(objectname)%09%(authordate:unix)%09%(committerdate:unix)%09%(subject)"
+    listing = out(["git", "for-each-ref", f"--format={fmt}", PENDING_REFS])
     found = []
     for ln in listing.splitlines():
-        branch, sha, date = ln.split("\t")
-        if not is_ancestor(sha, "refs/remotes/origin/main"):
-            found.append(Pending(branch, sha, now - int(date)))
+        branch, sha, since, at, subject = ln.split("\t", 4)
+        if is_ancestor(sha, "refs/remotes/origin/main"):
+            continue
+        if branch == "main" and is_ancestor(f"{sha}^", "refs/remotes/origin/main"):
+            continue
+        m = ANNOUNCE_SUBJECT.match(subject)
+        machine, pid = (m.group(1), int(m.group(2))) if m else ("", 0)
+        found.append(Pending(branch, sha, int(since), int(at), machine, pid))
     return found
 
 
-def in_flight(now: float, own: str | None) -> tuple[dict[str, str], list[Pending]]:
-    """The announcements of deploys under way, branch -> commit: the ones not
-    cleared and not older than PENDING_MAX_AGE, this checkout's own left
-    out; and the older ones, a dead deploy's each, for the caller to warn
-    of."""
-    live: dict[str, str] = {}
-    stale: list[Pending] = []
-    for p in pending_announcements(now):
-        if p.branch == own:
-            continue
-        if p.age > PENDING_MAX_AGE:
-            stale.append(p)
-        else:
-            live[p.branch] = p.sha
-    return live, stale
+def announced(own: str | None) -> dict[str, str]:
+    """The uncleared announcements, branch -> commit, this run's own branch
+    left out: the drift core's in_flight.  A lineage naming an announcement
+    of a branch with none is abandoned (its deploy is over, the push never
+    landed); one of a branch still announced is in flight, dead or not."""
+    return {p.branch: p.sha for p in pending_announcements() if p.branch != own}
+
+
+def announcer_dead(p: Pending) -> bool:
+    """Whether the announcing deploy demonstrably died: on this machine,
+    with its pid gone."""
+    if p.machine != proc.this_machine() or p.pid <= 0:
+        return False
+    try:
+        os.kill(p.pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+
+
+def clear_refspec(wb: str) -> list[str]:
+    """The push refspec clearing `wb`'s announcement, when one is uncleared
+    as fetched here (a retry of a failed push clears it too)."""
+    main = rev("refs/remotes/origin/main")
+    sha = rev(f"{PENDING_REFS}/{wb}")
+    if main and sha and not is_ancestor(sha, "refs/remotes/origin/main"):
+        return [f"{main}:{PENDING_REFS}/{wb}"]
+    return []
 
 
 def record_commit(target: str, union: str, parents: list[str], subject: str, doc: str) -> str:
@@ -617,9 +689,8 @@ def record_commit(target: str, union: str, parents: list[str], subject: str, doc
     for p in parents:
         if p and p not in ps and rev(f"{p}^{{commit}}") is not None:
             ps.extend(["-p", p])
-    env = {k: v for k, v in MACHINE_ENV.items() if not k.endswith("_DATE")}
     return out(["git", "commit-tree", tree, *ps, "-m", f"deploy {target}: {subject}\n\n{doc}\n"],
-               env=env)
+               env=DATELESS_ENV)
 
 
 def push_records(records: dict[str, str]) -> str | None:
@@ -633,11 +704,14 @@ def push_records(records: dict[str, str]) -> str | None:
 
 
 def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str]) -> None:
-    """The push that ends a deploy, in the background (push_work_branch's
-    way): the work branch, leased on origin's tip as fetched, and only once
-    that landed - so a deploy waiting on the announcement finds the branch
-    moved when it clears - the announcement pointed at origin/main and each
-    switched target's record onto refs/heads/DEPLOYED_PREFIX/<target>."""
+    """The push that ends a deploy, in the background: the work branch,
+    leased on origin's tip as fetched, and only once that landed - so a
+    deploy waiting on the announcement finds the branch moved when it
+    clears - the branch's announcement pointed at origin/main (this run's
+    or an earlier run's, whose push failed) and each switched target's
+    record onto refs/heads/DEPLOYED_PREFIX/<target>.  A background push
+    outlives this process, its outcome collected by the next run
+    (await_background_push)."""
     steps: list[list[str]] = []
     what: list[str] = []
     head = rev(f"refs/heads/{wb}") if wb else None
@@ -646,10 +720,12 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str])
         what.append(f"{wb} ({head[:12]})")
     after = [f"{sha}:refs/heads/{DEPLOYED_PREFIX}/{h}" for h, sha in records.items()]
     what += [f"{DEPLOYED_PREFIX}/{h}" for h in records]
-    main = rev("refs/remotes/origin/main")
-    if ann and wb and main:
-        collect_announce(ann)
-        after.append(f"{main}:{PENDING_REFS}/{wb}")
+    if ann is not None:
+        ann.stop()
+    if wb:
+        main = rev("refs/remotes/origin/main")
+        after += ([f"{main}:{PENDING_REFS}/{wb}"] if ann is not None and main
+                  else clear_refspec(wb))
     if after:
         steps.append(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--force",
                       "origin", *after])

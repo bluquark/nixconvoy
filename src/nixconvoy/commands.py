@@ -15,15 +15,17 @@ from typing import IO, NamedTuple
 from . import memo, proc, targets
 from .checkout import (
     PAST_REFS,
-    PENDING_REFS,
     SESSIONLESS,
+    WAIT_STALE,
     GitQueries,
     add_worktree,
     allowed_branches,
     ancestor_pids,
+    announcer_dead,
     await_background_push,
     catch_up,
     checkout_identity,
+    clear_refspec,
     current_branch,
     deploy_running,
     drop_worktree,
@@ -32,12 +34,12 @@ from .checkout import (
     fetch_args,
     git_op_in_progress,
     identity_of,
-    in_flight,
     listed_tips,
     lock_live,
     lock_pid_alive,
     on_origin,
     origin_tips,
+    pending_announcements,
     pop_tmp_commits,
     proc_stat,
     push_state,
@@ -770,21 +772,18 @@ def drop_branches(names: list[str]) -> list[str]:
     on_origin = {b: old for b, old in gone.items() if old}
     for b, old in on_origin.items():
         git("update-ref", "--create-reflog", f"{PAST_REFS}/{b}", old, check=False)
-    if on_origin:
+    # A gone branch's announcement is cleared with it (never deleted: a
+    # deleted ref lingers uncleared in every other clone).
+    clears = [spec for b in names for spec in clear_refspec(b)]
+    if on_origin or clears:
         # One push, bounded: prune holds the worktree's name lock meanwhile.
-        pushed = run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "origin",
-                      *(f":refs/heads/{b}" for b in on_origin),
+        pushed = run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--force",
+                      "origin", *(f":refs/heads/{b}" for b in on_origin), *clears,
                       *(f"--force-with-lease=refs/heads/{b}:{old}" for b, old in on_origin.items())],
                      check=False, timeout=30)
         if pushed.returncode != 0:
             failed.append(f"deleting {', '.join(on_origin)} on origin failed: "
                           f"{(pushed.stderr or '').strip() or 'timed out'}")
-    # A gone branch's announcement goes with it (best effort: origin may
-    # hold none).
-    for b in names:
-        git("update-ref", "-d", f"{PENDING_REFS}/{b}", check=False)
-    run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "origin",
-         *(f":{PENDING_REFS}/{b}" for b in names)], check=False, timeout=30)
     # A review of a branch gone this long is no longer expected.
     cutoff = time.time() - 90 * 86400
     past = run(["git", "for-each-ref", "--format=%(refname) %(committerdate:unix)", PAST_REFS], check=False)
@@ -955,13 +954,20 @@ def status() -> None:
         print(paint("on origin only (other machines' checkouts):", "dim"))
         for e in elsewhere:
             print(f"  {paint(e, 'yellow')}")
-    live, stale = in_flight(time.time(), None)
-    if live or stale:
+    pending = pending_announcements()
+    if pending:
         print(paint("deploys under way (announced increments):", "dim"))
-        for branch, sha in live.items():
-            print(f"  {paint(f'{branch}: {summarize(sha)}', 'yellow')}")
-        for p_ in stale:
-            print(f"  {paint(f'{p_.branch}: {summarize(p_.sha)} - {p_.age / 60:.0f} min old, never ended', 'red')}")
+        now = time.time()
+        for a in pending:
+            entry = f"{a.branch}: {summarize(a.sha)}"
+            # Display only: the announcer's clock, not this machine's.
+            silent = now - a.at
+            if announcer_dead(a):
+                print(f"  {paint(f'{entry} - its process (pid {a.pid} here) is gone', 'red')}")
+            elif silent > WAIT_STALE:
+                print(f"  {paint(f'{entry} - not renewed for {silent / 60:.0f} min: dead?', 'red')}")
+            else:
+                print(f"  {paint(entry, 'yellow')}")
 
 
 __all__ = ["abandon", "commit_only", "enter_sub", "land", "prune", "prune_after", "pull", "status", "work_branch_name"]

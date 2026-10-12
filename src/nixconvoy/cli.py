@@ -40,11 +40,14 @@ Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
   3. snapshot the staged state (index) as an ephemeral deterministic commit
      on top of the work branch; unstaged and untracked changes are excluded,
      since staging marks a change as ready to deploy.  Nothing is committed.
-     The increment is announced: its tree as a commit of its own, dated now,
-     pushed in the background to origin's refs/nixconvoy/pending/<branch>,
-     where a deploy starting elsewhere sees this one under way (step 4a)
-     until the push that ends this deploy clears it (step 8) - or this run
-     withdraws it, ending without a switch
+     The pending state - the increment, or a HEAD origin lacks (the
+     nightly's lock commit on main) - is announced: its tree as a commit
+     of its own, pushed to origin's refs/nixconvoy/pending/<branch> and
+     renewed there every 10 s for as long as this run lives, so a deploy
+     starting elsewhere sees this one under way (step 4a) until the push
+     that ends this deploy clears it (step 8) - or this run withdraws it,
+     ending without a switch.  Its author date is the run's start: its
+     rank among the deploys under way
   4. in a temporary worktree on that snapshot, union-merge every other
      pushed, listed work branch that still declares changes (mergiraf
      resolves structural conflicts; real conflicts abort with per-branch
@@ -57,9 +60,11 @@ Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
      candidate this checkout's own work reaches too (the eval memo's read
      scan over the union, no eval), wait for it, polling origin, then probe
      the targets again and redo step 4 with what it pushed.  Building without
-     it would only end refused - or rebuilt - once it switched.  An
-     announcement 30 min old whose deploy never ended is a dead deploy's,
-     ignored with a warning; --reset waits for nobody
+     it would only end refused - or rebuilt - once it switched.  Only
+     deploys announced before this one are waited for (two never wait for
+     each other); one whose announcement goes 30 s without a renewal, or
+     whose process is gone on this machine, is taken for dead and gone on
+     without, with a warning; --reset waits for nobody
   5. evaluate every reachable target's toplevel for the union, one nix eval
      process per stale target, concurrently, memoized per target by the git
      hashes of the files its configuration references and the lock entries
@@ -77,10 +82,13 @@ Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
      file its configuration reads changed since the tip of this branch its
      lineage recorded) it is left alone, running that work; when it does,
      the deploy is refused whole.  An increment whose deploy is over - its
-     announcement cleared (step 8) without the push landing, or, for a
-     lineage written without one, older than 30 min by the target's clock -
-     is abandoned: switched over with a warning; so is a refused target
-     under --reset, when this work reaches it or the target was named.  When the configuration
+     announcement cleared (step 8) without the push landing - is
+     abandoned: switched over with a warning; so is a refused target
+     under --reset, when this work reaches it or the target was named.
+     A dead deploy's announcement stays up, so its increment stays
+     refused: the refusal names the deploy and the clear that ends it
+     (git push --force origin origin/main:refs/nixconvoy/pending/<branch>),
+     or the push of its branch that keeps it.  When the configuration
      names a precheck (a flake check), it runs on a thread beside the evals
      unless a pass is already proven for exactly the files it reads, and a
      failure stops the deploy the moment it is known.  A drifting candidate
@@ -126,7 +134,10 @@ Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
      before its own fetch.  An increment that fails to eval, build or switch
      is never committed, so other checkouts cannot pull a broken commit and
      pushed tips never overestimate what is running; its changes stay staged
-     for the re-run, and its announcement is withdrawn
+     for the re-run, and its announcement is withdrawn - unless a target
+     was switched onto it already: then it stays, so a deploy elsewhere is
+     refused there rather than reverting the increment, until the re-run
+     ends with the push (or a hand clear)
 
 Land (nixconvoy land [<name> ...]): commit the work branch's tree minus
 COMMIT_MSG.md onto origin/main with COMMIT_MSG.md as the message, push main,

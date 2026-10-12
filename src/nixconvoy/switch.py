@@ -26,9 +26,9 @@ def lineage_doc(*, union: str, main: str | None, branches: dict[str, str | None]
     added: `branches` the other work branches' unioned tips, `own` the
     checked-out branch the union was built on (`head`, or `snap`, the commit
     the branch gets once the staged increment runs), `base` origin's tip of
-    it, `announce` the increment's announcement (checkout.announce_increment:
-    the drift core takes the increment as abandoned once that is cleared; a
-    reader from before it ignores the field, hence no new version)."""
+    it, `announce` the increment's announcement (checkout.Announce: the
+    drift core takes the increment as abandoned once the branch's
+    announcement is cleared; a version-2 reader may ignore the field)."""
     pending = bool(snap) or head != base
     doc: dict[str, object] = {
         "version": 2, "union": union, "main": main,

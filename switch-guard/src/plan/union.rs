@@ -14,7 +14,9 @@
 //! with what it pushed: building without it would only end refused, or
 //! rebuilt, once it switched.  A work branch that moves while the union
 //! builds would be reverted on its targets by switching without it, so
-//! the build is redone then too, up to ATTEMPTS times in all.
+//! the build is redone then too; ATTEMPTS such moves of origin end the
+//! run (a wait is another deploy's progress, not a move, and counts for
+//! nothing).
 use super::{failed, listed, Halt, Query, Run, Script, BRANCHES_FILE, MAIN, MSG_FILE};
 use std::collections::BTreeSet;
 
@@ -148,7 +150,8 @@ fn origin_moved(s: &mut Script, p: &Params, branches: &[(String, String)], fetch
 pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     let mut fetched = false;
     let mut seen = Seen { listed: Vec::new(), warned: BTreeSet::new() };
-    for _ in 0..ATTEMPTS {
+    let mut moves = 0;
+    while moves < ATTEMPTS {
         s.mark("union");
         let branches = select(s, p, &mut seen)?;
         s.must(Query::Worktree, "creating the union worktree")?;
@@ -156,12 +159,14 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
             Ok(union) => union,
             Err(c) => {
                 if origin_moved(s, p, &branches, &mut fetched, &mut seen)? {
+                    moves += 1;
                     continue;
                 }
                 return Err(Halt::Die(guidance(s, &c)?));
             }
         };
         if origin_moved(s, p, &branches, &mut fetched, &mut seen)? {
+            moves += 1;
             continue;
         }
         if !p.reset && s.flag(Query::AwaitPending { union: union.clone() })? {
@@ -174,6 +179,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
             return Ok(Outcome { union, branches });
         }
         s.print("work branches moved during the build; rebuilding the union");
+        moves += 1;
     }
     Err(Halt::Die(format!("origin kept moving during {ATTEMPTS} attempts; re-run")))
 }

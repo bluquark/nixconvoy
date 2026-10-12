@@ -7,17 +7,21 @@
 //! still the one it built on) or when it holds work of a branch
 //! deploy-branches here does not list.  Switching it would revert that work
 //! until its owner redeploys, so it is never switched as is - unless that
-//! deploy is over: its increment's announcement (the lineage's
-//! `pending.announce`, origin's pending ref) is no longer in flight
-//! (Context::in_flight), the push that would have cleared it having never
-//! landed; a lineage without one older than PENDING_MAX_AGE by the target's
-//! clock counts as a dead deploy's likewise - or the deploy is a --reset
-//! that names the target or reaches it.  When this checkout's own work does not reach the target
-//! (Params::reached: no file its configuration reads changed), the target is
-//! simply left running that work and the deploy goes on without it; when it
-//! does, two checkouts are changing the same target and the deploy is refused
-//! whole: switching the rest would leave them carrying this run's unpushed
-//! claim beside the other's, with neither increment able to land cleanly.
+//! deploy is over: the lineage names its increment's announcement
+//! (`pending.announce`) and origin's pending ref of the branch is cleared
+//! (Context::in_flight lacks it), which only the push that ends a deploy,
+//! or a hand clear, does - or the deploy is a --reset that names the
+//! target or reaches it.  A deploy that died leaves its announcement up
+//! (nixconvoy tells one from its stopped renewals: Context::dead), so
+//! its target stays refused, the refusal naming the deploy and the
+//! clear that ends it; nothing is taken over on a clock.  When this
+//! checkout's own work does not reach the target (Params::reached: no
+//! file its configuration reads changed), the target is simply left
+//! running that work and the deploy goes on without it; when it does,
+//! two checkouts are changing the same target and the deploy is refused
+//! whole: switching the rest would leave them carrying this run's
+//! unpushed claim beside the other's, with neither increment able to
+//! land cleanly.
 //!
 //! A target to be switched may run an increment that left the convoy since:
 //! a branch tip its lineage recorded that origin's tip of the branch no
@@ -35,13 +39,9 @@ use super::{listed, Halt, Query, Run, Script, BRANCHES_FILE};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// A push follows its switch within seconds (the nightly's main, once its
-/// four targets switched): a lineage without an announcement still refused
-/// this long after it was written (by the target's clock) is a dead
-/// deploy's, and its target is fair game again.  nixconvoy drops an
-/// announcement this old from Context::in_flight the same way.
-pub const PENDING_MAX_AGE: f64 = 30.0 * 60.0;
 pub const RESET_FLAG: &str = "--reset";
+/// Origin's announcements, by branch (nixconvoy's PENDING_REFS).
+pub const PENDING_REFS: &str = "refs/nixconvoy/pending";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lineage {
@@ -56,25 +56,21 @@ pub struct Lineage {
     /// The deploying checkout's own branch when what it unioned of it was not on
     /// origin yet, with the origin tip that push moves.
     pub pending: Option<(String, Option<String>)>,
-    /// The pending increment's announcement on origin, cleared by the push
-    /// that ends the deploy.
+    /// The pending increment's announcement on origin as the deploy made
+    /// it (renewed since; what counts is whether the branch's is cleared).
     pub announce: Option<String>,
     pub at: f64,
     pub machine: String,
     pub checkout: String,
     pub pid: i64,
-    /// Seconds since it was written, by the target's own clock (the file's
-    /// mtime): the machines' clocks drift, a WSL one after every sleep.
-    pub age: Option<f64>,
 }
 
 /// A lineage file's contents, or None when absent or malformed.
-pub fn parse(text: &str, age: Option<f64>) -> Option<Lineage> {
+pub fn parse(text: &str) -> Option<Lineage> {
     let v: Value = serde_json::from_str(text).ok()?;
     let o = v.as_object()?;
-    // Version 1 named the machine `by.host`; read, never written.
-    // pending.announce came later without a new version: a reader from
-    // before it ignores the field.
+    // Version 1 names the machine `by.host`; pending.announce is optional
+    // in version 2.
     let version = o.get("version").and_then(Value::as_i64)?;
     if !(1..=2).contains(&version) {
         return None;
@@ -114,7 +110,6 @@ pub fn parse(text: &str, age: Option<f64>) -> Option<Lineage> {
         machine: s(by.get("machine")).or_else(|| s(by.get("host")))?,
         checkout: s(by.get("checkout"))?,
         pid: by.get("pid").and_then(Value::as_i64).unwrap_or(0),
-        age,
     })
 }
 
@@ -134,9 +129,8 @@ pub enum Kind {
     /// Would be refused, but this checkout's work does not reach the target:
     /// left running the other checkout's work, not switched.
     LeftAlone,
-    /// Refused, but its deploy is over (its announcement cleared without
-    /// the push landing) or, without an announcement, it was written more
-    /// than PENDING_MAX_AGE ago.
+    /// Refused, but its deploy is over: its announcement cleared without
+    /// the push landing.
     Abandoned,
     /// Refused, but taken over by a --reset that names or reaches the target.
     Overridden,
@@ -171,10 +165,13 @@ pub struct Context {
     pub listed: BTreeSet<String>,
     /// This run's fetched origin tip of each branch.
     pub tips: BTreeMap<String, String>,
-    /// The announced increment of each branch whose deploy is under way:
-    /// origin's pending refs as fetched, a dead deploy's left out.
+    /// Each branch's uncleared announcement: origin's pending refs as
+    /// fetched, this run's own left out.
     pub in_flight: BTreeMap<String, String>,
-    pub now: f64,
+    /// The announced branches whose deploy nixconvoy found dead: its
+    /// process gone on this machine, or its announcement not renewed
+    /// while waited for.
+    pub dead: BTreeSet<String>,
     /// Seconds east of UTC, for the times shown.
     pub tz_offset: i64,
 }
@@ -211,20 +208,23 @@ pub fn classify(lin: Option<&Lineage>, running: &str, cx: &Context, take_over: b
             return (Kind::CatchUp, format!("runs {branch}'s increment deployed by {who}, pushed since"));
         }
         let at: String = base.as_deref().unwrap_or("nothing").chars().take(12).collect();
-        let why = format!("runs an increment of {branch} deployed by {who} whose push has not landed (origin/{branch} is still at {at})");
-        if let Some(a) = &lin.announce {
-            if cx.in_flight.get(branch) != Some(a) {
-                return (Kind::Abandoned, format!("{why}; its deploy is over without one, so taken as abandoned"));
+        let mut why =
+            format!("runs an increment of {branch} deployed by {who} whose push has not landed (origin/{branch} is still at {at})");
+        if lin.announce.is_some() {
+            if !cx.in_flight.contains_key(branch) {
+                return (
+                    Kind::Abandoned,
+                    format!("{why}; its deploy is over, the announcement cleared without the push, so taken as abandoned"),
+                );
+            }
+            if cx.dead.contains(branch) {
+                why = format!("{why}; that deploy looks dead, its announcement no longer renewed");
             }
         }
         (Kind::InFlight, why)
     } else {
         return (Kind::CatchUp, format!("runs pushed work deployed by {who}"));
     };
-    let age = lin.age.unwrap_or(cx.now - lin.at);
-    if (kind == Kind::Unlisted || lin.announce.is_none()) && age > PENDING_MAX_AGE {
-        return (Kind::Abandoned, format!("{why}; {:.0} min old, so taken as abandoned", age / 60.0));
-    }
     if take_over {
         return (Kind::Overridden, format!("{why}; taken over by {RESET_FLAG}"));
     }
@@ -263,8 +263,8 @@ pub struct Params {
     pub running: BTreeMap<String, Option<String>>,
     /// The union's toplevel of each reachable target.
     pub built: BTreeMap<String, String>,
-    /// Each probed target's lineage file and its age by the target's clock.
-    pub lineages: BTreeMap<String, (String, Option<f64>)>,
+    /// Each probed target's lineage file.
+    pub lineages: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -276,25 +276,31 @@ pub struct Outcome {
     pub drift: BTreeMap<String, (Kind, String)>,
 }
 
-/// The die message of a deploy refusing `refused` (in report order).
-pub fn refusal(refused: &[(String, Kind)]) -> String {
-    let targets: Vec<&str> = refused.iter().map(|(h, _)| h.as_str()).collect();
+/// The die message of a deploy refusing `refused` (in report order), each
+/// with the branch of its dead deploy when the refusal is one.
+pub fn refusal(refused: &[(String, Kind, Option<String>)]) -> String {
+    let targets: Vec<&str> = refused.iter().map(|(h, _, _)| h.as_str()).collect();
     let mut fixes = Vec::new();
-    if refused.iter().any(|(_, k)| *k == Kind::InFlight) {
+    if refused.iter().any(|(_, k, d)| *k == Kind::InFlight && d.is_none()) {
         fixes.push("re-run once that deploy ends".to_string());
     }
-    if refused.iter().any(|(_, k)| *k == Kind::Unlisted) {
+    let dead: BTreeSet<&str> = refused.iter().filter_map(|(_, _, d)| d.as_deref()).collect();
+    for b in dead {
+        fixes.push(format!(
+            "the deploy of {b} looks dead (its announcement is no longer renewed): clear it to have the next deploy revert its increment - git push --force origin origin/main:{PENDING_REFS}/{b} - or push {b} from its checkout to keep it"
+        ));
+    }
+    if refused.iter().any(|(_, k, _)| *k == Kind::Unlisted) {
         fixes.push(format!("list its branch in {BRANCHES_FILE} (`nixconvoy pull` once that line is on main)"));
     }
-    let fix = fixes.join(" or ");
+    let fix = fixes.join("; or ");
     let mut c = fix.chars();
     let fix: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
     format!(
-        "nothing switched or committed: {} {} another checkout's work this union lacks, and this checkout's work reaches {} too (see above).  {fix} (an increment whose deploy ended without its push, or whose announcement is {} min old, counts as abandoned), or deploy with {RESET_FLAG} {} to revert it deliberately - along with every other branch's work there, which {RESET_FLAG} leaves out.",
+        "nothing switched or committed: {} {} another checkout's work this union lacks, and this checkout's work reaches {} too (see above).  {fix}; or deploy with {RESET_FLAG} {} to revert it deliberately - along with every other branch's work there, which {RESET_FLAG} leaves out.",
         targets.join(", "),
         if targets.len() == 1 { "runs" } else { "run" },
         if targets.len() == 1 { "it" } else { "them" },
-        PENDING_MAX_AGE as u64 / 60,
         targets.first().copied().unwrap_or("")
     )
 }
@@ -350,7 +356,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     let mut refused = Vec::new();
     let mut fates = BTreeMap::new();
     for h in affected.iter().filter(|h| p.candidates.contains(h)) {
-        let lin = p.lineages.get(h).and_then(|(text, age)| parse(text, *age));
+        let lin = p.lineages.get(h).and_then(|text| parse(text));
         let running = p.running.get(h).cloned().flatten().unwrap_or_default();
         let reached = p.reached.contains(h);
         let (mut kind, mut why) = classify(lin.as_ref(), &running, &p.cx, p.reset && (p.named || reached), reached);
@@ -372,7 +378,13 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
             }
         }
         if kind.refused() {
-            refused.push((h.clone(), kind));
+            let dead = lin
+                .as_ref()
+                .and_then(|l| l.pending.as_ref())
+                .map(|(b, _)| b)
+                .filter(|b| kind == Kind::InFlight && p.cx.dead.contains(*b))
+                .cloned();
+            refused.push((h.clone(), kind, dead));
         } else if kind != Kind::LeftAlone {
             plan.push(h.clone());
         }

@@ -250,7 +250,9 @@ proptest! {
     fn unions(o in arb_origin(), reset in prop::bool::weighted(0.1)) {
         let p = params(reset);
         let (end, t, asked, fx, out) = run(&o, &p);
-        prop_assert!(t.stages.len() <= ATTEMPTS && t.worktrees <= ATTEMPTS);
+        // A wait is another deploy's progress: it costs no attempt.
+        let waits = o.waits.len() - end.waits.len();
+        prop_assert!(t.stages.len() <= ATTEMPTS && t.worktrees <= ATTEMPTS + waits);
         if reset {
             let merged = asked.iter().any(|q| matches!(q, Query::Branches | Query::Merge { .. } | Query::AwaitPending { .. }));
             prop_assert!(!merged);
@@ -293,7 +295,7 @@ proptest! {
             }
             Err(msg) => {
                 prop_assert_eq!(msg, format!("origin kept moving during {ATTEMPTS} attempts; re-run"));
-                prop_assert_eq!(t.worktrees, ATTEMPTS);
+                prop_assert_eq!(t.worktrees, ATTEMPTS + waits);
             }
         }
     }

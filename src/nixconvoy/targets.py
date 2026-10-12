@@ -9,7 +9,6 @@ import re
 import shlex
 import signal
 import socket
-import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -143,10 +142,8 @@ def target_cmd(target: str, argv: list[str], sudo: bool = False) -> list[str]:
 
 class Probe(NamedTuple):
     running: str | None
-    # LINEAGE_FILE as read ("" when absent) and its age by the target's clock
-    # (its mtime): the machines' clocks drift, a WSL one after every sleep.
+    # LINEAGE_FILE as read ("" when absent).
     lineage: str
-    age: float | None
     # switch.lineage_digest of it, for the guard's compare.
     digest: str
 
@@ -160,16 +157,10 @@ def lineage_digest(text: str) -> str:
 
 
 def parse_probe(stdout: str) -> Probe:
-    """The remote probe's output: the running system, the target's clock, the
-    lineage file's mtime ("-" when absent) and then the file verbatim."""
-    cur, _, rest = stdout.partition("\n")
-    now, _, rest = rest.partition("\n")
-    mtime, _, text = rest.partition("\n")
-    try:
-        age: float | None = float(now) - float(mtime)
-    except ValueError:
-        age = None
-    return Probe(cur.strip() or None, text, age, lineage_digest(text))
+    """The remote probe's output: the running system, then the lineage file
+    verbatim."""
+    cur, _, text = stdout.partition("\n")
+    return Probe(cur.strip() or None, text, lineage_digest(text))
 
 
 def probe(name: str) -> Probe:
@@ -179,21 +170,18 @@ def probe(name: str) -> Probe:
         try:
             cur = str(Path(CURRENT_SYSTEM).readlink())
         except OSError:
-            return Probe(None, "", None, "")
+            return Probe(None, "", "")
         try:
             text = Path(LINEAGE_FILE).read_bytes().decode()
-            age: float | None = time.time() - Path(LINEAGE_FILE).stat().st_mtime
         except (OSError, UnicodeDecodeError):
-            text, age = "", None
-        return Probe(cur, text, age, lineage_digest(text))
+            text = ""
+        return Probe(cur, text, lineage_digest(text))
     if local_only(name):
-        return Probe(None, "", None, "")
-    f = LINEAGE_FILE
-    script = (f"readlink {CURRENT_SYSTEM} && date +%s && "
-              f"{{ stat -c %Y {f} 2>/dev/null || echo -; }} && {{ cat {f} 2>/dev/null || true; }}")
+        return Probe(None, "", "")
+    script = f"readlink {CURRENT_SYSTEM} && {{ cat {LINEAGE_FILE} 2>/dev/null || true; }}"
     p = run(target_cmd(name, ["sh", "-c", script]), check=False, timeout=PROBE_TIMEOUT)
     if p.returncode != 0:
-        return Probe(None, "", None, "")
+        return Probe(None, "", "")
     return parse_probe(p.stdout)
 
 

@@ -240,9 +240,9 @@ def lineage_line(top: str, *, by: tuple[str, str] = OTHER,
     return proc.dump_json({**doc, "toplevel": top})
 
 
-def report(text: str, age: float | None, *, tips: dict[str, str] | None = None,
-           reset: bool = False, named: bool = True, reached: bool = True,
-           running: str = NEW, in_flight: dict[str, str] | None = None) -> tuple[str, str]:
+def report(text: str, *, tips: dict[str, str] | None = None,
+           reset: bool = False, named: bool = True, reached: bool = True, running: str = NEW,
+           in_flight: dict[str, str] | None = None, dead: list[str] | None = None) -> tuple[str, str]:
     """deploy-plan's drift verdict on one drifting target carrying `text` as
     its lineage file: its report line, and the deploy's die message."""
     out, err = io.StringIO(), io.StringIO()
@@ -251,11 +251,11 @@ def report(text: str, age: float | None, *, tips: dict[str, str] | None = None,
         guard.decide(
             "drift", me=list(ME), union="u" * 40, listed=sorted(LISTED),
             tips={BRANCH: BASE} if tips is None else tips, in_flight=in_flight or {},
-            now=1e6 + 60, tz_offset=0, router="choko", targets=["side1"], candidates=["side1"],
+            dead=dead or [], tz_offset=0, router="choko", targets=["side1"], candidates=["side1"],
             reset=reset, named=named, reached=["side1"] if reached else [],
             running={"side1": running},
             built={"side1": "/nix/store/union-system"},
-            lineages={"side1": {"text": text, "age": age}})
+            lineages={"side1": text})
     proc.DYING = False
     return out.getvalue().strip(), err.getvalue().strip().removeprefix("nixconvoy: ")
 
@@ -301,51 +301,53 @@ def target_cases() -> None:
 def lineage_cases() -> None:
     """The drift core (nixos/pkgs/switch-guard/src/plan/drift.rs, whose own
     tests hold the cases) on the lineages lineage_doc writes."""
-    line, died = report(lineage_line(NEW), 60)
+    line, died = report(lineage_line(NEW))
     assert line.startswith("side1: refused: runs an increment of haswell-wsl-deploys2 deployed by "
                            "haswell-wsl:/home/blu/projects/homelab2 (pid 4242) at 13:46"), line
     assert f"origin/{BRANCH} is still at {BASE[:12]}" in line, line
     assert died.startswith("nothing switched or committed: side1 runs another") and \
         "--reset side1" in died, died
-    line, died = report(lineage_line(NEW), 60, reached=False)
+    line, died = report(lineage_line(NEW), reached=False)
     assert line.startswith("side1: left alone: runs an increment of haswell-wsl-deploys2") and \
         line.endswith("this checkout's work does not reach it") and not died, (line, died)
-    line, _ = report(lineage_line(NEW), 31 * 60, reached=False)
-    assert line.startswith("side1: will switch, reverting it: "), line
-    line, died = report(lineage_line(NEW), 60, tips={BRANCH: LANDED})
+    line, died = report(lineage_line(NEW), tips={BRANCH: LANDED})
     assert line.startswith("side1: will switch (catch-up: ") and not died, (line, died)
-    line, _ = report(lineage_line(NEW), 31 * 60)
-    assert line.startswith("side1: will switch, reverting it: ") and "taken as abandoned" in line, line
-    # An announced increment: refused while origin's pending ref carries
-    # the announcement, abandoned at once when it was cleared without the push.
+    # An announced increment: refused while origin's pending ref of its
+    # branch is uncleared - the refusal naming the deploy as dead when this
+    # run found it so - and abandoned once it was cleared without the push.
     announced = lineage_line(NEW, announce="p" * 40)
     assert proc.load_json(announced)["pending"]["announce"] == "p" * 40  # type: ignore[index]
-    line, died = report(announced, 31 * 60, in_flight={BRANCH: "p" * 40})
-    assert line.startswith("side1: refused: ") and died, (line, died)
-    line, died = report(announced, 60)
+    line, died = report(announced, in_flight={BRANCH: "q" * 40})
+    assert line.startswith("side1: refused: ") and "dead" not in line and \
+        "Re-run once that deploy ends; or deploy with --reset side1" in died, (line, died)
+    line, died = report(announced, in_flight={BRANCH: "q" * 40}, dead=[BRANCH])
+    assert line.endswith("that deploy looks dead, its announcement no longer renewed") and \
+        f"The deploy of {BRANCH} looks dead" in died and \
+        f"git push --force origin origin/main:{checkout.PENDING_REFS}/{BRANCH}" in died, (line, died)
+    line, died = report(announced)
     assert line.startswith("side1: will switch, reverting it: ") and "its deploy is over" in line and \
         not died, (line, died)
-    line, _ = report(lineage_line(NEW), 60, reset=True)
+    line, _ = report(lineage_line(NEW), reset=True)
     assert line.endswith("taken over by --reset"), line
-    line, _ = report(lineage_line(NEW), 60, reset=True, named=False, reached=False)
+    line, _ = report(lineage_line(NEW), reset=True, named=False, reached=False)
     assert line.startswith("side1: left alone: "), line
-    line, _ = report(lineage_line(NEW), 60, reset=True, named=False)
+    line, _ = report(lineage_line(NEW), reset=True, named=False)
     assert line.endswith("taken over by --reset"), line
-    line, _ = report(lineage_line(NEW, pending=None, others=("M3-Air-deploys9",)), 60)
+    line, _ = report(lineage_line(NEW, pending=None, others=("M3-Air-deploys9",)))
     assert "side1: refused: runs work of M3-Air-deploys9" in line, line
-    assert report(lineage_line(NEW, by=ME), 60)[0].startswith("side1: will switch (this-branch: ")
-    assert report("", None) == ("side1: will switch", "")
-    assert report("{not json", None) == ("side1: will switch", "")
-    assert report(lineage_line(OLD), 60) == ("side1: will switch", "")
-    assert report(lineage_line(NEW), 60, running=OLD)[0] == "side1: will switch"
-    assert report(lineage_line(NEW), 60, running="/nix/store/union-system")[0] == "side1: up to date"
+    assert report(lineage_line(NEW, by=ME))[0].startswith("side1: will switch (this-branch: ")
+    assert report("") == ("side1: will switch", "")
+    assert report("{not json") == ("side1: will switch", "")
+    assert report(lineage_line(OLD)) == ("side1: will switch", "")
+    assert report(lineage_line(NEW), running=OLD)[0] == "side1: will switch"
+    assert report(lineage_line(NEW), running="/nix/store/union-system")[0] == "side1: up to date"
 
     text = lineage_line(NEW)
-    p = targets.parse_probe(f"{NEW}\n1000100\n1000000\n{text}")
-    assert p.running == NEW and p.lineage == text and p.age == 100, p
+    p = targets.parse_probe(f"{NEW}\n{text}")
+    assert p.running == NEW and p.lineage == text, p
     assert p.digest == hashlib.sha256(text.encode()).hexdigest(), p
-    p = targets.parse_probe(f"{OLD}\n1000100\n-\n")
-    assert p == targets.Probe(OLD, "", None, hashlib.sha256(b"").hexdigest()), p
+    p = targets.parse_probe(f"{OLD}\n")
+    assert p == targets.Probe(OLD, "", hashlib.sha256(b"").hexdigest()), p
 
     saved = (switch.rev, switch.current_branch)
     try:
@@ -406,7 +408,7 @@ def guard_cases(d: Path) -> None:
         return g.stdout.readline().strip()
 
     def drift(p: targets.Probe) -> str:
-        return report(p.lineage, p.age, running=p.running or "")[0]
+        return report(p.lineage, running=p.running or "")[0]
 
     point(cur, OLD)
     point(profile, OLD)
@@ -943,9 +945,10 @@ def git_cases(d: Path) -> None:
 
 
 def announce_cases(d: Path) -> None:
-    """The announcement of an increment, the deploy records and the push
-    that ends a deploy, on a scratch origin: what a deploy elsewhere sees
-    of a deploy under way (checkout.in_flight), what it leaves behind."""
+    """The announcement of a deploy's pending state and its renewals, the
+    deploy records and the push that ends a deploy, on a scratch origin:
+    what a deploy elsewhere sees of a deploy under way (checkout.announced),
+    what it leaves behind."""
     scratch_env()
     origin, seed, co = d / "origin.git", d / "seed", d / "homelab9"
     wb = "tester-deploys9"
@@ -957,37 +960,54 @@ def announce_cases(d: Path) -> None:
     sh(d, "clone", "--quiet", str(origin), str(co))
     prev = Path.cwd()
     os.chdir(co)
+    checkout.HEARTBEAT = 0.2  # type: ignore[assignment]
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             checkout.ensure_on_work_branch(wb)
         put(co, "a.txt", "one\ntwo\n")
         snap = checkout.staged_snapshot()
-        now = time.time()
-        # Announced: listed as under way by a fetch anywhere, dated now,
-        # this checkout's own left out of in_flight.
-        ann = checkout.announce_increment(wb, snap)
-        checkout.collect_announce(ann)
+        t0 = int(time.time())
+        # Announced: listed as under way by a fetch anywhere, the author
+        # date the deploy's start, this run's own branch left out.
+        ann = checkout.Announce(wb, snap)
+        assert ann.collect()
+        first = ann.sha
         sh(co, *checkout.fetch_args())
-        assert sh(co, "rev-parse", f"{ann.sha}^{{tree}}") == sh(co, "rev-parse", f"{snap}^{{tree}}")
-        assert sh(co, "log", "-1", "--format=%s", ann.sha).startswith(f"pending increment of {wb} from tester:")
-        (pend,) = checkout.pending_announcements(now + 5)
-        assert pend.branch == wb and pend.sha == ann.sha and 4 < pend.age < 60, pend
-        assert checkout.in_flight(now + 5, wb) == ({}, [])
-        assert checkout.in_flight(now + 5, None) == ({wb: ann.sha}, [])
-        # Too old: a dead deploy's, told apart for a warning.
-        live, stale = checkout.in_flight(now + checkout.PENDING_MAX_AGE + 5, None)
-        assert live == {} and [p.sha for p in stale] == [ann.sha], (live, stale)
-        # Withdrawn (the deploy ended without a switch): cleared onto origin/main.
-        checkout.withdraw_announcement(wb, ann)
+        assert sh(co, "rev-parse", f"{first}^{{tree}}") == sh(co, "rev-parse", f"{snap}^{{tree}}")
+        assert sh(co, "log", "-1", "--format=%s", first) == \
+            f"pending increment of {wb} from tester:{co} (pid {os.getpid()})"
+        (pend,) = checkout.pending_announcements()
+        assert pend.branch == wb and pend.sha == first and t0 <= pend.since <= pend.at <= t0 + 60 \
+            and (pend.machine, pend.pid) == ("tester", os.getpid()), pend
+        assert not checkout.announcer_dead(pend)
+        assert checkout.announcer_dead(pend._replace(pid=2 ** 22 - 1))
+        assert not checkout.announcer_dead(pend._replace(machine="elsewhere", pid=2 ** 22 - 1))
+        assert checkout.announced(wb) == {}
+        assert checkout.announced(None) == {wb: first}
+        # Renewed while the deploy runs: a fresh commit of the same tree on
+        # origin, the author date kept (the rank), the committer date new.
+        deadline = time.monotonic() + 10
+        while ann.sha == first and time.monotonic() < deadline:
+            time.sleep(0.1)
         sh(co, *checkout.fetch_args())
-        assert checkout.pending_announcements(now + 5) == []
+        (renewed,) = checkout.pending_announcements()
+        assert renewed.sha != first and renewed.since == pend.since and \
+            sh(co, "rev-parse", f"{renewed.sha}^{{tree}}") == sh(co, "rev-parse", f"{snap}^{{tree}}"), renewed
+        # Withdrawn (the deploy ended without a switch): cleared onto
+        # origin/main, the renewals over.
+        ann.withdraw()
+        sh(co, *checkout.fetch_args())
+        assert checkout.pending_announcements() == []
         assert sh(co, "rev-parse", f"{checkout.PENDING_REFS}/{wb}") == proc.rev("refs/remotes/origin/main")
+        time.sleep(0.5)
+        sh(co, *checkout.fetch_args())
+        assert checkout.pending_announcements() == []
 
         # The deploy records: the union's tree, chained on the target's
         # previous record first, then main, the branches and the increment;
         # a parent not here is left out.  Pushed before the switch.
-        ann = checkout.announce_increment(wb, snap)
-        checkout.collect_announce(ann)
+        ann = checkout.Announce(wb, snap)
+        assert ann.collect()
         committed = checkout.deployed_commit(snap, "two\n\nAffected: a\nDeployed: a")
         main = proc.rev("refs/remotes/origin/main")
         assert main is not None
@@ -1010,7 +1030,7 @@ def announce_cases(d: Path) -> None:
         assert proc.rev(f"refs/remotes/origin/{wb}") == committed
         assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/a") == rec1
         assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/b") == rec2
-        assert checkout.pending_announcements(now + 5) == []
+        assert checkout.pending_announcements() == []
         # A main checkout's deploy: the records alone.
         with contextlib.redirect_stdout(io.StringIO()):
             checkout.push_deployed(None, None, {"a": rec2})
@@ -1021,10 +1041,21 @@ def announce_cases(d: Path) -> None:
         # Nothing to push: no background push started.
         checkout.push_deployed(wb, None, {})
         assert not Path(checkout.push_state("pid")).exists()
+        # A main checkout's announcement (its HEAD origin lacks) is cleared
+        # by the push of main that lands that HEAD, not by nixconvoy.
+        ann = checkout.Announce("main", "HEAD")
+        assert ann.collect()
+        ann.stop()
+        sh(co, *checkout.fetch_args())
+        assert [p.branch for p in checkout.pending_announcements()] == ["main"]
+        sh(co, "push", "--quiet", "origin", "HEAD:main")
+        sh(co, *checkout.fetch_args())
+        assert checkout.pending_announcements() == []
         # The branch not pushed (its lease failed): the announcement stays,
-        # so the deploy still counts as under way until it is stale.
-        ann = checkout.announce_increment(wb, snap)
-        checkout.collect_announce(ann)
+        # so the deploy still counts as under way (dead, once its renewals
+        # stop) until a push of the branch clears it.
+        ann = checkout.Announce(wb, snap)
+        assert ann.collect()
         put(co, "a.txt", "one\ntwo\nthree\n", "three")
         sh(seed, "fetch", "--quiet", "origin", f"+refs/heads/{wb}:refs/heads/{wb}")
         sh(seed, "switch", "--quiet", wb)
@@ -1037,7 +1068,8 @@ def announce_cases(d: Path) -> None:
             checkout.await_background_push()
         assert "background push failed" in err.getvalue(), err.getvalue()
         sh(co, *checkout.fetch_args())
-        assert checkout.in_flight(now + 5, None) == ({wb: ann.sha}, [])
+        assert list(checkout.announced(None)) == [wb]
+        assert checkout.clear_refspec(wb) == [f"{proc.rev('refs/remotes/origin/main')}:{checkout.PENDING_REFS}/{wb}"]
     finally:
         os.chdir(prev)
     print("announcements: ok")

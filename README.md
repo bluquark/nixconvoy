@@ -44,18 +44,24 @@ no work.
   deploy that raced another aborts cleanly instead of reverting it, and a
   re-run converges.
 - **Announced increments.**  A deploy pushes its increment to a pending ref
-  on origin before anything is evaluated.  A deploy starting elsewhere whose
-  change reaches a target that one reaches too waits for it, then builds
-  with what it pushed - instead of building without it to be refused once
-  it switched.  The push that ends the deploy clears the announcement; a
-  deploy ending without a switch withdraws it.
+  on origin before anything is evaluated, and renews it every 10 seconds
+  for as long as it runs.  A deploy starting elsewhere whose change reaches
+  a target that one reaches too waits for it (only for deploys announced
+  before its own, so two never wait for each other), then builds with
+  what it pushed - instead of building without it to be refused once it
+  switched.  One whose announcement goes 30 seconds without a renewal is
+  taken for dead and no longer waited for.  The push that ends the deploy
+  clears the announcement; a deploy ending without a switch withdraws it.
 - **Lineage.**  Every target records where its system came from: the union,
   each branch's tip, and the machine and checkout that deployed it.  A
   deploy that would overwrite another checkout's not-yet-pushed increment
   is refused (or leaves that target alone when its own work does not reach
-  it) - until that deploy is over: its announcement cleared without the
-  push, or, for a lineage without one, 30 minutes old.  Then the increment
-  is abandoned and taken over with a warning.
+  it) until that deploy is over: its announcement cleared without the push,
+  which only the deploy's own end or a hand clear does.  Then the increment
+  is abandoned and taken over with a warning.  A deploy that died leaves
+  its announcement up, so its targets stay refused - the refusal names the
+  dead deploy and the clear that ends it - and nothing is ever taken over
+  on a clock.
 - **Deploy records.**  Before a target is switched, its deploy record - a
   commit of the exact tree it will run, on its previous record, main, the
   unioned branches and the increment - is pushed to origin, so no target
