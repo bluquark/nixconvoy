@@ -330,7 +330,8 @@ def main() -> None:
     if subcmd in ("land", "abandon"):
         if msg or reset or dry or (danger and not apply_now):
             die(USAGE)
-        deploys_from = (sub_parent(here) or here) if not hosts else here
+        named = [commands.find_sub(n) for n in hosts]
+        deploys_from = here if hosts and here not in named else sub_parent(here) or here
         # The deploy runs from a checkout the abandon does not reset, whose
         # staged changes it would have to carry without a message.
         if (apply_now and (hosts or deploys_from != here)
@@ -354,8 +355,7 @@ def main() -> None:
             lock.close()
         if hosts:
             if apply_now:
-                # A subagent worktree that named itself is gone: its parent deploys.
-                os.chdir(top if top.is_dir() else sub_parent(here) or here)
+                os.chdir(deploys_from)  # the parent's, when the named worktree was this one
                 take_lock()
                 deploy([], None, False, danger)
             return

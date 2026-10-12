@@ -590,11 +590,12 @@ def increment_fate(branch: str, tip: str, union: str, checkout: str | None) -> s
     recorded that origin's tip of the branch no longer is, for the deploy
     of `union` (the drift core's Query::Fate; `checkout` the deployer's
     when it is on this machine).  "kept" when the switch reverts none of
-    it: origin's branch still carries it, or the deployer's checkout still
-    has the branch checked out (its first push on its way - the commit
-    reaches the branch only after every switch - or its switch failed and
-    the increment stays staged there; abandon removes a subagent's
-    worktree), or merging it into the union changes nothing but MSG_FILE
+    it: origin's branch still carries it, or origin has no such branch yet
+    while the deployer's checkout has it checked out (its first push on
+    its way - the commit reaches the branch only after every switch - or
+    that first switch failed and the increment stays staged there; abandon
+    removes a subagent's worktree, and an agent checkout's branch is reset
+    on origin, not absent), or merging it into the union changes nothing but MSG_FILE
     (rebased, redeployed after a failed switch, landed intact).  Otherwise
     the union lacks it: "landed" when a later tip of the branch (one
     fetched here before, by the remote-tracking ref's reflog or PAST_REFS;
@@ -607,10 +608,11 @@ def increment_fate(branch: str, tip: str, union: str, checkout: str | None) -> s
     if rev(f"{tip}^{{commit}}") is None:
         return "kept"
     up = f"refs/remotes/origin/{branch}"
-    if rev(up) is not None and is_ancestor(tip, up):
-        return "kept"
-    if checkout and Path(checkout).is_dir() and (branch_at(Path(checkout)) == branch
-                                                 or noted_branch(Path(checkout)) == branch):
+    if rev(up) is not None:
+        if is_ancestor(tip, up):
+            return "kept"
+    elif checkout and Path(checkout).is_dir() and (branch_at(Path(checkout)) == branch
+                                                   or noted_branch(Path(checkout)) == branch):
         return "kept"
     p = run(["git", "merge-tree", "--write-tree", "--messages", union, tip], check=False)
     if p.returncode != 0:
