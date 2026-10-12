@@ -357,7 +357,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     for h in switch_order(&p.targets, &p.router) {
         let Some(Some(running)) = p.running.get(&h) else { continue };
         let Some(built) = p.built.get(&h) else {
-            return Err(Halt::Die(format!("deploy-plan was given no evaluated toplevel for {h}")));
+            return Err(Halt::Die(format!("nixconvoy-plan was given no evaluated toplevel for {h}")));
         };
         if built != running {
             affected.push(h);

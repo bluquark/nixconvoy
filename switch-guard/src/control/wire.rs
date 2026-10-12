@@ -1,4 +1,4 @@
-//! deploy-switch's protocol with nixconvoy: JSON lines.  nixconvoy writes
+//! nixconvoy-switch's protocol with nixconvoy: JSON lines.  nixconvoy writes
 //! the parameters, then one reply per query; the binary answers each with
 //! `{"effects": [...], "next": {...}}`.
 use super::{Effect, Guard, Next, Params, Query, Reply};
@@ -24,7 +24,7 @@ pub fn params(line: &str) -> Result<Params, String> {
     let v: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
     let protocol = field(&v, "protocol")?.as_u64();
     if protocol != Some(PROTOCOL) {
-        return Err(format!("deploy-switch speaks protocol {PROTOCOL}, nixconvoy {protocol:?}"));
+        return Err(format!("nixconvoy-switch speaks protocol {PROTOCOL}, nixconvoy {protocol:?}"));
     }
     Ok(Params {
         target: text(&v, "target")?,

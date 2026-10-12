@@ -1,9 +1,9 @@
 """nixconvoy's switch step end to end against a fake target: the real
-deploy-switch binary ($NIXCONVOY_SWITCH_BIN) decides, the switch module's
+nixconvoy-switch binary ($NIXCONVOY_SWITCH_BIN) decides, the switch module's
 effects loop performs, and every ssh call lands in this file's --fake-target
 mode, which plays the confirmed-switch helper, systemd-run and nix-env on a
 JSON state file.  Then the lineage records and the drift classification
-other deploys read from them, and deploy-plan's rebase and union cores on
+other deploys read from them, and nixconvoy-plan's rebase and union cores on
 scratch git repos.  Run by the flake's lint check (nix/lint.nix)."""
 
 from __future__ import annotations
@@ -131,7 +131,7 @@ class Clock:
 def scenario(name: str, *, helper: bool = True, check_ok: bool = True, activate_rc: int = 0,
              running: str = OLD, rollback_to: str = OLD, check_killed: bool = False,
              confirm_rc: int = 0, rollback_rc: int = 0,
-             deploy_switch: str = "") -> tuple[str | None, dict[str, object]]:
+             nixconvoy_switch: str = "") -> tuple[str | None, dict[str, object]]:
     """Run one switch; (the die message or None, the target's final state)."""
     state_file = Path(os.environ["FAKE_TARGET_STATE"])
     state_file.write_text(proc.dump_json({
@@ -145,7 +145,7 @@ def scenario(name: str, *, helper: bool = True, check_ok: bool = True, activate_
     died: str | None = None
     with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
         try:
-            switch.switch("testhost", OLD, NEW, deploy_switch or os.environ["NIXCONVOY_SWITCH_BIN"],
+            switch.switch("testhost", OLD, NEW, nixconvoy_switch or os.environ["NIXCONVOY_SWITCH_BIN"],
                           lineage=LINEAGE)
         except SystemExit:
             died = err.getvalue().strip().splitlines()[0].removeprefix("nixconvoy: ")
@@ -216,8 +216,8 @@ def main() -> None:
         crash = Path(d) / "crash"
         crash.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(3)\n")
         crash.chmod(0o755)
-        died, s = scenario("deploy-switch crashes", deploy_switch=str(crash))
-    assert died is not None and "deploy-switch stopped answering" in died, died
+        died, s = scenario("nixconvoy-switch crashes", nixconvoy_switch=str(crash))
+    assert died is not None and "nixconvoy-switch stopped answering" in died, died
     assert s["running"] == OLD and s["armed"] is False, s
 
 
@@ -244,7 +244,7 @@ def lineage_line(top: str, *, by: tuple[str, str] = OTHER,
 def report(text: str, *, tips: dict[str, str] | None = None,
            reset: bool = False, named: bool = True, reached: bool = True, running: str = NEW,
            in_flight: dict[str, str] | None = None, dead: list[str] | None = None) -> tuple[str, str]:
-    """deploy-plan's drift verdict on one drifting target carrying `text` as
+    """nixconvoy-plan's drift verdict on one drifting target carrying `text` as
     its lineage file: its report line, and the deploy's die message."""
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \

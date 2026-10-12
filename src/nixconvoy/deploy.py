@@ -470,7 +470,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             return False
         assert isinstance(done, dict)
         union = str(done["union"])
-        deploy_switch = binary("deploy-switch") if plan else ""
+        nixconvoy_switch = binary("nixconvoy-switch") if plan else ""
 
         # The switch-last targets alone, one by one, once everything else has
         # finished talking to them.  A failed switch dies once the others in
@@ -492,11 +492,11 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                 ann.claimed += [n for n in batch if n not in ann.claimed]
             if len(batch) == 1:
                 n = batch[0]
-                switch(n, expected[n], tops[n].out, deploy_switch, lineage=lineages[n],
+                switch(n, expected[n], tops[n].out, nixconvoy_switch, lineage=lineages[n],
                        digest=probed[n].digest, needs_internet=tops[n].last)
                 continue
             with ThreadPoolExecutor(len(batch)) as pool:
-                switches = [pool.submit(switch, n, expected[n], tops[n].out, deploy_switch, True,
+                switches = [pool.submit(switch, n, expected[n], tops[n].out, nixconvoy_switch, True,
                                         lineages[n], probed[n].digest, tops[n].last)
                             for n in batch]
             for f in switches:

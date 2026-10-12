@@ -438,7 +438,7 @@ impl Machine {
                     ),
                 })
             }
-            (pc, reply) => panic!("deploy-switch: reply {reply:?} does not answer {pc:?}"),
+            (pc, reply) => panic!("nixconvoy-switch: reply {reply:?} does not answer {pc:?}"),
         }
     }
 

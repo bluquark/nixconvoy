@@ -238,10 +238,10 @@ both would run).
 
 - `src/nixconvoy/`: the Python driver, which performs git, nix and ssh.
 - `switch-guard/`: a Rust crate holding the decisions as Sans-I/O state
-  machines, with stateright models and property tests: `deploy-plan` (the
+  machines, with stateright models and property tests: `nixconvoy-plan` (the
   rebase, the union, the drift verdicts, a subagent worktree's pruning
   against the create hook, the sessions and its agent's stops and
-  resumes), `deploy-switch` (the switch protocol), `confirmed-switch` (the
+  resumes), `nixconvoy-switch` (the switch protocol), `confirmed-switch` (the
   target-side helper) and `boot-assessment`.
 - `tests/switch_test.py`: the switch driven end to end against a fake target,
   the lineage classification, and the git cores on scratch repositories.

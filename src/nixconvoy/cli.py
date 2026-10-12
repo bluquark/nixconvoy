@@ -24,7 +24,7 @@ Model:
     converges whatever differs.
   - The decisions - rebasing a checkout, the union and its retries, which
     drifting targets may be switched, the switch itself - are the switch-guard
-    crate's (deploy-plan, deploy-switch: Sans-I/O cores); this program
+    crate's (nixconvoy-plan, nixconvoy-switch: Sans-I/O cores); this program
     performs the git, eval, build and ssh they ask for.
 
 Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
@@ -186,7 +186,7 @@ takes --danger-network-config-change.
 Prune (nixconvoy prune [<name> ...]): remove the subagent worktrees that
 hold nothing of their own - never deployed, no staged, unstaged or
 untracked change, HEAD and its work branch on origin - with their fresh
-branch; the named ones, or every one under this checkout (deploy-plan's
+branch; the named ones, or every one under this checkout (nixconvoy-plan's
 prune core decides each).  One whose spawning claude session still runs is
 kept, whichever session asks: the session may resume its agent, which needs
 the worktree.  So is one at work (a nixconvoy, git operation or push
@@ -244,8 +244,8 @@ probe, eval, build or switch.  NIXCONVOY_FAIL_VERIFY=1 fails a confirmed
 switch's verification, exercising the rollback.  NIXCONVOY_BUILDER
 overrides the builder ("" builds locally).  NIXCONVOY_HOLD_PUSH=N delays
 the background push N seconds, keeping the switched increment in flight.
-NIXCONVOY_GUARD_DIR names the directory holding deploy-plan and
-deploy-switch (the nix package sets it)."""
+NIXCONVOY_GUARD_DIR names the directory holding nixconvoy-plan and
+nixconvoy-switch (the nix package sets it)."""
 
 from __future__ import annotations
 

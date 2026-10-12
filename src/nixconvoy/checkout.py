@@ -1,6 +1,6 @@
 """The checkouts of the repo on this machine and their work branches:
 identity, locks, the staged snapshot, pushes, and the git queries
-deploy-plan's rebase core asks."""
+nixconvoy-plan's rebase core asks."""
 
 from __future__ import annotations
 
@@ -255,7 +255,7 @@ def ran(p: subprocess.CompletedProcess[str]) -> dict[str, object]:
 
 
 class GitQueries:
-    """Performs deploy-plan's git queries in the current checkout, and in
+    """Performs nixconvoy-plan's git queries in the current checkout, and in
     the throwaway worktree a rebase of a branch not checked out here
     (`aside`) runs in."""
 
@@ -327,7 +327,7 @@ class GitQueries:
             checkout = ask.get("checkout")
             return {"text": increment_fate(arg("branch"), arg("tip"), arg("union"),
                                            str(checkout) if checkout else None)}
-        raise ValueError(f"deploy-plan asked {ask!r}")
+        raise ValueError(f"nixconvoy-plan asked {ask!r}")
 
 
 def pop_tmp_commits() -> None:

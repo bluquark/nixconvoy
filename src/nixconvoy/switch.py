@@ -1,5 +1,5 @@
 """One target's switch: the lineage it claims, the on-target compare-and-swap
-guard, and the deploy-switch core's protocol performed over ssh."""
+guard, and the nixconvoy-switch core's protocol performed over ssh."""
 
 from __future__ import annotations
 
@@ -95,10 +95,10 @@ def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> 
     return ["ssh", "-o", "BatchMode=yes", *control_opts(), targets.ssh_address(target), script]
 
 
-def switch(target: str, expected: str, toplevel: str, deploy_switch: str,
+def switch(target: str, expected: str, toplevel: str, nixconvoy_switch: str,
            quiet: bool = False, lineage: str = "", digest: str = "",
            needs_internet: bool = False) -> None:
-    """Switch `target` to `toplevel` as deploy-switch decides.  `quiet`
+    """Switch `target` to `toplevel` as nixconvoy-switch decides.  `quiet`
     (several switches at once) prints the activation output afterwards,
     prefixed with the target.  Activation, confirm and rollback run in a
     transient unit on the target (as nixos-rebuild does), so they complete
@@ -192,7 +192,7 @@ def switch(target: str, expected: str, toplevel: str, deploy_switch: str,
         if kind == "sleep":
             time.sleep(secs(ask.get("ms")))
             return {"done": True}
-        raise ValueError(f"deploy-switch asked {ask!r}")
+        raise ValueError(f"nixconvoy-switch asked {ask!r}")
 
     def effect(e: dict[str, object]) -> None:
         if e.get("armed") is True:
@@ -201,13 +201,13 @@ def switch(target: str, expected: str, toplevel: str, deploy_switch: str,
             proc.ARMED.discard(target)
 
     try:
-        drive(deploy_switch, {
+        drive(nixconvoy_switch, {
             "protocol": CONTROL_PROTOCOL, "target": target, "toplevel": toplevel,
             "expected": expected,
             "place": "local" if local else targets.ssh_address(target),
             "quiet": quiet, "router": needs_internet,
             "fail_verify": os.environ.get("NIXCONVOY_FAIL_VERIFY") == "1"},
-            perform, "deploy-switch", f" while switching {target}", effect)
+            perform, "nixconvoy-switch", f" while switching {target}", effect)
     finally:
         if guard is not None:
             if guard.stdin is not None:

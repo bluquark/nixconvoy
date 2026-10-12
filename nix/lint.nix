@@ -1,6 +1,6 @@
 # The repo's own checks: ruff and pyrefly over the Python, rustfmt and
 # clippy over the crate (cargo test runs in the crate build itself), and
-# the switch test driving the real deploy-switch against a fake target.
+# the switch test driving the real nixconvoy-switch against a fake target.
 { pkgs, switch-guard, nixconvoy }:
 let
   inherit (pkgs) lib;
@@ -19,7 +19,7 @@ let
   switchTest = pkgs.runCommandLocal "nixconvoy-switch-test" { } ''
     cd ${pySources}
     PATH=${lib.makeBinPath [ pkgs.util-linux pkgs.git pkgs.mergiraf ]}:$PATH HOME=$TMPDIR \
-      NIXCONVOY_SWITCH_BIN=${switch-guard}/bin/deploy-switch PYTHONPATH=src \
+      NIXCONVOY_SWITCH_BIN=${switch-guard}/bin/nixconvoy-switch PYTHONPATH=src \
       ${pkgs.python3}/bin/python3 tests/switch_test.py
     touch $out
   '';

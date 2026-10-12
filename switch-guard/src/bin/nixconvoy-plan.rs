@@ -8,7 +8,7 @@ fn main() {
     let mut lines = stdin.lock().lines();
     let mut out = std::io::stdout().lock();
     let fail = |msg: String| -> ! {
-        eprintln!("deploy-plan: {msg}");
+        eprintln!("nixconvoy-plan: {msg}");
         std::process::exit(2);
     };
     let first = lines.next().and_then(Result::ok).unwrap_or_else(|| fail("no parameters".into()));

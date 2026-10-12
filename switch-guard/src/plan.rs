@@ -1,5 +1,5 @@
 //! nixconvoy's decisions about the checkout and the targets as Sans-I/O cores
-//! (deploy-plan): which targets a deploy may switch (drift), how a checkout is
+//! (nixconvoy-plan): which targets a deploy may switch (drift), how a checkout is
 //! brought onto origin/main (rebase), how the union of the work branches
 //! is built and kept current (union) and whether a subagent worktree is
 //! removed (prune).  nixconvoy performs each query - git,
@@ -381,7 +381,7 @@ pub fn failed(what: &str, detail: &str) -> String {
 }
 
 fn mismatch(q: &Query, r: &Reply) -> Halt {
-    Halt::Die(format!("deploy-plan asked {q:?} and got {r:?}"))
+    Halt::Die(format!("nixconvoy-plan asked {q:?} and got {r:?}"))
 }
 
 /// A stderr without git's hint: lines.

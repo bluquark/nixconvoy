@@ -48,7 +48,7 @@ in
     deadline = lib.mkOption {
       type = lib.types.ints.positive;
       default = 120;
-      description = "Seconds after arming before an unconfirmed switch is rolled back: the activation plus nixconvoy's verification must fit in it (deploy-switch neither starts a verification round nor pauses into its last 5 s, and ends every probe 2 s short of it).";
+      description = "Seconds after arming before an unconfirmed switch is rolled back: the activation plus nixconvoy's verification must fit in it (nixconvoy-switch neither starts a verification round nor pauses into its last 5 s, and ends every probe 2 s short of it).";
     };
     checks = lib.mkOption {
       type = lib.types.lines;

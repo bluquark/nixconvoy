@@ -1,5 +1,5 @@
-"""The switch-guard binaries (the crate under switch-guard/): deploy-plan
-makes the git and drift decisions, deploy-switch the switch's.  Both are
+"""The switch-guard binaries (the crate under switch-guard/): nixconvoy-plan
+makes the git and drift decisions, nixconvoy-switch the switch's.  Both are
 Sans-I/O cores speaking JSON lines (src/plan/wire.rs, src/control/wire.rs);
 this module runs one to its end, performing what it asks."""
 
@@ -24,7 +24,7 @@ Perform = Callable[[dict[str, object]], dict[str, object]]
 
 
 def binary(name: str) -> str:
-    """deploy-plan or deploy-switch: beside NIXCONVOY_SWITCH_BIN when set (the
+    """nixconvoy-plan or nixconvoy-switch: beside NIXCONVOY_SWITCH_BIN when set (the
     tests' fake), else under NIXCONVOY_GUARD_DIR (the nix wrapper sets it to the
     crate build this package was made with), else on PATH."""
     override = os.environ.get("NIXCONVOY_SWITCH_BIN")
@@ -102,9 +102,9 @@ def drive(exe: str, params: dict[str, object], perform: Perform, name: str,
 
 
 def decide(core: str, perform: Perform | None = None, **params: object) -> object:
-    """The outcome of deploy-plan's `core` with `params`, its git queries
+    """The outcome of nixconvoy-plan's `core` with `params`, its git queries
     performed in the current checkout unless `perform` says otherwise."""
     from .checkout import GitQueries  # noqa: PLC0415 - the queries decide through here too
 
-    return drive(binary("deploy-plan"), {"protocol": PLAN_PROTOCOL, "core": core, **params},
-                 perform or GitQueries(), "deploy-plan", f" deciding {core}")
+    return drive(binary("nixconvoy-plan"), {"protocol": PLAN_PROTOCOL, "core": core, **params},
+                 perform or GitQueries(), "nixconvoy-plan", f" deciding {core}")

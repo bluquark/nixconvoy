@@ -1,5 +1,5 @@
 # The crate behind the confirmed-switch helper, boot-assessment and
-# nixconvoy's deploy-switch and deploy-plan (switch-guard/, one crate: see
+# nixconvoy's nixconvoy-switch and nixconvoy-plan (switch-guard/, one crate: see
 # its src/lib.rs).  checkPhase's `cargo test` runs the stateright models and
 # the property tests.
 { pkgs }:

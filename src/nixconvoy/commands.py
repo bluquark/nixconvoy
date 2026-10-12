@@ -146,7 +146,7 @@ def land() -> None:
 def pull() -> None:
     """This checkout and its siblings onto origin/main (cli docstring)."""
     await_background_push()
-    binary("deploy-plan")  # resolved before update_checkout moves into the others
+    binary("nixconvoy-plan")  # resolved before update_checkout moves into the others
     if not catch_up([Path.cwd(), *sibling_checkouts()]):
         sys.exit(1)
 
@@ -211,7 +211,7 @@ def abandon(apply_now: bool = False) -> None:
 
 def prune(names: list[str]) -> None:
     """Remove the subagent worktrees that hold nothing of their own (cli
-    docstring: Prune), as deploy-plan's prune core decides: the named ones,
+    docstring: Prune), as nixconvoy-plan's prune core decides: the named ones,
     or every one under this checkout.  Runs are serialised per repository."""
     here = Path.cwd().resolve()
     top = sub_parent(here) or here
@@ -252,7 +252,7 @@ def prune_one(d: Path, *, named: bool, own_session_ends: bool = False,
               fetched: list[dict[str, object]] | None = None, prefetched: bool = False,
               deploy_held: bool = False, dropped_failed: list[str] | None = None,
               stopped: Stop | None = None) -> str | None:
-    """deploy-plan's prune core on the subagent worktree `d`: None once
+    """nixconvoy-plan's prune core on the subagent worktree `d`: None once
     removed (the process then in its parent), else why it was kept.
     `fetched` shares one fetch across a run (`prefetched`: the caller
     fetched); `deploy_held`: the caller holds its deploy lock already;

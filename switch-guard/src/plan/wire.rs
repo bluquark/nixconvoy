@@ -1,4 +1,4 @@
-//! deploy-plan's protocol with nixconvoy: JSON lines, as deploy-switch's
+//! nixconvoy-plan's protocol with nixconvoy: JSON lines, as nixconvoy-switch's
 //! (control/wire.rs).  nixconvoy writes the core's name and parameters,
 //! then one reply per query; the binary answers each with
 //! `{"effects": [...], "next": {"ask": ...} | {"done": ...} | {"die": ...}}`.
@@ -247,7 +247,7 @@ pub fn start(line: &str) -> Result<Core, String> {
     let v: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
     let protocol = field(&v, "protocol")?.as_u64();
     if protocol != Some(PROTOCOL) {
-        return Err(format!("deploy-plan speaks protocol {PROTOCOL}, nixconvoy {protocol:?}"));
+        return Err(format!("nixconvoy-plan speaks protocol {PROTOCOL}, nixconvoy {protocol:?}"));
     }
     Ok(match text(&v, "core")?.as_str() {
         "drift" => Core::Drift(Box::new(Replay::new(drift_params(&v)?, drift::program))),
