@@ -187,12 +187,21 @@ pub enum Query {
     /// Bring the checkout onto the fetched origin/main and retake the
     /// staged snapshot -> Ran.
     Refresh,
+    /// Wait while another checkout's deploy under way (its announcement on
+    /// origin, as fetched) reaches a target this checkout's work reaches
+    /// too, probing the targets again after -> Flag: waited (origin may
+    /// have moved).
+    AwaitPending {
+        union: String,
+    },
     /// Evaluate, build and copy `union` (the deploy's steps 5-7 up to the
-    /// switch), `listed` the branches it may contain, re-fetching meanwhile
-    /// -> Flag: true when the deploy ends there.
+    /// switch), `listed` the branches it may contain and `branches` the
+    /// ones it merged, re-fetching meanwhile -> Flag: true when the deploy
+    /// ends there.
     Stage {
         union: String,
         listed: Vec<String>,
+        branches: Vec<(String, String)>,
     },
 
     /// The prune core's, in the subagent worktree it judges.  Take the

@@ -1,43 +1,68 @@
-"""A deploy: probe, snapshot, union, eval, precheck, build, copy, switch,
-then commit and push - in the order the module docstring of cli.py gives."""
+"""A deploy: probe, snapshot and its announcement, union (waiting for a
+deploy under way that reaches the same targets), eval, precheck, build,
+copy and the records' push, switch, then commit and push - in the order the
+module docstring of cli.py gives."""
 
 from __future__ import annotations
 
 import os
+import subprocess
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from . import memo, proc, targets
 from .checkout import (
+    Announce,
     adopt_commit,
+    announce_increment,
     await_background_push,
     commit_deployed,
     current_branch,
     deployed_commit,
     ensure_on_work_branch,
     ensure_rebased,
+    fetch_args,
+    in_flight,
     origin_tips,
     pop_tmp_commits,
+    push_deployed,
+    push_records,
     push_work_branch,
+    record_commit,
     staged_differs,
     staged_snapshot,
+    withdraw_announcement,
     work_branch,
 )
 from .config import builder
 from .guard import binary, decide
 from .memo import Top
-from .proc import PERF, die, dump_json, git, rev
+from .proc import PERF, die, dump_json, git, load_json, rev
 from .switch import lineage_record, switch
 from .targets import Probe, expand_targets, flake_target_names, remote_only
 from .union import UnionQueries
+
+# Seconds between the looks at origin while waiting for a deploy under way.
+WAIT_POLL = 5
+
+
+def previous_record(lineage: str) -> str:
+    """The deploy record a target's lineage names, "" when none."""
+    try:
+        doc = load_json(lineage)
+    except ValueError:
+        return ""
+    rec = doc.get("record") if isinstance(doc, dict) else None
+    return rec if isinstance(rec, str) else ""
 
 
 def deploy(filter_targets: list[str], msg: str | None, reset: bool,
            danger: bool = False, dry: bool = False) -> None:
     """`reset`: this checkout's view alone - no other work branch in the
-    union, and a target running another checkout's refused work switched over
-    when this work reaches it or `filter_targets` names it.
+    union, no wait for a deploy under way, and a target running another
+    checkout's refused work switched over when this work reaches it or
+    `filter_targets` names it.
     `dry`: stop after the dry activation of every target that would be
     switched, printing the units it would stop, restart or reload; nothing
     is switched, committed or pushed."""
@@ -57,7 +82,7 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
     # still cover them.
     probe_names: list[str] = [] if skip else [n for n in all_targets if not remote_only(n)]
     pool = ThreadPoolExecutor(1 + len(probe_names))
-    fetch = pool.submit(git, "fetch", "--quiet", "--no-auto-gc", "origin")
+    fetch = pool.submit(git, *fetch_args("--no-auto-gc"))
     probes: dict[str, Future[Probe]] = {n: pool.submit(targets.probe, n) for n in probe_names}
     pool.shutdown(wait=False)
 
@@ -90,22 +115,50 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
     else:
         ensure_rebased()
 
+    ann: Announce | None = None
+    if snap and not dry and not skip:
+        assert wb is not None
+        ann = announce_increment(wb, snap)
+    settled = False
+    try:
+        settled = run_deploy(filter_targets, candidates, all_targets, msg, reset, danger, dry, skip,
+                             me, main0, wb, snap, ann, fetch, probes)
+    finally:
+        if ann is not None and not settled:
+            assert wb is not None
+            withdraw_announcement(wb, ann)
+
+
+def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: list[str],
+               msg: str | None, reset: bool, danger: bool, dry: bool, skip: bool, me: str,
+               main0: str | None, wb: str | None, snap: str, ann: Announce | None,
+               fetch: Future[subprocess.CompletedProcess[str]], probes: dict[str, Future[Probe]]) -> bool:
+    """The deploy from its union on: whether its announcement is settled by
+    the push that ends it (push_deployed), rather than to withdraw."""
     running: dict[str, str | None] = {}
     probed: dict[str, Probe] = {}
-    if not skip:
-        PERF.mark("probe")
+
+    def collect_probes() -> None:
+        nonlocal running, probed
         probed = {n: f.result() for n, f in probes.items()}
         running = {n: p.running for n, p in probed.items()}
         dead = [h for h in candidates if running.get(h) is None]
         if dead:
             die(f"unreachable: {', '.join(dead)} - nothing was committed; "
                 f"fix connectivity (or restrict targets / use `commit`) and re-run")
+
+    if not skip:
+        PERF.mark("probe")
+        collect_probes()
         targets.check_builder()
 
     plan: list[str] = []
     affected: list[str] = []
     left_alone: list[str] = []
     tops: dict[str, Top] = {}
+    committed = ""
+    records: dict[str, str] = {}
+    lineages: dict[str, str] = {}
 
     def refresh() -> None:
         nonlocal snap
@@ -113,11 +166,65 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
         if snap:
             snap = staged_snapshot()
 
-    def stage(wt: str, union: str, listed: list[str]) -> bool:
-        """Eval, precheck, build and copy for `union`, checked out in `wt`
-        from the branches `listed` in deploy-branches: whether the deploy
-        ends here."""
-        nonlocal plan, affected, left_alone, tops
+    def await_pending(wt: str, union: str) -> bool:
+        """The union core's AwaitPending (step 4a): while another checkout's
+        deploy is under way (its announcement, checkout.in_flight) and its
+        increment reaches a candidate this checkout's own work reaches too
+        (memo.reached_between on `union`, checked out in `wt`), wait for it
+        to end rather than build without it and be refused (or rebuild) once
+        it switched.  Whether it waited: the targets are then probed again,
+        and the union redone with what landed."""
+        nonlocal probes
+        if reset or skip:
+            return False
+        told: set[str] = set()
+        waited = False
+        failed_polls = 0
+        while True:
+            live, stale = in_flight(time.time(), wb)
+            for p in stale:
+                if p.branch not in told:
+                    told.add(p.branch)
+                    print(f"warning: ignoring the announced increment of {p.branch} "
+                          f"({p.sha[:12]}): {p.age / 60:.0f} min old and its deploy never ended",
+                          flush=True)
+            waiting: dict[str, list[str]] = {}
+            if live:
+                mine = memo.reached_targets(wt, union, candidates, snap or "HEAD",
+                                            {h: probed[h].lineage for h in candidates if h in probed})
+                for b, sha in live.items():
+                    both = memo.reached_between(wt, union, sorted(mine), f"{sha}^", sha)
+                    if both:
+                        waiting[b] = sorted(both)
+            if not waiting:
+                break
+            for b, hs in waiting.items():
+                if b not in told:
+                    told.add(b)
+                    print(f"waiting for {b}'s deploy under way: its increment and this "
+                          f"checkout's both reach {', '.join(hs)}...", flush=True)
+            waited = True
+            time.sleep(WAIT_POLL)
+            if git(*fetch_args(), check=False).returncode == 0:
+                failed_polls = 0
+            else:
+                failed_polls += 1
+                if failed_polls >= 12:
+                    die("origin stopped answering while waiting for the deploy under way; "
+                        "nothing was built, switched or committed")
+        if waited:
+            print("...ended; probing the targets again and redoing the union", flush=True)
+            PERF.mark("probe")
+            with ThreadPoolExecutor(max(1, len(probes))) as pool:
+                probes = {n: pool.submit(targets.probe, n) for n in probes}
+            collect_probes()
+        return waited
+
+    def stage(wt: str, union: str, listed: list[str], branches: list[tuple[str, str]]) -> bool:
+        """Eval, precheck, build and copy for `union`, checked out in `wt`,
+        from the branches `listed` in deploy-branches, `branches` the ones
+        it merged: whether the deploy ends here."""
+        nonlocal plan, affected, left_alone, tops, committed, records, lineages
         if skip:
             if dry:
                 print(f"NIXCONVOY_SKIP_SWITCH=1 --dry-activate: union {union}; nothing done")
@@ -157,7 +264,8 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
             targets=all_targets, candidates=candidates, reset=reset, named=bool(filter_targets),
             reached=sorted(reached), running=running,
             built={h: t.out for h, t in tops.items()},
-            lineages={h: {"text": p.lineage, "age": p.age} for h, p in probed.items()})
+            lineages={h: {"text": p.lineage, "age": p.age} for h, p in probed.items()},
+            in_flight=in_flight(time.time(), wb)[0])
         assert isinstance(verdict, dict)
         plan = [str(h) for h in verdict["plan"]]
         affected = [str(h) for h in verdict["affected"]]
@@ -179,6 +287,28 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
                     f"-u boot-assessment` on {name}; then change the configuration, or "
                     f"re-arm the stub to retry it as is (sudo mv of the +0-N stub to +2 "
                     f"under /boot/EFI/Linux).")
+
+        # The increment's commit and each target's record, before the
+        # switch: the lineage the targets get names the commit origin will
+        # hold, and the records reach origin before anything runs them.
+        committed = ""
+        subject = "main" + "".join(f" + {n}" for n, _ in branches)
+        if snap:
+            assert wb is not None  # a snapshot needs the work branch (deploy)
+            fmt = ", ".join
+            full = (f"{msg}\n\nAffected: {fmt(affected) or 'none'}"
+                    f"\nDeployed: {fmt(plan) or 'none'}")
+            committed = deployed_commit(snap, full)
+            subject = (msg or "").partition("\n")[0] or subject
+        doc = lineage_record(union, branches, committed, ann.sha if ann else "")
+        records, lineages = {}, {}
+        if not dry:
+            for h in plan:
+                body = dump_json({**doc, "toplevel": tops[h].out})
+                parents = [previous_record(probed[h].lineage), rev("refs/remotes/origin/main") or "",
+                           *(t for _, t in branches), committed]
+                records[h] = record_commit(h, union, parents, subject, body)
+                lineages[h] = dump_json({**doc, "toplevel": tops[h].out, "record": records[h]})
 
         if plan:
             b = builder()
@@ -205,11 +335,13 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
 
         if dry and plan:
             print(f"dry-activating {', '.join(plan)}...")
-        with ThreadPoolExecutor(1 + len(plan)) as pool:
-            refetch = pool.submit(git, "fetch", "--quiet", "origin")
+        with ThreadPoolExecutor(2 + len(plan)) as pool:
+            refetch = pool.submit(git, *fetch_args())
+            pushed = pool.submit(push_records, records)
             copies = [pool.submit(copy_then_gate, n, tops[n], len(plan) > 1) for n in plan]
             refusals = [r for r in (cp.result() for cp in copies) if r]
             refetch.result()
+            unpushed = pushed.result()
         if dry:
             if refusals:
                 die("--dry-activate: nothing was switched, committed or pushed; a deploy "
@@ -226,25 +358,17 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
             return True
         if refusals:
             die(refusals[0])
+        if unpushed:
+            die(f"pushing the deploy records to origin failed; nothing was switched:\n{unpushed}")
         return False
 
-    queries = UnionQueries(lambda: snap or "HEAD", fetch, refresh, stage)
+    queries = UnionQueries(lambda: snap or "HEAD", fetch, refresh, stage, await_pending)
     try:
         done = decide("union", queries, wb=wb or "", reset=reset, main0=main0)
         if skip or dry:
-            return
+            return False
         assert isinstance(done, dict)
         union = str(done["union"])
-        branches = [(str(n), str(t)) for n, t in done["branches"]]
-
-        committed = ""
-        if snap:
-            assert wb is not None  # a snapshot needs the work branch (above)
-            fmt = ", ".join
-            full = (f"{msg}\n\nAffected: {fmt(affected) or 'none'}"
-                    f"\nDeployed: {fmt(plan) or 'none'}")
-            committed = deployed_commit(snap, full)
-        record = lineage_record(union, branches, committed)
         deploy_switch = binary("deploy-switch") if plan else ""
 
         # The switch-last targets alone, one by one, once everything else has
@@ -261,18 +385,14 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
                 assert r is not None  # unreachable targets never enter the plan
                 expected[name] = r
             PERF.mark("switch:" + "+".join(batch))
-
-            def line(n: str) -> str:
-                return dump_json({**record, "toplevel": tops[n].out})
-
             if len(batch) == 1:
                 n = batch[0]
-                switch(n, expected[n], tops[n].out, deploy_switch, lineage=line(n),
+                switch(n, expected[n], tops[n].out, deploy_switch, lineage=lineages[n],
                        digest=probed[n].digest, needs_internet=tops[n].last)
                 continue
             with ThreadPoolExecutor(len(batch)) as pool:
                 switches = [pool.submit(switch, n, expected[n], tops[n].out, deploy_switch, True,
-                                        line(n), probed[n].digest, tops[n].last)
+                                        lineages[n], probed[n].digest, tops[n].last)
                             for n in batch]
             for f in switches:
                 f.result()
@@ -281,10 +401,9 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
         if committed:
             assert wb is not None
             adopt_commit(wb, committed)
-        if wb is not None and current_branch() == wb:
-            push_work_branch(wb, background=True)
         # A local main ahead of origin is pushed by its owner once every
         # target it affects has switched.
+        push_deployed(wb, ann, records)
 
         if plan:
             print(f"deployed {', '.join(plan)}: union {union}")
@@ -293,6 +412,6 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
                   f"checkout's work this checkout's does not reach (union {union})")
         else:
             print(f"nothing drifts from the union ({union}); nothing to switch")
+        return True
     finally:
         queries.drop()
-

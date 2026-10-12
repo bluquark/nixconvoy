@@ -307,27 +307,16 @@ def recorded_tip(lineage: str, branch: str) -> str | None:
     return tip if isinstance(tip, str) else None
 
 
-def reached_targets(wt: str, union: str, targets: list[str], tip: str,
-                    lineages: dict[str, str]) -> set[str]:
-    """The targets among `targets` whose evaluation reads something this
-    checkout's own work changed: a path of target_eval_reads, or a lock entry
-    of an input those files name, differing between `tip` (the commit about
-    to deploy) and what of this branch the target already runs - the tip its
-    lineage recorded, when that lies between origin/main's merge base and
-    `tip`, else the merge base itself, so main's movement, a rebase or
-    another branch's work never counts as this checkout's.  The drift core
-    consults it for a target carrying another checkout's refused work alone:
-    one this work does not reach is left running that work.  No merge base
-    (nothing to measure from) reaches every target."""
-    from .checkout import current_branch  # noqa: PLC0415 - checkout imports guard, which imports checkout
-
-    own = current_branch() or "main"
+def reached_between(wt: str, union: str, targets: list[str], base: str, tip: str) -> set[str]:
+    """The targets among `targets` whose evaluation reads something that
+    differs between the commits `base` and `tip`: a path of
+    target_eval_reads (in the `union` commit checked out in `wt`), or a lock
+    entry of an input those files name."""
     lock_path = cfg().flake_file("flake.lock")
-    p = run(["git", "merge-base", tip, "refs/remotes/origin/main"], check=False)
-    mb = p.stdout.strip()
-    if p.returncode != 0 or not mb:
-        return set(targets)
-    changed: dict[str, set[str]] = {}
+    # A rename lists both paths: the one a target read may be the old.
+    delta = set(out(["git", "diff", "--name-only", "--no-renames", base, tip]).splitlines())
+    if not delta:
+        return set()
     locks: dict[str, object] = {}
 
     def lock_at(ref: str) -> object:
@@ -342,17 +331,6 @@ def reached_targets(wt: str, union: str, targets: list[str], tip: str,
 
     reached: set[str] = set()
     for h in targets:
-        base = mb
-        rec = recorded_tip(lineages.get(h, ""), own)
-        if rec and rec != mb and is_ancestor(mb, rec) and is_ancestor(rec, tip):
-            base = rec
-        if base not in changed:
-            # A rename lists both paths: the one a target read may be the old.
-            changed[base] = set(out(["git", "diff", "--name-only", "--no-renames",
-                                     base, tip]).splitlines())
-        delta = changed[base]
-        if not delta:
-            continue
         reads = target_eval_reads(wt, union, h)
         if reads is None:
             reached.add(h)
@@ -364,6 +342,37 @@ def reached_targets(wt: str, union: str, targets: list[str], tip: str,
                 and lock_part(lock_at(base), named) != lock_part(lock_at(tip), named))
         if files or lock:
             reached.add(h)
+    return reached
+
+
+def reached_targets(wt: str, union: str, targets: list[str], tip: str,
+                    lineages: dict[str, str]) -> set[str]:
+    """The targets among `targets` whose evaluation reads something this
+    checkout's own work changed (reached_between): differing between `tip`
+    (the commit about to deploy) and what of this branch the target already
+    runs - the tip its lineage recorded, when that lies between origin/main's
+    merge base and `tip`, else the merge base itself, so main's movement, a
+    rebase or another branch's work never counts as this checkout's.  The
+    drift core consults it for a target carrying another checkout's refused
+    work alone: one this work does not reach is left running that work.  No
+    merge base (nothing to measure from) reaches every target."""
+    from .checkout import current_branch  # noqa: PLC0415 - checkout imports guard, which imports checkout
+
+    own = current_branch() or "main"
+    p = run(["git", "merge-base", tip, "refs/remotes/origin/main"], check=False)
+    mb = p.stdout.strip()
+    if p.returncode != 0 or not mb:
+        return set(targets)
+    by_base: dict[str, list[str]] = {}
+    for h in targets:
+        base = mb
+        rec = recorded_tip(lineages.get(h, ""), own)
+        if rec and rec != mb and is_ancestor(mb, rec) and is_ancestor(rec, tip):
+            base = rec
+        by_base.setdefault(base, []).append(h)
+    reached: set[str] = set()
+    for base, hs in by_base.items():
+        reached |= reached_between(wt, union, hs, base, tip)
     return reached
 
 

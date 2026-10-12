@@ -30,6 +30,8 @@ struct Origin {
     /// What the fetch finds, and each build after it.
     fetch: Option<(String, Refs)>,
     builds: Vec<Refs>,
+    /// The deploys under way to wait for: what origin holds after each.
+    waits: Vec<Refs>,
     tree_as_is: bool,
     final_stage: bool,
 }
@@ -161,8 +163,20 @@ fn answer(o: &mut Origin, t: &mut Trace, q: &Query) -> Reply {
             }
             ran(true)
         }
-        Query::Stage { union, listed } => {
+        Query::AwaitPending { union } => {
+            assert!(!t.p.as_ref().unwrap().reset, "a --reset waits for nobody");
+            assert_eq!(t.checked_out.as_ref(), Some(union), "waiting on a union not checked out");
+            assert!(t.fetched && !t.stale, "waited before the fetch was collected and followed");
+            if o.waits.is_empty() {
+                return Reply::Flag(false);
+            }
+            o.refs = o.waits.remove(0);
+            t.stale = true;
+            Reply::Flag(true)
+        }
+        Query::Stage { union, listed, branches } => {
             assert_eq!(listed, &o.listed, "drift judged against another deploy-branches than the checkout's");
+            assert_eq!(branches.iter().map(|b| b.0.clone()).collect::<Vec<_>>(), t.merged, "staging other branches than the union merged");
             assert_eq!(t.checked_out.as_ref(), Some(union), "staging what is not checked out");
             assert!(t.fetched && !t.stale, "staged before the fetch was collected and followed");
             t.stages.push((union.clone(), t.merged.clone()));
@@ -201,11 +215,12 @@ fn arb_origin() -> impl Strategy<Value = Origin> {
         arb_refs(),
         proptest::option::of((prop::sample::select(vec!["m0", "m1"]).prop_map(str::to_string), arb_refs())),
         prop::collection::vec(arb_refs(), 0..4),
+        prop::collection::vec(arb_refs(), 0..3),
         any::<bool>(),
         prop::bool::weighted(0.1),
         any::<bool>(),
     )
-        .prop_map(|(head_has, unchanged, conflicts, refs, fetch, builds, tree_as_is, final_stage, lists_new)| Origin {
+        .prop_map(|(head_has, unchanged, conflicts, refs, fetch, builds, waits, tree_as_is, final_stage, lists_new)| Origin {
             listed: LISTED.iter().map(|s| s.to_string()).collect(),
             refreshed_listed: lists_new.then(|| LISTED.iter().chain(&[NEW]).map(|s| s.to_string()).collect()),
             head_has,
@@ -215,6 +230,7 @@ fn arb_origin() -> impl Strategy<Value = Origin> {
             main: "m0".into(),
             fetch,
             builds,
+            waits,
             tree_as_is,
             final_stage,
         })
@@ -236,7 +252,7 @@ proptest! {
         let (end, t, asked, fx, out) = run(&o, &p);
         prop_assert!(t.stages.len() <= ATTEMPTS && t.worktrees <= ATTEMPTS);
         if reset {
-            let merged = asked.iter().any(|q| matches!(q, Query::Branches | Query::Merge { .. }));
+            let merged = asked.iter().any(|q| matches!(q, Query::Branches | Query::Merge { .. } | Query::AwaitPending { .. }));
             prop_assert!(!merged);
         }
         for q in &asked {
@@ -276,7 +292,7 @@ proptest! {
                 prop_assert!(select_of(&end, &p).contains(&(name.clone(), sha.clone())));
             }
             Err(msg) => {
-                prop_assert_eq!(msg, format!("work branches kept moving during {ATTEMPTS} build attempts; re-run"));
+                prop_assert_eq!(msg, format!("origin kept moving during {ATTEMPTS} attempts; re-run"));
                 prop_assert_eq!(t.worktrees, ATTEMPTS);
             }
         }
@@ -318,6 +334,28 @@ fn a_moved_origin_redoes_the_union() {
     let marks: Vec<&Effect> = fx.iter().filter(|e| matches!(e, Effect::Mark(_))).collect();
     assert_eq!(marks, [&Effect::Mark("union".into()), &Effect::Mark("fetch".into()), &Effect::Mark("union".into())]);
     assert_eq!(asked.iter().filter(|q| **q == Query::Worktree).count(), 2);
+}
+
+#[test]
+fn a_deploy_under_way_is_waited_for() {
+    // Before anything is evaluated, the wait; then the union is redone on
+    // the refreshed checkout with the branch that deploy pushed.
+    let o = Origin {
+        refs: vec![(LISTED[1].into(), "s1".into())],
+        main: "m0".into(),
+        waits: vec![vec![(LISTED[1].into(), "s1".into()), (LISTED[2].into(), "s2".into())]],
+        listed: LISTED.iter().map(|s| s.to_string()).collect(),
+        ..Origin::default()
+    };
+    let (_, t, asked, fx, out) = run(&o, &params(false));
+    let done = out.unwrap();
+    assert_eq!(done.branches, [(LISTED[1].to_string(), "s1".to_string()), (LISTED[2].to_string(), "s2".to_string())]);
+    assert_eq!((t.refreshed, t.stages.len(), t.worktrees), (1, 1, 2));
+    assert!(fx.contains(&Effect::Print("redoing the union with what that deploy pushed".into())));
+    let waits: Vec<&Query> = asked.iter().filter(|q| matches!(q, Query::AwaitPending { .. })).collect();
+    assert_eq!(waits.len(), 2);
+    let stage = asked.iter().position(|q| matches!(q, Query::Stage { .. })).unwrap();
+    assert!(asked.iter().position(|q| matches!(q, Query::AwaitPending { .. })).unwrap() < stage);
 }
 
 #[test]

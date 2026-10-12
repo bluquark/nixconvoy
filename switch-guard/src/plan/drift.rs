@@ -6,10 +6,13 @@
 //! when that checkout's push has not landed (origin's tip of its branch is
 //! still the one it built on) or when it holds work of a branch
 //! deploy-branches here does not list.  Switching it would revert that work
-//! until its owner redeploys, so it is never switched as is - unless the
-//! lineage is older than PENDING_MAX_AGE by the target's clock (a dead
-//! deploy's) or the deploy is a --reset that names the target or reaches
-//! it.  When this checkout's own work does not reach the target
+//! until its owner redeploys, so it is never switched as is - unless that
+//! deploy is over: its increment's announcement (the lineage's
+//! `pending.announce`, origin's pending ref) is no longer in flight
+//! (Context::in_flight), the push that would have cleared it having never
+//! landed; a lineage without one older than PENDING_MAX_AGE by the target's
+//! clock counts as a dead deploy's likewise - or the deploy is a --reset
+//! that names the target or reaches it.  When this checkout's own work does not reach the target
 //! (Params::reached: no file its configuration reads changed), the target is
 //! simply left running that work and the deploy goes on without it; when it
 //! does, two checkouts are changing the same target and the deploy is refused
@@ -33,9 +36,10 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A push follows its switch within seconds (the nightly's main, once its
-/// four targets switched): a lineage still refused this long after it was
-/// written (by the target's clock) is a dead deploy's, and its target is fair
-/// game again.
+/// four targets switched): a lineage without an announcement still refused
+/// this long after it was written (by the target's clock) is a dead
+/// deploy's, and its target is fair game again.  nixconvoy drops an
+/// announcement this old from Context::in_flight the same way.
 pub const PENDING_MAX_AGE: f64 = 30.0 * 60.0;
 pub const RESET_FLAG: &str = "--reset";
 
@@ -52,6 +56,9 @@ pub struct Lineage {
     /// The deploying checkout's own branch when what it unioned of it was not on
     /// origin yet, with the origin tip that push moves.
     pub pending: Option<(String, Option<String>)>,
+    /// The pending increment's announcement on origin, cleared by the push
+    /// that ends the deploy.
+    pub announce: Option<String>,
     pub at: f64,
     pub machine: String,
     pub checkout: String,
@@ -66,18 +73,26 @@ pub fn parse(text: &str, age: Option<f64>) -> Option<Lineage> {
     let v: Value = serde_json::from_str(text).ok()?;
     let o = v.as_object()?;
     // Version 1 named the machine `by.host`; read, never written.
+    // pending.announce came later without a new version: a reader from
+    // before it ignores the field.
     let version = o.get("version").and_then(Value::as_i64)?;
     if !(1..=2).contains(&version) {
         return None;
     }
     let s = |v: Option<&Value>| v.and_then(Value::as_str).map(str::to_string);
     let by = o.get("by")?.as_object()?;
+    let mut announce = None;
     let pending = match o.get("pending") {
         None | Some(Value::Null) => None,
         Some(Value::Object(p)) => {
             let base = match p.get("base") {
                 None | Some(Value::Null) => None,
                 Some(Value::String(b)) => Some(b.clone()),
+                Some(_) => return None,
+            };
+            announce = match p.get("announce") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(a)) => Some(a.clone()),
                 Some(_) => return None,
             };
             Some((s(p.get("branch"))?, base))
@@ -94,6 +109,7 @@ pub fn parse(text: &str, age: Option<f64>) -> Option<Lineage> {
         branches,
         tips,
         pending,
+        announce,
         at: o.get("at")?.as_f64()?,
         machine: s(by.get("machine")).or_else(|| s(by.get("host")))?,
         checkout: s(by.get("checkout"))?,
@@ -118,7 +134,9 @@ pub enum Kind {
     /// Would be refused, but this checkout's work does not reach the target:
     /// left running the other checkout's work, not switched.
     LeftAlone,
-    /// Refused, but written more than PENDING_MAX_AGE ago.
+    /// Refused, but its deploy is over (its announcement cleared without
+    /// the push landing) or, without an announcement, it was written more
+    /// than PENDING_MAX_AGE ago.
     Abandoned,
     /// Refused, but taken over by a --reset that names or reaches the target.
     Overridden,
@@ -153,6 +171,9 @@ pub struct Context {
     pub listed: BTreeSet<String>,
     /// This run's fetched origin tip of each branch.
     pub tips: BTreeMap<String, String>,
+    /// The announced increment of each branch whose deploy is under way:
+    /// origin's pending refs as fetched, a dead deploy's left out.
+    pub in_flight: BTreeMap<String, String>,
     pub now: f64,
     /// Seconds east of UTC, for the times shown.
     pub tz_offset: i64,
@@ -190,15 +211,18 @@ pub fn classify(lin: Option<&Lineage>, running: &str, cx: &Context, take_over: b
             return (Kind::CatchUp, format!("runs {branch}'s increment deployed by {who}, pushed since"));
         }
         let at: String = base.as_deref().unwrap_or("nothing").chars().take(12).collect();
-        (
-            Kind::InFlight,
-            format!("runs an increment of {branch} deployed by {who} whose push has not landed (origin/{branch} is still at {at})"),
-        )
+        let why = format!("runs an increment of {branch} deployed by {who} whose push has not landed (origin/{branch} is still at {at})");
+        if let Some(a) = &lin.announce {
+            if cx.in_flight.get(branch) != Some(a) {
+                return (Kind::Abandoned, format!("{why}; its deploy is over without one, so taken as abandoned"));
+            }
+        }
+        (Kind::InFlight, why)
     } else {
         return (Kind::CatchUp, format!("runs pushed work deployed by {who}"));
     };
     let age = lin.age.unwrap_or(cx.now - lin.at);
-    if age > PENDING_MAX_AGE {
+    if (kind == Kind::Unlisted || lin.announce.is_none()) && age > PENDING_MAX_AGE {
         return (Kind::Abandoned, format!("{why}; {:.0} min old, so taken as abandoned", age / 60.0));
     }
     if take_over {
@@ -257,7 +281,7 @@ pub fn refusal(refused: &[(String, Kind)]) -> String {
     let targets: Vec<&str> = refused.iter().map(|(h, _)| h.as_str()).collect();
     let mut fixes = Vec::new();
     if refused.iter().any(|(_, k)| *k == Kind::InFlight) {
-        fixes.push("re-run once its push lands".to_string());
+        fixes.push("re-run once that deploy ends".to_string());
     }
     if refused.iter().any(|(_, k)| *k == Kind::Unlisted) {
         fixes.push(format!("list its branch in {BRANCHES_FILE} (`nixconvoy pull` once that line is on main)"));
@@ -266,7 +290,7 @@ pub fn refusal(refused: &[(String, Kind)]) -> String {
     let mut c = fix.chars();
     let fix: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
     format!(
-        "nothing switched or committed: {} {} another checkout's work this union lacks, and this checkout's work reaches {} too (see above).  {fix} (after {} min it counts as abandoned), or deploy with {RESET_FLAG} {} to revert it deliberately - along with every other branch's work there, which {RESET_FLAG} leaves out.",
+        "nothing switched or committed: {} {} another checkout's work this union lacks, and this checkout's work reaches {} too (see above).  {fix} (an increment whose deploy ended without its push, or whose announcement is {} min old, counts as abandoned), or deploy with {RESET_FLAG} {} to revert it deliberately - along with every other branch's work there, which {RESET_FLAG} leaves out.",
         targets.join(", "),
         if targets.len() == 1 { "runs" } else { "run" },
         if targets.len() == 1 { "it" } else { "them" },

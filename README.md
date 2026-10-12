@@ -43,12 +43,26 @@ no work.
   target that first re-checks it still runs what this deploy probed.  A
   deploy that raced another aborts cleanly instead of reverting it, and a
   re-run converges.
+- **Announced increments.**  A deploy pushes its increment to a pending ref
+  on origin before anything is evaluated.  A deploy starting elsewhere whose
+  change reaches a target that one reaches too waits for it, then builds
+  with what it pushed - instead of building without it to be refused once
+  it switched.  The push that ends the deploy clears the announcement; a
+  deploy ending without a switch withdraws it.
 - **Lineage.**  Every target records where its system came from: the union,
   each branch's tip, and the machine and checkout that deployed it.  A
   deploy that would overwrite another checkout's not-yet-pushed increment
   is refused (or leaves that target alone when its own work does not reach
-  it).  A lineage older than 30 minutes is a dead deploy's and is taken
-  over with a warning.
+  it) - until that deploy is over: its announcement cleared without the
+  push, or, for a lineage without one, 30 minutes old.  Then the increment
+  is abandoned and taken over with a warning.
+- **Deploy records.**  Before a target is switched, its deploy record - a
+  commit of the exact tree it will run, on its previous record, main, the
+  unioned branches and the increment - is pushed to origin, so no target
+  ever runs a state origin does not hold.  Once the target runs it,
+  `deployed/<target>` points at it: `git log --first-parent
+  origin/deployed/<target>` is the target's deploy history, and `git diff`
+  between two such branches what two targets run differently.
 - **Confirmed switches.**  With the NixOS module, a switch activates the
   new system with `switch-to-configuration test` under a dead-man timer,
   verifies it from the deploying machine (reachable, on the internet, its
@@ -271,6 +285,7 @@ deploying unmerged work to the same targets, each safe from the others.
 | Refuses a switch that would restart protected units |   |   |   | ✓ |
 | Switches the router (or any target) last |   |   |   | ✓ |
 | Commits and pushes only after the switch succeeded |   |   |   | ✓ |
+| Every deployed state is a pushed commit; a branch per target records its deploy history |   |   |   | ✓ |
 | Boot counting: an unreachable boot falls back to the last proven generation |   |   |   | ✓ |
 
 ### Concurrent checkouts
@@ -279,6 +294,7 @@ deploying unmerged work to the same targets, each safe from the others.
 |---|:-:|:-:|:-:|:-:|
 | Several checkouts deploy unmerged work to the same targets |   |   |   | ✓ |
 | Refuses to revert another checkout's in-flight work |   |   |   | ✓ |
+| Waits for a deploy under way on the same targets instead of building to be refused |   |   |   | ✓ |
 
 ## License
 

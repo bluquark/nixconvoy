@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 /// Bumped on any change of the messages below; nixconvoy sends the version
 /// it speaks.
-pub const PROTOCOL: u64 = 4;
+pub const PROTOCOL: u64 = 5;
 
 fn field<'a>(v: &'a Value, k: &str) -> Result<&'a Value, String> {
     v.get(k).ok_or_else(|| format!("missing {k} in {v}"))
@@ -77,11 +77,16 @@ fn drift_params(v: &Value) -> Result<drift::Params, String> {
     for (b, t) in object(v, "tips")? {
         tips.insert(b.clone(), t.as_str().ok_or("tips holds a non-string")?.to_string());
     }
+    let mut in_flight = BTreeMap::new();
+    for (b, a) in object(v, "in_flight")? {
+        in_flight.insert(b.clone(), a.as_str().ok_or("in_flight holds a non-string")?.to_string());
+    }
     Ok(drift::Params {
         cx: drift::Context {
             me: (machine.clone(), checkout.clone()),
             listed: strings(v, "listed")?.into_iter().collect(),
             tips,
+            in_flight,
             now: field(v, "now")?.as_f64().ok_or("now is not a number")?,
             tz_offset: field(v, "tz_offset")?.as_i64().ok_or("tz_offset is not an integer")?,
         },
@@ -188,7 +193,10 @@ pub fn query(q: &Query) -> Value {
         Query::Checkout { union } => ("checkout", vec![("union", s(union))]),
         Query::CollectFetch => ("collect_fetch", vec![]),
         Query::Refresh => ("refresh", vec![]),
-        Query::Stage { union, listed } => ("stage", vec![("union", s(union)), ("listed", json!(listed))]),
+        Query::AwaitPending { union } => ("await_pending", vec![("union", s(union))]),
+        Query::Stage { union, listed, branches } => {
+            ("stage", vec![("union", s(union)), ("listed", json!(listed)), ("branches", json!(branches))])
+        }
         Query::TakeNameLock => ("take_name_lock", vec![]),
         Query::ReleaseNameLock => ("release_name_lock", vec![]),
         Query::TakeDeployLock => ("take_deploy_lock", vec![]),
@@ -285,7 +293,7 @@ mod tests {
     #[test]
     fn round_trip() {
         assert!(start(r#"{"protocol":0,"core":"rebase","mode":"pop_tmp"}"#).is_err());
-        let mut c = start(r#"{"protocol":4,"core":"rebase","mode":"pop_tmp"}"#).unwrap();
+        let mut c = start(r#"{"protocol":5,"core":"rebase","mode":"pop_tmp"}"#).unwrap();
         assert_eq!(c.decide(None), (r#"{"effects":[],"next":{"ask":"head_subject"}}"#.to_string(), true));
         assert_eq!(reply(r#"{"text":null}"#).unwrap(), Reply::Text(None));
         let (line, more) = c.decide(Some(Reply::Text(None)));
@@ -300,16 +308,16 @@ mod tests {
         );
         assert_eq!(reply(r#"{"ran":true,"detail":""}"#).unwrap(), Reply::Ran { ok: true, detail: String::new() });
         assert_eq!(query(&Query::Switch { branch: "b".into(), start: None }).to_string(), r#"{"ask":"switch","branch":"b","start":null}"#);
-        let mut d = start(r#"{"protocol":4,"core":"drift","me":["h","/c"],"union":"u","listed":["main"],"tips":{},"now":0,"tz_offset":0,"router":"choko","targets":["a"],"candidates":["a"],"reset":false,"named":false,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"lineages":{"a":{"text":"","age":null}}}"#).unwrap();
+        let mut d = start(r#"{"protocol":5,"core":"drift","me":["h","/c"],"union":"u","listed":["main"],"tips":{},"in_flight":{},"now":0,"tz_offset":0,"router":"choko","targets":["a"],"candidates":["a"],"reset":false,"named":false,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"lineages":{"a":{"text":"","age":null}}}"#).unwrap();
         let (line, _) = d.decide(None);
         assert_eq!(
             line,
             r#"{"effects":[{"print":"  a: will switch"}],"next":{"done":{"affected":["a"],"drift":{"a":["untracked",""]},"plan":["a"]}}}"#
         );
-        let mut u = start(r#"{"protocol":4,"core":"union","wb":"w","reset":true,"main0":null}"#).unwrap();
+        let mut u = start(r#"{"protocol":5,"core":"union","wb":"w","reset":true,"main0":null}"#).unwrap();
         assert_eq!(u.decide(None).0, r#"{"effects":[{"mark":"union"}],"next":{"ask":"listed"}}"#);
         let mut p =
-            start(r#"{"protocol":4,"core":"prune","name":"agent-x","named":false,"own_session_ends":false,"stopped":null}"#).unwrap();
+            start(r#"{"protocol":5,"core":"prune","name":"agent-x","named":false,"own_session_ends":false,"stopped":null}"#).unwrap();
         assert_eq!(p.decide(None).0, r#"{"effects":[],"next":{"ask":"lock"}}"#);
         assert_eq!(
             p.decide(Some(Reply::Text(Some("pid 7".into())))).0,

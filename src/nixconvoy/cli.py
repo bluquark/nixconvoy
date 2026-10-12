@@ -39,7 +39,12 @@ Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
      evaluated
   3. snapshot the staged state (index) as an ephemeral deterministic commit
      on top of the work branch; unstaged and untracked changes are excluded,
-     since staging marks a change as ready to deploy.  Nothing is committed
+     since staging marks a change as ready to deploy.  Nothing is committed.
+     The increment is announced: its tree as a commit of its own, dated now,
+     pushed in the background to origin's refs/nixconvoy/pending/<branch>,
+     where a deploy starting elsewhere sees this one under way (step 4a)
+     until the push that ends this deploy clears it (step 8) - or this run
+     withdraws it, ending without a switch
   4. in a temporary worktree on that snapshot, union-merge every other
      pushed, listed work branch that still declares changes (mergiraf
      resolves structural conflicts; real conflicts abort with per-branch
@@ -47,6 +52,14 @@ Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
      deterministic (fixed identity/date, parent = origin/main), so the eval
      memo stays valid across retries and no-op redeploys.  Once step 1's
      fetch lands, steps 3-4 are redone if it moved origin/main or a work branch
+  4a. before anything is evaluated: while another checkout's deploy is under
+     way (its announcement, as fetched) and its increment reaches a
+     candidate this checkout's own work reaches too (the eval memo's read
+     scan over the union, no eval), wait for it, polling origin, then probe
+     the targets again and redo step 4 with what it pushed.  Building without
+     it would only end refused - or rebuilt - once it switched.  An
+     announcement 30 min old whose deploy never ended is a dead deploy's,
+     ignored with a warning; --reset waits for nobody
   5. evaluate every reachable target's toplevel for the union, one nix eval
      process per stale target, concurrently, memoized per target by the git
      hashes of the files its configuration references and the lock entries
@@ -63,21 +76,29 @@ Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
      switched as is: when this checkout's own work does not reach it (no
      file its configuration reads changed since the tip of this branch its
      lineage recorded) it is left alone, running that work; when it does,
-     the deploy is refused whole.  A refused lineage older than 30 min by
-     the target's clock is a dead deploy's and is switched over with a
-     warning; so is a refused target under --reset, when this work reaches it
-     or the target was named.  When the configuration
+     the deploy is refused whole.  An increment whose deploy is over - its
+     announcement cleared (step 8) without the push landing, or, for a
+     lineage written without one, older than 30 min by the target's clock -
+     is abandoned: switched over with a warning; so is a refused target
+     under --reset, when this work reaches it or the target was named.  When the configuration
      names a precheck (a flake check), it runs on a thread beside the evals
      unless a pass is already proven for exactly the files it reads, and a
      failure stops the deploy the moment it is known.  A drifting candidate
      whose boot counting rejected its new toplevel stops the deploy before
-     anything is built
+     anything is built.  Each target to be switched gets its deploy record:
+     a commit of the union's tree whose message carries the lineage below,
+     on the target's previous record (git log --first-parent is its deploy
+     history), origin/main, each unioned branch's tip and the increment's
+     commit, which is made now with its -m message and Affected:/Deployed:
+     trailers
   6. build the drifting candidates' closures straight from the evaluated
      .drvs (no re-eval), on the configured builder if any, unsandboxed
      when a dry-run shows only trivial builders left.  Nothing drifting and
      no precheck to run means no build
   7. copy the closures over, concurrently, while re-fetching to check that
-     no work branch moved during the build.  A target with protected units is
+     no work branch moved during the build and pushing the records to
+     origin's refs/nixconvoy/deploying/<target>, so no target ever runs a
+     state origin does not hold.  A target with protected units is
      dry-activated once its closure has landed: if the switch would stop,
      restart or reload one of them, the deploy stops before any target is
      switched unless --danger-network-config-change was given.  Then every
@@ -89,20 +110,23 @@ Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
      guard compares the lineage too, then claims the lineage file for the
      new toplevel before activation with its provenance: the toplevel, the
      union, origin/main and each unioned branch's tip, this checkout's
-     branch as pending when what it unioned of it is not on origin yet, the
-     time and this machine and checkout.  A target whose toplevel carries
+     branch as pending when what it unioned of it is not on origin yet
+     (with the announcement), the time, this machine and checkout, and the
+     record.  A target whose toplevel carries
      /confirmed-switch (the confirmed-switch module) is switched confirmed:
      a rollback timer is armed, the toplevel activated with `test`, and
      only once the target runs it, reaches the internet and passes its own
      checks (for a switch-last target, this machine must reach the internet
      too) are its profile and bootloader entry set - otherwise it is rolled
      back to the probed system, never rebooted
-  8. only now commit the staged state onto the work branch - the -m message
-     plus Affected:/Deployed: trailers - and push it in the background, the
-     next run collecting the result before its own fetch.  An increment that
-     fails to eval, build or switch is never committed, so other checkouts
-     cannot pull a broken commit and pushed tips never overestimate what is
-     running; its changes stay staged for the re-run
+  8. only now adopt the increment's commit onto the work branch and push it
+     in the background - then, once that landed, point the announcement at
+     origin/main and each switched target's record at
+     refs/heads/deployed/<target> - the next run collecting the result
+     before its own fetch.  An increment that fails to eval, build or switch
+     is never committed, so other checkouts cannot pull a broken commit and
+     pushed tips never overestimate what is running; its changes stay staged
+     for the re-run, and its announcement is withdrawn
 
 Land (nixconvoy land [<name> ...]): commit the work branch's tree minus
 COMMIT_MSG.md onto origin/main with COMMIT_MSG.md as the message, push main,
@@ -175,7 +199,8 @@ that affect no NixOS target, or to publish work while a target is unreachable.
 A staged change to what the precheck reads is checked on its own first.
 
 --reset deploys this checkout's view alone: the other work branches are
-left out of the union, so every target switched loses their work, and a target
+left out of the union (and no deploy under way is waited for), so every
+target switched loses their work, and a target
 running another checkout's in-flight or unlisted work (step 5) is switched
 over too, reverting that work, when this checkout's work reaches it or the
 target is named (one left alone otherwise stays as it is).  It is a one-off:

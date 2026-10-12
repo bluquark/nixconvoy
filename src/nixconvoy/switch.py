@@ -20,29 +20,39 @@ from .targets import PROBE_TIMEOUT, control_opts, lineage_digest
 
 
 def lineage_doc(*, union: str, main: str | None, branches: dict[str, str | None],
-                own: str, head: str | None, base: str | None, snap: str,
+                own: str, head: str | None, base: str | None, snap: str, announce: str,
                 at: float, machine: str, checkout: str, pid: int) -> dict[str, object]:
-    """The lineage of a deploy's union, before its toplevel is added:
-    `branches` the other work branches' unioned tips, `own` the checked-out
-    branch the union was built on (`head`, or `snap`, the commit the branch
-    gets once the staged increment runs), `base` origin's tip of it."""
+    """The lineage of a deploy's union, before its toplevel and record are
+    added: `branches` the other work branches' unioned tips, `own` the
+    checked-out branch the union was built on (`head`, or `snap`, the commit
+    the branch gets once the staged increment runs), `base` origin's tip of
+    it, `announce` the increment's announcement (checkout.announce_increment:
+    the drift core takes the increment as abandoned once that is cleared; a
+    reader from before it ignores the field, hence no new version)."""
     pending = bool(snap) or head != base
-    return {
+    doc: dict[str, object] = {
         "version": 2, "union": union, "main": main,
         "branches": {**branches, own: snap or head},
         "pending": {"branch": own, "base": base, "head": snap or head} if pending else None,
         "at": round(at), "by": {"machine": machine, "checkout": checkout, "pid": pid},
     }
+    if pending and announce:
+        p = doc["pending"]
+        assert isinstance(p, dict)
+        p["announce"] = announce
+    return doc
 
 
-def lineage_record(union: str, branches: list[tuple[str, str]], snap: str) -> dict[str, object]:
+def lineage_record(union: str, branches: list[tuple[str, str]], snap: str,
+                   announce: str = "") -> dict[str, object]:
     """lineage_doc for this deploy, from the refs it built its union on;
     `snap` the increment's work-branch commit (deployed_commit), or ""."""
     own = current_branch() or "main"  # detached: at origin/main (ensure_rebased)
     return lineage_doc(
         union=union, main=rev("refs/remotes/origin/main"), branches=dict(branches),
         own=own, head=rev("HEAD"), base=rev(f"refs/remotes/origin/{own}"), snap=snap,
-        at=time.time(), machine=proc.this_machine(), checkout=str(Path.cwd()), pid=os.getpid())
+        announce=announce, at=time.time(), machine=proc.this_machine(), checkout=str(Path.cwd()),
+        pid=os.getpid())
 
 
 def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> list[str]:

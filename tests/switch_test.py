@@ -229,19 +229,20 @@ LISTED = {"main", BRANCH, "haswell-wsl-deploys3", "chikuwa-deploys1"}
 
 
 def lineage_line(top: str, *, by: tuple[str, str] = OTHER,
-                 pending: tuple[str, str | None] | None = (BRANCH, BASE),
+                 pending: tuple[str, str | None] | None = (BRANCH, BASE), announce: str = "",
                  others: tuple[str, ...] = ("chikuwa-deploys1",), at: float = 1e6) -> str:
     own = pending[0] if pending else BRANCH
     doc = switch.lineage_doc(
         union="u" * 40, main="m" * 40, branches={b: "c" * 40 for b in others},
         own=own, head="h" * 40, base=pending[1] if pending else "h" * 40,
-        snap="s" * 40 if pending else "", at=at, machine=by[0], checkout=by[1], pid=4242)
+        snap="s" * 40 if pending else "", announce=announce, at=at, machine=by[0], checkout=by[1],
+        pid=4242)
     return proc.dump_json({**doc, "toplevel": top})
 
 
 def report(text: str, age: float | None, *, tips: dict[str, str] | None = None,
            reset: bool = False, named: bool = True, reached: bool = True,
-           running: str = NEW) -> tuple[str, str]:
+           running: str = NEW, in_flight: dict[str, str] | None = None) -> tuple[str, str]:
     """deploy-plan's drift verdict on one drifting target carrying `text` as
     its lineage file: its report line, and the deploy's die message."""
     out, err = io.StringIO(), io.StringIO()
@@ -249,7 +250,7 @@ def report(text: str, age: float | None, *, tips: dict[str, str] | None = None,
             contextlib.suppress(SystemExit):
         guard.decide(
             "drift", me=list(ME), union="u" * 40, listed=sorted(LISTED),
-            tips={BRANCH: BASE} if tips is None else tips,
+            tips={BRANCH: BASE} if tips is None else tips, in_flight=in_flight or {},
             now=1e6 + 60, tz_offset=0, router="choko", targets=["side1"], candidates=["side1"],
             reset=reset, named=named, reached=["side1"] if reached else [],
             running={"side1": running},
@@ -315,6 +316,15 @@ def lineage_cases() -> None:
     assert line.startswith("side1: will switch (catch-up: ") and not died, (line, died)
     line, _ = report(lineage_line(NEW), 31 * 60)
     assert line.startswith("side1: will switch, reverting it: ") and "taken as abandoned" in line, line
+    # An announced increment: refused while origin's pending ref carries
+    # the announcement, abandoned at once when it was cleared without the push.
+    announced = lineage_line(NEW, announce="p" * 40)
+    assert proc.load_json(announced)["pending"]["announce"] == "p" * 40  # type: ignore[index]
+    line, died = report(announced, 31 * 60, in_flight={BRANCH: "p" * 40})
+    assert line.startswith("side1: refused: ") and died, (line, died)
+    line, died = report(announced, 60)
+    assert line.startswith("side1: will switch, reverting it: ") and "its deploy is over" in line and \
+        not died, (line, died)
     line, _ = report(lineage_line(NEW), 60, reset=True)
     assert line.endswith("taken over by --reset"), line
     line, _ = report(lineage_line(NEW), 60, reset=True, named=False, reached=False)
@@ -348,6 +358,9 @@ def lineage_cases() -> None:
         assert record("haswell-wsl-deploys3", "h", "h", "") is None
         assert record("haswell-wsl-deploys3", "h", "h", "s") == {
             "branch": "haswell-wsl-deploys3", "base": "h", "head": "s"}
+        switch.current_branch = lambda: "haswell-wsl-deploys3"
+        assert switch.lineage_record("u", [], "s", "p")["pending"] == {
+            "branch": "haswell-wsl-deploys3", "base": "h", "head": "s", "announce": "p"}
         assert record("haswell-wsl-deploys3", "h2", "h", "") == {
             "branch": "haswell-wsl-deploys3", "base": "h", "head": "h2"}
         assert record("main", "lock", "m", "") == {"branch": "main", "base": "m", "head": "lock"}
@@ -546,6 +559,14 @@ def reach_cases(d: Path) -> None:
         sh(co, "fetch", "--quiet")
         sh(co, "rebase", "--quiet", "origin/main")
         assert reached({"a": lineage(**{wb: main0}), "b": lineage(**{wb: main0})}) == {"a", "b"}
+        # Between two commits, as the wait for a deploy under way measures
+        # its increment (reached_between): x.nix's change reaches a alone.
+        tip = sh(co, "rev-parse", "HEAD")
+        memo.union_objects.cache_clear()
+        memo.target_eval_reads.cache_clear()
+        assert memo.reached_between(str(co), tip, targets, f"{c_x}^", c_x) == {"a"}
+        assert memo.reached_between(str(co), tip, targets, c_x, c_x) == set()
+        assert memo.reached_between(str(co), tip, ["b"], f"{c_x}^", c_x) == set()
     finally:
         os.chdir(prev)
     print("reach: ok")
@@ -636,9 +657,10 @@ def git_cases(d: Path) -> None:
         staged: list[list[str]] = []
         refreshes: list[str] = []
 
-        def stage(wt: str, union: str, listed: list[str]) -> bool:
+        def stage(wt: str, union: str, listed: list[str], branches: list[tuple[str, str]]) -> bool:
             assert sh(Path(wt), "rev-parse", "HEAD") == union
             assert listed == ["other-deploys1", f"{wb}*"], listed
+            assert [b for b, _ in branches] == ["other-deploys1"], branches
             staged.append(sorted(p.name for p in Path(wt).iterdir()))
             return False
 
@@ -920,6 +942,107 @@ def git_cases(d: Path) -> None:
     print("git cores: ok")
 
 
+def announce_cases(d: Path) -> None:
+    """The announcement of an increment, the deploy records and the push
+    that ends a deploy, on a scratch origin: what a deploy elsewhere sees
+    of a deploy under way (checkout.in_flight), what it leaves behind."""
+    scratch_env()
+    origin, seed, co = d / "origin.git", d / "seed", d / "homelab9"
+    wb = "tester-deploys9"
+    sh(d, "init", "--quiet", "--bare", "-b", "main", str(origin))
+    sh(d, "clone", "--quiet", str(origin), str(seed))
+    put(seed, "deploy-branches", f"{wb}*\nother-deploys1\n")
+    put(seed, "a.txt", "one\n", "seed")
+    sh(seed, "push", "--quiet", "origin", "HEAD:main")
+    sh(d, "clone", "--quiet", str(origin), str(co))
+    prev = Path.cwd()
+    os.chdir(co)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            checkout.ensure_on_work_branch(wb)
+        put(co, "a.txt", "one\ntwo\n")
+        snap = checkout.staged_snapshot()
+        now = time.time()
+        # Announced: listed as under way by a fetch anywhere, dated now,
+        # this checkout's own left out of in_flight.
+        ann = checkout.announce_increment(wb, snap)
+        checkout.collect_announce(ann)
+        sh(co, *checkout.fetch_args())
+        assert sh(co, "rev-parse", f"{ann.sha}^{{tree}}") == sh(co, "rev-parse", f"{snap}^{{tree}}")
+        assert sh(co, "log", "-1", "--format=%s", ann.sha).startswith(f"pending increment of {wb} from tester:")
+        (pend,) = checkout.pending_announcements(now + 5)
+        assert pend.branch == wb and pend.sha == ann.sha and 4 < pend.age < 60, pend
+        assert checkout.in_flight(now + 5, wb) == ({}, [])
+        assert checkout.in_flight(now + 5, None) == ({wb: ann.sha}, [])
+        # Too old: a dead deploy's, told apart for a warning.
+        live, stale = checkout.in_flight(now + checkout.PENDING_MAX_AGE + 5, None)
+        assert live == {} and [p.sha for p in stale] == [ann.sha], (live, stale)
+        # Withdrawn (the deploy ended without a switch): cleared onto origin/main.
+        checkout.withdraw_announcement(wb, ann)
+        sh(co, *checkout.fetch_args())
+        assert checkout.pending_announcements(now + 5) == []
+        assert sh(co, "rev-parse", f"{checkout.PENDING_REFS}/{wb}") == proc.rev("refs/remotes/origin/main")
+
+        # The deploy records: the union's tree, chained on the target's
+        # previous record first, then main, the branches and the increment;
+        # a parent not here is left out.  Pushed before the switch.
+        ann = checkout.announce_increment(wb, snap)
+        checkout.collect_announce(ann)
+        committed = checkout.deployed_commit(snap, "two\n\nAffected: a\nDeployed: a")
+        main = proc.rev("refs/remotes/origin/main")
+        assert main is not None
+        rec1 = checkout.record_commit("a", snap, ["", main, "f" * 40, committed], "two", '{"doc": 1}')
+        assert sh(co, "log", "-1", "--format=%P", rec1).split() == [main, committed]
+        assert sh(co, "log", "-1", "--format=%s%n%b", rec1) == 'deploy a: two\n{"doc": 1}'
+        rec2 = checkout.record_commit("a", snap, [rec1, main, committed, main], "three", "{}")
+        assert sh(co, "log", "-1", "--format=%P", rec2).split() == [rec1, main, committed]
+        assert checkout.push_records({"a": rec1, "b": rec2}) is None
+        assert checkout.push_records({}) is None
+        assert sh(seed, "ls-remote", "origin", f"{checkout.DEPLOYING_REFS}/a").split()[0] == rec1
+        # The push that ends the deploy: the work branch, then the records
+        # onto refs/heads/deployed/<target> and the announcement cleared.
+        with contextlib.redirect_stderr(io.StringIO()):
+            checkout.adopt_commit(wb, committed)
+        with contextlib.redirect_stdout(io.StringIO()):
+            checkout.push_deployed(wb, ann, {"a": rec1, "b": rec2})
+        checkout.await_background_push()
+        sh(co, *checkout.fetch_args())
+        assert proc.rev(f"refs/remotes/origin/{wb}") == committed
+        assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/a") == rec1
+        assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/b") == rec2
+        assert checkout.pending_announcements(now + 5) == []
+        # A main checkout's deploy: the records alone.
+        with contextlib.redirect_stdout(io.StringIO()):
+            checkout.push_deployed(None, None, {"a": rec2})
+        checkout.await_background_push()
+        sh(co, *checkout.fetch_args())
+        assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/a") == rec2
+        assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/b") == rec2
+        # Nothing to push: no background push started.
+        checkout.push_deployed(wb, None, {})
+        assert not Path(checkout.push_state("pid")).exists()
+        # The branch not pushed (its lease failed): the announcement stays,
+        # so the deploy still counts as under way until it is stale.
+        ann = checkout.announce_increment(wb, snap)
+        checkout.collect_announce(ann)
+        put(co, "a.txt", "one\ntwo\nthree\n", "three")
+        sh(seed, "fetch", "--quiet", "origin", f"+refs/heads/{wb}:refs/heads/{wb}")
+        sh(seed, "switch", "--quiet", wb)
+        put(seed, "b.txt", "theirs\n", "theirs")
+        sh(seed, "push", "--quiet", "origin", wb)
+        with contextlib.redirect_stdout(io.StringIO()):
+            checkout.push_deployed(wb, ann, {})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            checkout.await_background_push()
+        assert "background push failed" in err.getvalue(), err.getvalue()
+        sh(co, *checkout.fetch_args())
+        assert checkout.in_flight(now + 5, None) == ({wb: ann.sha}, [])
+    finally:
+        os.chdir(prev)
+    print("announcements: ok")
+
+
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--fake-target"]:
         sys.exit(fake_target(sys.argv[2:]))
@@ -937,3 +1060,5 @@ if __name__ == "__main__":
         reach_cases(Path(d))
     with tempfile.TemporaryDirectory() as d:
         git_cases(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        announce_cases(Path(d))

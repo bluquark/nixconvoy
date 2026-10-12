@@ -23,9 +23,11 @@ def solve_with_mergiraf(wt: str, path: str) -> bool:
 class UnionQueries(GitQueries):
     def __init__(self, base: Callable[[], str], fetch: Future[subprocess.CompletedProcess[str]],
                  refresh: Callable[[], None],
-                 stage: Callable[[str, str, list[str]], bool]) -> None:
+                 stage: Callable[[str, str, list[str], list[tuple[str, str]]], bool],
+                 await_pending: Callable[[str, str], bool] | None = None) -> None:
         super().__init__()
         self.base, self.fetch, self.refresh, self.stage = base, fetch, refresh, stage
+        self.await_pending = await_pending
         self.wt = ""
         self.wts: list[str] = []
 
@@ -99,8 +101,13 @@ class UnionQueries(GitQueries):
         if kind == "refresh":
             self.refresh()
             return {"ran": True, "detail": ""}
+        if kind == "await_pending":
+            if self.await_pending is None:
+                return {"flag": False}
+            return {"flag": self.await_pending(wt, arg("union"))}
         if kind == "stage":
-            listed = ask.get("listed")
-            assert isinstance(listed, list)
-            return {"flag": self.stage(wt, arg("union"), [str(b) for b in listed])}
+            listed, branches = ask.get("listed"), ask.get("branches")
+            assert isinstance(listed, list) and isinstance(branches, list)
+            return {"flag": self.stage(wt, arg("union"), [str(b) for b in listed],
+                                       [(str(n), str(t)) for n, t in branches])}
         return super().__call__(ask)

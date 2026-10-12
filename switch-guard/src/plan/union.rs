@@ -8,9 +8,13 @@
 //! The union is first built from the previous fetch's refs, while this
 //! run's fetch is still in flight; once it lands, a moved origin/main or
 //! work branch redoes the union (and so does a conflict, which the fetch
-//! may have resolved).  A work branch that moves while the union builds
-//! would be reverted on its targets by switching without it, so the build is
-//! redone then too, up to ATTEMPTS times.
+//! may have resolved).  Then, before anything is evaluated, a deploy under
+//! way elsewhere whose increment reaches a target this checkout's work
+//! reaches too is waited for (Query::AwaitPending), and the union redone
+//! with what it pushed: building without it would only end refused, or
+//! rebuilt, once it switched.  A work branch that moves while the union
+//! builds would be reverted on its targets by switching without it, so
+//! the build is redone then too, up to ATTEMPTS times in all.
 use super::{failed, listed, Halt, Query, Run, Script, BRANCHES_FILE, MAIN, MSG_FILE};
 use std::collections::BTreeSet;
 
@@ -160,12 +164,18 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         if origin_moved(s, p, &branches, &mut fetched, &mut seen)? {
             continue;
         }
-        if s.flag(Query::Stage { union: union.clone(), listed: seen.listed.clone() })? || select(s, p, &mut seen)? == branches {
+        if !p.reset && s.flag(Query::AwaitPending { union: union.clone() })? {
+            s.print("redoing the union with what that deploy pushed");
+            s.must(Query::Refresh, "bringing the checkout onto origin/main")?;
+            continue;
+        }
+        let stage = Query::Stage { union: union.clone(), listed: seen.listed.clone(), branches: branches.clone() };
+        if s.flag(stage)? || select(s, p, &mut seen)? == branches {
             return Ok(Outcome { union, branches });
         }
         s.print("work branches moved during the build; rebuilding the union");
     }
-    Err(Halt::Die(format!("work branches kept moving during {ATTEMPTS} build attempts; re-run")))
+    Err(Halt::Die(format!("origin kept moving during {ATTEMPTS} attempts; re-run")))
 }
 
 #[cfg(test)]

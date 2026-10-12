@@ -19,22 +19,34 @@ fn landed() -> String {
 }
 
 /// nixconvoy's lineage_doc with the toplevel added: `pending` is the
-/// deploying checkout's own branch and origin's tip of it.
-fn doc(top: &str, by: (&str, &str), pending: Option<(&str, Option<&str>)>, others: &[&str], at: f64) -> String {
+/// deploying checkout's own branch and origin's tip of it, `announce` its
+/// increment's announcement.
+fn doc_ann(top: &str, by: (&str, &str), pending: Option<(&str, Option<&str>)>, announce: Option<&str>, others: &[&str], at: f64) -> String {
     let own = pending.map(|p| p.0).unwrap_or(BRANCH);
     let mut branches = serde_json::Map::new();
     for b in others {
         branches.insert(b.to_string(), json!("c".repeat(40)));
     }
     branches.insert(own.to_string(), json!("h".repeat(40)));
+    let pending = pending.map(|(b, base)| {
+        let mut p = json!({"branch": b, "base": base, "head": "s".repeat(40)});
+        if let Some(a) = announce {
+            p["announce"] = json!(a);
+        }
+        p
+    });
     json!({
         "version": 2, "union": "u".repeat(40), "main": "m".repeat(40),
         "branches": branches,
-        "pending": pending.map(|(b, base)| json!({"branch": b, "base": base, "head": "s".repeat(40)})),
+        "pending": pending,
         "at": at, "by": {"machine": by.0, "checkout": by.1, "pid": 4242},
         "toplevel": top,
     })
     .to_string()
+}
+
+fn doc(top: &str, by: (&str, &str), pending: Option<(&str, Option<&str>)>, others: &[&str], at: f64) -> String {
+    doc_ann(top, by, pending, None, others, at)
 }
 
 fn cx(tips: &[(&str, &str)]) -> Context {
@@ -42,15 +54,29 @@ fn cx(tips: &[(&str, &str)]) -> Context {
         me: (ME.0.into(), ME.1.into()),
         listed: ["main", BRANCH, "haswell-wsl-deploys3", "chikuwa-deploys1"].iter().map(|s| s.to_string()).collect(),
         tips: tips.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
+        in_flight: BTreeMap::new(),
         now: T0 + 60.0,
         tz_offset: 0,
     }
 }
 
-fn lin(top: &str, by: (&str, &str), pending: Option<(&str, Option<&str>)>, others: &[&str], age: f64, at: f64) -> Lineage {
-    let l = parse(&doc(top, by, pending, others, at), Some(age)).expect("a lineage_doc parses");
+fn lin_ann(
+    top: &str,
+    by: (&str, &str),
+    pending: Option<(&str, Option<&str>)>,
+    announce: Option<&str>,
+    others: &[&str],
+    age: f64,
+    at: f64,
+) -> Lineage {
+    let l = parse(&doc_ann(top, by, pending, announce, others, at), Some(age)).expect("a lineage_doc parses");
     assert_eq!(l.pending, pending.map(|(b, base)| (b.to_string(), base.map(str::to_string))));
+    assert_eq!(l.announce.as_deref(), announce.filter(|_| pending.is_some()));
     l
+}
+
+fn lin(top: &str, by: (&str, &str), pending: Option<(&str, Option<&str>)>, others: &[&str], age: f64, at: f64) -> Lineage {
+    lin_ann(top, by, pending, None, others, age, at)
 }
 
 fn std_lin() -> Lineage {
@@ -78,6 +104,20 @@ fn classifies_lineages() {
     let young = lin(NEW, OTHER, Some((BRANCH, Some(&b))), &["chikuwa-deploys1"], 10.0, T0 - 7200.0);
     assert_eq!(k(Some(&young), &at_base, false).0, Kind::InFlight);
 
+    // An announced increment is in flight while origin's pending ref still
+    // carries its announcement, whatever the lineage's age, and abandoned
+    // the moment it does not: its deploy ended without the push.
+    let announced = lin_ann(NEW, OTHER, Some((BRANCH, Some(&b))), Some("p"), &["chikuwa-deploys1"], PENDING_MAX_AGE + 60.0, T0);
+    let mut live = at_base.clone();
+    live.in_flight.insert(BRANCH.into(), "p".into());
+    assert_eq!(k(Some(&announced), &live, false).0, Kind::InFlight);
+    let (kind, why) = k(Some(&announced), &at_base, false);
+    assert!(kind == Kind::Abandoned && why.contains("its deploy is over without one"), "{why}");
+    live.in_flight.insert(BRANCH.into(), "q".into());
+    assert_eq!(k(Some(&announced), &live, false).0, Kind::Abandoned);
+    assert_eq!(classify(Some(&announced), NEW, &at_base, false, false).0, Kind::Abandoned);
+    assert_eq!(k(Some(&announced), &cx(&[(BRANCH, &landed())]), false).0, Kind::CatchUp);
+
     let (kind, why) = k(Some(&std_lin()), &at_base, true);
     assert!(kind == Kind::Overridden && why.contains(RESET_FLAG), "{why}");
 
@@ -101,6 +141,7 @@ fn classifies_lineages() {
     assert_eq!(parse("", None), None);
     assert_eq!(parse("{not json", None), None);
     assert_eq!(parse(r#"{"version": 3}"#, None), None);
+    assert_eq!(parse(&doc(NEW, OTHER, None, &[], T0).replace(r#""version":2"#, r#""version":3"#), None), None);
     // A version-1 file, from before by.host became by.machine, still counts.
     let v1 = doc(NEW, OTHER, None, &[], T0).replace(r#""version":2"#, r#""version":1"#).replace(r#""machine":"#, r#""host":"#);
     assert_eq!(parse(&v1, None).map(|l| l.machine), Some(OTHER.0.to_string()));
@@ -121,13 +162,13 @@ fn classifies_lineages() {
 fn refusal_advice() {
     let a = refusal(&[("side1".into(), Kind::InFlight)]);
     assert!(
-        a.contains("side1 runs another") && a.contains("reaches it too") && a.contains("Re-run once its push lands (after 30 min"),
+        a.contains("side1 runs another") && a.contains("reaches it too") && a.contains("Re-run once that deploy ends (an increment"),
         "{a}"
     );
     assert!(a.contains(&format!("{RESET_FLAG} side1")) && !a.contains(BRANCHES_FILE), "{a}");
     let a = refusal(&[("side1".into(), Kind::Unlisted), ("side6".into(), Kind::InFlight)]);
     assert!(a.contains("side1, side6 run another") && a.contains("reaches them too"), "{a}");
-    assert!(a.contains("Re-run once its push lands or list its branch in deploy-branches"), "{a}");
+    assert!(a.contains("Re-run once that deploy ends or list its branch in deploy-branches"), "{a}");
     assert!(a.contains(&format!("{RESET_FLAG} side1 ")), "{a}");
 }
 
@@ -215,7 +256,7 @@ fn names_the_abandoned_increments() {
     p.cx.listed.insert(sub.into());
     let (asked, _, out) = run_with(p.clone(), "kept");
     assert_eq!(asked.len(), 1);
-    assert!(out.unwrap_err().contains("Re-run once its push lands"));
+    assert!(out.unwrap_err().contains("Re-run once that deploy ends"));
     // Deployed from another machine: no checkout here to look at.
     let elsewhere = doc(OLD, ("chikuwa", "/var/lib/homelab"), Some((sub, None)), &[], T0);
     let mut q = p.clone();
@@ -344,12 +385,20 @@ fn arb_lineage() -> impl Strategy<Value = Option<String>> {
             arb_top(),
             any::<bool>(),
             proptest::option::of((arb_name(), proptest::option::of(prop::sample::select(vec!["a", "b"])))),
+            proptest::option::of(prop::sample::select(vec!["p", "q"])),
             prop::collection::vec(arb_name(), 0..3),
             0.0..1e7f64,
         )
-            .prop_map(|(top, mine, pending, others, at)| {
+            .prop_map(|(top, mine, pending, announce, others, at)| {
                 let others: Vec<&str> = others.iter().map(String::as_str).collect();
-                Some(doc(&top, if mine { ME } else { OTHER }, pending.as_ref().map(|(b, base)| (b.as_str(), *base)), &others, at))
+                Some(doc_ann(
+                    &top,
+                    if mine { ME } else { OTHER },
+                    pending.as_ref().map(|(b, base)| (b.as_str(), *base)),
+                    announce,
+                    &others,
+                    at,
+                ))
             }),
     ]
 }
@@ -365,12 +414,13 @@ fn arb_params() -> impl Strategy<Value = Params> {
         prop::collection::btree_set(target(), 0..5),
         prop::collection::vec((proptest::option::of(arb_top()), arb_top(), arb_lineage(), proptest::option::of(0.0..4000.0f64)), 5),
         prop::collection::btree_map(arb_name(), prop::sample::select(vec!["a", "b"]).prop_map(str::to_string), 0..4),
+        prop::collection::btree_map(arb_name(), prop::sample::select(vec!["p", "q"]).prop_map(str::to_string), 0..3),
         0.0..1e7f64,
     )
-        .prop_map(|(targets, cands, (reset, named), reached, facts, tips, now)| {
+        .prop_map(|(targets, cands, (reset, named), reached, facts, tips, in_flight, now)| {
             let targets: Vec<String> = targets.into_iter().collect();
             let mut p = Params {
-                cx: Context { tips, now, ..cx(&[]) },
+                cx: Context { tips, in_flight, now, ..cx(&[]) },
                 union: "u".repeat(40),
                 router: "choko".into(),
                 candidates: cands.into_iter().filter(|c| targets.contains(c)).collect(),
@@ -427,13 +477,18 @@ proptest! {
             let unlisted = l.branches.iter().any(|b| !p.cx.listed.contains(b));
             if kind == Kind::Unlisted { prop_assert!(unlisted); }
             if !mine && unlisted { prop_assert!(matches!(kind, Kind::Unlisted | Kind::Abandoned)); }
+            // An announced increment is judged by its announcement alone
+            // (nixconvoy ages those by their commits); one without, by
+            // the lineage's age.
+            let announced_live = l.announce.as_ref().is_some_and(|a| l.pending.as_ref().is_some_and(|(b, _)| p.cx.in_flight.get(b) == Some(a)));
             if kind == Kind::InFlight {
                 let (b, base) = l.pending.clone().unwrap();
                 prop_assert_eq!(p.cx.tips.get(&b), base.as_ref());
+                prop_assert!(l.announce.is_none() || announced_live);
             }
             let stale = l.age.unwrap_or(p.cx.now - l.at) > PENDING_MAX_AGE;
-            if kind == Kind::Abandoned { prop_assert!(stale); }
-            if kind.refused() { prop_assert!(!stale); }
+            if kind == Kind::Abandoned { prop_assert!(stale || (l.announce.is_some() && !announced_live)); }
+            if kind == Kind::Unlisted || (kind == Kind::InFlight && l.announce.is_none()) { prop_assert!(!stale); }
         }
         if kind.refused() {
             prop_assert_eq!(over, Kind::Overridden);

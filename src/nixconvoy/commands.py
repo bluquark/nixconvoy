@@ -28,8 +28,10 @@ from .checkout import (
     drop_worktree,
     ensure_on_work_branch,
     ensure_rebased,
+    fetch_args,
     git_op_in_progress,
     identity_of,
+    in_flight,
     listed_tips,
     lock_live,
     lock_pid_alive,
@@ -61,7 +63,7 @@ def commit_only(msg: str | None) -> None:
     if not msg:
         die('commit requires -m "..."')
     await_background_push()
-    git("fetch", "--quiet", "origin")
+    git(*fetch_args())
     pop_tmp_commits()
     wb = require_work_branch("commit")
     if not staged_differs():
@@ -88,7 +90,7 @@ def commit_only(msg: str | None) -> None:
 
 def land() -> None:
     await_background_push()
-    git("fetch", "--quiet", "origin")
+    git(*fetch_args())
     pop_tmp_commits()
     wb = require_work_branch("land")
     if current_branch() != wb:
@@ -160,7 +162,7 @@ def abandon(apply_now: bool = False) -> None:
     running its increments until a deploy reverts them: `apply_now` when
     the caller deploys right after, for the message."""
     await_background_push()
-    git("fetch", "--quiet", "origin")
+    git(*fetch_args())
     pop_tmp_commits()
     ident = checkout_identity()
     here = Path.cwd().resolve()
@@ -818,7 +820,7 @@ def status() -> None:
     """Every checkout on this machine as a tree, and the work branches only
     origin holds (cli docstring: Status)."""
     paint = painter()
-    git("fetch", "--quiet", "--no-auto-gc", "origin", check=False)
+    git(*fetch_args("--no-auto-gc"), check=False)
     main = rev("refs/remotes/origin/main")
     tips = origin_tips()
     pats = allowed_branches()
@@ -946,6 +948,13 @@ def status() -> None:
         print(paint("on origin only (other machines' checkouts):", "dim"))
         for e in elsewhere:
             print(f"  {paint(e, 'yellow')}")
+    live, stale = in_flight(time.time(), None)
+    if live or stale:
+        print(paint("deploys under way (announced increments):", "dim"))
+        for branch, sha in live.items():
+            print(f"  {paint(f'{branch}: {summarize(sha)}', 'yellow')}")
+        for p_ in stale:
+            print(f"  {paint(f'{p_.branch}: {summarize(p_.sha)} - {p_.age / 60:.0f} min old, never ended', 'red')}")
 
 
 __all__ = ["abandon", "commit_only", "enter_sub", "land", "prune", "prune_after", "pull", "status", "work_branch_name"]
