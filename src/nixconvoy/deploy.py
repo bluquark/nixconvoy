@@ -229,7 +229,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             waiting: dict[str, list[str]] = {}
             now = time.monotonic()
             for p in pending_announcements():
-                if p.branch == own or (rank is not None and (p.since, p.branch) >= rank):
+                if p.branch == own or p.branch in dead or (rank is not None and (p.since, p.branch) >= rank):
                     continue
                 if announcer_dead(p):
                     if p.branch not in dead:

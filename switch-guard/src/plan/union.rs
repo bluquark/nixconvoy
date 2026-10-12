@@ -21,6 +21,9 @@ use super::{failed, listed, Halt, Query, Run, Script, BRANCHES_FILE, MAIN, MSG_F
 use std::collections::BTreeSet;
 
 pub const ATTEMPTS: usize = 3;
+/// Deploys waited for in a row before giving up: each wait ends with
+/// another deploy's progress, so this many means something is wrong.
+pub const WAITS: usize = 10;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Params {
@@ -151,6 +154,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     let mut fetched = false;
     let mut seen = Seen { listed: Vec::new(), warned: BTreeSet::new() };
     let mut moves = 0;
+    let mut waits = 0;
     while moves < ATTEMPTS {
         s.mark("union");
         let branches = select(s, p, &mut seen)?;
@@ -170,6 +174,10 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
             continue;
         }
         if !p.reset && s.flag(Query::AwaitPending { union: union.clone() })? {
+            waits += 1;
+            if waits > WAITS {
+                return Err(Halt::Die(format!("waited for {WAITS} deploys in a row; re-run")));
+            }
             s.print("redoing the union with what that deploy pushed");
             s.must(Query::Refresh, "bringing the checkout onto origin/main")?;
             continue;
