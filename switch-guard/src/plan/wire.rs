@@ -166,7 +166,9 @@ pub fn query(q: &Query) -> Value {
         Query::DropWorktree => ("drop_worktree", vec![]),
         Query::Switch { branch, start } => ("switch", vec![("branch", s(branch)), ("start", json!(start))]),
         Query::Upstream { branch } => ("upstream", vec![("branch", s(branch))]),
-        Query::Fate { branch, tip, union } => ("fate", vec![("branch", s(branch)), ("tip", s(tip)), ("union", s(union))]),
+        Query::Fate { branch, tip, union, checkout } => {
+            ("fate", vec![("branch", s(branch)), ("tip", s(tip)), ("union", s(union)), ("checkout", json!(checkout))])
+        }
         Query::SetUpstream { branch } => ("set_upstream", vec![("branch", s(branch))]),
         Query::Listed => ("listed", vec![]),
         Query::Branches => ("branches", vec![]),

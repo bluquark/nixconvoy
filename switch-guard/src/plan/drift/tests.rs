@@ -183,7 +183,7 @@ fn names_the_abandoned_increments() {
     p.cx = cx(&[(BRANCH, &b), ("chikuwa-deploys1", &"c".repeat(40))]);
     let (asked, fx, out) = run_with(p.clone(), "abandoned");
     assert_eq!(out.unwrap().plan, ["chikuwa", "choko"]);
-    assert_eq!(asked, [Query::Fate { branch: BRANCH.into(), tip: "h".repeat(40), union: "u".repeat(40) }]);
+    assert_eq!(asked, [Query::Fate { branch: BRANCH.into(), tip: "h".repeat(40), union: "u".repeat(40), checkout: Some(OTHER.1.into()) }]);
     let line = format!("  chikuwa: will switch (catch-up: runs pushed work deployed by haswell-wsl:/home/blu/projects/homelab2 (pid 4242) at 13:46; reverting {BRANCH}'s abandoned increment hhhhhhhhhhhh)");
     assert_eq!(fx[0], Effect::Print(line));
     assert!(
@@ -213,6 +213,12 @@ fn names_the_abandoned_increments() {
     let (asked, _, out) = run_with(p.clone(), "kept");
     assert_eq!(asked.len(), 1);
     assert!(out.unwrap_err().contains("Re-run once its push lands"));
+    // Another machine's deployer: no checkout here to look at.
+    let elsewhere = doc(OLD, ("chikuwa", "/var/lib/homelab"), Some((sub, None)), &[], T0);
+    let mut q = p.clone();
+    q.lineages.insert("chikuwa".into(), (elsewhere, Some(60.0)));
+    let (asked, _, _) = run_with(q, "kept");
+    assert!(matches!(&asked[0], Query::Fate { checkout: None, .. }), "{asked:?}");
     let (asked, fx, out) = run_with(p.clone(), "abandoned");
     assert_eq!(asked.len(), 1, "one fate per tip: {asked:?}");
     assert_eq!(out.unwrap().plan, ["chikuwa"]);
@@ -433,9 +439,12 @@ proptest! {
         }
     }
 
+    /// The plan follows classify, except that a pending increment of a
+    /// branch origin has no tip of is caught up (never refused or left
+    /// alone) once its fate is not "kept".
     #[test]
-    fn plans(p in arb_params()) {
-        let (fx, out) = run(p.clone());
+    fn plans(p in arb_params(), fate in prop::sample::select(vec!["kept", "landed", "abandoned"])) {
+        let (_, fx, out) = run_with(p.clone(), fate);
         let affected: Vec<String> = switch_order(&p.hosts, &p.router).into_iter()
             .filter(|h| matches!((p.running.get(h), p.built.get(h)), (Some(Some(r)), Some(b)) if r != b))
             .collect();
@@ -443,6 +452,10 @@ proptest! {
             let lin = p.lineages.get(h).and_then(|(t, a)| parse(t, *a));
             let running = p.running[h].clone().unwrap();
             let reached = p.reached.contains(h);
+            let gone = lin.as_ref().is_some_and(|l| matches!(&l.pending, Some((b, None)) if !p.cx.tips.contains_key(b) && l.tips.contains_key(b)));
+            if fate != "kept" && gone && classify(lin.as_ref(), &running, &p.cx, false, true).0 == Kind::InFlight {
+                return (h.clone(), Kind::CatchUp);
+            }
             (h.clone(), classify(lin.as_ref(), &running, &p.cx, p.reset && (p.named || reached), reached).0)
         }).collect();
         let refused: Vec<(String, Kind)> = verdicts.iter().filter(|v| v.1.refused()).cloned().collect();

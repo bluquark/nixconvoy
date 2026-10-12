@@ -115,15 +115,17 @@ pub enum Query {
         branch: String,
     },
     /// What became of `branch`'s increment at `tip`, which origin's tip of
-    /// the branch no longer is: "kept" when the branch (on origin, or
-    /// local: a push on its way) still carries it or merging it into
-    /// `union` changes nothing (rebased, redeployed, landed intact), else
-    /// "landed" (an origin/main commit squashed a later tip of it) or
-    /// "abandoned" -> Text.
+    /// the branch no longer is: "kept" when origin's branch still carries
+    /// it, or `checkout` (the deployer's, on this machine) still has the
+    /// branch checked out - its first push on its way, or its switch
+    /// failed - or merging it into `union` changes nothing (rebased,
+    /// redeployed, landed intact), else "landed" (an origin/main commit
+    /// squashed a later tip of it) or "abandoned" -> Text.
     Fate {
         branch: String,
         tip: String,
         union: String,
+        checkout: Option<String>,
     },
     /// Point the branch's upstream at origin/main -> Ran.
     SetUpstream {

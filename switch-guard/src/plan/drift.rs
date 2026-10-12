@@ -273,15 +273,17 @@ pub fn refusal(refused: &[(String, Kind)]) -> String {
     )
 }
 
-/// Query::Fate's answer for `branch`'s increment at `tip`, asked once per
-/// tip (`fates` memoises it across hosts): "kept", "landed" or
-/// "abandoned".
-fn fate(s: &mut Script, branch: &str, tip: &str, p: &Params, fates: &mut BTreeMap<(String, String), String>) -> Run<String> {
+/// Query::Fate's answer for `branch`'s increment at `tip` of the lineage
+/// `lin`, asked once per tip (`fates` memoises it across hosts): "kept",
+/// "landed" or "abandoned".  The query names the deployer's checkout when
+/// it is on this machine: one still on the branch keeps the increment.
+fn fate(s: &mut Script, branch: &str, tip: &str, lin: &Lineage, p: &Params, fates: &mut BTreeMap<(String, String), String>) -> Run<String> {
     let key = (branch.to_string(), tip.to_string());
     if let Some(f) = fates.get(&key) {
         return Ok(f.clone());
     }
-    let f = s.text(Query::Fate { branch: branch.into(), tip: tip.into(), union: p.union.clone() })?.unwrap_or_default();
+    let checkout = (lin.host == p.cx.me.0).then(|| lin.checkout.clone());
+    let f = s.text(Query::Fate { branch: branch.into(), tip: tip.into(), union: p.union.clone(), checkout })?.unwrap_or_default();
     fates.insert(key, f.clone());
     Ok(f)
 }
@@ -297,7 +299,7 @@ fn reverted(s: &mut Script, lin: &Lineage, p: &Params, fates: &mut BTreeMap<(Str
             continue;
         }
         let short: String = tip.chars().take(12).collect();
-        match fate(s, b, tip, p, fates)?.as_str() {
+        match fate(s, b, tip, lin, p, fates)?.as_str() {
             "abandoned" => notes.push(format!("{b}'s abandoned increment {short}")),
             "landed" => notes.push(format!("{b}'s increment {short}, landed and since undone")),
             _ => {}
@@ -335,7 +337,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
             if let Some((b, None)) = &lin.pending {
                 if !p.cx.tips.contains_key(b) {
                     if let Some(tip) = lin.tips.get(b) {
-                        if fate(s, b, tip, p, &mut fates)? != "kept" {
+                        if fate(s, b, tip, lin, p, &mut fates)? != "kept" {
                             let who = format!("{}:{} (pid {})", lin.host, lin.checkout, lin.pid);
                             (kind, why) = (Kind::CatchUp, format!("runs {b}'s increment deployed by {who}, the branch gone since"));
                         }

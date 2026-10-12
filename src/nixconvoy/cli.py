@@ -354,7 +354,8 @@ def main() -> None:
             lock.close()
         if hosts:
             if apply_now:
-                os.chdir(top)
+                # A subagent worktree that named itself is gone: its parent deploys.
+                os.chdir(top if top.is_dir() else sub_parent(here) or here)
                 take_lock()
                 deploy([], None, False, danger)
             return

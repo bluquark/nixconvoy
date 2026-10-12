@@ -296,7 +296,9 @@ class GitQueries:
         if kind == "set_upstream":
             return ran(git("branch", "--set-upstream-to=origin/main", arg("branch"), check=False))
         if kind == "fate":
-            return {"text": increment_fate(arg("branch"), arg("tip"), arg("union"))}
+            checkout = ask.get("checkout")
+            return {"text": increment_fate(arg("branch"), arg("tip"), arg("union"),
+                                           str(checkout) if checkout else None)}
         raise ValueError(f"deploy-plan asked {ask!r}")
 
 
@@ -583,25 +585,33 @@ def on_origin(cwd: str | None = None, pats: set[str] | None = None) -> bool:
     return False
 
 
-def increment_fate(branch: str, tip: str, union: str) -> str:
+def increment_fate(branch: str, tip: str, union: str, checkout: str | None) -> str:
     """What became of `branch`'s increment at `tip`, a tip a host's lineage
     recorded that origin's tip of the branch no longer is, for the deploy
-    of `union` (the drift core's Query::Fate).  "kept" when the switch
-    reverts none of it: the branch still carries it, on origin or here (a
-    subagent's first push on its way: the branch exists locally), or
-    merging it into the union changes nothing but MSG_FILE (rebased,
-    redeployed after a failed switch, landed intact).  Otherwise the union
-    lacks it: "landed" when a later tip of the branch (one fetched here
-    before, by the remote-tracking ref's reflog or PAST_REFS) carried it and
-    was landed - the increment undone since - else "abandoned": reset,
-    dropped with its subagent worktree or force-pushed over.  A tip this
-    repository never fetched, or one conflicting with the union (its lines
-    changed since, by whatever), is "kept": nothing to announce."""
+    of `union` (the drift core's Query::Fate; `checkout` the deployer's
+    when it is on this machine).  "kept" when the switch reverts none of
+    it: origin's branch still carries it, or the deployer's checkout still
+    has the branch checked out (its first push on its way - the commit
+    reaches the branch only after every switch - or its switch failed and
+    the increment stays staged there; abandon removes a subagent's
+    worktree), or merging it into the union changes nothing but MSG_FILE
+    (rebased, redeployed after a failed switch, landed intact).  Otherwise
+    the union lacks it: "landed" when a later tip of the branch (one
+    fetched here before, by the remote-tracking ref's reflog or PAST_REFS;
+    only the entries newer than the tip's own can descend from it, or the
+    newest few when it never was one) carried it and was landed - the
+    increment undone since - else "abandoned": reset, dropped with its
+    subagent worktree or force-pushed over.  A tip this repository never
+    fetched, or one conflicting with the union (its lines changed since, by
+    whatever), is "kept": nothing to announce."""
     if rev(f"{tip}^{{commit}}") is None:
         return "kept"
-    for ref in (f"refs/remotes/origin/{branch}", f"refs/heads/{branch}"):
-        if rev(ref) is not None and is_ancestor(tip, ref):
-            return "kept"
+    up = f"refs/remotes/origin/{branch}"
+    if rev(up) is not None and is_ancestor(tip, up):
+        return "kept"
+    if checkout and Path(checkout).is_dir() and (branch_at(Path(checkout)) == branch
+                                                 or noted_branch(Path(checkout)) == branch):
+        return "kept"
     p = run(["git", "merge-tree", "--write-tree", "--messages", union, tip], check=False)
     if p.returncode != 0:
         return "kept"
@@ -612,13 +622,14 @@ def increment_fate(branch: str, tip: str, union: str) -> str:
     base = run(["git", "merge-base", tip, main], check=False).stdout.strip()
     if base:
         landed = set(out(["git", "log", "--format=%T", f"{base}..{main}"]).split())
-        past: list[str] = []
-        for ref in (f"refs/remotes/origin/{branch}", f"{PAST_REFS}/{branch}"):
-            if rev(ref) is not None:
-                past += out(["git", "log", "-g", "--format=%H", ref]).split()
-        for later in dict.fromkeys(past):
-            if is_ancestor(tip, later) and tree_less_msg(later) in landed:
-                return "landed"
+        for ref in (up, f"{PAST_REFS}/{branch}"):
+            if rev(ref) is None:
+                continue
+            entries = out(["git", "log", "-g", "--format=%H", ref]).split()  # newest first
+            newer = entries[:entries.index(tip)] if tip in entries else entries[:20]
+            for later in dict.fromkeys(newer):
+                if is_ancestor(tip, later) and tree_less_msg(later) in landed:
+                    return "landed"
     return "abandoned"
 
 
