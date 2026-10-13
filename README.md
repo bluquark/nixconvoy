@@ -218,9 +218,11 @@ with its branch by `land` or `abandon` once its task is done - or by
 `prune` when it holds nothing of its own and its agent has stopped (a
 resume of the agent recreates it) or the session that spawned the agent
 has exited.  `integrations/claude-code/` is a Claude Code plugin holding
-the hooks that create such worktrees under the spawning checkout, prune
-them when their agent stops and recreate them for its resume, beside the
-`git review` command and a bash prompt segment:
+the hooks that give every subagent spawned inside a repository such a
+worktree (`isolation: worktree` added to the Agent call unless it chose
+otherwise), create it under the spawning checkout, prune it when its agent
+stops and recreate it for its resume, beside the `git review` command and
+a bash prompt segment:
 
 ```
 /plugin install nixconvoy --marketplace bluquark/nixconvoy
@@ -229,10 +231,14 @@ them when their agent stops and recreate them for its resume, beside the
 The package also ships the plugin tree under `share/nixconvoy/claude-code/`
 for a repo that wires the hooks itself: a settings.json pointing at
 `hooks/worktree-create.sh`, `hooks/worktree-remove.sh`,
-`hooks/session-start.sh`, `hooks/subagent-stop.sh` and
+`hooks/session-start.sh`, `hooks/subagent-stop.sh`,
+`hooks/subagent-isolate.sh` (PreToolUse, matcher `Agent|Task`) and
 `hooks/worktree-resume.sh` (PreToolUse, matcher `SendMessage`) there, as
 `hooks/hooks.json` does (such a repo should not also enable the plugin, or
-both would run).
+both would run).  A repo with a PreToolUse hook of its own on `Agent`
+that rewrites the call should run `subagent-isolate.sh` from inside it and
+continue from the `updatedInput` it prints, rather than wire both: how
+Claude Code combines two hooks' `updatedInput` is not specified.
 
 ## How it is built
 
