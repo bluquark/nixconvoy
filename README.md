@@ -73,11 +73,11 @@ no work.
   between two such branches what two targets run differently.
 - **Confirmed switches.**  With the NixOS module, a switch activates the
   new system with `switch-to-configuration test` under a dead-man timer,
-  verifies it from the deploying machine (a new ssh connection gets in and
-  finds the new system running, its own checks pass, the internet is
-  reachable where asked for), and only then sets the profile and bootloader
-  entry;
-  otherwise the target rolls back to what it ran.  No reboot is ever
+  verifies it from the deploying machine (a new ssh connection - a direct
+  read on a local target - finds the new system running, its own checks
+  pass, the internet is reachable where asked for), and only then sets the
+  profile and bootloader entry; otherwise the target rolls back to what it
+  ran.  No reboot is ever
   automatic.
 - **Protected units.**  A target can declare units a deploy must never
   restart unasked (a router's networkd, nftables, dnsmasq).  The new system

@@ -66,7 +66,7 @@ in
       type = lib.types.package;
       default = checks;
       readOnly = true;
-      description = "`checks` as one program on the helper's PATH (errexit): what the `check` verb runs after the internet probe, and what boot-assessment's gate runs on a counted boot.";
+      description = "`checks` as one program on the helper's PATH (errexit): what the `check` verb runs (after the internet probe when `internetCheck` is on), and what boot-assessment's gate runs on a counted boot.";
     };
     stateDir = lib.mkOption {
       type = lib.types.str;
