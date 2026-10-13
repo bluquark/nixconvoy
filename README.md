@@ -237,8 +237,11 @@ for a repo that wires the hooks itself: a settings.json pointing at
 `hooks/hooks.json` does (such a repo should not also enable the plugin, or
 both would run).  A repo with a PreToolUse hook of its own on `Agent`
 that rewrites the call should run `subagent-isolate.sh` from inside it and
-continue from the `updatedInput` it prints, rather than wire both: how
-Claude Code combines two hooks' `updatedInput` is not specified.
+continue from the `updatedInput` it prints, rather than wire both (a
+plugin install on top of such a hook does wire both): how Claude Code
+combines two hooks' `updatedInput` is not specified.  The hook returns
+the rewritten call as allowed, so an `ask` rule on Agent does not prompt
+for a spawn it isolated.
 
 ## How it is built
 
