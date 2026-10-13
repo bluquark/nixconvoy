@@ -2,37 +2,7 @@
 let
   cfg = config.nixconvoy.confirmedSwitch;
   state = "/run/confirmed-switch";
-  tools = [ pkgs.coreutils pkgs.util-linux config.systemd.package pkgs.curl config.nix.package sshProbe ];
-  ssh = config.services.openssh;
-  # "addr port" per sshd listener: each ListenAddress (on every Port when it
-  # names none), or loopback for the wildcard bind.
-  sshEndpoints =
-    let
-      ports = map toString (if ssh.ports == [ ] then [ 22 ] else ssh.ports);
-      loopback = if (ssh.settings.AddressFamily or "any") == "inet6" then "::1" else "127.0.0.1";
-      ofAddress = a: if a.port != null then [ "${a.addr} ${toString a.port}" ] else map (p: "${a.addr} ${p}") ports;
-    in
-    if ssh.listenAddresses != [ ] then lib.concatMap ofAddress ssh.listenAddresses else map (p: "${loopback} ${p}") ports;
-  # A real connection to one listener, answered with sshd's identification
-  # string; the client's own is sent first so sshd logs a plain preauth close.
-  # An IPv6 ListenAddress is written bracketed; /dev/tcp wants it bare.
-  sshProbe = pkgs.writeShellApplication {
-    name = "confirmed-switch-ssh-probe";
-    text = ''
-      addr=''${1#[}
-      exec 3<>"/dev/tcp/''${addr%]}/$2"
-      printf 'SSH-2.0-nixconvoy-check\r\n' >&3
-      read -r -t 5 banner <&3
-      [[ $banner == SSH-* ]]
-    '';
-  };
-  sshCheck = ''
-    while read -r addr port; do
-      timeout 5 confirmed-switch-ssh-probe "$addr" "$port" || { echo "sshd does not answer on $addr port $port" >&2; exit 1; }
-    done <<'EOF'
-    ${lib.concatStringsSep "\n" sshEndpoints}
-    EOF
-  '';
+  tools = [ pkgs.coreutils pkgs.util-linux config.systemd.package pkgs.curl config.nix.package ];
   # The `check` verb and boot-assessment's gate run this same program.
   checks = pkgs.writeShellApplication {
     name = "confirmed-switch-checks";
@@ -42,6 +12,7 @@ let
   };
   conf = pkgs.writeText "confirmed-switch.conf" ''
     deadline = ${toString cfg.deadline}
+    internet_check = ${lib.boolToString cfg.internetCheck}
     checks = ${lib.getExe checks}
     state_dir = ${state}
     systemctl = ${config.systemd.package}/bin/systemctl
@@ -64,7 +35,8 @@ in
   # Confirmed switches, the "commit confirmed" of network gear: a toplevel
   # carrying /confirmed-switch tells nixconvoy to activate it with
   # `switch-to-configuration test` under a dead-man timer, verify from the
-  # deploying machine, and only then set the profile and bootloader entry.
+  # deploying machine (over a new ssh connection: a switch that stopped sshd
+  # admitting logins fails), and only then set the profile and bootloader entry.
   # The timer covers a switch that cut its own path in, or a deploying
   # machine that died; no reboot is ever automatic.  The helper is linked
   # into the toplevel rather than put on PATH so the new closure carries it
@@ -77,19 +49,18 @@ in
     };
     deadline = lib.mkOption {
       type = lib.types.ints.positive;
-      default = 120;
-      description = "Seconds after arming before an unconfirmed switch is rolled back: the activation plus nixconvoy's verification must fit in it (nixconvoy-switch neither starts a verification round nor pauses into its last 5 s, and ends every probe 2 s short of it).";
+      default = 30;
+      description = "Seconds after arming before an unconfirmed switch is rolled back: the activation plus nixconvoy's verification must fit in it (nixconvoy-switch neither starts a verification round nor pauses into its last 5 s, and ends every probe 2 s short of it).  Raise it for a target whose activation takes long.";
     };
-    sshCheck = lib.mkOption {
+    internetCheck = lib.mkOption {
       type = lib.types.bool;
-      default = ssh.enable;
-      defaultText = lib.literalExpression "config.services.openssh.enable";
-      description = "Open `checks` with a connection to each address sshd listens on (loopback for the wildcard bind) that must answer with an SSH identification string: the one check every target carries by default, a switch that lost sshd having lost the way in.";
+      default = false;
+      description = "Begin the `check` verb with an HTTPS probe of the internet (google.com's generate_204), so a switch that lost the way out fails verification.  Off for a target meant to run without it.";
     };
     checks = lib.mkOption {
       type = lib.types.lines;
       default = "";
-      description = "Bash run by the helper's `check` verb (as root, errexit) after the internet probe: the target's own assertions on the new system, after `sshCheck`'s, whose last stderr line is what a failed verification reports.";
+      description = "Bash run by the helper's `check` verb (as root, errexit) after `internetCheck`'s probe: the target's own assertions on the new system, whose last stderr line is what a failed verification reports.  Verification already requires a new ssh connection to find the target running the new system.";
     };
     checksCommand = lib.mkOption {
       type = lib.types.package;
@@ -106,7 +77,6 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    nixconvoy.confirmedSwitch.checks = lib.mkIf cfg.sshCheck (lib.mkBefore sshCheck);
     system.systemBuilderCommands = ''
       ln -s ${lib.getExe helper} $out/confirmed-switch
     '';

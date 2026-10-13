@@ -130,13 +130,17 @@ def control_opts() -> list[str]:
             "-o", "ControlPersist=60"]
 
 
-def target_cmd(target: str, argv: list[str], sudo: bool = False) -> list[str]:
-    """`argv` on `target`: directly when it is this machine, else over ssh."""
+def target_cmd(target: str, argv: list[str], sudo: bool = False,
+               fresh: bool = False) -> list[str]:
+    """`argv` on `target`: directly when it is this machine, else over ssh -
+    the deploy's master connection, or with `fresh` a new connection of its
+    own, proving sshd admits one."""
     pre = ["sudo"] if sudo else []
     if target == proc.this_machine():
         return [*pre, *argv]
+    opts = ["-o", "ControlPath=none"] if fresh else control_opts()
     # The remote shell re-parses ssh's command line, hence the quoting.
-    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *control_opts(),
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *opts,
             ssh_address(target), *pre, *map(shlex.quote, argv)]
 
 
@@ -186,8 +190,9 @@ def probe(name: str) -> Probe:
 
 
 def running_system(name: str, cleanup: bool = False,
-                   timeout: float = PROBE_TIMEOUT) -> str | None:
-    """The target's /run/current-system, or None if it cannot be read."""
+                   timeout: float = PROBE_TIMEOUT, fresh: bool = False) -> str | None:
+    """The target's /run/current-system (`fresh`: over a new ssh connection),
+    or None if it cannot be read."""
     if name == proc.this_machine():
         try:
             return str(Path(CURRENT_SYSTEM).readlink())
@@ -195,7 +200,7 @@ def running_system(name: str, cleanup: bool = False,
             return None
     if local_only(name):
         return None
-    p = run(target_cmd(name, ["readlink", CURRENT_SYSTEM]),
+    p = run(target_cmd(name, ["readlink", CURRENT_SYSTEM], fresh=fresh),
             check=False, timeout=timeout, cleanup=cleanup)
     if p.returncode != 0:
         return None

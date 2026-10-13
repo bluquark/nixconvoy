@@ -97,6 +97,7 @@ pub fn drive(host: &mut impl Host, mut m: Machine<String>) -> i32 {
 pub struct Settings {
     pub config: PathBuf,
     pub deadline: u64,
+    pub internet_check: bool,
     pub checks: String,
     pub state_dir: PathBuf,
     pub systemctl: String,
@@ -112,6 +113,7 @@ impl Settings {
         Ok(Settings {
             config: path.to_path_buf(),
             deadline: c.num("deadline")?,
+            internet_check: c.str("internet_check")? == "true",
             checks: c.str("checks")?.to_string(),
             state_dir: PathBuf::from(c.str("state_dir")?),
             systemctl: c.str("systemctl")?.to_string(),
@@ -257,8 +259,9 @@ impl Host for System<'_> {
 pub const USAGE: &str =
     "usage: nixconvoy-confirmed-switch arm | activate <toplevel> | confirm <toplevel> [reboot-pending] | rollback | check | deadline";
 
-/// The `check` verb: nixconvoy reports its last stderr line.  Root, so the
-/// target's checks can attribute sockets (ss -p) and read state.
+/// The `check` verb: the internet probe when configured, then the target's
+/// checks; nixconvoy reports its last stderr line.  Root, so the checks can
+/// attribute sockets (ss -p) and read state.
 fn check(s: &Settings) -> i32 {
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } != 0 {
@@ -266,7 +269,7 @@ fn check(s: &Settings) -> i32 {
         return 1;
     }
     let probe = ["-fsS", "--max-time", "10", "-o", "/dev/null", "https://www.google.com/generate_204"];
-    if proc::run(&s.curl, &probe) != 0 {
+    if s.internet_check && proc::run(&s.curl, &probe) != 0 {
         proc::warn("cannot reach the internet");
         return 1;
     }

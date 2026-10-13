@@ -102,7 +102,9 @@ def switch(target: str, expected: str, toplevel: str, nixconvoy_switch: str,
     (several switches at once) prints the activation output afterwards,
     prefixed with the target.  Activation, confirm and rollback run in a
     transient unit on the target (as nixos-rebuild does), so they complete
-    even if this ssh session dies.  `lineage` (one JSON line) is claimed on
+    even if this ssh session dies.  Each verification round reads the running
+    system over a new ssh connection, not the deploy's master connection: a
+    switch that stopped sshd admitting logins fails it.  `lineage` (one JSON line) is claimed on
     the target under the switch lock, `digest` the lineage_digest the probe
     read (switch_guard_cmd).  `needs_internet`: verification also requires
     this machine to reach the internet (the router)."""
@@ -180,7 +182,7 @@ def switch(target: str, expected: str, toplevel: str, nixconvoy_switch: str,
             return {"now": proc.monotonic_ms()}
         if kind == "running":
             return {"running": targets.running_system(target, cleanup=True,
-                                                    timeout=secs(ask.get("timeout_ms")))}
+                                                    timeout=secs(ask.get("timeout_ms")), fresh=True)}
         if kind == "check":
             t = secs(ask.get("timeout_ms"))
             p = run(targets.target_cmd(target, [helper, "check"], sudo=True), check=False, timeout=t,

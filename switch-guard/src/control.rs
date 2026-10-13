@@ -75,7 +75,8 @@ pub enum Query {
     Helper(Vec<String>),
     /// Monotonic milliseconds -> Now.
     Now,
-    /// /run/current-system -> Running.
+    /// /run/current-system, over a new ssh connection: the proof that sshd
+    /// admits one -> Running.
     Running {
         timeout_ms: Option<u64>,
     },
@@ -327,8 +328,9 @@ impl Machine {
                 ))
             }
 
-            // One round of verification: the target runs the new system and
-            // passes its check (internet + homelab.confirmedSwitch.checks),
+            // One round of verification: a new ssh connection finds the
+            // target running the new system, its check passes (the internet
+            // probe when configured, then nixconvoy.confirmedSwitch.checks),
             // and for the router this machine reaches the internet too.
             (Pc::VerifyNow { w, rc }, Reply::Now(now)) => {
                 self.cut = false;

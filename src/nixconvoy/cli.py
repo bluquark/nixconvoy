@@ -127,10 +127,11 @@ Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
      record.  A target whose toplevel carries
      /confirmed-switch (the confirmed-switch module) is switched confirmed:
      a rollback timer is armed, the toplevel activated with `test`, and
-     only once the target runs it, reaches the internet and passes its own
-     checks (for a switch-last target, this machine must reach the internet
-     too) are its profile and bootloader entry set - otherwise it is rolled
-     back to the probed system, never rebooted
+     only once a new ssh connection finds the target running it and its own
+     checks pass (the internet probe when configured; for a switch-last
+     target, this machine must reach the internet too) are its profile and
+     bootloader entry set - otherwise it is rolled back to the probed
+     system, never rebooted
   8. only now adopt the increment's commit onto the work branch and push it
      in the background - then, once that landed, point the announcement at
      origin/main and each switched target's record at

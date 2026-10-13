@@ -156,8 +156,9 @@ def scenario(name: str, *, helper: bool = True, check_ok: bool = True, activate_
 def main() -> None:
     me = [sys.executable, str(Path(__file__).resolve())]
 
-    def target_cmd(target: str, argv: list[str], sudo: bool = False) -> list[str]:
-        del target, sudo
+    def target_cmd(target: str, argv: list[str], sudo: bool = False,
+                   fresh: bool = False) -> list[str]:
+        del target, sudo, fresh
         return [*me, "--fake-target", *argv]
 
     def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> list[str]:
