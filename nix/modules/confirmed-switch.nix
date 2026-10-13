@@ -8,17 +8,19 @@ let
   # names none), or loopback for the wildcard bind.
   sshEndpoints =
     let
-      ports = map toString ssh.ports;
+      ports = map toString (if ssh.ports == [ ] then [ 22 ] else ssh.ports);
       loopback = if (ssh.settings.AddressFamily or "any") == "inet6" then "::1" else "127.0.0.1";
       ofAddress = a: if a.port != null then [ "${a.addr} ${toString a.port}" ] else map (p: "${a.addr} ${p}") ports;
     in
     if ssh.listenAddresses != [ ] then lib.concatMap ofAddress ssh.listenAddresses else map (p: "${loopback} ${p}") ports;
   # A real connection to one listener, answered with sshd's identification
   # string; the client's own is sent first so sshd logs a plain preauth close.
+  # An IPv6 ListenAddress is written bracketed; /dev/tcp wants it bare.
   sshProbe = pkgs.writeShellApplication {
     name = "confirmed-switch-ssh-probe";
     text = ''
-      exec 3<>"/dev/tcp/$1/$2"
+      addr=''${1#[}
+      exec 3<>"/dev/tcp/''${addr%]}/$2"
       printf 'SSH-2.0-nixconvoy-check\r\n' >&3
       read -r -t 5 banner <&3
       [[ $banner == SSH-* ]]
