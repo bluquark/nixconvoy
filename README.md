@@ -73,8 +73,9 @@ no work.
   between two such branches what two targets run differently.
 - **Confirmed switches.**  With the NixOS module, a switch activates the
   new system with `switch-to-configuration test` under a dead-man timer,
-  verifies it from the deploying machine (reachable, on the internet, its
-  own checks pass), and only then sets the profile and bootloader entry;
+  verifies it from the deploying machine (reachable, on the internet, sshd
+  answers, its own checks pass), and only then sets the profile and
+  bootloader entry;
   otherwise the target rolls back to what it ran.  No reboot is ever
   automatic.
 - **Protected units.**  A target can declare units a deploy must never
@@ -181,7 +182,8 @@ tags = ["portable"]          # `@portable` on the command line names every targe
 
 ```nix
 nixconvoy.confirmedSwitch.deadline = 120;   # seconds before an unconfirmed switch rolls back
-nixconvoy.confirmedSwitch.checks = ''       # bash, as root, errexit: the target's own assertions
+nixconvoy.confirmedSwitch.sshCheck = true;  # the default: sshd must answer on each address it listens on
+nixconvoy.confirmedSwitch.checks = ''       # bash, as root, errexit: the target's own assertions, after it
   systemctl is-active -q nginx.service
 '';
 nixconvoy.protectedUnits = [ "systemd-networkd.service" "nftables.service" ];
