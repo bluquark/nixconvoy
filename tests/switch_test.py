@@ -1103,6 +1103,119 @@ def announce_cases(d: Path) -> None:
     print("announcements: ok")
 
 
+def annex_cases(d: Path) -> None:
+    """The annex flow on scratch repos: the worktree, a deploy's sync (the
+    annex branch pushed, the lock node relocked and staged), a landing
+    (squashed onto the annex's main, the node relocked there) and the
+    removal; prefetch replaced, since the lock's hash is nix's to compute."""
+    scratch_env()
+    from nixconvoy import annex  # noqa: PLC0415 - after scratch_env's config
+    ax_origin, ax_seed = d / "dep.git", d / "dep-seed"
+    sh(d, "init", "--quiet", "--bare", "-b", "main", str(ax_origin))
+    sh(d, "clone", "--quiet", str(ax_origin), str(ax_seed))
+    put(ax_seed, "tool.py", "v1\n", "dep v1")
+    sh(ax_seed, "push", "--quiet", "origin", "HEAD:main")
+    ax_repo = d / "dep"  # the repository's checkout here, never deployed from
+    sh(d, "clone", "--quiet", str(ax_origin), str(ax_repo))
+
+    def locked(rev: str, ref: str) -> dict[str, object]:
+        return {"lastModified": 1, "narHash": f"sha256-{rev[:8]}", "ref": ref, "rev": rev,
+                "revCount": 1, "type": "git", "url": str(ax_origin)}
+
+    fetched: list[str] = []
+
+    def fake_prefetch(ref: str) -> dict[str, object]:
+        fetched.append(ref)
+        q = dict(part.split("=", 1) for part in ref.partition("?")[2].split("&"))
+        assert ref.startswith(f"git+{ax_origin}?"), ref
+        return locked(q["rev"], q["ref"])
+
+    annex.prefetch = fake_prefetch
+    config.set_cfg(config.parse(f'flake = "nixos"\n[annexes.dep]\nrepo = "{ax_repo}"\n'))
+
+    origin, seed, co = d / "origin.git", d / "seed", d / "homelab9"
+    wb = "tester-deploys9"
+    v1 = sh(ax_seed, "rev-parse", "HEAD")
+    lock = {"nodes": {"dep": {"flake": False, "locked": locked(v1, "refs/heads/main"),
+                              "original": {"type": "git", "url": str(ax_origin)}},
+                      "root": {"inputs": {"dep": "dep"}}},
+            "root": "root", "version": 7}
+    sh(d, "init", "--quiet", "--bare", "-b", "main", str(origin))
+    sh(d, "clone", "--quiet", str(origin), str(seed))
+    put(seed, "deploy-branches", f"{wb}*\n")
+    put(seed, ".gitignore", "annexes/\n")
+    put(seed, "nixos/flake.lock", proc.dump_json(lock) + "\n", "seed")
+    sh(seed, "push", "--quiet", "origin", "HEAD:main")
+    sh(d, "clone", "--quiet", str(origin), str(co))
+    prev = Path.cwd()
+    os.chdir(co)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            checkout.ensure_on_work_branch(wb)
+            ax = annex.create("dep", wb)
+        assert ax == co / "annexes" / "dep" and annex.branch_at(ax) == wb
+        assert sh(ax, "rev-parse", "HEAD") == v1
+        assert sh(ax, "config", f"branch.{wb}.merge") == "refs/heads/main"
+        assert (ax_repo / ".git" / annex.MARKER).exists()
+        assert not sh(co, "status", "--porcelain")  # gitignored
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert annex.create("dep", wb) == ax  # idempotent
+        assert annex.sync(wb, None) == []  # nothing of its own: no push, the lock as it was
+        assert not annex.own(co) and annex.notes(co) == ["annex dep"]
+
+        # Staged in the annex: committed on its branch, pushed, the node relocked and staged here.
+        put(ax, "tool.py", "v2\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            try:
+                annex.sync(wb, None)
+                raise AssertionError("did not die")
+            except SystemExit:
+                proc.DYING = False
+        assert "annex dep has staged changes" in err.getvalue()
+        told = annex.sync(wb, "dep: v2")
+        v2 = sh(ax, "rev-parse", "HEAD")
+        assert v2 != v1 and sh(ax, "log", "-1", "--format=%s") == "dep: v2"
+        assert sh(ax_seed, "ls-remote", str(ax_origin), f"refs/heads/{wb}").split()[0] == v2
+        assert len(told) == 2 and "pushed" in told[0] and "locks" in told[1], told
+        assert fetched == [f"git+{ax_origin}?ref=refs/heads/{wb}&rev={v2}"]
+        assert sh(co, "diff", "--cached", "--name-only") == "nixos/flake.lock"
+        assert annex.locked_rev("dep") == (v2, f"refs/heads/{wb}")
+        assert annex.sync(wb, "again") == []  # settled: nothing to do
+        assert annex.own(co)
+        assert annex.notes(co) == ["annex dep +1"]
+
+        # The deploy's commit of the lock, then the landing: the annex squashed onto its main.
+        sh(co, "commit", "--quiet", "-m", "dep: v2")
+        put(co, "COMMIT_MSG.md", "dep v2 landed\n", "msg")
+        put(ax_seed, "other.txt", "x\n", "upstream meanwhile")
+        sh(ax_seed, "push", "--quiet", "origin", "HEAD:main")
+        with contextlib.redirect_stdout(io.StringIO()):
+            annex.land_all(wb, "dep v2 landed")
+        ax_main = sh(ax_seed, "ls-remote", str(ax_origin), "refs/heads/main").split()[0]
+        assert sh(ax, "rev-parse", "HEAD") == ax_main
+        assert sh(ax, "log", "-1", "--format=%s", ax_main) == "dep v2 landed"
+        assert sh(ax, "show", f"{ax_main}:tool.py") == "v2" and sh(ax, "show", f"{ax_main}:other.txt") == "x"
+        assert sh(ax, "rev-list", "--count", f"{v1}..{ax_main}") == "2"  # upstream's, then the squash
+        assert annex.locked_rev("dep") == (ax_main, "refs/heads/main")
+        assert not sh(co, "diff", "--cached") and sh(co, "log", "-1", "--format=%s").startswith("annex dep:")
+        assert not annex.own(co)
+        with contextlib.redirect_stdout(io.StringIO()):
+            annex.land_all(wb, "dep v2 landed")  # a retry: nothing left to do
+        assert sh(co, "log", "-1", "--format=%s").startswith("annex dep:")
+
+        # The removal: worktree and branch gone, here and on the annex's origin.
+        with contextlib.redirect_stdout(io.StringIO()):
+            annex.remove_all(co)
+        assert not ax.exists() and not (co / "annexes").exists()
+        assert not sh(ax_seed, "ls-remote", str(ax_origin), f"refs/heads/{wb}")
+        assert annex.present(co) == []
+        assert f"refs/heads/{wb}" not in sh(ax_repo, "for-each-ref", "--format=%(refname)")
+    finally:
+        os.chdir(prev)
+    print("annexes: ok")
+
+
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--fake-target"]:
         sys.exit(fake_target(sys.argv[2:]))
@@ -1122,3 +1235,5 @@ if __name__ == "__main__":
         git_cases(Path(d))
     with tempfile.TemporaryDirectory() as d:
         announce_cases(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        annex_cases(Path(d))

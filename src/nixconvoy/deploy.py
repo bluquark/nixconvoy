@@ -13,7 +13,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
-from . import memo, proc, targets
+from . import annex, memo, proc, targets
 from .checkout import (
     PENDING_REFS,
     WAIT_STALE,
@@ -125,6 +125,9 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
             "until pushed) or parked on origin/main")
 
     snap = ""
+    PERF.mark("annex")
+    for told in annex.sync(wb, msg):
+        print(told)
     PERF.mark("snapshot")
     if staged_differs():
         if not msg and not dry:

@@ -12,7 +12,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import IO, NamedTuple
 
-from . import memo, proc, targets
+from . import annex, memo, proc, targets
 from .checkout import (
     PAST_REFS,
     SESSIONLESS,
@@ -69,6 +69,8 @@ def commit_only(msg: str | None) -> None:
     git(*fetch_args())
     pop_tmp_commits()
     wb = require_work_branch("commit")
+    for told in annex.sync(wb, msg):
+        print(told)
     if not staged_differs():
         die("nothing is staged")
     # No build gate here, so a staged change the precheck reads is checked alone.
@@ -102,9 +104,8 @@ def land() -> None:
     if staged_differs():
         die("staged but undeployed changes present; deploy or unstage them first")
     ensure_rebased()
-    tree = tree_less_msg("HEAD")
     main = rev("refs/remotes/origin/main")
-    if main is None or tree == out(["git", "rev-parse", "origin/main^{tree}"]):
+    if main is None or tree_less_msg("HEAD") == out(["git", "rev-parse", "origin/main^{tree}"]):
         die("no changes vs origin/main to land")
     msg = out(["git", "show", f"HEAD:{MSG_FILE}"]) if rev(f"HEAD:{MSG_FILE}") else ""
     if not msg:
@@ -124,6 +125,9 @@ def land() -> None:
     lines = msg.splitlines()
     if len(lines) > 1 and lines[1].strip():
         msg = "\n".join([lines[0], "", *lines[1:]])
+    # The annexes first: main must never lock a branch about to go.
+    annex.land_all(wb, msg)
+    tree = tree_less_msg("HEAD")
 
     commit = out(["git", "commit-tree", tree, "-p", main, "-m", msg])
 
@@ -136,6 +140,7 @@ def land() -> None:
     git("reset", "--quiet", commit)  # move wb to main; working tree untouched
     Path(MSG_FILE).unlink(missing_ok=True)  # now main's commit message
     print(f"landed on main: {summarize(commit)}")
+    annex.remove_all(Path.cwd().resolve())
     siblings = sibling_checkouts()  # the parent of a subagent worktree included
     finish(wb)
     if not catch_up(siblings):
@@ -174,6 +179,7 @@ def abandon(apply_now: bool = False) -> None:
     if ident.kind == "sub" and ident.wb and current_branch() != ident.wb and sub_parent(here):
         # Never deployed: still on its fresh branch.
         # The CLI holds this worktree's deploy lock, and abandon fetched.
+        annex.remove_all(here)
         failed: list[str] = []
         why = prune_one(here, named=True, own_session_ends=True, prefetched=True, deploy_held=True,
                         dropped_failed=failed)
@@ -195,6 +201,7 @@ def abandon(apply_now: bool = False) -> None:
         die("nothing to abandon")
 
     deployed = deployed_targets(f"{main}..{prev}")
+    annex.remove_all(here)
     git("reset", "--quiet", "--hard", main)
     Path(MSG_FILE).unlink(missing_ok=True)  # an uncommitted copy survives the hard reset
     git("branch", "-f", "main", main, check=False)
@@ -474,7 +481,7 @@ class PruneQueries(GitQueries):
             # An agent that stopped may be resumed: what git ignores (its
             # builds, notes) is kept for it too.
             ignored = ["--ignored"] if self.stop is not None else []
-            return {"flag": bool(out(["git", "status", "--porcelain", *ignored]))}
+            return {"flag": bool(out(["git", "status", "--porcelain", *ignored])) or annex.own(self.d)}
         if kind == "occupied":
             return {"flag": occupied(self.d, invoker=self.invoker)}
         if kind == "ran_again":
@@ -489,6 +496,7 @@ class PruneQueries(GitQueries):
             self.claim_out = claimed and ask.get("expect") is not None
             return {"flag": claimed}
         if kind == "remove_worktree":
+            annex.remove_all(self.d)  # nested in it: their registrations go first
             os.chdir(self.parent)
             # git holds the name lock too, so a prune killed meanwhile
             # leaves it deleting under the lock.
@@ -738,6 +746,7 @@ def remove_sub(branches: list[str]) -> None:
     require_unlocked(here)
     if worktree_lock(here) is not None:
         git("worktree", "unlock", str(here))
+    annex.remove_all(here)
     os.chdir(parent)
     git("worktree", "remove", "--force", str(here), pass_fds=(held.fileno(),))
     # Still held: a create of the name reuses no branch about to go.
@@ -898,6 +907,7 @@ def status() -> None:
         if ident.wb and cur != ident.wb and ident.kind != "main":
             notes.append(p(f"owns {ident.wb}", "dim"))
         notes += [p(f"{label} {n}", "cyan") for label, n in counts.items() if n]
+        notes += [p(a, "cyan") for a in annex.notes(d)]
         if ident.kind == "sub" and not own and not any(counts.values()) and cur != ident.wb:
             if sessionless:
                 notes.append(p(f"empty, its create found no claude session: nixconvoy abandon {d.name} "
@@ -958,6 +968,11 @@ def status() -> None:
         print(paint("on origin only (other machines' checkouts):", "dim"))
         for e in elsewhere:
             print(f"  {paint(e, 'yellow')}")
+    stray = annex.repo_notes()
+    if stray:
+        print(paint("annex repositories edited outside any annex:", "dim"))
+        for e in stray:
+            print(f"  {paint(e, 'red')}")
     pending = pending_announcements()
     if pending:
         print(paint("deploys under way (announced increments):", "dim"))
@@ -976,4 +991,22 @@ def status() -> None:
                 print(f"  {paint(entry, 'yellow')}")
 
 
-__all__ = ["abandon", "commit_only", "enter_sub", "land", "prune", "prune_after", "pull", "status", "work_branch_name"]
+def annexes() -> None:
+    """`nixconvoy annex` with no input: the configured annexes, each with
+    its repository and, when present under this checkout, its state."""
+    repos = annex.configured()
+    if not repos:
+        print("no annexes configured (nixconvoy.toml: [annexes.<input>] repo = \"...\")")
+        return
+    here = Path.cwd().resolve()
+    state = {n.split(" ", 2)[1]: n for n in annex.notes(here)}
+    for name, repo in sorted(repos.items()):
+        d = here / annex.ANNEX_DIR / name
+        where = state.get(name, f"present at {d}") if (d / ".git").exists() else "not present here"
+        print(f"{name}: {repo}  ({where})")
+    for e in annex.repo_notes():
+        print(f"warning: {e}", file=sys.stderr)
+
+
+__all__ = ["abandon", "annexes", "commit_only", "enter_sub", "land", "prune", "prune_after", "pull", "status",
+           "work_branch_name"]

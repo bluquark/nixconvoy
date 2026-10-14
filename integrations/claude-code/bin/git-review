@@ -7,7 +7,8 @@
 # given).  Leading arguments that are no paths here but subagent worktree
 # names (.claude/worktrees/<name> of this checkout, else of any checkout of
 # this repository, a unique prefix each) show those worktrees instead, one
-# after the other.
+# after the other.  A checkout's annexes (annexes/<input>, nixconvoy annex)
+# follow its diff, each from the merge-base with its origin's default branch.
 # One pager stream keeps the messages visible on long diffs; colors are
 # per-line because less -R drops attributes at line boundaries.
 # The nixconvoy package carries it, so `nixconvoy review` runs it anywhere;
@@ -106,6 +107,20 @@ show() {
         echo
     fi
     git -C "$d" diff --cached $color "$@"
+    for a in "$d"/annexes/*/; do
+        [ -e "$a.git" ] || continue
+        a=${a%/}
+        def=$(git -C "$a" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)
+        def=${def:-origin/main}
+        abase=$(git -C "$a" merge-base "$def" HEAD 2>/dev/null) || continue
+        echo
+        if [ -n "$color" ]; then
+            printf '\033[1m── annex %s ──\033[0m\n' "$(basename "$a")"
+        else
+            echo "── annex $(basename "$a") ──"
+        fi
+        git -C "$a" diff --cached $color "$abase" -- ":(top,exclude)COMMIT_MSG.md"
+    done
 }
 
 run() {

@@ -209,6 +209,30 @@ runs or not: resuming the agent recreates it (the PreToolUse hook on
 SendMessage).  It keeps a worktree whose lock names no session.
 
 
+Annex (nixconvoy annex [<input>]): the flake input <input> developed in
+place: a worktree of its repository (nixconvoy.toml's annexes.<input>.repo,
+whose origin the lock fetches) at <checkout>/annexes/<input>, on a branch
+named after this checkout's work branch - origin's copy of that branch
+when it has one, else new off the repository's default branch, with its
+upstream set there.  annexes/ must be gitignored (a nested checkout).  Work
+there as in the checkout: stage what is ready, and each deploy (or commit)
+commits the annex's staged state onto that branch with the -m message,
+pushes it to the annex's origin and points the flake.lock node at the
+pushed rev (nix flake prefetch gives the hash), staged here, so the
+increment carries the annex as a lock change: the union, the eval memo and
+the lineage see nothing new.  The annex branch is pushed before the build,
+since the build fetches it, so it may run ahead of what is deployed; the
+work branch's lock is the claim.  land lands each annex first - its
+branch rebased onto the repository's default branch and squashed there as
+one commit (the annex's own COMMIT_MSG.md, else the checkout's) - and
+relocks the node on the default branch as a commit of the work branch,
+then lands main; abandon, land and prune remove the annex worktree with
+its branch, here and on its origin.  With no <input>, the configured
+annexes and which are present here.  An annex repository's own checkout
+is never deployed from: status flags edits there, and nixconvoy leaves a
+`nixconvoy-annexed` marker in its git dir for a pre-commit hook to refuse
+an agent's commit on its default branch.
+
 Commit (nixconvoy commit -m "..."): commit + push the staged state onto the
 work branch without probing, building or switching anything - for changes
 that affect no NixOS target, or to publish work while a target is unreachable.
@@ -256,8 +280,8 @@ import os
 import sys
 from pathlib import Path
 
-from . import commands, proc
-from .checkout import lock_checkout, sub_parent
+from . import annex, commands, proc
+from .checkout import lock_checkout, require_work_branch, sub_parent
 from .deploy import deploy
 from .proc import PERF, PERF_FILE, die, git, ok, out
 from .targets import NETWORK_FLAG, exec_on
@@ -271,6 +295,7 @@ USAGE = """usage: nixconvoy apply [-m "msg"] [--reset] [--danger-network-config-
        nixconvoy status
        nixconvoy review [worktree ...] [diff args]
        nixconvoy exec [target|@tag ...] -- command [arg ...]
+       nixconvoy annex [input]
 With no targets named, every target whose running system differs from the union
 is switched; naming targets, or @tag for the targets nixconvoy.toml tags so,
 restricts switching to (at most) those.
@@ -292,7 +317,8 @@ def main() -> None:
         print(__doc__)
         print(USAGE)
         return
-    if args[0] not in ("apply", "land", "commit", "abandon", "prune", "pull", "status", "review", "exec"):
+    if args[0] not in ("apply", "land", "commit", "abandon", "prune", "pull", "status", "review", "exec",
+                       "annex"):
         die(USAGE)
     subcmd = args.pop(0)
     start = Path.cwd()
@@ -311,7 +337,7 @@ def main() -> None:
             die(USAGE)
         exec_on(args[:at], args[at + 1:])
         return
-    if subcmd not in ("status", "prune"):
+    if subcmd not in ("status", "prune", "annex"):
         atexit.register(PERF.write, Path.cwd() / PERF_FILE)
     msg: str | None = None
     reset = False
@@ -354,6 +380,15 @@ def main() -> None:
         if msg or reset or danger or dry or names:
             die(USAGE)
         commands.status()
+        return
+    if subcmd == "annex":
+        if msg or reset or danger or dry or len(names) > 1:
+            die(USAGE)
+        if not names:
+            commands.annexes()
+            return
+        take_lock()
+        annex.create(names[0], require_work_branch("annex"))
         return
     if subcmd == "prune":
         if msg or reset or danger or dry or ((after or stopped) and names) or (after and stopped):

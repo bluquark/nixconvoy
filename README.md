@@ -177,6 +177,9 @@ served_by = "builder"        # skipped when building on that builder
 local_only = true            # deployable only from itself
 ssh_address = "root@10.0.0.9"   # overrides the template
 tags = ["portable"]          # `@portable` on the command line names every target tagged so
+
+[annexes.mytool]             # a flake input developed in place (see Annexes)
+repo = "~/projects/mytool"   # its repository's checkout here; its origin is what the lock fetches
 ```
 
 ### The NixOS module
@@ -207,6 +210,7 @@ nixconvoy pull                 rebase every checkout on this machine onto origin
 nixconvoy status               every checkout on this machine, and origin's other branches
 nixconvoy review               the pending landing: COMMIT_MSG.md, then the diff
 nixconvoy exec [target|@tag ...] -- cmd [arg ...]   run a command on each target, concurrently
+nixconvoy annex [input]        the flake input developed in place under this checkout (see Annexes)
 ```
 
 `nixconvoy --help` and the docstring of `src/nixconvoy/cli.py` describe each
@@ -245,6 +249,40 @@ plugin install on top of such a hook does wire both): how Claude Code
 combines two hooks' `updatedInput` is not specified.  The hook returns
 the rewritten call as allowed, so an `ask` rule on Agent does not prompt
 for a spawn it isolated.
+
+## Annexes
+
+A flake input you also develop - a tool of your own, a fork - gets the
+same deploy model, without a separate checkout per task.  Name it in
+`nixconvoy.toml` (`[annexes.<input>] repo = "..."`, the repository's checkout
+on this machine) and gitignore `annexes/`.  Then, from a checkout on a work
+branch:
+
+- **`nixconvoy annex <input>`** adds a worktree of that repository at
+  `<checkout>/annexes/<input>`, on a branch named after the checkout's work
+  branch, off the repository's default branch.  Work there as in the
+  checkout: stage what is ready to deploy.
+- **A deploy carries it as a lock change.**  `apply` (and `commit`)
+  commits the annex's staged state onto its branch with the `-m` message,
+  pushes it to the annex's origin and points the `flake.lock` node at the
+  pushed rev, staged in the checkout.  The increment then carries the annex
+  like any other edit: the union, the eval memo and the lineage see a lock
+  change to an input the targets name.  Two work branches moving the same
+  annex are a lock conflict, which the union reports like any other.
+- **`land` lands the annex first:** its branch rebased onto the
+  repository's default branch and squashed there as one commit (the
+  annex's own `COMMIT_MSG.md`, else the checkout's), the node relocked on
+  the default branch as a commit of the work branch, then main.  `abandon`
+  discards it.  Either way the annex worktree goes, with its branch here
+  and on its origin; a subagent worktree's annexes go with it.
+- **Keep the nightly off annexed inputs.**  An unattended `nix flake
+  update` would move the node back to the default branch's tip; let
+  landings move it instead.
+- **Never work in the repository's own checkout.**  `status` flags edits
+  there, and nixconvoy leaves a `nixconvoy-annexed` marker in that
+  repository's git dir, so a global pre-commit hook can refuse an agent's
+  commit on its default branch outside an annex (`[ -f
+  "$(git rev-parse --git-common-dir)/nixconvoy-annexed" ]`).
 
 ## How it is built
 
