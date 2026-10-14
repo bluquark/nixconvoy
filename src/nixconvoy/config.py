@@ -47,6 +47,10 @@ class Config:
     # A subagent worktree of the main checkout owns "<prefix>-<name>";
     # {machine} is this machine's hostname.
     branch_prefix: str = "{machine}-deploys"
+    # Where `open <name>` puts a task worktree, relative to the checkout
+    # (gitignored: a nested worktree); any worktree nested in a checkout
+    # is one of its task worktrees, wherever it was made.
+    worktrees: str = "worktrees"
     # A flake check (checks.<system>.<attr>) proven before any build,
     # memoized on the git object ids of the files matching `globs`.
     precheck_attr: str = ""
@@ -156,7 +160,7 @@ def parse(text: str) -> Config:
     version = doc.get("version", 1)
     if version != 1:
         raise ConfigError(f"{CONFIG_FILE}: version {version} is not supported (1 is)")
-    known = {"version", "flake", "hosts_dir", "system", "ssh_address", "branch_prefix",
+    known = {"version", "flake", "hosts_dir", "system", "ssh_address", "branch_prefix", "worktrees",
              "precheck", "memo", "eval", "build", "targets", "annexes"}
     for k in doc:
         if k not in known:
@@ -202,12 +206,16 @@ def parse(text: str) -> Config:
     namespace = _str(memo, "namespace", "memo")
     if bool(overlay) != bool(namespace):
         raise ConfigError("memo.overlay and memo.namespace go together")
+    worktrees = _str(doc, "worktrees", CONFIG_FILE, "worktrees").strip("/")
+    if not worktrees or ".." in worktrees.split("/"):
+        raise ConfigError(f"{CONFIG_FILE}: worktrees is a directory inside the checkout")
     return Config(
         flake=_str(doc, "flake", CONFIG_FILE, "."),
         hosts_dir=_str(doc, "hosts_dir", CONFIG_FILE),
         system=_str(doc, "system", CONFIG_FILE, "x86_64-linux"),
         ssh_template=_template(doc, "ssh_address", "{target}", "target"),
         branch_prefix=_template(doc, "branch_prefix", "{machine}-deploys", "machine"),
+        worktrees=worktrees,
         precheck_attr=_str(pre, "attr", "precheck"),
         precheck_globs=_strs(pre, "globs", "precheck"),
         overlay=overlay, overlay_namespace=namespace,

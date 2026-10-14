@@ -4,20 +4,16 @@ build and copy of a union (deploy.deploy)."""
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 from collections.abc import Callable
 from concurrent.futures import Future
 from fnmatch import fnmatchcase
+from pathlib import Path
 
+from . import annex
 from .checkout import MACHINE_ENV, GitQueries, add_worktree, allowed_branches, drop_worktree, ran, summarize
 from .config import MSG_FILE, cfg
-from .proc import git, ok, out, rev, run
-
-
-def solve_with_mergiraf(wt: str, path: str) -> bool:
-    tool = ["mergiraf"] if shutil.which("mergiraf") else ["nix", "run", "nixpkgs#mergiraf", "--"]
-    return ok([*tool, "solve", path], cwd=wt)
+from .proc import git, ok, out, rev, run, solve_with_mergiraf
 
 
 class UnionQueries(GitQueries):
@@ -73,6 +69,8 @@ class UnionQueries(GitQueries):
         if kind == "drop_file":
             return ran(git("rm", "--quiet", "-f", arg("file"), cwd=wt, check=False))
         if kind == "solve":
+            if arg("file") == str(annex.lock_path()):
+                return {"flag": annex.solve_lock(Path(wt))}
             return {"flag": solve_with_mergiraf(wt, arg("file"))}
         if kind == "add":
             return ran(git("add", "--", arg("file"), cwd=wt, check=False))

@@ -36,8 +36,6 @@ MACHINE_ENV = {
     "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
     "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z",
 }
-# Claude Code's subagent worktrees live under a checkout here.
-SUB_DIR = Path(".claude/worktrees")
 # A throwaway worktree of a run (the union's, a rebase aside): never a
 # checkout, whatever `git worktree list` says.
 TMP_PREFIX = "nixconvoy-"
@@ -103,18 +101,47 @@ def owned(name: str, pats: set[str] | None = None) -> bool:
 
 class Checkout(NamedTuple):
     # "main" (no work branch of its own), "agent" (a work branch) or "sub"
-    # (a subagent worktree under another checkout's SUB_DIR).
+    # (a subagent worktree nested in another checkout).
     kind: str
     wb: str | None
 
 
+def sub_dir() -> Path:
+    """Where `open <name>` puts a task worktree, under the checkout."""
+    return Path(cfg().worktrees)
+
+
+def git_common(d: Path) -> Path | None:
+    """The common git dir of the worktree at `d`, read off its .git (a
+    directory in the primary worktree, a gitdir: file in a linked one)
+    without running git; None when `d` is no worktree."""
+    dotgit = d / ".git"
+    try:
+        if dotgit.is_dir():
+            return dotgit.resolve()
+        text = dotgit.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if not text.startswith("gitdir:"):
+        return None
+    g = Path(text[len("gitdir:"):].strip())
+    if not g.is_absolute():
+        g = d / g
+    return (g.parent.parent if g.parent.name == "worktrees" else g).resolve()
+
+
 def sub_parent(d: Path) -> Path | None:
-    """The checkout a subagent worktree at `d` (<checkout>/.claude/worktrees/<name>)
-    belongs to; None when `d` is not one."""
-    top = d.parent.parent.parent
-    if (d.parent.name == SUB_DIR.name and d.parent.parent.name == SUB_DIR.parent.name
-            and (top / ".git").exists() and re.fullmatch(r"[\w.-]+", d.name)):
-        return top
+    """The checkout the subagent worktree at `d` is nested in - the nearest
+    directory above it holding a .git, when that is a worktree of the
+    same repository (an annex's nested checkout is another repository's);
+    None when `d` is not one."""
+    if not re.fullmatch(r"[\w.-]+", d.name) or (mine := git_common(d)) is None:
+        return None
+    up = d.parent
+    while up != up.parent:
+        if (up / ".git").exists():
+            return up if git_common(up) == mine else None
+        up = up.parent
     return None
 
 
@@ -152,7 +179,7 @@ def note_branch(d: Path, wb: str) -> None:
 def identity_of(here: Path, cur: str | None, pats: set[str] | None = None) -> Checkout:
     """What the checkout at `here` with `cur` checked out is: on one of
     this machine's listed work branches it owns that branch (a subagent's
-    when it lives under another checkout's SUB_DIR); a subagent worktree on
+    when it is nested in another checkout); a subagent worktree on
     any other branch owns <parent's work branch>-<name> (<branch_prefix>-<name>
     under the main checkout); a checkout that owned a work branch before
     (its note) still does; anything else is the main checkout, with no work
@@ -288,9 +315,30 @@ class GitQueries:
         if kind == "head_subject":
             return {"text": git("log", "-1", "--format=%s", check=False).stdout.strip() or None}
         if kind == "rebase":
+            from . import annex  # noqa: PLC0415 - annex builds on this module
+
             empty = "--empty=keep" if ask.get("keep_empty") else "--empty=drop"
-            return ran(git("rebase", "--quiet", empty, "origin/main", cwd=self.where(ask),
-                           check=False))
+            where = self.where(ask)
+            p = git("rebase", "--quiet", empty, "origin/main", cwd=where, check=False)
+            # Stopped on the lock alone, where main locks an annex this
+            # branch relocked (its landing elsewhere): the annex follows.
+            while p.returncode != 0 and annex.solve_rebase(Path(where or Path.cwd()).resolve(), Path.cwd().resolve()):
+                if ok(["git", "diff", "--cached", "--quiet"], cwd=where):
+                    # Resolved to what HEAD has already (a later relock of
+                    # the same annex): kept as an empty commit where the
+                    # core counts on its commits (its tmp commits), else skipped.
+                    if not ask.get("keep_empty"):
+                        p = git("rebase", "--skip", cwd=where, env={"GIT_EDITOR": "true"}, check=False)
+                        continue
+                    stopped = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path",
+                                        "rebase-merge/stopped-sha"], cwd=where)).read_text().strip()
+                    git("commit", "--quiet", "--allow-empty", "--no-verify", "-C", stopped, cwd=where)
+                p = git("rebase", "--continue", cwd=where, env={"GIT_EDITOR": "true"}, check=False)
+            if p.returncode == 0:
+                annex.push_pending()
+            else:
+                annex.undo_pending()
+            return ran(p)
         if kind == "rebase_abort":
             return ran(git("rebase", "--abort", cwd=self.where(ask), check=False))
         if kind == "rev":

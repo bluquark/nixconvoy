@@ -296,6 +296,9 @@ enum Act {
     Commit,
     Deploy,
     Detach,
+    /// A land or abandon: the work branch reset onto main, pushed so; the
+    /// worktree stays on it, idle.
+    Land,
     /// Its run ends, maybe with a wake bypassing the resume hook pending
     /// (when it arose is moot until then).
     Stop {
@@ -467,7 +470,7 @@ impl World {
                 None
             }
             Removing::Checked => {
-                self.lost |= x.dirty || x.commits || x.on_wb || x.local == Local::Unpushed || x.increments || x.push;
+                self.lost |= x.dirty || x.commits || x.local == Local::Unpushed || x.increments || x.push;
                 self.stranded |= live;
                 self.evicted |= x.occupant && at_claim;
                 x.tree = false;
@@ -723,6 +726,9 @@ impl Model for Prune {
                         }
                         if x.on_wb && !x.dirty {
                             acts.push(Act::Detach);
+                            if !x.push {
+                                acts.push(Act::Land);
+                            }
                         }
                     }
                     if a.sub && w.stops > 0 && w.sweeps.iter().all(|sw| sw.stopped.is_none()) {
@@ -823,6 +829,13 @@ impl Model for Prune {
                 w.x.on_wb = false;
                 w.x.commits = false;
             }
+            Act::Land => {
+                w.work -= 1;
+                let x = &mut w.x;
+                x.commits = false;
+                x.increments = false;
+                x.local = Local::Pushed;
+            }
             Act::Stop { wake } => {
                 w.stops -= 1;
                 let a = w.agent.as_mut().expect("a running agent");
@@ -922,14 +935,7 @@ impl Model for Prune {
                 let x = &w.x;
                 let dead = matches!(x.lock.or(x.claimed), Some(Lock::Of(..)));
                 w.later != Some(true)
-                    || !(x.exists()
-                        && dead
-                        && !x.occupant
-                        && !x.dirty
-                        && !x.commits
-                        && !x.on_wb
-                        && x.local != Local::Unpushed
-                        && !x.increments)
+                    || !(x.exists() && dead && !x.occupant && !x.dirty && !x.commits && x.local != Local::Unpushed && !x.increments)
             }),
             Property::sometimes("a worktree is removed", |_, w: &World| w.removed),
             Property::sometimes("a sweep defers to a create holding the name", |_, w: &World| w.deferred),

@@ -2,18 +2,21 @@
 # WorktreeRemove hook: the counterpart of worktree-create.sh.  Claude Code
 # fires it when it removes a worktree that hook created - a `claude
 # --worktree` session's on exit; not a finished subagent's, which
-# `nixconvoy prune` removes when it stops or its session exits - and without it the
+# `nixconvoy close` removes when it stops or its session exits - and without it the
 # worktree's branch would stay behind.  A worktree with changes, or commits not on
 # origin/main (a work branch deployed but not landed: nixconvoy's land
 # or abandon is its way out), is kept (exit 1 leaves it on disk, as
-# documented), as is one another live claude session has taken over.
+# documented), as is one another live claude session has taken over, or
+# one holding an annex worktree (annexes/<input>, gitignored: nixconvoy's
+# close judges that and removes both in order).
 set -eu
 command -v jq >/dev/null 2>&1 || { echo "worktree-remove: jq missing" >&2; exit 1; }
 path=$(jq -r '.worktree_path')
 # Resolved, as the create hook names the lock after git's resolved path.
 path=$(cd -P "$path" 2>/dev/null && pwd -P) || exit 0
-top=$(dirname "$(dirname "$(dirname "$path")")")
-# The name lock worktree-create.sh and nixconvoy's prune take, so neither
+# The checkout it is nested in.
+top=$(git -C "$(dirname "$path")" rev-parse --show-toplevel 2>/dev/null) || exit 0
+# The name lock worktree-create.sh and nixconvoy's close take, so neither
 # meets this removal half done; everything is checked under it.
 locks="$(git -C "$top" rev-parse --path-format=absolute --git-common-dir)/nixconvoy-worktree-locks"
 mkdir -p "$locks"
@@ -26,7 +29,7 @@ else
   }
 fi
 if ! locked_name; then
-  echo "worktree-remove: $path stayed locked for 60s by a nixconvoy prune or a create, kept" >&2
+  echo "worktree-remove: $path stayed locked for 60s by a nixconvoy close or a create, kept" >&2
   exit 1
 fi
 [ -d "$path" ] || exit 0  # removed meanwhile
@@ -57,6 +60,11 @@ if [ -n "$(git -C "$path" status --porcelain)" ] \
   echo "worktree-remove: $path has work not on origin/main, kept" >&2
   exit 1
 fi
+for a in "$path"/annexes/*/.git; do
+  [ -e "$a" ] || continue
+  echo "worktree-remove: $path holds an annex ($(basename "$(dirname "$a")")): left to nixconvoy close" >&2
+  exit 1
+done
 branch=$(git -C "$path" symbolic-ref --short -q HEAD || true)
 git -C "$top" worktree unlock "$path" 2>/dev/null || true
 git -C "$top" worktree remove --force "$path"

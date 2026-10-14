@@ -12,10 +12,11 @@ Model:
     state onto it and pushes it after a successful deploy.  A checkout on
     main (or any other branch, another machine's work branch included) is a
     main checkout: it deploys main plus the pushed work branches and owns
-    nothing.  A Claude Code subagent worktree (<checkout>/.claude/worktrees/
-    <name>) owns <parent's branch>-<name> (<branch_prefix>-<name> under a
-    main checkout) from its first deploy.  After a land or abandon a
-    checkout stays on its work branch, reset onto origin/main.
+    nothing.  A subagent (task) worktree - one nested in a checkout,
+    <checkout>/<worktrees>/<name> by `open` - owns <parent's branch>-<name>
+    (<branch_prefix>-<name> under a main checkout) from its first deploy.
+    After a land or abandon a checkout stays on its work branch, reset onto
+    origin/main.
   - COMMIT_MSG.md at a work branch's root describes the branch's work since
     its last landing.  It never reaches main's tree: `land` consumes it as
     the commit message.
@@ -144,15 +145,24 @@ Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
      a deploy elsewhere is refused there rather than reverting the
      increment, until the re-run ends with the push (or a hand clear)
 
-Land (nixconvoy land [<name> ...]): commit the work branch's tree minus
-COMMIT_MSG.md onto origin/main with COMMIT_MSG.md as the message, push main,
-reset this branch (and its origin copy) onto the new main, the checkout
-staying on it.  Every other checkout on this machine is then brought onto
-the new main (see Pull); checkouts on other machines rebase at their next
-deploy.  A subagent's worktree has done its one task once landed or
-abandoned, so it is removed instead, with its branch (here and on origin);
-run from any checkout with the worktrees' <name>s (a unique prefix will
-do), land and abandon act on each in turn.
+Land (nixconvoy land [<name> ...] | --union | --annex <input>): commit the work branch's
+tree minus COMMIT_MSG.md onto origin/main with COMMIT_MSG.md as the message,
+push main, reset this branch (and its origin copy) onto the new main, the
+checkout staying on it.  Every other checkout on this machine is then
+brought onto the new main (see Pull); checkouts on other machines rebase at
+their next deploy.  A subagent worktree stays too, idle on its reset branch:
+`close` removes it (the session-exit sweep does, once its agent is done).
+Run from any checkout with the worktrees' <name>s (a unique prefix will do),
+land and abandon act on each in turn.  The checkout's annexes land first
+(see Annexes); --annex <input> lands that one annex alone.  --union lands
+this checkout and its subagent worktrees as one unit - for subagents that
+each did a piece of this checkout's task: every sub's branch (one on its
+work branch with work beyond main; a sub holding undeployed commits stops
+it) is merged into this branch's tree as a deploy's union merges them
+(mergiraf on the conflicts), and that lands as one commit under this
+checkout's COMMIT_MSG.md; each branch is reset onto the new main, each
+worktree staying, its unstaged edits kept (an edited file the landing
+changes stops it before main moves).
 
 Pull (nixconvoy pull): fetch and bring this checkout and every sibling
 checkout onto origin/main - a deploy's automatic rebase, for all of them at
@@ -169,69 +179,118 @@ whether they are pushed, staged/unstaged/untracked counts, the
 COMMIT_MSG.md subject, a deploy or git operation in progress - then the
 work branches only origin holds (other machines' checkouts).
 
-Review (nixconvoy review [<name> ...] [args]): `git review`
-(integrations/claude-code/bin/git-review), the review of the pending landing.
+Review (nixconvoy review [<name> ...] [--union] [args]): the review of
+the pending landing (review.py; `git review`, in the package's bin, is
+the same): COMMIT_MSG.md, then the diff against the merge-base with
+origin's default branch, then the annexes'.  A name is a subagent
+worktree's, an annex's (that annex alone) or a branch's (the worktree on
+it, else the branch against its merge-base, so an annex branch reviews
+from its repository too); one that is none of these is an error; --union reviews this checkout and then each
+subagent worktree; the rest are git diff arguments.
 
-Abandon (nixconvoy abandon [--apply-now] [<name> ...]): discard this
-checkout's work instead of landing it: hard-reset the checkout and reset
-the work branch (local and origin) onto origin/main, staying on it.
-Untracked files survive; the old tip remains reachable via the reflog.
+Abandon (nixconvoy abandon [--apply-now] [<name> ...] | --union | --annex <input>):
+discard this checkout's work instead of landing it: hard-reset the checkout
+and reset the work branch (local and origin) onto origin/main, staying on
+it; a subagent worktree stays too (close removes it); its annexes are
+reset onto their default branch likewise.  Untracked files survive; the
+old tip remains reachable via the reflog.
 No target is touched: the ones its increments were deployed to (named from
 their Deployed: trailers) keep running them until the next deploy by
 anyone, whose verdict names what it reverts ("will switch (catch-up: ...;
 reverting <branch>'s abandoned increment <sha>)").  --apply-now runs that
-deploy at once, so the targets drop the work now - from the checkout abandon
-ran in, a subagent worktree's parent once the worktree is removed; it
-takes --danger-network-config-change.
+deploy at once, so the targets drop the work now, from the checkout abandon
+ran in; it takes --danger-network-config-change.  --union abandons each
+subagent worktree holding anything, then this checkout.
 
-Prune (nixconvoy prune [<name> ...]): remove the subagent worktrees that
-hold nothing of their own - never deployed, no staged, unstaged or
-untracked change, HEAD and its work branch on origin - with their fresh
-branch; the named ones, or every one under this checkout (nixconvoy-plan's
-prune core decides each).  One whose spawning claude session still runs is
-kept, whichever session asks: the session may resume its agent, which needs
-the worktree.  So is one at work (a nixconvoy, git operation or push
-running in it), on a work branch (land or abandon decides it), locked by
-hand (or, in a sweep, unlocked) or holding anything; each kept one is said
-so, as is one a process works in.  It all happens under a lock on the
-worktree's name, which the create hook takes too, and the removal claims
-the lock it judged and leaves git to refuse a worktree locked meanwhile.  `--after PID` detaches, prunes what dead
-sessions left, waits for the claude session PID to exit and prunes again
-(one waiter per session, logged to nixconvoy-prune.log in the common git
-dir): the Claude Code plugin's SessionStart hook starts it, so a subagent's
-worktree with nothing of its own goes when its session ends.  `--stopped
-PID`, the SubagentStop hook's, takes that hook's input on stdin and,
-detached, removes the stopped agent's worktree sooner, at its stop, when it
-holds nothing of its own, no process or other running agent works in it
-and, a few seconds on, the agent has not run again (a message or Claude
-Code's own follow-up turn) and no resume relocked it, whether session PID
-runs or not: resuming the agent recreates it (the PreToolUse hook on
-SendMessage).  It keeps a worktree whose lock names no session.
-
-
-Annex (nixconvoy annex [<input>]): the flake input <input> developed in
-place: a worktree of its repository (nixconvoy.toml's annexes.<input>.repo,
-whose origin the lock fetches) at <checkout>/annexes/<input>, on a branch
-named after this checkout's work branch - origin's copy of that branch
-when it has one, else new off the repository's default branch, with its
-upstream set there.  annexes/ must be gitignored (a nested checkout).  Work
-there as in the checkout: stage what is ready, and each deploy (or commit)
-commits the annex's staged state onto that branch with the -m message,
-pushes it to the annex's origin and points the flake.lock node at the
-pushed rev (nix flake prefetch gives the hash), staged here, so the
-increment carries the annex as a lock change: the union, the eval memo and
-the lineage see nothing new.  The annex branch is pushed before the build,
-since the build fetches it, so it may run ahead of what is deployed; the
-work branch's lock is the claim.  land lands each annex first - its
-branch rebased onto the repository's default branch and squashed there as
-one commit (the annex's own COMMIT_MSG.md, else the checkout's) - and
-relocks the node on the default branch as a commit of the work branch,
-then lands main; abandon, land and prune remove the annex worktree with
-its branch, here and on its origin.  With no <input>, the configured
-annexes and which are present here.  An annex repository's own checkout
-is never deployed from: status flags edits there, and nixconvoy leaves a
+Open (nixconvoy open [--lock REASON] <name> | [--branch <wb>] <path> | --annex
+<input>): a worktree.  <name> (no / in it): a task worktree,
+<root>/<worktrees>/<name> (nixconvoy.toml's `worktrees`, `worktrees/` by
+default, which must be gitignored; root: the checkout this one's subagent
+worktrees hang off) on the fresh branch worktree-<name> off origin's
+default branch, owning <root's work branch>-<name> from its first deploy
+- what Claude Code's worktree isolation makes through the plugin's
+WorktreeCreate hook, which runs this with --lock naming its session; a
+name already opened is reused.  A worktree nested in a checkout is its
+subagent worktree wherever it was made.  <path> (with a /): an agent
+checkout beside the others - a worktree of this repository at that path,
+outside every checkout, on a work branch of this machine's: --branch, else
+<branch_prefix><N> for the digits the path's name ends with (homelab5 ->
+...-deploys5) when that is listed and free, else the first listed free
+number; origin's copy of the branch when it has one (a checkout removed
+before), else new off origin's default branch.  --annex:
+the flake input <input> developed in place: a worktree of its repository
+(nixconvoy.toml's annexes.<input>.repo, whose origin the lock fetches) at
+<checkout>/annexes/<input>, on a branch named after this checkout's work
+branch - origin's copy of that branch when it has one, else new off the
+repository's default branch, with its upstream set there.  annexes/ must
+be gitignored (a nested checkout).  Work there as in the checkout: stage
+what is ready, and each deploy (or commit) commits the annex's staged
+state onto that branch with the -m message, pushes it to the annex's
+origin and points the flake.lock node at the pushed rev (nix flake lock
+--override-input on a scratch copy of the flake, so the input's own
+inputs follow), staged here, so the increment carries the annex as a lock
+change: the union, the eval memo and the lineage see nothing new.  Two work branches that moved the same annex meet in the union as
+a lock conflict the union resolves node by node: the annex branches are
+merged in the annex repository (its configured checkout, else a bare
+mirror under ~/.cache/nixconvoy/annexes/), the merge pushed to the annex
+origin's refs/nixconvoy/union/<input>/<sha> and the union's node locked
+there - deterministic, so retries and the eval memo agree; a union ref no
+ref of origin (nor its deploy history of 90 days) locks any more is deleted
+by the next union, a day after its push; annex branches that conflict are
+reported as any union conflict.  Once one lands, the other's
+rebase onto main meets the landed node and rebases its annex branch onto
+the landed default branch, pushing it and relocking on it.  The annex branch is pushed before the build, since the build fetches
+it, so it may run ahead of what is deployed; the work branch's lock is the
+claim.  land lands each annex first - its tip merged onto the
+repository's default branch and squashed there as one commit (the
+COMMIT_MSG.md in the annex worktree, tracked or not, else the checkout's)
+- and relocks the node on the default branch as a commit of the work
+branch, then lands main; the annex worktree stays, its branch reset onto
+the landed commit.  `land --annex <input>` lands that one annex ahead of
+the checkout (the relock commit pushed on the work branch); `abandon
+--annex <input>` resets it onto the default branch and puts its lock node
+back to what origin/main locks, staged for the next deploy to revert it on
+the targets; the checkout's own abandon resets its annexes so.  status
+lists the configured annexes.  An annex repository's own checkout is never
+deployed from: status flags edits there, and nixconvoy leaves a
 `nixconvoy-annexed` marker in its git dir for a pre-commit hook to refuse
 an agent's commit on its default branch.
+
+Close (nixconvoy close [--force] [<name> ...] | [--force] <path> ... | --annex <input> |
+--after PID | --stopped PID): remove a worktree.  The named task worktrees when they hold
+nothing of their own - never deployed, no staged, unstaged or untracked
+change, HEAD and its work branch on origin, no annex holding anything -
+with their fresh branch, as nixconvoy-plan's prune core decides (a named
+one's lock counts its session as ended for it); --force removes a named
+one whatever it holds, with its branches and annexes, here and on origin.
+With no name, every one under this checkout (a sweep), where one whose
+spawning claude session still runs is kept, whichever session asks: the
+session may resume its agent, which needs the worktree.  So is one at
+work (a nixconvoy, git operation or push running in it), on a work branch
+(land or abandon decides it), locked by hand (or, in a sweep, unlocked) or
+holding anything; each kept one is said so, as is one a process works in.
+It all happens under a lock on the worktree's name, which open takes too,
+and the removal claims the lock it judged and leaves git to refuse a
+worktree locked meanwhile.  --annex <input>: that annex's worktree with
+its branch, here and on its origin (the last tip kept under
+refs/nixconvoy/past/<branch>/<sha> there for 90 days), unless that would lose work - edits, commits
+not on the default branch, a lock still naming its branch - which --force
+overrides, the lock node then put back to origin/main's, staged.  <path>:
+an agent checkout (never the primary worktree), with its work branch here
+and on origin, when it holds nothing of its own - no edits, nothing beyond
+origin/main, no annex holding anything - or --force.  `--after
+PID` detaches, sweeps what dead sessions left, waits for the claude session
+PID to exit and sweeps again (one waiter per session, logged to
+nixconvoy-prune.log in the common git dir): the Claude Code plugin's
+SessionStart hook starts it, so a subagent's worktree with nothing of its
+own goes when its session ends.  `--stopped PID`, the SubagentStop hook's,
+takes that hook's input on stdin and, detached, removes the stopped
+agent's worktree sooner, at its stop, when it holds nothing of its own, no
+process or other running agent works in it and, a few seconds on, the
+agent has not run again (a message or Claude Code's own follow-up turn)
+and no resume relocked it, whether session PID runs or not: resuming the
+agent recreates it (the PreToolUse hook on SendMessage).  It keeps a
+worktree whose lock names no session.
 
 Commit (nixconvoy commit -m "..."): commit + push the staged state onto the
 work branch without probing, building or switching anything - for changes
@@ -280,7 +339,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import annex, commands, proc
+from . import annex, commands, proc, review
 from .checkout import lock_checkout, require_work_branch, sub_parent
 from .deploy import deploy
 from .proc import PERF, PERF_FILE, die, git, ok, out
@@ -288,14 +347,14 @@ from .targets import NETWORK_FLAG, exec_on
 
 USAGE = """usage: nixconvoy apply [-m "msg"] [--reset] [--danger-network-config-change] [--dry-activate] [target|@tag ...]
        nixconvoy commit -m "msg"
-       nixconvoy land [worktree ...]
-       nixconvoy abandon [--apply-now] [worktree ...]
-       nixconvoy prune [worktree ...] | --after PID | --stopped PID < hook-input
+       nixconvoy land [worktree ...] | --union | --annex input
+       nixconvoy abandon [--apply-now] [worktree ...] | --union | --annex input
+       nixconvoy open [--lock reason] name | [--branch wb] path | --annex input
+       nixconvoy close [--force] [worktree ...] | [--force] path ... | --annex input | --after PID | --stopped PID < hook-input
        nixconvoy pull
        nixconvoy status
-       nixconvoy review [worktree ...] [diff args]
+       nixconvoy review [worktree|branch ...] [--union] [diff args]
        nixconvoy exec [target|@tag ...] -- command [arg ...]
-       nixconvoy annex [input]
 With no targets named, every target whose running system differs from the union
 is switched; naming targets, or @tag for the targets nixconvoy.toml tags so,
 restricts switching to (at most) those.
@@ -303,7 +362,8 @@ restricts switching to (at most) those.
 reload a unit the target's configuration protects (nixconvoy.protectedUnits).
 --dry-activate stops before any switch, printing what each would do.
 abandon --apply-now deploys at once, so the targets drop the abandoned work
-now rather than at the next deploy."""
+now rather than at the next deploy.  --union acts on this checkout and its
+subagent worktrees as one unit; a path (with a /) names an agent checkout."""
 DRY_FLAG = "--dry-activate"
 APPLY_NOW_FLAG = "--apply-now"
 
@@ -317,8 +377,8 @@ def main() -> None:
         print(__doc__)
         print(USAGE)
         return
-    if args[0] not in ("apply", "land", "commit", "abandon", "prune", "pull", "status", "review", "exec",
-                       "annex"):
+    if args[0] not in ("apply", "land", "commit", "abandon", "close", "pull", "status", "review", "exec",
+                       "open"):
         die(USAGE)
     subcmd = args.pop(0)
     start = Path.cwd()
@@ -328,7 +388,7 @@ def main() -> None:
     git("worktree", "prune", "--expire", "1.day.ago", check=False)
     if subcmd == "review":
         os.chdir(start)  # its paths are the caller's
-        os.execvp("git", ["git", "review", *args])  # noqa: S606 - integrations/claude-code/bin/git-review
+        sys.exit(review.main(args))
     if subcmd == "exec":
         if "--" not in args or args[0] in ("-h", "--help"):
             die(USAGE)
@@ -337,7 +397,7 @@ def main() -> None:
             die(USAGE)
         exec_on(args[:at], args[at + 1:])
         return
-    if subcmd not in ("status", "prune", "annex"):
+    if subcmd not in ("status", "close", "open"):
         atexit.register(PERF.write, Path.cwd() / PERF_FILE)
     msg: str | None = None
     reset = False
@@ -347,13 +407,31 @@ def main() -> None:
     names: list[str] = []
     after = ""
     stopped = ""
+    annex_name: str | None = None
+    annex_flag = False
+    lock_reason: str | None = None
+    branch: str | None = None
+    force = False
+    union = False
     while args:
         a = args.pop(0)
         if a == "-m" and args:
             msg = args.pop(0)
-        elif a == "--after" and subcmd == "prune" and args and args[0].isdigit():
+        elif a == "--annex" and subcmd == "open":
+            annex_flag = True
+        elif a == "--annex" and subcmd in ("land", "abandon", "close") and args:
+            annex_name = args.pop(0)
+        elif a == "--lock" and subcmd == "open" and args:
+            lock_reason = args.pop(0)
+        elif a == "--branch" and subcmd == "open" and args:
+            branch = args.pop(0)
+        elif a == "--union" and subcmd in ("land", "abandon"):
+            union = True
+        elif a == "--force" and subcmd == "close":
+            force = True
+        elif a == "--after" and subcmd == "close" and args and args[0].isdigit():
             after = args.pop(0)
-        elif a == "--stopped" and subcmd == "prune" and args and args[0].isdigit():
+        elif a == "--stopped" and subcmd == "close" and args and args[0].isdigit():
             stopped = args.pop(0)
         elif a == "--reset":
             reset = True
@@ -381,46 +459,80 @@ def main() -> None:
             die(USAGE)
         commands.status()
         return
-    if subcmd == "annex":
-        if msg or reset or danger or dry or len(names) > 1:
+    if subcmd == "open":
+        if msg or reset or danger or dry or len(names) != 1 or (branch and (annex_flag or lock_reason)):
             die(USAGE)
-        if not names:
-            commands.annexes()
-            return
-        take_lock()
-        annex.create(names[0], require_work_branch("annex"))
+        if annex_flag:
+            annex.create(names[0], require_work_branch("open --annex"))
+        elif is_path(names[0]):
+            if lock_reason:
+                die(USAGE)
+            commands.open_checkout(start / Path(names[0]).expanduser(), branch)
+        elif branch:
+            die(USAGE)
+        else:
+            commands.open_worktree(names[0], lock_reason)
         return
-    if subcmd == "prune":
-        if msg or reset or danger or dry or ((after or stopped) and names) or (after and stopped):
+    if annex_name is not None:
+        if names or apply_now or msg or reset or dry or danger or after or stopped:
+            die(USAGE)
+        take_lock()
+        if subcmd == "land":
+            commands.land_annex(annex_name)
+        elif subcmd == "abandon":
+            commands.abandon_annex(annex_name)
+        else:
+            commands.close_annex(annex_name, force=force)
+        return
+    if subcmd == "close":
+        if msg or reset or danger or dry or ((after or stopped) and (names or force)) or (after and stopped):
             die(USAGE)
         if stopped:
             stop = json.loads(sys.stdin.read() or "{}")
             commands.prune_stopped(int(stopped), stop if isinstance(stop, dict) else {})
         elif after:
             commands.prune_after(int(after))
+        elif any(is_path(n) for n in names):
+            if not all(is_path(n) for n in names):
+                die(USAGE)
+            take_lock()
+            for n in names:
+                commands.close_checkout(start / Path(n).expanduser(), force=force)
         else:
-            commands.prune(names)
+            commands.close_worktrees(names, force=force)
         return
     top = Path.cwd()
     here = top.resolve()
     if subcmd in ("land", "abandon"):
-        if msg or reset or dry or (danger and not apply_now):
+        if msg or reset or dry or (danger and not apply_now) or (union and names):
             die(USAGE)
-        named = [commands.find_sub(n) for n in names]
-        deploys_from = here if names and here not in named else sub_parent(here) or here
+        if union and subcmd == "land":
+            take_lock()
+            commands.land_union()
+            return
+        parent_too = False
+        if union:
+            # Each sub holding anything, then this checkout.
+            if sub_parent(here) is not None:
+                die("abandon --union runs from the checkout the worktrees hang off")
+            names = [str(d) for d in commands.subs_of(here) if commands.holds_work(d)]
+            parent_too = commands.holds_work(here)
+            if not names and not parent_too:
+                die("nothing to abandon here or in any subagent worktree")
+        named = [Path(n) if union else commands.find_sub(n) for n in names]
+        deploys_from = here
         # The deploy runs from a checkout the abandon does not reset, whose
         # staged changes it would have to carry without a message.
-        if (apply_now and (names or deploys_from != here)
+        if (apply_now and names and here not in named and not parent_too
                 and not ok(["git", "diff", "--cached", "--quiet"], cwd=str(deploys_from))):
             die(f"{deploys_from} has staged changes, which the deploy of {APPLY_NOW_FLAG} "
                 "would carry: deploy or unstage them first")
         # Several subagent worktrees, one after the other, each under its
         # own checkout's lock.
-        for name in names:
-            if len(names) > 1:
-                print(f"== {name}")
-            os.chdir(top)  # the previous one's removal moved into its parent
-            commands.enter_sub(name)
+        for name, d in zip(names, named, strict=True):
+            if len(names) > 1 or parent_too:
+                print(f"== {d.name}")
+            os.chdir(d)
             lock = lock_checkout()
             if lock is None:
                 die(f"another nixconvoy is running in {name}'s worktree")
@@ -429,10 +541,14 @@ def main() -> None:
             else:
                 commands.abandon(apply_now)
             lock.close()
-        if names:
-            if apply_now:
-                os.chdir(deploys_from)  # the parent's, when the named worktree was this one
+        if names or union:
+            if parent_too or apply_now:
+                os.chdir(deploys_from)
                 take_lock()
+            if parent_too:
+                print(f"== {here.name}")
+                commands.abandon(apply_now)
+            if apply_now:
                 deploy([], None, False, danger)
             return
     take_lock()
@@ -441,8 +557,6 @@ def main() -> None:
     elif subcmd == "abandon":
         commands.abandon(apply_now)
         if apply_now:
-            if Path.cwd().resolve() != here:
-                take_lock()  # a subagent worktree's removal moved into its parent
             deploy([], None, False, danger)
     elif subcmd == "commit":
         if reset or danger or dry or names:
@@ -450,6 +564,12 @@ def main() -> None:
         commands.commit_only(msg)
     else:  # apply
         deploy(names, msg, reset, danger, dry)
+
+
+def is_path(arg: str) -> bool:
+    """An open/close argument naming an agent checkout by its path rather
+    than a task worktree by its name."""
+    return "/" in arg or arg.startswith("~")
 
 
 def take_lock() -> None:

@@ -15,7 +15,7 @@ let
     build-system = [ python.pkgs.setuptools ];
     doCheck = false;
   };
-  # `git review`, which `nixconvoy review` execs, and the Claude Code
+  # `git review`, a wrapper of `nixconvoy review`, and the Claude Code
   # plugin (hooks, prompt segment) under share/, for an install by path.
   integrations = pkgs.runCommand "nixconvoy-integrations" { } ''
     mkdir -p $out/bin $out/share/nixconvoy

@@ -1,4 +1,4 @@
-//! Whether a subagent worktree (<checkout>/.claude/worktrees/<name>) is
+//! Whether a subagent worktree (one nested in a checkout, <checkout>/<worktrees>/<name>) is
 //! removed, and its removal.  Claude Code never removes the worktrees
 //! nixconvoy's WorktreeCreate hook makes, and an agent can be resumed while
 //! the session that spawned it runs, which needs its worktree; so a
@@ -156,16 +156,19 @@ fn judge(s: &mut Script, p: &Params) -> Run<Result<Judged, Outcome>> {
     let Some(wb) = s.text(Query::OwnBranch)? else {
         return kept("it owns no work branch");
     };
-    if cur.as_deref() == Some(wb.as_str()) {
-        return kept(if wb.ends_with(&format!("-{}", p.name)) {
-            format!("on its work branch {wb}: land or abandon decides it")
-        } else {
-            format!("it has {wb}, another checkout's work branch, checked out")
-        });
+    // On its own work branch it is judged like any checkout: idle once the
+    // branch is reset onto main (a land or abandon), holding work before.
+    let on_wb = cur.as_deref() == Some(wb.as_str());
+    if on_wb && !wb.ends_with(&format!("-{}", p.name)) {
+        return kept(format!("it has {wb}, another checkout's work branch, checked out"));
     }
     if let Some(tip) = s.text(Query::Rev { name: format!("refs/remotes/origin/{wb}") })? {
         if !s.flag(Query::Contains { a: tip, b: MAIN.into() })? {
-            return kept(format!("it is not on {wb}, which carries pushed increments; `git switch {wb}` there to discard them"));
+            return kept(if on_wb {
+                format!("its work branch {wb} carries pushed increments: land or abandon decides it")
+            } else {
+                format!("it is not on {wb}, which carries pushed increments; `git switch {wb}` there to discard them")
+            });
         }
     }
     if let Some(local) = s.text(Query::Rev { name: format!("refs/heads/{wb}") })? {

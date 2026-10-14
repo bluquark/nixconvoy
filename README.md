@@ -27,7 +27,8 @@ what is deployed.
   evaluates and switches nothing.
 - **`land` lands a branch on main**, as one commit whose message is the
   branch's `COMMIT_MSG.md`; **`abandon`** discards it.  Either way the
-  checkout stays on its work branch, reset onto the new main, and every
+  checkout stays on its work branch, reset onto the new main (a subagent
+  worktree too: `close` removes one), and every
   other checkout on the machine is rebased onto it.  Neither touches a
   target: abandoned work stays deployed until the next deploy by anyone,
   which says what it reverts - `abandon --apply-now` runs that deploy at
@@ -153,6 +154,7 @@ system = "x86_64-linux"
 ssh_address = "me@{target}.lan"   # ssh address template (default "{target}"); the builder's too
 branch_prefix = "{machine}-deploys"   # {machine}: this machine's hostname; a worktree under
                                       # a plain checkout owns "<prefix>-<name>"
+worktrees = "worktrees"      # where `open <name>` puts a task worktree, under the checkout (gitignored)
 
 [precheck]                   # a flake check proven before any build
 attr = "repo-lint"           # checks.<system>.<attr>
@@ -205,12 +207,18 @@ nixconvoy apply --dry-activate [target|@tag ...]   build and copy, then only rep
 nixconvoy commit -m "msg"      commit + push the staged state, no build or switch
 nixconvoy land [name ...]      land the work branch on main
 nixconvoy abandon [--apply-now] [name ...]   discard it (--apply-now: and deploy, reverting it now)
-nixconvoy prune [name ...]     remove the finished subagents' worktrees holding nothing of their own
+nixconvoy land --union | abandon --union   this checkout and its task worktrees as one unit (one main commit)
+nixconvoy close [--force] [name ...]   remove task worktrees holding nothing of their own (--force: whatever they hold)
+nixconvoy close [--force] path ...   remove an agent checkout likewise, with its work branch
+nixconvoy close --annex input [--force]   remove an annex worktree likewise
 nixconvoy pull                 rebase every checkout on this machine onto origin/main
 nixconvoy status               every checkout on this machine, and origin's other branches
-nixconvoy review               the pending landing: COMMIT_MSG.md, then the diff
+nixconvoy review [name|branch ...] [--union]   the pending landing: COMMIT_MSG.md, then the diff
 nixconvoy exec [target|@tag ...] -- cmd [arg ...]   run a command on each target, concurrently
-nixconvoy annex [input]        the flake input developed in place under this checkout (see Annexes)
+nixconvoy open [--lock reason] name   a task worktree <checkout>/<worktrees>/<name> (what the plugin's create hook runs)
+nixconvoy open [--branch wb] path   an agent checkout at that path on a work branch of this machine's
+nixconvoy open --annex input  the flake input developed in place under this checkout (see Annexes)
+nixconvoy land --annex input | abandon --annex input   one annex alone, ahead of the checkout's landing
 ```
 
 `nixconvoy --help` and the docstring of `src/nixconvoy/cli.py` describe each
@@ -218,16 +226,27 @@ step of a deploy in full.
 
 ## Worktrees
 
-A git worktree under `<checkout>/.claude/worktrees/<name>` (the layout
-Claude Code's worktree isolation creates) owns `<checkout's branch>-<name>`
-from its first deploy, deploys in parallel with its parent, and is removed
-with its branch by `land` or `abandon` once its task is done - or by
-`prune` when it holds nothing of its own and its agent has stopped (a
-resume of the agent recreates it) or the session that spawned the agent
-has exited.  `integrations/claude-code/` is a Claude Code plugin holding
+A git worktree nested in a checkout - `<checkout>/<worktrees>/<name>`,
+the directory nixconvoy.toml names (`worktrees/` by default, gitignored),
+where `nixconvoy open <name>` makes one and the create hook below runs
+it - is that checkout's task worktree: it owns `<checkout's
+branch>-<name>` from its first deploy and deploys in parallel with its
+parent.  `land` and `abandon` leave it in place like any checkout, idle on
+its reset branch; `nixconvoy close <name>` removes it when it holds
+nothing of its own (`--force`: whatever it holds), as the sweeps do on
+their own once its agent has stopped (a resume of the agent recreates it)
+or the session that spawned the agent has exited.  When the task
+worktrees each did a piece of their parent's task, `land --union` merges
+their branches into the parent's tree and lands it all as one commit
+under the parent's COMMIT_MSG.md (`review --union` shows each,
+`abandon --union` discards each).  `nixconvoy open <path>` makes a
+further agent checkout beside the others instead - a worktree at that
+path on a listed work branch of this machine's, numbered after the path's
+name - and `close <path>` removes one holding nothing of its own.
+`integrations/claude-code/` is a Claude Code plugin holding
 the hooks that give every subagent spawned inside a repository such a
 worktree (`isolation: worktree` added to the Agent call unless it chose
-otherwise), create it under the spawning checkout, prune it when its agent
+otherwise), create it under the spawning checkout, close it when its agent
 stops and recreate it for its resume, beside the `git review` command and
 a bash prompt segment:
 
@@ -258,31 +277,58 @@ same deploy model, without a separate checkout per task.  Name it in
 on this machine) and gitignore `annexes/`.  Then, from a checkout on a work
 branch:
 
-- **`nixconvoy annex <input>`** adds a worktree of that repository at
-  `<checkout>/annexes/<input>`, on a branch named after the checkout's work
-  branch, off the repository's default branch.  Work there as in the
+- **`nixconvoy open --annex <input>`** adds a worktree of that repository
+  at `<checkout>/annexes/<input>`, on a branch named after the checkout's
+  work branch, off the repository's default branch.  Work there as in the
   checkout: stage what is ready to deploy.
 - **A deploy carries it as a lock change.**  `apply` (and `commit`)
   commits the annex's staged state onto its branch with the `-m` message,
   pushes it to the annex's origin and points the `flake.lock` node at the
-  pushed rev, staged in the checkout.  The increment then carries the annex
+  pushed rev (`nix flake lock --override-input` on a scratch copy of the
+  flake, so a transitive input the annex moved follows), staged in the
+  checkout.  The increment then carries the annex
   like any other edit: the union, the eval memo and the lineage see a lock
   change to an input the targets name.  Two work branches moving the same
-  annex are a lock conflict, which the union reports like any other.
-- **`land` lands the annex first:** its branch rebased onto the
-  repository's default branch and squashed there as one commit (the
-  annex's own `COMMIT_MSG.md`, else the checkout's), the node relocked on
-  the default branch as a commit of the work branch, then main.  `abandon`
-  discards it.  Either way the annex worktree goes, with its branch here
-  and on its origin; a subagent worktree's annexes go with it.
+  annex meet in the union: the lock is merged node by node, and the node
+  both moved gets the merge of their annex branches, made in the annex
+  repository (its configured checkout, else a bare mirror under
+  `~/.cache/nixconvoy/annexes/`; mergiraf on the conflicts), pushed to the
+  annex origin's `refs/nixconvoy/union/<input>/<sha>` and locked there -
+  a derived value like the union commit, the same again on a retry; a
+  union ref that no branch, announcement or deploy record of origin (nor
+  the records' history of the last 90 days) locks any more is deleted by
+  the next union, a day after it was pushed (`refs/nixconvoy/stamp/<sha>`
+  dates each pushed union and past ref).  Two
+  annex branches that conflict are a union conflict like any other.  Once
+  one of them lands, the other checkout's rebase onto main meets the
+  landed node and rebases its annex branch onto the landed default branch
+  (pushed, the node relocked on it); an annex rebase that is not clean is
+  resolved by hand in the annex worktree.
+- **`land` lands the annex first:** its tip merged onto the
+  repository's default branch (as the union merges it) and squashed there
+  as one commit (the
+  `COMMIT_MSG.md` in the annex worktree, tracked or not, else the
+  checkout's), the node relocked on the default branch as a commit of the
+  work branch, then main.  It refuses an annex whose HEAD is not what the
+  lock deploys.  `abandon` discards it, resetting it onto the default
+  branch.  Either way the annex worktree stays, like the checkout; `land
+  --annex <input>` and `abandon --annex <input>` do it for one annex ahead
+  of the checkout's own landing, the abandon putting the lock node back to
+  origin/main's, staged for the next deploy to revert it on the targets.
+  `close --annex <input>` removes the worktree with its branch, here and
+  on its origin (the last tip kept under
+  `refs/nixconvoy/past/<branch>/<sha>` there, since the deploy records
+  lock revs of it, for 90 days after the push), refusing what would
+  lose work unless `--force`; a task worktree's annexes go with it.
 - **Keep the nightly off annexed inputs.**  An unattended `nix flake
   update` would move the node back to the default branch's tip; let
   landings move it instead.
-- **Never work in the repository's own checkout.**  `status` flags edits
-  there, and nixconvoy leaves a `nixconvoy-annexed` marker in that
-  repository's git dir, so a global pre-commit hook can refuse an agent's
-  commit on its default branch outside an annex (`[ -f
-  "$(git rev-parse --git-common-dir)/nixconvoy-annexed" ]`).
+- **Never work in the repository's own checkout.**  `status` lists the
+  annexes and flags edits there, and nixconvoy leaves a `nixconvoy-annexed`
+  marker in that repository's git dir, so a global pre-commit hook can
+  refuse an agent's commit on its default branch outside an annex (`[ -f
+  "$(git rev-parse --git-common-dir)/nixconvoy-annexed" ]`; a repository
+  setting its own `core.hooksPath`, husky's say, bypasses global hooks).
 
 ## How it is built
 

@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -191,8 +192,8 @@ def rev(ref: str) -> str | None:
     return p.stdout.strip() or None
 
 
-def is_ancestor(a: str, b: str) -> bool:
-    return ok(["git", "merge-base", "--is-ancestor", a, b])
+def is_ancestor(a: str, b: str, cwd: str | None = None) -> bool:
+    return ok(["git", "merge-base", "--is-ancestor", a, b], cwd=cwd)
 
 
 def this_machine() -> str:
@@ -254,3 +255,9 @@ def painter() -> Callable[[str, str], str]:
 
 
 HELD: list[IO[str]] = []  # locks held until exit
+
+
+def solve_with_mergiraf(wt: str, path: str) -> bool:
+    """Resolve the conflicted `path` in the worktree `wt` structurally."""
+    tool = ["mergiraf"] if shutil.which("mergiraf") else ["nix", "run", "nixpkgs#mergiraf", "--"]
+    return ok([*tool, "solve", path], cwd=wt)

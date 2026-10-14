@@ -126,7 +126,7 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
 
     snap = ""
     PERF.mark("annex")
-    for told in annex.sync(wb, msg):
+    for told in annex.sync(wb, msg, dry=dry):
         print(told)
     PERF.mark("snapshot")
     if staged_differs():

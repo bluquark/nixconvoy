@@ -75,7 +75,6 @@ fn keeps_and_says_why() {
         (Query::PushInFlight, Reply::Flag(true), "a push of its work branch is in flight"),
         (Query::Nested, Reply::Flag(true), "another worktree lives inside it"),
         (Query::OwnBranch, Reply::Text(None), "it owns no work branch"),
-        (Query::CurrentBranch, Reply::Text(Some("h-deploys3-agent-x".into())), "on its work branch h-deploys3-agent-x"),
         (Query::Fetch, Reply::Ran { ok: false, detail: "offline".into() }, "origin could not be fetched"),
         (Query::Dirty, Reply::Flag(true), "it has uncommitted or untracked changes"),
         (Query::OnOrigin, Reply::Flag(false), "it carries commits not on origin"),
@@ -108,6 +107,20 @@ fn keeps_and_says_why() {
     };
     let (_, o) = run(params(false), foreign);
     assert_eq!(kept(&o), "it has h-deploys3, another checkout's work branch, checked out");
+    // On its own work branch: kept while that carries pushed increments,
+    // removed once it is reset onto main (a land or abandon), pushed so.
+    let on_wb = |increments: bool| {
+        move |q: &Query| match q {
+            Query::CurrentBranch => Some(Reply::Text(Some("h-deploys3-agent-x".into()))),
+            Query::Rev { name } if name == "refs/remotes/origin/h-deploys3-agent-x" => Some(Reply::Text(Some("tip".into()))),
+            Query::Contains { a, .. } if a == "tip" => Some(Reply::Flag(!increments)),
+            _ => None,
+        }
+    };
+    let (_, o) = run(params(false), on_wb(true));
+    assert_eq!(kept(&o), "its work branch h-deploys3-agent-x carries pushed increments: land or abandon decides it");
+    let (asked, o) = run(params(false), on_wb(false));
+    assert_eq!(o, Outcome::Removed, "{asked:?}");
 }
 
 #[test]

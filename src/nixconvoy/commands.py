@@ -1,4 +1,4 @@
-"""The verbs beside deploy: commit, land, pull, abandon, prune and status."""
+"""The verbs beside deploy: commit, land, pull, abandon, open, close and status."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import sys
 import time
 from fnmatch import fnmatchcase
@@ -14,6 +15,7 @@ from typing import IO, NamedTuple
 
 from . import annex, memo, proc, targets
 from .checkout import (
+    MACHINE_ENV,
     PAST_REFS,
     SESSIONLESS,
     WAIT_STALE,
@@ -23,6 +25,7 @@ from .checkout import (
     ancestor_pids,
     announcer_dead,
     await_background_push,
+    branch_at,
     catch_up,
     checkout_identity,
     clear_refspec,
@@ -32,26 +35,30 @@ from .checkout import (
     ensure_on_work_branch,
     ensure_rebased,
     fetch_args,
+    git_common,
     git_op_in_progress,
     identity_of,
     listed_tips,
+    lock_checkout,
     lock_live,
     lock_pid_alive,
     on_origin,
     origin_tips,
+    owned,
     pending_announcements,
     pop_tmp_commits,
     proc_stat,
     push_state,
     push_work_branch,
     ran,
-    require_unlocked,
     require_work_branch,
     sibling_checkouts,
     staged_differs,
     staged_snapshot,
+    sub_dir,
     sub_parent,
     summarize,
+    this_prefix,
     tree_less_msg,
     warn_no_msgfile,
     work_branch_name,
@@ -59,7 +66,7 @@ from .checkout import (
 )
 from .config import MSG_FILE
 from .guard import binary, decide
-from .proc import die, git, is_ancestor, ok, out, painter, rev, run
+from .proc import die, git, is_ancestor, ok, out, painter, rev, run, solve_with_mergiraf
 
 
 def commit_only(msg: str | None) -> None:
@@ -118,14 +125,17 @@ def land() -> None:
     if carried:
         die(f"{wb} contains the unlanded increments of {', '.join(carried)}; land "
             "that branch first, then re-run")
-    if sub_parent(Path.cwd().resolve()) is not None:
-        require_unlocked(Path.cwd())  # before anything is pushed: finish removes the worktree
     # A blank line after the subject, or git folds the whole first paragraph
     # (subject + bullets) into %s.
     lines = msg.splitlines()
     if len(lines) > 1 and lines[1].strip():
         msg = "\n".join([lines[0], "", *lines[1:]])
     # The annexes first: main must never lock a branch about to go.
+    gone = annex.orphaned(Path.cwd(), wb)
+    if gone:
+        die(f"the lock deploys {wb}'s rev of annex {', '.join(gone)}, whose worktree is gone: "
+            f"`nixconvoy open --annex <input>` recreates it from origin's branch to land it, or "
+            f"`nixconvoy abandon --annex <input>` drops it")
     annex.land_all(wb, msg)
     tree = tree_less_msg("HEAD")
 
@@ -140,7 +150,6 @@ def land() -> None:
     git("reset", "--quiet", commit)  # move wb to main; working tree untouched
     Path(MSG_FILE).unlink(missing_ok=True)  # now main's commit message
     print(f"landed on main: {summarize(commit)}")
-    annex.remove_all(Path.cwd().resolve())
     siblings = sibling_checkouts()  # the parent of a subagent worktree included
     finish(wb)
     if not catch_up(siblings):
@@ -174,20 +183,18 @@ def abandon(apply_now: bool = False) -> None:
     pop_tmp_commits()
     ident = checkout_identity()
     here = Path.cwd().resolve()
-    if ident.kind == "sub" and sub_parent(here) is not None:
-        require_unlocked(Path.cwd())
     if ident.kind == "sub" and ident.wb and current_branch() != ident.wb and sub_parent(here):
-        # Never deployed: still on its fresh branch.
-        # The CLI holds this worktree's deploy lock, and abandon fetched.
-        annex.remove_all(here)
-        failed: list[str] = []
-        why = prune_one(here, named=True, own_session_ends=True, prefetched=True, deploy_held=True,
-                        dropped_failed=failed)
-        if why is not None:
-            die(f"this worktree is kept: {why}")
-        if failed:
-            die(f"subagent worktree {sub_label(here)} removed, but not its branches on origin (above)")
-        print(f"subagent worktree {sub_label(here)} removed")
+        # Never deployed: still on its fresh branch, reset onto origin/main
+        # (untracked files survive); close removes the worktree.
+        main = rev("refs/remotes/origin/main")
+        if main is None:
+            die("origin/main not found")
+        prev = rev("HEAD") or ""
+        annex.reset_all(here, ident.wb)
+        git("reset", "--quiet", "--hard", main)
+        Path(MSG_FILE).unlink(missing_ok=True)
+        print(f"nothing deployed from {sub_label(here)}; reset onto origin/main (was {prev[:12]}, "
+              f"see reflog); `nixconvoy close {here.name}` removes the worktree")
         return
     wb = require_work_branch("abandon")
     if current_branch() != wb:
@@ -201,7 +208,7 @@ def abandon(apply_now: bool = False) -> None:
         die("nothing to abandon")
 
     deployed = deployed_targets(f"{main}..{prev}")
-    annex.remove_all(here)
+    annex.reset_all(here, wb)
     git("reset", "--quiet", "--hard", main)
     Path(MSG_FILE).unlink(missing_ok=True)  # an uncommitted copy survives the hard reset
     git("branch", "-f", "main", main, check=False)
@@ -216,12 +223,17 @@ def abandon(apply_now: bool = False) -> None:
     finish(wb)
 
 
-def prune(names: list[str]) -> None:
-    """Remove the subagent worktrees that hold nothing of their own (cli
-    docstring: Prune), as nixconvoy-plan's prune core decides: the named ones,
-    or every one under this checkout.  Runs are serialised per repository."""
+def close_worktrees(names: list[str], *, force: bool = False) -> None:
+    """Remove the task worktrees that hold nothing of their own (cli
+    docstring: Close), as nixconvoy-plan's prune core decides: the named
+    ones (their lock's session counted as ended for them, as abandon from
+    inside counts it), or every one under this checkout.  `force` removes
+    the named ones whatever they hold, with their branches.  Runs are
+    serialised per repository."""
     here = Path.cwd().resolve()
     top = sub_parent(here) or here
+    if force and not names:
+        die("--force needs the worktrees named")
     serial = Path(out(["git", "rev-parse", "--git-common-dir"])).resolve() / "nixconvoy-prune.lock"
     with serial.open("w") as held:
         fcntl.flock(held, fcntl.LOCK_EX)
@@ -231,17 +243,40 @@ def prune(names: list[str]) -> None:
             print(f"no subagent worktree under {top}", flush=True)
         fetched: list[dict[str, object]] = []
         for d in subs:
+            label = sub_label(d)
             try:
                 if not d.is_dir():
                     continue  # removed since it was listed
-                why = prune_one(d, named=bool(names), fetched=fetched)
-                verdict = "empty, removed" if why is None else f"kept, {why}"
+                if force:
+                    if deploy_running(d):
+                        die(f"a nixconvoy is running in {sub_label(d)}")
+                    remove_sub(d, [identity_of(d, branch_at(d)).wb or ""])
+                    verdict = "removed (--force)"
+                else:
+                    why = prune_one(d, named=bool(names), own_session_ends=bool(names), fetched=fetched)
+                    verdict = "empty, removed" if why is None else f"kept, {why}"
             except (Exception, SystemExit) as e:  # noqa: BLE001 - one worktree's failure, reported
                 proc.DYING = False
                 verdict = f"kept, its check failed: {e!r}"
             finally:
                 os.chdir(top)
-            print(f"{sub_label(d)}: {verdict}", flush=True)
+            print(f"{label}: {verdict}", flush=True)
+
+
+def close_annex(name: str, *, force: bool = False) -> None:
+    """`close --annex <input>`: the annex worktree removed with its
+    branch, unless that would lose work (`force`: removed anyway, its lock
+    node put back to origin/main's when it named the branch, staged)."""
+    git(*fetch_args("--no-auto-gc"), check=False)
+    ax = annex.present_one(Path.cwd(), name)
+    wb = work_branch_name()
+    why = annex.keeps(ax, wb)
+    if why is not None and not force:
+        die(f"annex {name} is kept: {why} (--force removes it anyway)")
+    # The lock first: its restore needs nix and the network, the removal nothing.
+    if bool(wb) and (annex.locked_rev(name)[1] == f"refs/heads/{wb}" or annex.lock_off_default(name, ax.repo)):
+        annex.restore_lock(ax)
+    annex.remove_one(ax)
 
 
 class Stop(NamedTuple):
@@ -546,7 +581,7 @@ def prune_after(pid: int) -> None:
     def sweep(what: str) -> None:
         print(f"{time.strftime('%F %T')} claude session {pid} {what} ({top})", flush=True)
         try:
-            prune([])
+            close_worktrees([])
         except (Exception, SystemExit) as e:  # noqa: BLE001 - the waiter outlives a failed sweep
             proc.DYING = False
             print(f"prune failed: {e!r}", flush=True)
@@ -718,32 +753,31 @@ def prune_stopped(session: int, stop: dict[str, object]) -> None:
 
 def finish(wb: str) -> None:
     """The checked-out work branch after a land or abandon, now at
-    origin/main's commit: an agent's moved there on origin too; a
-    subagent's worktree has done its one task, so it is removed with its
-    branch, here and on origin (the process moves into the parent)."""
-    if sub_parent(Path.cwd().resolve()) is not None:
-        remove_sub([wb])
-        return
+    origin/main's commit, moved there on origin too.  A subagent worktree
+    stays, idle: `close` removes it (the session-exit sweep does so on its
+    own)."""
     old = rev(f"refs/remotes/origin/{wb}") or ""
     git("push", "--quiet", "origin", f"{wb}:refs/heads/{wb}",
         f"--force-with-lease=refs/heads/{wb}:{old}")
     print(f"{wb} reset onto origin/main, here and on origin")
-
-
-def remove_sub(branches: list[str]) -> None:
-    """Remove the current subagent worktree with its branches (`branches`
-    and whatever it has checked out), here and on origin; the process moves
-    into the parent."""
     here = Path.cwd().resolve()
+    if sub_parent(here) is not None:
+        print(f"the worktree stays; `nixconvoy close {here.name}` removes it")
+
+
+def remove_sub(here: Path, branches: list[str]) -> None:
+    """`close --force`: the subagent worktree `here` removed with its
+    branches (`branches` and whatever it has checked out) and its annexes,
+    here and on origin, whatever they hold; the process ends up in the
+    parent."""
     parent = sub_parent(here)
     assert parent is not None
-    names = sub_branches(here, current_branch(), branches)
+    names = sub_branches(here, branch_at(here), [b for b in branches if b])
     # Under the name lock, so no create reuses it between the check and the
     # removal; git holds it too, through a kill of this process.
     held = hold_lock(name_lock_path(here), wait=60)
     if held is None:
-        die(f"{here} stayed locked for 60s by a create or a prune; re-run")
-    require_unlocked(here)
+        die(f"{here} stayed locked for 60s by a create or a close; re-run")
     if worktree_lock(here) is not None:
         git("worktree", "unlock", str(here))
     annex.remove_all(here)
@@ -755,7 +789,7 @@ def remove_sub(branches: list[str]) -> None:
     if failed:
         die("\n".join(failed))
     print(f"subagent worktree {here.relative_to(parent)} removed, with "
-          f"{', '.join(branches)} here and on origin")
+          f"{', '.join(names) or 'no branch of its own'} here and on origin")
 
 
 def sub_branches(here: Path, cur: str | None, branches: list[str]) -> list[str]:
@@ -780,7 +814,13 @@ def drop_branches(names: list[str]) -> list[str]:
         git("branch", "--quiet", "-D", b, check=False)
     on_origin = {b: old for b, old in gone.items() if old}
     for b, old in on_origin.items():
-        git("update-ref", "--create-reflog", f"{PAST_REFS}/{b}", old, check=False)
+        # Every tip the remote-tracking ref's reflog remembers (a branch
+        # reset onto main by a land or abandon before this), oldest first,
+        # so the deletion of that ref with its reflog forgets none.
+        past = out(["git", "log", "-g", "--format=%H", f"refs/remotes/origin/{b}"]).split()[::-1] or [old]
+        git("update-ref", "--create-reflog", f"{PAST_REFS}/{b}", past[0], check=False)
+        for tip in past[1:]:
+            git("update-ref", "-m", "past tip", f"{PAST_REFS}/{b}", tip, check=False)
     # A gone branch's announcement is cleared with it (never deleted: a
     # deleted ref lingers uncleared in every other clone).
     clears = [spec for b in names for spec in clear_refspec(b)]
@@ -808,7 +848,21 @@ def drop_branches(names: list[str]) -> list[str]:
 
 
 def sub_label(d: Path) -> str:
-    return f"{d.parent.parent.parent.name}/{d.name}"
+    parent = sub_parent(d)
+    return f"{parent.name}/{d.name}" if parent is not None else str(d)
+
+
+def subs_of(top: Path) -> list[Path]:
+    """The subagent worktrees nested in the checkout `top`."""
+    return sorted(d for d in sibling_checkouts() if sub_parent(d) == top)
+
+
+def holds_work(d: Path) -> bool:
+    """Whether the checkout `d` has anything an abandon would discard:
+    commits beyond origin/main, or staged or unstaged edits."""
+    head = run(["git", "rev-parse", "HEAD"], cwd=str(d), check=False).stdout.strip()
+    return bool(head and not is_ancestor(head, "refs/remotes/origin/main")) \
+        or bool(run(["git", "status", "--porcelain", "-uno"], cwd=str(d), check=False).stdout)
 
 
 def enter_sub(name: str) -> None:
@@ -910,15 +964,15 @@ def status() -> None:
         notes += [p(a, "cyan") for a in annex.notes(d)]
         if ident.kind == "sub" and not own and not any(counts.values()) and cur != ident.wb:
             if sessionless:
-                notes.append(p(f"empty, its create found no claude session: nixconvoy abandon {d.name} "
+                notes.append(p(f"empty, its create found no claude session: nixconvoy close {d.name} "
                                "removes it", "dim"))
             elif alive is None:
-                notes.append(p("empty, locked by hand: prune keeps it", "dim"))
+                notes.append(p("empty, locked by hand: the sweep keeps it", "dim"))
             elif live:
-                notes.append(p("empty, locked by its agent's claude session: pruned when its agent "
+                notes.append(p("empty, locked by its agent's claude session: closed when its agent "
                                "stops or that session exits", "dim"))
             else:
-                notes.append(p(f"empty: nixconvoy prune {d.name} removes it", "dim"))
+                notes.append(p(f"empty: nixconvoy close {d.name} removes it", "dim"))
         msg = g(d, "show", f"HEAD:{MSG_FILE}").partition("\n")[0] if cur not in (None, "main") else ""
         if msg:
             notes.append(p(f'"{msg[:60]}"', "dim"))
@@ -968,6 +1022,11 @@ def status() -> None:
         print(paint("on origin only (other machines' checkouts):", "dim"))
         for e in elsewhere:
             print(f"  {paint(e, 'yellow')}")
+    repos = annex.configured()
+    if repos:
+        print(paint("annexes (nixconvoy.toml, `nixconvoy open --annex <input>`):", "dim"))
+        for name, repo in sorted(repos.items()):
+            print(f"  {paint(name, 'bold')}: {repo}")
     stray = annex.repo_notes()
     if stray:
         print(paint("annex repositories edited outside any annex:", "dim"))
@@ -991,22 +1050,370 @@ def status() -> None:
                 print(f"  {paint(entry, 'yellow')}")
 
 
-def annexes() -> None:
-    """`nixconvoy annex` with no input: the configured annexes, each with
-    its repository and, when present under this checkout, its state."""
-    repos = annex.configured()
-    if not repos:
-        print("no annexes configured (nixconvoy.toml: [annexes.<input>] repo = \"...\")")
-        return
+def open_worktree(name: str, lock_reason: str | None) -> Path:
+    """`nixconvoy open <name>`: the task worktree <root>/<worktrees>/<name>
+    (nixconvoy.toml's `worktrees`; root: the checkout this one's subagent
+    worktrees hang off) on the fresh branch worktree-<name> off origin's
+    default branch - a worktree of that name is reused - owning <root's
+    branch>-<name> from its first deploy.  Under the name lock prune holds
+    while judging a worktree of the name.  `lock_reason` is the worktree
+    lock Claude Code's create hook names its session with (replacing a
+    reused one's); without it a hand-opened worktree is locked as
+    sessionless, which prune keeps and land or abandon lift."""
+    if not re.fullmatch(r"[\w.-]+", name):
+        die(f"{name}: a worktree name holds letters, digits, '.', '-' and '_' only")
+    root = outermost(Path.cwd().resolve())
+    d = root / sub_dir() / name
+    # A nested worktree not ignored is an untracked directory `git add -A`
+    # would stage as a gitlink.
+    if not ok(["git", "check-ignore", "-q", "--no-index", str(d)], cwd=str(root)):
+        die(f"{sub_dir()}/ must be gitignored (a nested worktree): add it to .gitignore, "
+            f"or point nixconvoy.toml's `worktrees` at a directory that is")
+    branch = f"worktree-{name}"
+    base = default_base(root)
+    reason = lock_reason or f"nixconvoy open {name} {SESSIONLESS}"
+    held = hold_lock(name_lock_path(d), wait=60)
+    if held is None:
+        die(f"{d} stayed locked for 60s by a close or another open; re-run")
+    try:
+        for attempt in range(3):
+            if attempt:
+                time.sleep(1)
+            if d.is_dir() and run(["git", "rev-parse", "--show-toplevel"], cwd=str(d),
+                                  check=False).stdout.strip() == str(d):
+                if lock_reason is not None:
+                    # Reused: its lock replaced in one rename.
+                    locked = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path", "locked"],
+                                      cwd=str(d)))
+                    locked.with_suffix(".tmp").write_text(lock_reason)
+                    locked.with_suffix(".tmp").replace(locked)
+                print(d)
+                return d
+            git("worktree", "prune", cwd=str(root), check=False)
+            d.parent.mkdir(parents=True, exist_ok=True)
+            add = ([str(d), branch] if rev(f"refs/heads/{branch}") else ["-b", branch, str(d), base])
+            p = git("worktree", "add", "--quiet", "--lock", "--reason", reason, *add, cwd=str(root),
+                    check=False, pass_fds=(held.fileno(),))
+            if p.returncode == 0:
+                print(d)
+                return d
+            print(f"open: git worktree add failed: {(p.stderr or '').strip()}", file=sys.stderr)
+    finally:
+        held.close()
+    return die(f"could not create or reuse {d} (git's errors above)")
+
+
+def default_base(root: Path) -> str:
+    """origin's default branch as fetched (origin/HEAD, else origin/main),
+    else HEAD."""
+    return next((r for r in ("refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+                 if run(["git", "rev-parse", "-q", "--verify", r], cwd=str(root), check=False).returncode == 0),
+                "HEAD")
+
+
+def open_checkout(path: Path, branch: str | None) -> Path:
+    """`nixconvoy open <path>`: an agent checkout - a worktree of this
+    repository at `path`, outside every checkout, on a work branch of this
+    machine's: `branch`, else <branch_prefix><N> for the digits `path`'s
+    name ends with when that branch is listed and free, else the first
+    listed free number.  The branch is taken as origin holds it (a removed
+    checkout's), else new off origin's default branch; its upstream is
+    origin/main as nixconvoy keeps it.  Prints the path."""
     here = Path.cwd().resolve()
-    state = {n.split(" ", 2)[1]: n for n in annex.notes(here)}
-    for name, repo in sorted(repos.items()):
-        d = here / annex.ANNEX_DIR / name
-        where = state.get(name, f"present at {d}") if (d / ".git").exists() else "not present here"
-        print(f"{name}: {repo}  ({where})")
-    for e in annex.repo_notes():
-        print(f"warning: {e}", file=sys.stderr)
+    d = path.expanduser().resolve()
+    if d.exists():
+        die(f"{d} exists already")
+    git(*fetch_args("--no-auto-gc"), check=False)
+    mine = git_common(here)
+    up = d.parent
+    while up != up.parent:
+        if (up / ".git").exists():
+            if git_common(up) == mine:
+                die(f"{d} would be nested in the checkout {up}: `nixconvoy open <name>` makes a task "
+                    f"worktree there; an agent checkout goes beside the checkouts")
+            break
+        up = up.parent
+    pats = allowed_branches()
+    tips = origin_tips()
+    local = set(out(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/"]).split())
+    prefix = this_prefix()
+
+    def free(b: str) -> bool:
+        return b not in local and b not in tips
+
+    if branch is None:
+        m = re.search(r"(\d+)$", d.name)
+        if m and owned(f"{prefix}{m.group(1)}", pats) and free(f"{prefix}{m.group(1)}"):
+            branch = f"{prefix}{m.group(1)}"
+        else:
+            branch = next((f"{prefix}{n}" for n in range(1, 1000)
+                           if owned(f"{prefix}{n}", pats) and free(f"{prefix}{n}")), None)
+        if branch is None:
+            die(f"no free work branch {prefix}N is listed in deploy-branches; name one with --branch")
+    elif not owned(branch, pats):
+        die(f"{branch} is not a work branch of this machine's: one named {prefix}... that "
+            f"deploy-branches lists")
+    d.parent.mkdir(parents=True, exist_ok=True)
+    if branch in local:
+        p = git("worktree", "add", "--quiet", str(d), branch, check=False)
+    elif branch in tips:
+        p = git("worktree", "add", "--quiet", "-b", branch, str(d), f"refs/remotes/origin/{branch}", check=False)
+    else:
+        p = git("worktree", "add", "--quiet", "-b", branch, str(d), default_base(here), check=False)
+    if p.returncode != 0:
+        die(f"git worktree add failed:\n{(p.stderr or '').strip()}")
+    git("branch", "--quiet", "--set-upstream-to=origin/main", branch, check=False)
+    print(d)
+    print(f"checkout {d.name} on {branch}" + (" (origin's copy)" if branch in tips and branch not in local
+                                               else ""), file=sys.stderr)
+    return d
 
 
-__all__ = ["abandon", "annexes", "commit_only", "enter_sub", "land", "prune", "prune_after", "pull", "status",
-           "work_branch_name"]
+def close_checkout(path: Path, *, force: bool = False) -> None:
+    """`nixconvoy close <path>`: the agent checkout at `path` removed with
+    its work branch, here and on origin (the tip kept under PAST_REFS),
+    when it holds nothing of its own - no edits, nothing beyond
+    origin/main, no annex holding anything - or `force`."""
+    here = Path.cwd().resolve()
+    d = path.expanduser().resolve()
+    if d == here:
+        die("run close from another checkout")
+    if git_common(d) is None or git_common(d) != git_common(here):
+        die(f"{d} is no worktree of this repository")
+    if git_common(d) == (d / ".git").resolve():
+        die(f"{d} is the primary worktree, which holds the repository")
+    if sub_parent(d) is not None:
+        die(f"{d} is a subagent worktree: `nixconvoy close {d.name}`")
+    git(*fetch_args("--no-auto-gc"), check=False)
+    nested = subs_of(d)
+    if nested:
+        die(f"{d} holds the subagent worktrees {', '.join(w.name for w in nested)}: close them first")
+    os.chdir(d)
+    lock = lock_checkout()
+    os.chdir(here)
+    if lock is None:
+        die(f"a nixconvoy is running in {d}")
+    cur = branch_at(d)
+    wb = identity_of(d, cur).wb
+    head = out(["git", "rev-parse", "HEAD"], cwd=str(d))
+    # Its annex worktrees are its own (removed with it), ignored or not.
+    edits = [ln for ln in run(["git", "status", "--porcelain"], cwd=str(d), check=False).stdout.splitlines()
+             if ln[3:] != f"{annex.ANNEX_DIR}/" and not ln[3:].startswith(f"{annex.ANNEX_DIR}/")]
+    tip = rev(f"refs/heads/{wb}") if wb else None
+    kept = ("edits or untracked files" if edits
+            else "commits not on origin/main" if not is_ancestor(head, "refs/remotes/origin/main")
+            else f"its work branch {wb}, with commits not on origin/main"
+            if tip and not is_ancestor(tip, "refs/remotes/origin/main")
+            else "an annex holding something" if annex.own(d) else None)
+    if kept and not force:
+        die(f"{d} holds {kept}: land or abandon it first (--force removes it anyway)")
+    if worktree_lock(d) is not None:
+        git("worktree", "unlock", str(d), check=False)
+    annex.remove_all(d)
+    lock.close()
+    git("worktree", "remove", "--force", str(d))
+    names = [b for b in {cur, wb} if b and owned(b)]
+    failed = drop_branches(names)
+    if failed:
+        die("\n".join(failed))
+    print(f"checkout {d} removed, with {', '.join(sorted(names)) or 'no branch of its own'} here and on origin")
+
+
+def land_union() -> None:
+    """`nixconvoy land --union`: this checkout and its subagent worktrees
+    landed as one commit on main - each sub's branch merged into this
+    branch's tree (mergiraf on the conflicts, as a deploy's union) under
+    this checkout's MSG_FILE - every branch reset onto the new main, here
+    and on origin, each worktree staying."""
+    await_background_push()
+    git(*fetch_args())
+    pop_tmp_commits()
+    here = Path.cwd().resolve()
+    if sub_parent(here) is not None:
+        die("land --union runs from the checkout the worktrees hang off")
+    wb = require_work_branch("land --union")
+    if current_branch() != wb:
+        die(f"land runs from the work branch ({wb}); currently on {current_branch() or '(detached HEAD)'}")
+    if staged_differs():
+        die("staged but undeployed changes present; deploy or unstage them first")
+    ensure_rebased()
+    main = rev("refs/remotes/origin/main")
+    if main is None:
+        die("origin/main not found")
+    main_tree = out(["git", "rev-parse", f"{main}^{{tree}}"])
+    msg = out(["git", "show", f"HEAD:{MSG_FILE}"]) if rev(f"HEAD:{MSG_FILE}") else ""
+    if not msg:
+        die(f"{wb} has no {MSG_FILE}; write one (it becomes the main commit message)")
+    lines = msg.splitlines()
+    if len(lines) > 1 and lines[1].strip():
+        msg = "\n".join([lines[0], "", *lines[1:]])
+
+    # The participants: each sub on its work branch with work beyond main.
+    parts: list[tuple[Path, str]] = []
+    locks: list[IO[str]] = []
+    try:
+        for d in subs_of(here):
+            label = sub_label(d)
+            cur = branch_at(d)
+            ident = identity_of(d, cur)
+            head = out(["git", "rev-parse", "HEAD"], cwd=str(d))
+            if not ok(["git", "diff", "--cached", "--quiet"], cwd=str(d)):
+                die(f"{label} has staged but undeployed changes; deploy or unstage them first")
+            if is_ancestor(head, main) or tree_less_msg("HEAD", str(d)) == main_tree:
+                continue
+            if cur != ident.wb or not ident.wb:
+                die(f"{label} holds commits on {cur or 'a detached HEAD'} that were never deployed: "
+                    f"deploy or abandon them first")
+            if git_op_in_progress(d):
+                die(f"{label} has a {git_op_in_progress(d)} in progress")
+            os.chdir(d)
+            lock = lock_checkout()
+            os.chdir(here)
+            if lock is None:
+                die(f"another nixconvoy is running in {label}")
+            locks.append(lock)
+            parts.append((d, ident.wb))
+        if not parts:
+            die(f"no subagent worktree under {here.name} holds work to land; `nixconvoy land` "
+                f"lands this checkout alone")
+        own = {wb, *(b for _, b in parts)}
+        for d, b in [(here, wb), *parts]:
+            carried = [x for x, tip in listed_tips(allowed_branches()).items()
+                       if x not in own and is_ancestor(tip, "HEAD" if d == here else f"refs/heads/{b}")
+                       and not is_ancestor(tip, main)]
+            if carried:
+                die(f"{b} contains the unlanded increments of {', '.join(carried)}; land that branch "
+                    f"first, then re-run")
+            gone = annex.orphaned(d, b)
+            if gone:
+                die(f"the lock deploys {b}'s rev of annex {', '.join(gone)}, whose worktree is gone: "
+                    f"`nixconvoy open --annex <input>` or `abandon --annex <input>` in {d.name} first")
+        def merged_tree() -> str:
+            """The branches merged in a throwaway worktree on this branch's
+            tip (the lock node by node, as a deploy's union): its tree."""
+            wt = add_worktree("HEAD")
+            try:
+                for d, b in parts:
+                    tip = out(["git", "rev-parse", "HEAD"], cwd=str(d))
+                    p = git("merge", "--quiet", "--no-edit", "-m", f"union {b}", tip, cwd=wt, env=MACHINE_ENV,
+                            check=False)
+                    if p.returncode == 0:
+                        continue
+                    for f in out(["git", "diff", "--name-only", "--diff-filter=U"], cwd=wt).splitlines():
+                        if f == MSG_FILE:
+                            git("rm", "--quiet", "-f", f, cwd=wt, check=False)
+                        elif (annex.solve_lock(Path(wt)) if f == str(annex.lock_path())
+                              else solve_with_mergiraf(wt, f)):
+                            git("add", "--", f, cwd=wt, check=False)
+                        else:
+                            git("merge", "--abort", cwd=wt, check=False)
+                            die(f"{b} conflicts with the rest in {f}: resolve it (rebase {b} onto {wb} in "
+                                f"{sub_label(d)}), or `nixconvoy land {d.name}` alone first")
+                    git("commit", "--quiet", "--no-edit", "--no-verify", cwd=wt, env=MACHINE_ENV)
+                return tree_less_msg("HEAD", wt)
+            finally:
+                drop_worktree(wt)
+
+        def clashes(tree: str) -> None:
+            """Each worktree is reset onto the landed commit with its unstaged
+            edits kept (reset --keep), which an edited or untracked file the
+            others changed would stop: told now, before anything moves."""
+            for d in [here, *(d for d, _ in parts)]:
+                loose = set(out(["git", "diff", "--name-only"], cwd=str(d)).splitlines()) - {MSG_FILE}
+                loose |= set(out(["git", "ls-files", "--others", "--exclude-standard"], cwd=str(d)).splitlines())
+                moved = set(out(["git", "diff", "--name-only", "HEAD", tree], cwd=str(d)).splitlines())
+                if clash := sorted(loose & moved):
+                    die(f"{d.name if d == here else sub_label(d)} has unstaged edits or untracked files "
+                        f"the landing changes: {', '.join(clash)}; stage and deploy them, or put them aside")
+
+        # Proven to merge before any annex lands (which cannot be undone).
+        clashes(merged_tree())
+        for d, b in [(here, wb), *parts]:
+            os.chdir(d)
+            annex.land_all(b, msg)
+            os.chdir(here)
+        tree = merged_tree()
+        if tree == main_tree:
+            die("no changes vs origin/main to land")
+        clashes(tree)
+
+        commit = out(["git", "commit-tree", tree, "-p", main, "-m", msg])
+        p = git("push", "--quiet", "origin", f"{commit}:refs/heads/main", check=False)
+        if p.returncode != 0:
+            die(f"pushing main failed (moved since fetch?); re-run:\n{p.stderr.strip()}")
+        git("branch", "-f", "main", commit, check=False)
+        print(f"landed on main: {summarize(commit)}")
+        for d, b in [(here, wb), *parts]:
+            os.chdir(d)
+            git("checkout", "--quiet", "--", MSG_FILE, check=False)  # consumed: the commit's message
+            if git("reset", "--quiet", "--keep", commit, check=False).returncode != 0:
+                # Landed all the same: the branch moves, the working tree
+                # showing the others' changes until `git checkout -- .`.
+                git("reset", "--quiet", commit)
+                print(f"note: {d.name}'s working tree kept as it was (a file in the way); "
+                      f"`git checkout -- .` there brings it onto the landing", file=sys.stderr)
+            Path(MSG_FILE).unlink(missing_ok=True)
+            finish(b)
+            os.chdir(here)
+    finally:
+        for lock in locks:
+            lock.close()
+    landed = {d for d, _ in parts}
+    if not catch_up([d for d in sibling_checkouts() if d not in landed]):
+        die("some checkouts could not be brought onto the new main (see above); "
+            "fix them and `nixconvoy pull`")
+
+
+def land_annex(name: str) -> None:
+    """`land --annex <name>`: the one annex landed on its repository's
+    default branch and relocked there as a commit on the work branch,
+    pushed; its worktree stays.  The checkout's own landing is untouched."""
+    await_background_push()
+    git(*fetch_args())
+    pop_tmp_commits()
+    wb = require_work_branch("land --annex")
+    if current_branch() != wb:
+        die(f"land runs from the work branch ({wb}); currently on {current_branch() or '(detached HEAD)'}")
+    if staged_differs():
+        die("staged but undeployed changes present; deploy or unstage them first")
+    ensure_rebased()
+    ax = annex.present_one(Path.cwd(), name)
+    fallback = (out(["git", "show", f"HEAD:{MSG_FILE}"]) if rev(f"HEAD:{MSG_FILE}") else "").partition("\n")[0]
+    annex.land_one(ax, wb, fallback or f"{name} landed")
+    push_work_branch(wb)
+
+
+def abandon_annex(name: str) -> None:
+    """`abandon --annex <name>`: the one annex reset onto its repository's
+    default branch, the lock node restored to origin/main's and staged for
+    the next deploy; its worktree stays."""
+    await_background_push()
+    git(*fetch_args())
+    pop_tmp_commits()
+    wb = require_work_branch("abandon --annex")
+    ax = annex.present_one(Path.cwd(), name)
+    annex.reset_one(ax, wb)
+    if not annex.restore_lock(ax):
+        print(f"annex {name}: the lock still names what origin/main locks; nothing to revert")
+
+
+__all__ = [
+    "abandon",
+    "abandon_annex",
+    "close_annex",
+    "close_checkout",
+    "close_worktrees",
+    "commit_only",
+    "enter_sub",
+    "holds_work",
+    "land",
+    "land_annex",
+    "land_union",
+    "open_checkout",
+    "open_worktree",
+    "prune_after",
+    "pull",
+    "status",
+    "subs_of",
+    "work_branch_name",
+]
