@@ -202,23 +202,24 @@ nixconvoy.switchLast = true;                # the router: switched alone, after 
 ## Commands
 
 ```
-nixconvoy apply [-m "msg"] [--reset] [target|@tag ...]   deploy
-nixconvoy apply --dry-activate [target|@tag ...]   build and copy, then only report what each switch would do
-nixconvoy commit -m "msg"      commit + push the staged state, no build or switch
-nixconvoy land [name ...]      land the work branch on main
-nixconvoy abandon [--apply-now] [name ...]   discard it (--apply-now: and deploy, reverting it now)
-nixconvoy land --union | abandon --union   this checkout and its task worktrees as one unit (one main commit)
-nixconvoy close [--force] [name ...]   remove task worktrees holding nothing of their own (--force: whatever they hold)
-nixconvoy close [--force] path ...   remove an agent checkout likewise, with its work branch
-nixconvoy close --annex input [--force]   remove an annex worktree likewise
+nixconvoy apply [-m <msg>] [--reset] [<target> | @<tag> ...]   deploy
+nixconvoy apply --dry-activate [<target> | @<tag> ...]   build and copy, then only report what each switch would do
+nixconvoy commit -m <msg>      commit + push the staged state, no build or switch
+nixconvoy land [<worktree> ...]   land the work branch on main
+nixconvoy abandon [--apply-now] [<worktree> ...]   discard it (--apply-now: and deploy, reverting it now)
+nixconvoy land --union | abandon [--apply-now] --union   this checkout and its task worktrees as one unit (one main commit)
+nixconvoy close [--force] [<worktree> ...]   remove task worktrees holding nothing of their own (--force: whatever they hold)
+nixconvoy close [--force] <path> ...   remove an agent checkout likewise, with its work branch
+nixconvoy close [--force] --annex <input>   remove an annex worktree likewise
 nixconvoy pull                 rebase every checkout on this machine onto origin/main
 nixconvoy status               every checkout on this machine, and origin's other branches
-nixconvoy review [name|branch ...] [--union]   the pending landing: COMMIT_MSG.md, then the diff
-nixconvoy exec [target|@tag ...] -- cmd [arg ...]   run a command on each target, concurrently
-nixconvoy open [--lock reason] name   a task worktree <checkout>/<worktrees>/<name> (what the plugin's create hook runs)
-nixconvoy open [--branch wb] path   an agent checkout at that path on a work branch of this machine's
-nixconvoy open --annex input  the flake input developed in place under this checkout (see Annexes)
-nixconvoy land --annex input | abandon --annex input   one annex alone, ahead of the checkout's landing
+nixconvoy review [<worktree> | <branch> ...] [<diff-arg> ...]   the pending landing: COMMIT_MSG.md, then the diff
+nixconvoy review --union [<diff-arg> ...]   the checkout's and its task worktrees' together
+nixconvoy exec [<target> | @<tag> ...] -- <command> [<arg> ...]   run a command on each target, concurrently
+nixconvoy open [--lock <reason>] <name>   a task worktree <checkout>/<worktrees>/<name> (what the plugin's create hook runs)
+nixconvoy open [--branch <work-branch>] <path>   an agent checkout at that path on a work branch of this machine's
+nixconvoy open --annex <input>   the flake input developed in place under this checkout (see Annexes)
+nixconvoy land --annex <input> | abandon --annex <input>   one annex alone, ahead of the checkout's landing
 ```
 
 `nixconvoy --help` and the docstring of `src/nixconvoy/cli.py` describe each

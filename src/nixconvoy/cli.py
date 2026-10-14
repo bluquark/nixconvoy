@@ -28,8 +28,8 @@ Model:
     crate's (nixconvoy-plan, nixconvoy-switch: Sans-I/O cores); this program
     performs the git, eval, build and ssh they ask for.
 
-Deploy (nixconvoy apply [-m "..."] [--reset] [--danger-network-config-change]
-         [--dry-activate] [target|@tag ...]):
+Deploy (nixconvoy apply [-m <msg>] [--reset] [--danger-network-config-change]
+         [--dry-activate] [<target> | @<tag> ...]):
   1. start fetching origin; enumerate the targets from the hosts directory
   2. probe every target's running system and its lineage
      (/var/lib/nixconvoy/lineage.json, in the same round trip; a local_only
@@ -179,7 +179,8 @@ whether they are pushed, staged/unstaged/untracked counts, the
 COMMIT_MSG.md subject, a deploy or git operation in progress - then the
 work branches only origin holds (other machines' checkouts).
 
-Review (nixconvoy review [<name> ...] [--union] [args]): the review of
+Review (nixconvoy review [<worktree> | <branch> ...] [<diff-arg> ...] | review
+--union [<diff-arg> ...]): the review of
 the pending landing (review.py; `git review`, in the package's bin, is
 the same): COMMIT_MSG.md, then the diff against the merge-base with
 origin's default branch, then the annexes'.  A name is a subagent
@@ -202,8 +203,8 @@ deploy at once, so the targets drop the work now, from the checkout abandon
 ran in; it takes --danger-network-config-change.  --union abandons each
 subagent worktree holding anything, then this checkout.
 
-Open (nixconvoy open [--lock REASON] <name> | [--branch <wb>] <path> | --annex
-<input>): a worktree.  <name> (no / in it): a task worktree,
+Open (nixconvoy open [--lock <reason>] <name> | [--branch <work-branch>] <path> |
+--annex <input>): a worktree.  <name> (no / in it): a task worktree,
 <root>/<worktrees>/<name> (nixconvoy.toml's `worktrees`, `worktrees/` by
 default, which must be gitignored; root: the checkout this one's subagent
 worktrees hang off) on the fresh branch worktree-<name> off origin's
@@ -292,7 +293,7 @@ and no resume relocked it, whether session PID runs or not: resuming the
 agent recreates it (the PreToolUse hook on SendMessage).  It keeps a
 worktree whose lock names no session.
 
-Commit (nixconvoy commit -m "..."): commit + push the staged state onto the
+Commit (nixconvoy commit -m <msg>): commit + push the staged state onto the
 work branch without probing, building or switching anything - for changes
 that affect no NixOS target, or to publish work while a target is unreachable.
 A staged change to what the precheck reads is checked on its own first.
@@ -317,7 +318,7 @@ reload.  Nothing is switched, committed or pushed, and the staged changes
 need no -m; the run fails where a deploy would stop: a dry activation that
 fails, or protected units the switch would touch without the flag.
 
-Exec (nixconvoy exec [target|@tag ...] -- command [arg ...]): the command on
+Exec (nixconvoy exec [<target> | @<tag> ...] -- <command> [<arg> ...]): the command on
 each named target (every target addressable from here when none is named),
 concurrently, each target's output printed under its name once it finishes.
 Arguments are passed as they are (a pipeline wants `sh -c '...'`); the exit
@@ -336,25 +337,42 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import re
 import sys
 from pathlib import Path
+from typing import IO, NoReturn
 
 from . import annex, commands, proc, review
 from .checkout import lock_checkout, require_work_branch, sub_parent
 from .deploy import deploy
-from .proc import PERF, PERF_FILE, die, git, ok, out
+from .proc import PERF, PERF_FILE, TOOL, die, git, ok, out, painter
 from .targets import NETWORK_FLAG, exec_on
 
-USAGE = """usage: nixconvoy apply [-m "msg"] [--reset] [--danger-network-config-change] [--dry-activate] [target|@tag ...]
-       nixconvoy commit -m "msg"
-       nixconvoy land [worktree ...] | --union | --annex input
-       nixconvoy abandon [--apply-now] [worktree ...] | --union | --annex input
-       nixconvoy open [--lock reason] name | [--branch wb] path | --annex input
-       nixconvoy close [--force] [worktree ...] | [--force] path ... | --annex input | --after PID | --stopped PID < hook-input
-       nixconvoy pull
-       nixconvoy status
-       nixconvoy review [worktree|branch ...] [--union] [diff args]
-       nixconvoy exec [target|@tag ...] -- command [arg ...]
+# The synopsis: one line per form.  <x> a value, [x] optional, (a | b) one
+# of, ... repeated.  USAGE_NOTES follows it under --help only.
+SYNOPSIS = """\
+apply [-m <msg>] [--reset] [--danger-network-config-change] [--dry-activate] [<target> | @<tag> ...]
+commit -m <msg>
+land [<worktree> ...]
+land (--union | --annex <input>)
+abandon [--apply-now [--danger-network-config-change]] [<worktree> ...]
+abandon [--apply-now [--danger-network-config-change]] --union
+abandon --annex <input>
+open [--lock <reason>] <name>
+open [--branch <work-branch>] <path>
+open --annex <input>
+close [--force] [<worktree> ...]
+close [--force] <path> ...
+close [--force] --annex <input>
+close --after <pid>
+close --stopped <pid> < <hook-input>
+pull
+status
+review [<worktree> | <branch> ...] [<diff-arg> ...]
+review --union [<diff-arg> ...]
+exec [<target> | @<tag> ...] -- <command> [<arg> ...]
+"""
+USAGE_NOTES = """\
 With no targets named, every target whose running system differs from the union
 is switched; naming targets, or @tag for the targets nixconvoy.toml tags so,
 restricts switching to (at most) those.
@@ -364,6 +382,28 @@ reload a unit the target's configuration protects (nixconvoy.protectedUnits).
 abandon --apply-now deploys at once, so the targets drop the abandoned work
 now rather than at the next deploy.  --union acts on this checkout and its
 subagent worktrees as one unit; a path (with a /) names an agent checkout."""
+
+
+def usage(stream: IO[str] | None = None) -> str:
+    """The synopsis, colored when `stream` (stdout) is a terminal: the
+    subcommand bold, flags yellow, values cyan."""
+    paint = painter(stream)
+    lines = []
+    for form in SYNOPSIS.splitlines():
+        sub, _, rest = form.partition(" ")
+        rest = re.sub(r"<[\w-]+>", lambda m: paint(m.group(), "cyan"), rest)
+        rest = re.sub(r"(?<![\w<])--?\w[\w-]*", lambda m: paint(m.group(), "yellow"), rest)
+        lines.append(f"{TOOL} {paint(sub, 'bold')} {rest}".rstrip())
+    lines[0] = "usage: " + lines[0]
+    return "\n".join("       " + ln if i else ln for i, ln in enumerate(lines))
+
+
+def bad_usage() -> NoReturn:
+    sys.stdout.flush()
+    print(usage(sys.stderr), file=sys.stderr)
+    sys.exit(1)
+
+
 DRY_FLAG = "--dry-activate"
 APPLY_NOW_FLAG = "--apply-now"
 
@@ -371,15 +411,16 @@ APPLY_NOW_FLAG = "--apply-now"
 def main() -> None:
     args = sys.argv[1:]
     if not args:
-        print(USAGE)
+        print(usage())
         return
     if args[0] in ("-h", "--help"):
         print(__doc__)
-        print(USAGE)
+        print(usage())
+        print(USAGE_NOTES)
         return
     if args[0] not in ("apply", "land", "commit", "abandon", "close", "pull", "status", "review", "exec",
                        "open"):
-        die(USAGE)
+        bad_usage()
     subcmd = args.pop(0)
     start = Path.cwd()
     os.chdir(out(["git", "rev-parse", "--show-toplevel"]))
@@ -391,10 +432,10 @@ def main() -> None:
         sys.exit(review.main(args))
     if subcmd == "exec":
         if "--" not in args or args[0] in ("-h", "--help"):
-            die(USAGE)
+            bad_usage()
         at = args.index("--")
         if not args[at + 1:]:
-            die(USAGE)
+            bad_usage()
         exec_on(args[:at], args[at + 1:])
         return
     if subcmd not in ("status", "close", "open"):
@@ -442,40 +483,42 @@ def main() -> None:
         elif a == APPLY_NOW_FLAG and subcmd == "abandon":
             apply_now = True
         elif a in ("-h", "--help"):
-            print(USAGE)
+            print(usage())
+            print(USAGE_NOTES)
             return
         elif not a.startswith("-"):
             names.append(a)
         else:
-            die(USAGE)
+            bad_usage()
 
     if subcmd == "pull":
         if msg or reset or danger or dry or names:
-            die(USAGE)
+            bad_usage()
         commands.pull()  # takes each checkout's lock itself, this one included
         return
     if subcmd == "status":
         if msg or reset or danger or dry or names:
-            die(USAGE)
+            bad_usage()
         commands.status()
         return
     if subcmd == "open":
-        if msg or reset or danger or dry or len(names) != 1 or (branch and (annex_flag or lock_reason)):
-            die(USAGE)
+        if msg or reset or danger or dry or len(names) != 1 or (branch and (annex_flag or lock_reason)) \
+                or (annex_flag and lock_reason):
+            bad_usage()
         if annex_flag:
             annex.create(names[0], require_work_branch("open --annex"))
         elif is_path(names[0]):
             if lock_reason:
-                die(USAGE)
+                bad_usage()
             commands.open_checkout(start / Path(names[0]).expanduser(), branch)
         elif branch:
-            die(USAGE)
+            bad_usage()
         else:
             commands.open_worktree(names[0], lock_reason)
         return
     if annex_name is not None:
-        if names or apply_now or msg or reset or dry or danger or after or stopped:
-            die(USAGE)
+        if names or apply_now or msg or reset or dry or danger or after or stopped or union:
+            bad_usage()
         take_lock()
         if subcmd == "land":
             commands.land_annex(annex_name)
@@ -486,7 +529,7 @@ def main() -> None:
         return
     if subcmd == "close":
         if msg or reset or danger or dry or ((after or stopped) and (names or force)) or (after and stopped):
-            die(USAGE)
+            bad_usage()
         if stopped:
             stop = json.loads(sys.stdin.read() or "{}")
             commands.prune_stopped(int(stopped), stop if isinstance(stop, dict) else {})
@@ -494,7 +537,7 @@ def main() -> None:
             commands.prune_after(int(after))
         elif any(is_path(n) for n in names):
             if not all(is_path(n) for n in names):
-                die(USAGE)
+                bad_usage()
             take_lock()
             for n in names:
                 commands.close_checkout(start / Path(n).expanduser(), force=force)
@@ -505,7 +548,7 @@ def main() -> None:
     here = top.resolve()
     if subcmd in ("land", "abandon"):
         if msg or reset or dry or (danger and not apply_now) or (union and names):
-            die(USAGE)
+            bad_usage()
         if union and subcmd == "land":
             take_lock()
             commands.land_union()
@@ -560,7 +603,7 @@ def main() -> None:
             deploy([], None, False, danger)
     elif subcmd == "commit":
         if reset or danger or dry or names:
-            die(USAGE)
+            bad_usage()
         commands.commit_only(msg)
     else:  # apply
         deploy(names, msg, reset, danger, dry)

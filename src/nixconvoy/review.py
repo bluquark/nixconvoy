@@ -29,7 +29,7 @@ from typing import IO
 from .annex import ANNEX_DIR
 from .checkout import sub_parent
 from .config import BRANCHES_FILE, MSG_FILE
-from .proc import die, run
+from .proc import die, painter, run
 
 EXCLUDE_MSG = f":(top,exclude){MSG_FILE}"
 
@@ -139,7 +139,8 @@ class Out:
     """The review's output: the terminal's pager, else stdout."""
 
     def __init__(self) -> None:
-        self.color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+        self.paint = painter()
+        self.color = self.paint("x", "bold") != "x"
         self.pager: subprocess.Popen[str] | None = None
         self.sink: IO[str] = sys.stdout
         if self.color:
@@ -151,9 +152,8 @@ class Out:
                 self.sink = self.pager.stdin
 
     def line(self, text: str, style: str = "") -> None:
-        codes = {"bold": "1", "cyan": "36", "heading": "1;33"}
-        if self.color and style:
-            text = f"\033[{codes[style]}m{text}\033[0m"
+        if style:
+            text = self.paint(text, style.replace("heading", "bold yellow"))
         self.sink.write(text + "\n")
         self.sink.flush()
 

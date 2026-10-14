@@ -241,10 +241,11 @@ def stream(cmd: list[str], *, held_as: str | None = None,
     return rc
 
 
-def painter() -> Callable[[str, str], str]:
-    """paint(text, style) in SGR codes on a terminal (NO_COLOR unset), else
-    the text as is: bold, dim, green, yellow, red, cyan, magenta."""
-    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+def painter(stream: IO[str] | None = None) -> Callable[[str, str], str]:
+    """paint(text, style) in SGR codes when `stream` (stdout) is a terminal
+    (NO_COLOR unset), else the text as is: bold, dim, green, yellow, red,
+    cyan, magenta."""
+    if not (stream or sys.stdout).isatty() or os.environ.get("NO_COLOR"):
         return lambda text, _style: text
     codes = {"bold": "1", "dim": "2", "green": "32", "yellow": "33", "red": "31",
              "cyan": "36", "magenta": "35"}
