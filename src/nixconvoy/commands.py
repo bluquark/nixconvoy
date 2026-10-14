@@ -137,7 +137,7 @@ def land(release: bool = False) -> None:
     print(f"landed on main: {summarize(commit)}")
     siblings = sibling_checkouts()  # the parent of a subagent worktree included
     finish(wb)
-    if not catch_up(siblings):
+    if not (catch_up(siblings) & annex.catch_up_repos()):
         die("some checkouts could not be brought onto the new main (see above); "
             "fix them and `nixconvoy pull`")
 
@@ -146,7 +146,7 @@ def pull() -> None:
     """This checkout and its siblings onto origin/main (cli docstring)."""
     await_background_push()
     binary("nixconvoy-plan")  # resolved before update_checkout moves into the others
-    if not catch_up([Path.cwd(), *sibling_checkouts()]):
+    if not (catch_up([Path.cwd(), *sibling_checkouts()]) & annex.catch_up_repos()):
         sys.exit(1)
 
 
@@ -1354,7 +1354,7 @@ def land_union(release: bool = False) -> None:
         for lock in locks:
             lock.close()
     landed = {d for d, _ in parts}
-    if not catch_up([d for d in sibling_checkouts() if d not in landed]):
+    if not (catch_up([d for d in sibling_checkouts() if d not in landed]) & annex.catch_up_repos()):
         die("some checkouts could not be brought onto the new main (see above); "
             "fix them and `nixconvoy pull`")
 
@@ -1362,7 +1362,8 @@ def land_union(release: bool = False) -> None:
 def land_annex(name: str) -> None:
     """`land --annex <name>`: the one annex landed on its repository's
     default branch and relocked there as a commit on the work branch,
-    pushed; its worktree stays.  The checkout's own landing is untouched."""
+    pushed; its worktree stays, and the annex repositories' own checkouts
+    follow (annex.catch_up_repos).  The checkout's own landing is untouched."""
     await_background_push()
     git(*fetch_args())
     pop_tmp_commits()
@@ -1376,6 +1377,8 @@ def land_annex(name: str) -> None:
     fallback = (out(["git", "show", f"HEAD:{MSG_FILE}"]) if rev(f"HEAD:{MSG_FILE}") else "").partition("\n")[0]
     annex.land_one(ax, wb, fallback or f"{name} landed")
     push_work_branch(wb)
+    if not annex.catch_up_repos():
+        sys.exit(1)
 
 
 def abandon_annex(name: str) -> None:

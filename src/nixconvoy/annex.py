@@ -1008,6 +1008,19 @@ def catch_up(top: Path, wb: str) -> list[str]:
     return problems
 
 
+def onto(d: Path, upstream: str) -> tuple[bool, str]:
+    """The rebase core's Onto run in `d`: HEAD made to contain `upstream`,
+    (ok, status)."""
+    prev = Path.cwd()
+    os.chdir(d)
+    try:
+        done = decide("rebase", mode="onto", upstream=upstream)
+    finally:
+        os.chdir(prev)
+    assert isinstance(done, dict)
+    return done.get("ok") is True, str(done.get("status"))
+
+
 def catch_up_one(ax: Annex, wb: str) -> str | None:
     """catch_up for one annex: the problem, or None."""
     cur = branch_at(ax.dir)
@@ -1022,15 +1035,8 @@ def catch_up_one(ax: Annex, wb: str) -> str | None:
     upstream = f"refs/remotes/origin/{default_branch(ax.repo)}"
     was = rev_in(ax.dir, "HEAD")
     own = not ok(["git", "merge-base", "--is-ancestor", "HEAD", upstream], cwd=str(ax.dir))
-    prev = Path.cwd()
-    os.chdir(ax.dir)
-    try:
-        done = decide("rebase", mode="onto", upstream=upstream)
-    finally:
-        os.chdir(prev)
-    assert isinstance(done, dict)
-    status = str(done.get("status"))
-    if done.get("ok") is not True:
+    good, status = onto(ax.dir, upstream)
+    if not good:
         return f"annex {ax.name}: {status}"
     head = rev_in(ax.dir, "HEAD")
     if head is None or was is None or head == was:
@@ -1041,6 +1047,49 @@ def catch_up_one(ax: Annex, wb: str) -> str | None:
             push_branch(ax, wb)
         if locked_rev(ax.name)[0] == was and relock(ax.name, wb, head):
             print(f"annex {ax.name}: {lock_path()} locks {head[:12]} on {wb}")
+    return None
+
+
+def catch_up_repos() -> bool:
+    """After a landing's or a pull's sweep of the checkouts: every
+    configured annex repository with a checkout here sitting on its
+    default branch brought onto that branch as fetched (catch_up_repo,
+    the origins fetched in parallel), as the main checkout is brought
+    onto main; whether each could be, the problems said."""
+    on_default = {name: repo for name, repo in configured().items()
+                  if (repo / ".git").exists() and branch_at(repo) == default_branch_of(repo)}
+    with ThreadPoolExecutor() as pool:
+        for name, repo in on_default.items():
+            if repo not in FETCHED and repo not in PREFETCH:
+                PREFETCH[repo] = pool.submit(fetch_refs, name, repo)
+    good = True
+    for name, repo in on_default.items():
+        try:
+            problem = catch_up_repo(name, repo)
+        except SystemExit:
+            proc.DYING = False
+            problem = f"{repo} (annex {name}): failed (above)"
+        if problem is not None:
+            print(problem, file=sys.stderr)
+            good = False
+    return good
+
+
+def catch_up_repo(name: str, repo: Path) -> str | None:
+    """The annex repository's own checkout (`repo`, worked in by nobody)
+    brought onto its default branch as fetched the way a main checkout
+    is brought onto origin/main: fast-forwarded when it holds nothing of
+    its own, its edits riding along.  One whose origin cannot be fetched
+    is left alone (said).  The problem, or None."""
+    if not fetch_once(name, repo):
+        return None
+    default = default_branch(repo)
+    with repo_lock(repo):  # another checkout's sweep, reaching the same repository
+        good, status = onto(repo, f"refs/remotes/origin/{default}")
+    if not good:
+        return f"{repo} (annex {name}): {status}"
+    if status != "up to date":
+        print(f"{repo} (annex {name}): {status}")
     return None
 
 

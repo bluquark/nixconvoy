@@ -211,7 +211,9 @@ along; one with commits of its own is pushed where its origin has the
 branch, and a lock naming its old tip relocked on the new, staged.  One
 that cannot follow - its rebase not clean, its origin unreachable while a
 relock waits on it - is named in the checkout's line, which then counts
-as failed, and left as it was.
+as failed, and left as it was.  The annex repository's own checkout, when
+on its default branch, follows the same way, as the main checkout follows
+main.
 
 Status (nixconvoy status): after a fetch, every checkout on this machine as
 a tree (the main checkouts, the work-branch ones, each with its subagent

@@ -347,7 +347,14 @@ branch:
 - **Keep the nightly off annexed inputs.**  An unattended `nix flake
   update` would move the node back to the default branch's tip; let
   landings move it instead.
-- **Never work in the repository's own checkout.**  `status` lists the
+- **Never work in the repository's own checkout.**  The sweep of the
+  checkouts a landing or `pull` runs (every configured repository here,
+  an annex worktree of it present or not) brings it
+  onto the landed default branch when it sits on that branch, by the
+  rebase that brings the main checkout onto main: fast-forwarded when
+  it holds nothing of its own, its edits riding along; one whose edits
+  the landing touches is left as it was and named.
+  `status` lists the
   annexes and flags edits there, and nixconvoy leaves a `nixconvoy-annexed`
   marker in that repository's git dir, so a global pre-commit hook can
   refuse an agent's commit on its default branch outside an annex (`[ -f

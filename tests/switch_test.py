@@ -1464,11 +1464,30 @@ def annex_cases(d: Path) -> None:
         ancient = sh(ax_seed, "rev-parse", "HEAD")
         sh(ax_seed, "reset", "--quiet", "--hard", "HEAD~1")
         sh(ax_seed, "push", "--quiet", "origin", f"{ancient}:{annex.PAST_REFS}/gone/{ancient}")
+        # The repository's own checkout, idle on main since the clone, follows
+        # in the sweep after the landing (the landing itself leaves it alone:
+        # nothing of its may stop main's commit), like the main checkout
+        # follows main, an untracked file of its riding along; one on
+        # another branch is left where it is.
+        assert sh(ax_repo, "rev-parse", "HEAD") == v1 and annex.branch_at(ax_repo) == "main"
+        (ax_repo / "scratch.txt").write_text("s\n")
         with contextlib.redirect_stdout(io.StringIO()):
             annex.land_all(wb, "dep v2 landed")
         assert not sh(ax_seed, "ls-remote", str(ax_origin), f"{annex.PAST_REFS}/gone/*")
         ax_main = sh(ax_seed, "ls-remote", str(ax_origin), "refs/heads/main").split()[0]
         assert sh(ax, "rev-parse", "HEAD") == ax_main
+        assert sh(ax_repo, "rev-parse", "HEAD") == v1
+        sh(ax_repo, "switch", "--quiet", "-c", "aside")
+        with contextlib.redirect_stdout(io.StringIO()) as noted:
+            assert annex.catch_up_repos()
+        assert sh(ax_repo, "rev-parse", "HEAD") == v1 and not noted.getvalue()
+        sh(ax_repo, "switch", "--quiet", "main")
+        with contextlib.redirect_stdout(io.StringIO()) as noted:
+            assert annex.catch_up_repos()
+        assert sh(ax_repo, "rev-parse", "HEAD") == ax_main and annex.branch_at(ax_repo) == "main"
+        assert f"{ax_repo} (annex dep): fast-forwarded main onto origin/main" in noted.getvalue(), noted.getvalue()
+        assert sh(ax_repo, "status", "--porcelain") == "?? scratch.txt"
+        (ax_repo / "scratch.txt").unlink()
         assert sh(ax, "log", "-1", "--format=%B", ax_main) == "dep v2 landed\n\nthe annex's own message"
         assert not (ax / "COMMIT_MSG.md").exists()
         assert sh(ax, "show", f"{ax_main}:tool.py") == "v2" and sh(ax, "show", f"{ax_main}:other.txt") == "x"
@@ -1603,6 +1622,24 @@ def annex_cases(d: Path) -> None:
         new_main = sh(ax_seed, "rev-parse", "HEAD")
         annex.FETCHED.clear()
         os.chdir(co)
+        # The repository's own checkout follows in the sweep's last pass,
+        # a worktree of the annex present or not; an edit there that the
+        # new tip touches leaves it as it was, named.
+        assert sh(ax_repo, "rev-parse", "HEAD") == ax_main
+        (ax_repo / "more.txt").write_text("mine\n")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as said:
+            assert not annex.catch_up_repos()
+        assert f"{ax_repo} (annex dep): rebasing main onto origin/main is not clean" in said.getvalue(), said.getvalue()
+        assert sh(ax_repo, "rev-parse", "HEAD") == ax_main and (ax_repo / "more.txt").read_text() == "mine\n"
+        assert not sh(ax_repo, "status", "--porcelain", "-uno")
+        (ax_repo / "more.txt").unlink()
+        with contextlib.redirect_stdout(io.StringIO()) as noted:
+            assert annex.catch_up_repos()
+        assert sh(ax_repo, "rev-parse", "HEAD") == new_main
+        assert f"{ax_repo} (annex dep): fast-forwarded main onto origin/main" in noted.getvalue(), noted.getvalue()
+        with contextlib.redirect_stdout(io.StringIO()) as noted:
+            assert annex.catch_up_repos()  # settled: silent
+        assert not noted.getvalue()
         with contextlib.redirect_stdout(io.StringIO()):
             good, status = checkout.update_checkout(co8)
         assert good, status
