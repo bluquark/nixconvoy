@@ -79,7 +79,7 @@ def holds(wb: str, tip: str, main: str, release: bool, cwd: str | None = None) -
     them = ", ".join(held)
     if not release:
         die(f"{wb} holds back {them}: increments of it reach {'it' if len(held) == 1 else 'them'} "
-            f"but were deployed to other targets alone.  `nixconvoy apply --catch-up {' '.join(held)}` from its "
+            f"but were deployed to other targets alone.  `nixconvoy apply {' '.join(held)}` from its "
             f"checkout deploys them there first; `land --release` lands them as they are, for the "
             f"next deploy anywhere to roll out")
     print(f"releasing {them}: the next deploy anywhere rolls the landed work out there")
@@ -212,7 +212,7 @@ def abandon(apply_now: bool = False) -> None:
             print(f"deployed to {where}: deploying now to revert it")
         else:
             print(f"deployed to {where}; whichever targets run it keep it until the next deploy "
-                  f"reverts it (`nixconvoy apply --catch-up`, or `abandon --apply-now` for both at once)")
+                  f"reverts it (`nixconvoy apply`, or `abandon --apply-now` for both at once)")
     finish(wb)
 
 

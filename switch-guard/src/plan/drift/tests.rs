@@ -250,7 +250,7 @@ fn held_targets() {
     let msg = out.unwrap_err();
     assert_eq!(
         msg,
-        "nothing switched or committed: choko is held back by another branch (see above): the union carries work that checkout deployed to other targets alone, and this checkout's work reaches it too.  Deploy it there (nixconvoy apply --catch-up choko from that checkout) or land it with --release; or deploy with --reset choko to switch it to this checkout's view alone, without the held work (and without every other branch's), the hold standing."
+        "nothing switched or committed: choko is held back by another branch (see above): the union carries work that checkout deployed to other targets alone, and this checkout's work reaches it too.  Deploy it there (nixconvoy apply choko from that checkout) or land it with --release; or deploy with --reset choko to switch it to this checkout's view alone, without the held work (and without every other branch's), the hold standing."
     );
     assert_eq!(fx[1], Effect::Print("  side1: will switch".into()));
     assert_eq!(
@@ -266,7 +266,7 @@ fn held_targets() {
     let mut q = p.clone();
     q.lineages.insert("side1".into(), doc(OLD, OTHER, Some((BRANCH, Some(&b))), &[], T0));
     let msg = run(q.clone()).1.unwrap_err();
-    assert!(msg.starts_with("nothing switched or committed: side1 runs another checkout's work") && msg.contains("Re-run once that deploy ends, or push its branch from its checkout; or choko held back by another branch: deploy it there (nixconvoy apply --catch-up choko from that checkout) or land it with --release; or deploy with"), "{msg}");
+    assert!(msg.starts_with("nothing switched or committed: side1 runs another checkout's work") && msg.contains("Re-run once that deploy ends, or push its branch from its checkout; or choko held back by another branch: deploy it there (nixconvoy apply choko from that checkout) or land it with --release; or deploy with"), "{msg}");
     q.lineages.insert("choko".into(), doc_ann(OLD, OTHER, Some((BRANCH, Some(&b))), Some("p"), &[], T0));
     q.cx.in_flight.insert(BRANCH.into(), "q".into());
     q.cx.dead.insert(BRANCH.into());

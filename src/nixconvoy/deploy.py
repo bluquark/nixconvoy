@@ -124,10 +124,10 @@ def commit_unreached(wb: str, msg: str, snap: str) -> None:
 
 
 def deploy(filter_targets: list[str], msg: str | None, reset: bool,
-           allow: frozenset[str] = frozenset(), dry: bool = False, catch_up: bool = False) -> None:
-    """`msg` describes the staged increment; `catch_up` (--catch-up) is
-    the deploy of nothing staged, converging the targets on the union as
-    it is - one or the other, as the staging decides.
+           allow: frozenset[str] = frozenset(), dry: bool = False) -> None:
+    """`msg` describes the staged increment (default: the checkout's name
+    and the increment's number on its branch); with nothing staged the
+    deploy converges the targets on the union as it is.
     `reset`: this checkout's view alone - no other work branch in the
     union, no wait for a deploy under way, and a target running another
     checkout's refused work switched over when this work reaches it or
@@ -183,6 +183,9 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
     # step (a pin reaches targets) and the rebase onto origin/main.
     PERF.mark("reach")
     scanned = ""  # the snapshot the early scan judged, so an unchanged one is not scanned again
+    if msg is None and wb is not None and not dry and (
+            staged_differs() or any(submodule.staged(sub.dir, less_msg=True) for sub in submodule.present(Path.cwd()))):
+        msg = f"{Path.cwd().name}: increment {int(out(['git', 'rev-list', '--count', 'refs/remotes/origin/main..HEAD'])) + 1}"
     if (wb is not None and bool(msg) and not dry and not skip and not reset and not filter_targets
             and staged_differs() and not carrying):
         scanned = staged_snapshot()
@@ -196,11 +199,6 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
         print(told)
     PERF.mark("snapshot")
     if staged_differs():
-        if catch_up:
-            die('staged changes present, which --catch-up would not deploy: describe this increment '
-                'with -m "...", or unstage it')
-        if not msg and not dry:
-            die('staged changes present; describe this increment with -m "..."')
         if wb is None:
             die("staged changes in the main checkout, which has no work branch: commit "
                 "them by hand here, or stage them in a checkout on a work branch")
@@ -221,9 +219,6 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
             start_probes()
     elif msg:
         die("nothing is staged; stage the change or drop -m")
-    elif not catch_up and not dry:
-        die("nothing is staged: `nixconvoy apply --catch-up` converges the targets on the union as it "
-            'is; a staged change deploys as an increment with -m "..."')
     else:
         ensure_rebased()
 

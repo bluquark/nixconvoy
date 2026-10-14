@@ -334,7 +334,7 @@ pub fn refusal(refused: &[(String, Kind, Option<String>)]) -> String {
     if targets.is_empty() {
         let one = held.len() == 1;
         return format!(
-            "nothing switched or committed: {} {} held back by another branch (see above): the union carries work that checkout deployed to other targets alone, and this checkout's work reaches {} too.  Deploy it there (nixconvoy apply --catch-up {} from that checkout) or land it with --release; or deploy with {RESET_FLAG} {} to switch {} to this checkout's view alone, without the held work (and without every other branch's), the hold standing.",
+            "nothing switched or committed: {} {} held back by another branch (see above): the union carries work that checkout deployed to other targets alone, and this checkout's work reaches {} too.  Deploy it there (nixconvoy apply {} from that checkout) or land it with --release; or deploy with {RESET_FLAG} {} to switch {} to this checkout's view alone, without the held work (and without every other branch's), the hold standing.",
             held.join(", "),
             if one { "is" } else { "are" },
             if one { "it" } else { "them" },
@@ -359,7 +359,7 @@ pub fn refusal(refused: &[(String, Kind, Option<String>)]) -> String {
     }
     if !held.is_empty() {
         fixes.push(format!(
-            "{} held back by another branch: deploy it there (nixconvoy apply --catch-up {} from that checkout) or land it with --release",
+            "{} held back by another branch: deploy it there (nixconvoy apply {} from that checkout) or land it with --release",
             held.join(", "),
             held.join(" ")
         ));

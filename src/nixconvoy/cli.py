@@ -29,11 +29,12 @@ Model:
     crate's (nixconvoy-plan, nixconvoy-switch: Sans-I/O cores); this program
     performs the git, eval, build and ssh they ask for.
 
-Deploy (nixconvoy apply -m <msg> | --catch-up [--reset] [--allow <protection> ...]
-         [<target> | @<tag> ...]; apply --dry-activate [...]): -m describes
-  the staged increment the deploy commits; --catch-up, with nothing
-  staged, converges the targets on the union as it is (the nightlies', and
-  a main checkout's, deploy).
+Deploy (nixconvoy apply [<target> | @<tag> ...] [-m <msg>] [--reset]
+         [--allow <protection> ...] [--dry-activate]): -m describes the
+  staged increment the deploy commits (default: "<checkout>: increment
+  <n>", n its number on the branch); with nothing staged the deploy
+  converges the targets on the union as it is (the nightlies', and a main
+  checkout's, deploy).
   1. start fetching origin; enumerate the targets from the hosts directory
   2. probe every target's running system and its lineage
      (/var/lib/nixconvoy/lineage.json, in the same round trip; a local_only
@@ -180,7 +181,7 @@ branch, so it switches the target to this checkout's view alone, without
 the held work, the hold standing.  `status` shows what each checkout holds
 back.
 
-Land (nixconvoy land [-m <msg>] [<name> ...] | --union | --submodule <input>):
+Land (nixconvoy land [<name> ... | --union] [-m <msg>] | --submodule <input>):
 commit the work branch's tree minus COMMIT_MSG.md onto origin/main with
 COMMIT_MSG.md as the message (or -m <msg>, for a branch without the file:
 both at once is refused; with --submodule, the submodule's file), push
@@ -229,8 +230,8 @@ whether they are pushed, staged/unstaged/untracked counts, the
 COMMIT_MSG.md subject, a deploy or git operation in progress - then the
 work branches only origin holds (other machines' checkouts).
 
-Review (nixconvoy review [<worktree> | <branch> ...] [<diff-arg> ...] | review
---union [<diff-arg> ...]): the review of
+Review (nixconvoy review [<worktree> | <branch> ... | --union] [<diff-arg> ...]):
+the review of
 the pending landing (review.py; `git review`, in the package's bin, is
 the same): COMMIT_MSG.md, then the diff against the merge-base with
 origin's default branch, then the submodules'.  A name is a subagent
@@ -239,7 +240,7 @@ it, else the branch against its merge-base, so a submodule branch reviews
 from its repository too); one that is none of these is an error; --union reviews this checkout and then each
 subagent worktree; the rest are git diff arguments.
 
-Abandon (nixconvoy abandon [--apply-now] [<name> ...] | --union | --submodule <input>):
+Abandon (nixconvoy abandon [<name> ... | --union] [--apply-now] | --submodule <input>):
 discard this checkout's work instead of landing it: hard-reset the checkout
 and reset the work branch (local and origin) onto origin/main, staying on
 it; a subagent worktree stays too (close removes it); its submodules are
@@ -385,20 +386,11 @@ from .deploy import deploy
 from .proc import PERF, PERF_FILE, TOOL, die, git, ok, out, painter
 from .targets import ALLOW_FLAG
 
-# The synopsis: one line per form.  <x> a value, [x] optional, (a | b) one
-# of, ... repeated.  USAGE_NOTES follows it under --help only.
+# The synopsis: one line per form under its section's heading (= ...).
+# <x> a value, [x] optional, (a | b) one of, ... repeated.  USAGE_NOTES
+# follows it under --help only.
 SYNOPSIS = """\
-apply -m <msg> [--reset] [--allow <protection> ...] [<target> | @<tag> ...]
-apply --catch-up [--reset] [--allow <protection> ...] [<target> | @<tag> ...]
-apply --dry-activate [--reset] [--allow <protection> ...] [<target> | @<tag> ...]
-review [<worktree> | <branch> ...] [<diff-arg> ...]
-review --union [<diff-arg> ...]
-land [-m <msg>] [--release] [<worktree> ...]
-land --union [-m <msg>] [--release]
-land --submodule <input> [-m <msg>]
-abandon [--apply-now [--allow <protection> ...]] [<worktree> ...]
-abandon --union [--apply-now [--allow <protection> ...]]
-abandon --submodule <input>
+= Managing worktrees
 open <name> [--lock <reason>]
 open <path> [--branch <work-branch>]
 open --submodule <input>
@@ -408,11 +400,18 @@ close --after <pid>
 close --stopped <pid> < <hook-input>
 pull
 status
+= Deploying and committing changes
+apply [<target> | @<tag> ...] [-m <msg>] [--reset] [--allow <protection> ...] [--dry-activate]
+review [<worktree> | <branch> ... | --union] [<diff-arg> ...]
+land [<worktree> ... | --union] [-m <msg>] [--release]
+land --submodule <input> [-m <msg>]
+abandon [<worktree> ... | --union] [--apply-now [--allow <protection> ...]]
+abandon --submodule <input>
 """
 USAGE_NOTES = """\
 -m describes the staged increment a deploy commits once its targets are
-switched; --catch-up is the deploy of nothing staged, converging the targets
-on the union as it is.
+switched (default: "<checkout>: increment <n>"); with nothing staged, the
+deploy converges the targets on the union as it is.
 With no targets named, every target whose running system differs from the union
 is switched; naming targets, or @tag for the targets nixconvoy.toml tags so,
 restricts switching to (at most) those.
@@ -428,8 +427,8 @@ subagent worktrees as one unit; a path (with a /) names an agent checkout."""
 
 
 def usage(stream: IO[str] | None = None) -> str:
-    """The synopsis, colored when `stream` (stdout) is a terminal: the
-    subcommand bold, flags yellow and the value a flag takes cyan,
+    """The synopsis in its sections, colored when `stream` (stdout) is a
+    terminal: the headings and the subcommand bold, flags yellow and the value a flag takes cyan,
     positional values green; inside [...] the brackets, "..." and "|"
     gray, the flags, their values and the positionals dim."""
     paint = painter(stream)
@@ -451,14 +450,16 @@ def usage(stream: IO[str] | None = None) -> str:
                 " " + paint(m.group("fval"), dim + "cyan") if m.group("fval") else "")
         return paint(m.group("pos"), dim + "green")
 
-    lines = []
+    lines = ["usage:"]
     for form in SYNOPSIS.splitlines():
+        if form.startswith("= "):
+            lines += ["", paint(form[2:] + ":", "bold")]
+            continue
         sub, _, rest = form.partition(" ")
         rest = re.sub(r"(?P<open>\[)|(?P<close>\])|(?P<mark>\.\.\.|\|)"
                       r"|(?P<flag>(?<![\w<])--?\w[\w-]*)(?: (?P<fval><[\w-]+>))?|(?P<pos>@?<[\w-]+>)", color, rest)
-        lines.append(f"{TOOL} {paint(sub, 'bold')} {rest}".rstrip())
-    lines[0] = "usage: " + lines[0]
-    return "\n".join("       " + ln if i else ln for i, ln in enumerate(lines))
+        lines.append(f"  {TOOL} {paint(sub, 'bold')} {rest}".rstrip())
+    return "\n".join(lines)
 
 
 def bad_usage() -> NoReturn:
@@ -509,7 +510,6 @@ def main() -> None:
     force = False
     union = False
     release = False
-    catch_up = False
     while args:
         a = args.pop(0)
         if a == "-m" and args and not args[0].startswith("-"):
@@ -534,8 +534,6 @@ def main() -> None:
             stopped = args.pop(0)
         elif a == "--reset":
             reset = True
-        elif a == "--catch-up" and subcmd == "apply":
-            catch_up = True
         elif a == ALLOW_FLAG and args and not args[0].startswith("-"):
             allow.add(args.pop(0))
         elif a == DRY_FLAG:
@@ -654,7 +652,7 @@ def main() -> None:
                 print(f"== {here.name}")
                 commands.abandon(apply_now)
             if apply_now:
-                deploy([], None, False, frozenset(allow), catch_up=True)
+                deploy([], None, False, frozenset(allow))
             return
     take_lock()
     if subcmd == "land":
@@ -662,15 +660,12 @@ def main() -> None:
     elif subcmd == "abandon":
         commands.abandon(apply_now)
         if apply_now:
-            deploy([], None, False, frozenset(allow), catch_up=True)
+            deploy([], None, False, frozenset(allow))
     else:  # apply
-        if catch_up and msg is not None:
-            bad_usage()
-        if dry and (catch_up or msg is not None):
+        if dry and msg is not None:
             # Accepted so a deploy's command line reruns with the flag added.
-            print(f"note: {'--catch-up' if catch_up else '-m'} does nothing with {DRY_FLAG}: "
-                  "nothing is committed", file=sys.stderr)
-        deploy(names, msg, reset, frozenset(allow), dry, catch_up)
+            print(f"note: -m does nothing with {DRY_FLAG}: nothing is committed", file=sys.stderr)
+        deploy(names, msg, reset, frozenset(allow), dry)
 
 
 def is_path(arg: str) -> bool:

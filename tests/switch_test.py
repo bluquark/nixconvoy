@@ -419,7 +419,7 @@ def lineage_cases() -> None:
     assert line == ("side1: refused: held back by work/chikuwa/1: the union carries its work, "
                     "deployed from that checkout to other targets alone"), line
     assert died.startswith("nothing switched or committed: side1 is held back by another branch") \
-        and "nixconvoy apply --catch-up side1 from that checkout" in died, died
+        and "nixconvoy apply side1 from that checkout" in died, died
     line, died = report("", held={"side1": ["work/chikuwa/1"]}, reached=False)
     assert line.startswith("side1: left alone: held back by") and not died, (line, died)
 
@@ -1800,8 +1800,7 @@ def open_cases(d: Path) -> None:
         try:
             for argv in (["abandon", "-m", "x"], ["abandon", "-m", "x", "--submodule", "dep"],
                          ["land", "-m", ""], ["land", "-m", " ", "--union"], ["land", "-m", "--union"],
-                         ["land", "-m", "x", "a", "b"], ["land", "-m"], ["apply", "-m", "x", "--catch-up"],
-                         ["land", "--catch-up"]):
+                         ["land", "-m", "x", "a", "b"], ["land", "-m"]):
                 sys.argv = ["nixconvoy", *argv]
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
                     try:
@@ -1810,7 +1809,7 @@ def open_cases(d: Path) -> None:
                         assert e.code == 1, (argv, e.code)
                     else:
                         raise AssertionError(argv)
-                assert err.getvalue().startswith("usage: nixconvoy apply"), (argv, err.getvalue())
+                assert err.getvalue().startswith("usage:\n\nManaging worktrees:\n  nixconvoy open "), (argv, err.getvalue())
         finally:
             sys.argv = argv0
             atexit.unregister(proc.PERF.write)

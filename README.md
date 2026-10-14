@@ -5,7 +5,7 @@ one checkout ever reverting what another already switched.
 
 nixconvoy is for the way a homelab actually evolves: lots of small,
 experimental changes, tested in production, kept honest by NixOS's atomic
-switches and generations.  You stage a change, run `nixconvoy apply -m "..."`, and the
+switches and generations.  You stage a change, run `nixconvoy apply`, and the
 targets that differ from the result are switched.  If the target does not come
 back reachable and healthy, the switch rolls itself back.  Only after the
 targets run the change is it committed, so a branch never claims more than
@@ -221,21 +221,20 @@ nixconvoy.switchLast = true;                # the router: switched alone, after 
 ## Commands
 
 ```
-nixconvoy apply -m <msg> [--reset] [<target> | @<tag> ...]   deploy the staged increment
-nixconvoy apply --catch-up [--reset] [<target> | @<tag> ...]   nothing staged: converge the targets on the union as it is
-nixconvoy apply --dry-activate [<target> | @<tag> ...]   build and copy, then only report what each switch would do
-nixconvoy land [-m <msg>] [--release] [<worktree> ...]   land the work branch on main (-m: under <msg>, for a branch without COMMIT_MSG.md; --release: targets its increments held back included)
-nixconvoy abandon [--apply-now] [<worktree> ...]   discard it (--apply-now: and deploy, reverting it now)
-nixconvoy land --union [-m <msg>] | abandon --union [--apply-now]   this checkout and its task worktrees as one unit (one main commit, the subs' COMMIT_MSG.md appended)
+# Managing worktrees
 nixconvoy close [<worktree> ... | <path> ...] [--force]   remove task worktrees, or agent checkouts by path (with their work branch), holding nothing of their own (--force: whatever they hold)
 nixconvoy close --submodule <input> [--force]   remove a submodule worktree likewise
 nixconvoy pull                 rebase every checkout on this machine onto origin/main
 nixconvoy status               every checkout on this machine, and origin's other branches
-nixconvoy review [<worktree> | <branch> ...] [<diff-arg> ...]   the pending landing: COMMIT_MSG.md, then the diff
-nixconvoy review --union [<diff-arg> ...]   the checkout's and its task worktrees' together
 nixconvoy open <name> [--lock <reason>]   a task worktree <checkout>/<worktrees>/<name> (what the plugin's create hook runs)
 nixconvoy open <path> [--branch <work-branch>]   an agent checkout at that path on a work branch of this machine's
 nixconvoy open --submodule <input>   the flake input developed in place under this checkout (see Submodules)
+
+# Deploying and committing changes
+nixconvoy apply [<target> | @<tag> ...] [-m <msg>] [--reset] [--dry-activate]   deploy the staged increment (-m: its message, default "<checkout>: increment <n>"), or with nothing staged converge the targets on the union as it is; --dry-activate: build and copy, then only report what each switch would do
+nixconvoy land [<worktree> ... | --union] [-m <msg>] [--release]   land the work branch on main (--union: this checkout and its task worktrees as one unit, one main commit with the subs' COMMIT_MSG.md appended; -m: under <msg>, for a branch without COMMIT_MSG.md; --release: targets its increments held back included)
+nixconvoy abandon [<worktree> ... | --union] [--apply-now]   discard it (--union: likewise as one unit; --apply-now: and deploy, reverting it now)
+nixconvoy review [<worktree> | <branch> ... | --union] [<diff-arg> ...]   the pending landing: COMMIT_MSG.md, then the diff (--union: the checkout's and its task worktrees' together)
 nixconvoy land --submodule <input> [-m <msg>] | abandon --submodule <input>   one submodule alone, ahead of the checkout's landing (-m: under <msg>, for a submodule without its own COMMIT_MSG.md)
 ```
 
