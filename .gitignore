@@ -4,3 +4,4 @@ result-*
 __pycache__/
 .claude/*
 !.claude/settings.json
+nixconvoy-perf.jsonl
