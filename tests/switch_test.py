@@ -1,5 +1,5 @@
 """nixconvoy's switch step end to end against a fake target: the real
-nixconvoy-switch binary ($NIXCONVOY_SWITCH_BIN) decides, the switch module's
+nixconvoy-switch binary ($NIXCONVOY_GUARD_DIR's) decides, the switch module's
 effects loop performs, and every ssh call lands in this file's --fake-target
 mode, which plays the confirmed-switch helper, systemd-run and nix-env on a
 JSON state file.  Then the lineage records and the drift classification
@@ -146,7 +146,7 @@ def scenario(name: str, *, helper: bool = True, check_ok: bool = True, activate_
     died: str | None = None
     with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
         try:
-            switch.switch("testhost", OLD, NEW, nixconvoy_switch or os.environ["NIXCONVOY_SWITCH_BIN"],
+            switch.switch("testhost", OLD, NEW, nixconvoy_switch or guard.binary("nixconvoy-switch"),
                           lineage=LINEAGE)
         except SystemExit:
             died = err.getvalue().strip().splitlines()[0].removeprefix("nixconvoy: ")

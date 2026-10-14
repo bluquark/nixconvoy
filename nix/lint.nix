@@ -19,7 +19,7 @@ let
   switchTest = pkgs.runCommandLocal "nixconvoy-switch-test" { } ''
     cd ${pySources}
     PATH=${lib.makeBinPath [ pkgs.util-linux pkgs.git pkgs.mergiraf ]}:$PATH HOME=$TMPDIR \
-      NIXCONVOY_SWITCH_BIN=${switch-guard}/bin/nixconvoy-switch PYTHONPATH=src \
+      NIXCONVOY_GUARD_DIR=${switch-guard}/bin PYTHONPATH=src \
       ${pkgs.python3}/bin/python3 tests/switch_test.py
     touch $out
   '';

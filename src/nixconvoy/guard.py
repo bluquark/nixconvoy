@@ -24,12 +24,9 @@ Perform = Callable[[dict[str, object]], dict[str, object]]
 
 
 def binary(name: str) -> str:
-    """nixconvoy-plan or nixconvoy-switch: beside NIXCONVOY_SWITCH_BIN when set (the
-    tests' fake), else under NIXCONVOY_GUARD_DIR (the nix wrapper sets it to the
-    crate build this package was made with), else on PATH."""
-    override = os.environ.get("NIXCONVOY_SWITCH_BIN")
-    if override:
-        return str(Path(override).with_name(name))
+    """nixconvoy-plan or nixconvoy-switch: under NIXCONVOY_GUARD_DIR (the nix
+    wrapper sets it to the crate build this package was made with), else on
+    PATH."""
     d = os.environ.get("NIXCONVOY_GUARD_DIR")
     if d:
         return str(Path(d) / name)
