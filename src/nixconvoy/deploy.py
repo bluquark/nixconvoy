@@ -30,6 +30,7 @@ from .checkout import (
     ensure_on_work_branch,
     ensure_rebased,
     fetch_args,
+    held_targets,
     origin_tips,
     pending_announcements,
     pop_tmp_commits,
@@ -117,7 +118,7 @@ def commit_unreached(wb: str, msg: str, snap: str) -> None:
             if err:
                 die(f"{err}; nothing was committed")
     PERF.mark("commit-push")
-    commit_deployed(wb, snap, f"{msg}\n\nAffected: none\nDeployed: none")
+    commit_deployed(wb, snap, f"{msg}\n\nReaches: none\nDeployed: none")
     push_work_branch(wb)
     print(f"reaches no target: committed onto {wb} and pushed; nothing probed, built or switched")
 
@@ -145,8 +146,8 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
 
     await_background_push()
     main0 = rev("refs/remotes/origin/main")
-    # Non-candidates are probed best-effort so the Affected: trailer can
-    # still cover them.
+    # Non-candidates are probed best-effort: the verdict reports their
+    # drift, and a hold on one is read off its lineage.
     probe_names: list[str] = [] if skip else [n for n in all_targets if not remote_only(n)]
     pool = ThreadPoolExecutor(1 + len(probe_names) + len(annex.present(Path.cwd())))
     fetch = pool.submit(git, *fetch_args("--no-auto-gc"))
@@ -222,7 +223,11 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
     # for as long as this run lives.
     ann: Announce | None = None
     own = current_branch() or "main"  # detached: at origin/main (ensure_rebased)
-    if not dry and not skip and (snap or rev("HEAD") != rev(f"refs/remotes/origin/{own}")):
+    # A work branch holding targets back may end a hold with an empty
+    # increment (stage's release): announced like any increment.
+    if not dry and not skip and (snap or rev("HEAD") != rev(f"refs/remotes/origin/{own}")
+                                 or (wb is not None and own == wb
+                                     and held_targets("refs/remotes/origin/main..HEAD"))):
         ann = Announce(own, snap or "HEAD")
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, exit_on_signal)
@@ -432,15 +437,25 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                 die(f"{err}; nothing was pushed or switched")
         reached = memo.reached_targets(wt, union, sorted(tops), snap or "HEAD",
                                      {h: probed[h].lineage for h in tops if h in probed})
+        # The targets the other unioned branches hold back (held_targets):
+        # each ran its increments to other targets alone - one already
+        # running the branch's tip (its lineage) is not held by it.
+        held: dict[str, list[str]] = {}
+        for name, tip in branches:
+            for h in held_targets(f"refs/remotes/origin/main..{tip}"):
+                if h in probed and memo.recorded_tip(probed[h].lineage, name) == tip:
+                    continue
+                held.setdefault(h, []).append(name)
         last = [h for h in sorted(tops) if tops[h].last]
         verdict = decide(
             "drift", me=[me, str(Path.cwd())], union=union,
             listed=sorted({*listed, "main"}), tips=origin_tips(),
             tz_offset=time.localtime().tm_gmtoff, router=last[0] if last else "",
             targets=all_targets, candidates=candidates, reset=reset, named=bool(filter_targets),
-            reached=sorted(reached), running=running,
+            work_branch=wb is not None, reached=sorted(reached), running=running,
             built={h: t.out for h, t in tops.items()},
             lineages={h: p.lineage for h, p in probed.items()},
+            held={h: sorted(bs) for h, bs in held.items()},
             in_flight=announced(ann.key if ann is not None else None), dead=sorted(dead))
         assert isinstance(verdict, dict)
         plan = [str(h) for h in verdict["plan"]]
@@ -467,15 +482,31 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         # The increment's commit and each target's record, before the
         # switch: the lineage the targets get names the commit origin will
         # hold, and the records reach origin before anything runs them.
+        # The commit's trailers: Reaches, the targets the increment reaches
+        # among those deployable from here; Deployed, the candidates running
+        # the branch's tip once this deploy is over (switched now, or up to
+        # date already) - a target in the first and not the second is held
+        # back (held_targets) until a deploy here switches it.
         committed = ""
         subject = "main" + "".join(f" + {n}" for n, _ in branches)
+        fmt = ", ".join
+        deployed = sorted(h for h in candidates if h in plan or h not in affected)
         if snap and not dry:
             assert wb is not None  # a snapshot needs the work branch (deploy)
-            fmt = ", ".join
-            full = (f"{msg}\n\nAffected: {fmt(affected) or 'none'}"
-                    f"\nDeployed: {fmt(plan) or 'none'}")
+            reaches = sorted(memo.reached_between(wt, union, [h for h in all_targets if not remote_only(h)],
+                                                  "HEAD", snap))
+            full = (f"{msg}\n\nReaches: {fmt(reaches) or 'none'}"
+                    f"\nDeployed: {fmt(deployed) or 'none'}")
             committed = deployed_commit(snap, full)
             subject = (msg or "").partition("\n")[0] or subject
+        elif wb is not None and not dry and current_branch() == wb:
+            # No increment, but a target this branch held back now runs its
+            # tip: an empty increment records the release, as the hold is
+            # read from the branch's trailers alone.
+            ends = sorted(held_targets("refs/remotes/origin/main..HEAD") & set(deployed))
+            if ends:
+                subject = f"deployed to {fmt(ends)}, held back until now"
+                committed = deployed_commit("HEAD", f"{subject}\n\nReaches: none\nDeployed: {fmt(deployed)}")
         doc = lineage_record(union, branches, committed, ann.sha if ann else "", ann.key if ann else "")
         records, lineages = {}, {}
         if not dry:

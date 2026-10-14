@@ -69,6 +69,15 @@ no work.
   dead deploy and the clear that ends it - and nothing is ever taken over
   on a clock.  Work of a branch `deploy-branches` does not list stays
   refused until listed.
+- **Held-back targets.**  An increment deployed to named targets alone is
+  committed with the targets it reaches (`Reaches:`) and the ones now
+  running the branch's tip (`Deployed:`); a target in the first and not the
+  second is held back until a deploy from that checkout switches it.  The
+  union carries the work, so every other work branch's deploy leaves a held
+  target alone, or is refused when its own work reaches it; a main
+  checkout's deploy (a nightly's) leaves it behind rather than fail; and
+  `land` refuses until `--release` - no restricted apply rolls out
+  elsewhere by accident.
 - **Deploy records.**  Before a target is switched, its deploy record - a
   commit of the exact tree it will run, on its previous record, main, the
   unioned branches and the increment - is pushed to origin, so no target
@@ -213,7 +222,7 @@ nixconvoy.switchLast = true;                # the router: switched alone, after 
 ```
 nixconvoy apply [-m <msg>] [--reset] [<target> | @<tag> ...]   deploy
 nixconvoy apply --dry-activate [<target> | @<tag> ...]   build and copy, then only report what each switch would do
-nixconvoy land [<worktree> ...]   land the work branch on main
+nixconvoy land [--release] [<worktree> ...]   land the work branch on main (--release: targets its increments held back included)
 nixconvoy abandon [--apply-now] [<worktree> ...]   discard it (--apply-now: and deploy, reverting it now)
 nixconvoy land --union | abandon [--apply-now] --union   this checkout and its task worktrees as one unit (one main commit)
 nixconvoy close [--force] [<worktree> ...]   remove task worktrees holding nothing of their own (--force: whatever they hold)

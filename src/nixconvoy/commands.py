@@ -36,6 +36,7 @@ from .checkout import (
     fetch_args,
     git_common,
     git_op_in_progress,
+    held_targets,
     identity_of,
     listed_tips,
     lock_checkout,
@@ -57,6 +58,7 @@ from .checkout import (
     sub_parent,
     summarize,
     this_prefix,
+    trailer_targets,
     tree_less_msg,
     work_branch_name,
     worktree_lock,
@@ -66,7 +68,23 @@ from .guard import binary, decide
 from .proc import die, git, is_ancestor, ok, out, painter, rev, run, solve_with_mergiraf
 
 
-def land() -> None:
+def holds(wb: str, tip: str, main: str, release: bool, cwd: str | None = None) -> None:
+    """The targets `wb`'s increments (`main..tip`) hold back: a landing is
+    refused on them unless `release`, which tells where the landed work
+    rolls out from."""
+    held = sorted(held_targets(f"{main}..{tip}", cwd))
+    if not held:
+        return
+    them = ", ".join(held)
+    if not release:
+        die(f"{wb} holds back {them}: increments of it reach {'it' if len(held) == 1 else 'them'} "
+            f"but were deployed to other targets alone.  `nixconvoy apply {' '.join(held)}` from its "
+            f"checkout deploys them there first; `land --release` lands them as they are, for the "
+            f"next deploy anywhere to roll out")
+    print(f"releasing {them}: the next deploy anywhere rolls the landed work out there")
+
+
+def land(release: bool = False) -> None:
     await_background_push()
     git(*fetch_args())
     pop_tmp_commits()
@@ -91,6 +109,7 @@ def land() -> None:
     if carried:
         die(f"{wb} contains the unlanded increments of {', '.join(carried)}; land "
             "that branch first, then re-run")
+    holds(wb, "HEAD", main, release)
     # A blank line after the subject, or git folds the whole first paragraph
     # (subject + bullets) into %s.
     lines = msg.splitlines()
@@ -136,7 +155,7 @@ def deployed_targets(commits: str) -> list[str]:
     (their Deployed: trailers), sorted."""
     names: set[str] = set()
     for ln in out(["git", "log", "--format=%(trailers:key=Deployed,valueonly)", commits]).splitlines():
-        names.update(h.strip() for h in ln.split(",") if h.strip() and h.strip() != "none")
+        names |= trailer_targets(ln)
     return sorted(names)
 
 
@@ -928,6 +947,10 @@ def status() -> None:
         if ident.wb and cur != ident.wb and ident.kind != "main":
             notes.append(p(f"owns {ident.wb}", "dim"))
         notes += [p(f"{label} {n}", "cyan") for label, n in counts.items() if n]
+        if own and cur not in (None, "main"):
+            held = sorted(held_targets("origin/main..HEAD", str(d)))
+            if held:
+                notes.append(p(f"holds back {', '.join(held)}", "yellow"))
         notes += [p(a, "cyan") for a in annex.notes(d)]
         if ident.kind == "sub" and not own and not any(counts.values()) and cur != ident.wb:
             if sessionless:
@@ -1188,7 +1211,7 @@ def close_checkout(path: Path, *, force: bool = False) -> None:
     print(f"checkout {d} removed, with {', '.join(sorted(names)) or 'no branch of its own'} here and on origin")
 
 
-def land_union() -> None:
+def land_union(release: bool = False) -> None:
     """`nixconvoy land --union`: this checkout and its subagent worktrees
     landed as one commit on main - each sub's branch merged into this
     branch's tree (mergiraf on the conflicts, as a deploy's union) under
@@ -1257,6 +1280,9 @@ def land_union() -> None:
             if gone:
                 die(f"the lock deploys {b}'s rev of annex {', '.join(gone)}, whose worktree is gone: "
                     f"`nixconvoy open --annex <input>` or `abandon --annex <input>` in {d.name} first")
+        for d, b in [(here, wb), *parts]:
+            holds(b, "HEAD" if d == here else f"refs/heads/{b}", main, release)
+
         def merged_tree() -> str:
             """The branches merged in a throwaway worktree on this branch's
             tip (the lock node by node, as a deploy's union): its tree."""

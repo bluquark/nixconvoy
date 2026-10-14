@@ -227,14 +227,76 @@ fn params(targets: &[&str], candidates: &[&str], reset: (bool, bool), drifting: 
         candidates: s(candidates),
         reset: reset.0,
         named: reset.1,
+        work_branch: true,
         reached: targets.iter().map(|h| h.to_string()).collect(),
         running: targets
             .iter()
             .map(|h| (h.to_string(), Some(if drifting.iter().any(|d| d.0 == *h) { OLD } else { NEW }.to_string())))
             .collect(),
         built: targets.iter().map(|h| (h.to_string(), NEW.to_string())).collect(),
+        held: BTreeMap::new(),
         lineages: drifting.iter().filter_map(|(h, l)| l.clone().map(|l| (h.to_string(), l))).collect(),
     }
+}
+
+/// A target another branch holds back is left alone, or refused when a
+/// work branch's own work reaches it, as an in-flight increment is; a main
+/// checkout's own work (main's advance) leaves it behind instead.
+#[test]
+fn held_targets() {
+    let mut p = params(&["chikuwa", "choko", "side1"], &["chikuwa", "choko", "side1"], (false, false), &[("choko", None), ("side1", None)]);
+    p.held.insert("choko".into(), vec!["work/chikuwa/1".into()]);
+    let (fx, out) = run(p.clone());
+    let msg = out.unwrap_err();
+    assert_eq!(
+        msg,
+        "nothing switched or committed: choko is held back by another branch (see above): the union carries work that checkout deployed to other targets alone, and this checkout's work reaches it too.  Deploy it there (nixconvoy apply choko from that checkout) or land it with --release; or deploy with --reset choko to switch it to this checkout's view alone, without the held work (and without every other branch's), the hold standing."
+    );
+    assert_eq!(fx[1], Effect::Print("  side1: will switch".into()));
+    assert_eq!(
+        fx[2],
+        Effect::Print(
+            "  choko: refused: held back by work/chikuwa/1: the union carries its work, deployed from that checkout to other targets alone"
+                .into()
+        )
+    );
+    // Beside an in-flight refusal, the fixes name both; a held target's own
+    // refusal (here: in flight, and dead) says more than the hold.
+    let b = base();
+    let mut q = p.clone();
+    q.lineages.insert("side1".into(), doc(OLD, OTHER, Some((BRANCH, Some(&b))), &[], T0));
+    let msg = run(q.clone()).1.unwrap_err();
+    assert!(msg.starts_with("nothing switched or committed: side1 runs another checkout's work") && msg.contains("Re-run once that deploy ends, or push its branch from its checkout; or choko held back by another branch: deploy it there (nixconvoy apply choko from that checkout) or land it with --release; or deploy with"), "{msg}");
+    q.lineages.insert("choko".into(), doc_ann(OLD, OTHER, Some((BRANCH, Some(&b))), Some("p"), &[], T0));
+    q.cx.in_flight.insert(BRANCH.into(), "q".into());
+    q.cx.dead.insert(BRANCH.into());
+    let (fx, out) = run(q);
+    let msg = out.unwrap_err();
+    assert!(msg.contains(&format!("the deploy of {BRANCH} looks dead")), "{msg}");
+    assert!(
+        matches!(&fx[2], Effect::Print(l) if l.starts_with("  choko: refused: runs an increment") && l.ends_with("no longer renewed")),
+        "{fx:?}"
+    );
+
+    p.reached = ["chikuwa".to_string(), "side1".to_string()].into_iter().collect();
+    let (fx, out) = run(p.clone());
+    let out = out.unwrap();
+    assert_eq!(out.plan, ["side1"]);
+    assert_eq!(out.drift["choko"].0, Kind::LeftAlone);
+    assert_eq!(
+        fx[2],
+        Effect::Print("  choko: left alone: held back by work/chikuwa/1: the union carries its work, deployed from that checkout to other targets alone; this checkout's work does not reach it".into())
+    );
+    // A main checkout reaching it (main's advance) is left behind on it.
+    p.reached.insert("choko".into());
+    p.work_branch = false;
+    let (fx, out) = run(p.clone());
+    assert_eq!(out.unwrap().drift["choko"].0, Kind::LeftAlone);
+    assert!(matches!(&fx[2], Effect::Print(l) if l.ends_with("left behind on main's advance")), "{fx:?}");
+    // An empty holder list is no hold.
+    p.work_branch = true;
+    p.held.insert("choko".into(), vec![]);
+    assert_eq!(run(p).1.unwrap().plan, ["side1", "choko"]);
 }
 
 /// The core run with every increment that left origin's tips `fate`
@@ -467,8 +529,10 @@ fn arb_params() -> impl Strategy<Value = Params> {
         prop::collection::btree_map(arb_name(), prop::sample::select(vec!["a", "b"]).prop_map(str::to_string), 0..4),
         prop::collection::btree_map(arb_name(), prop::sample::select(vec!["p", "q"]).prop_map(str::to_string), 0..3),
         prop::collection::btree_set(arb_name(), 0..3),
+        prop::collection::btree_map(target(), prop::collection::vec(arb_name(), 0..2), 0..3),
+        any::<bool>(),
     )
-        .prop_map(|(targets, cands, (reset, named), reached, facts, tips, in_flight, dead)| {
+        .prop_map(|(targets, cands, (reset, named), reached, facts, tips, in_flight, dead, held, work_branch)| {
             let targets: Vec<String> = targets.into_iter().collect();
             let mut p = Params {
                 cx: Context { tips, in_flight, dead, ..cx(&[]) },
@@ -478,9 +542,11 @@ fn arb_params() -> impl Strategy<Value = Params> {
                 targets: targets.clone(),
                 reset,
                 named,
+                work_branch,
                 reached,
                 running: BTreeMap::new(),
                 built: BTreeMap::new(),
+                held,
                 lineages: BTreeMap::new(),
             };
             for (h, (running, built, lineage)) in targets.iter().zip(facts) {
@@ -560,10 +626,15 @@ proptest! {
             let running = p.running[h].clone().unwrap();
             let reached = p.reached.contains(h);
             let gone = lin.as_ref().is_some_and(|l| matches!(&l.pending, Some((b, None)) if !p.cx.tips.contains_key(b) && l.tips.contains_key(b)));
-            if fate != "kept" && gone && classify(lin.as_ref(), &running, &p.cx, false, true).0 == Kind::InFlight {
-                return (h.clone(), Kind::CatchUp);
+            let kind = if fate != "kept" && gone && classify(lin.as_ref(), &running, &p.cx, false, true).0 == Kind::InFlight {
+                Kind::CatchUp
+            } else {
+                classify(lin.as_ref(), &running, &p.cx, p.reset && (p.named || reached), reached).0
+            };
+            match p.held.get(h).filter(|by| !by.is_empty() && !kind.refused() && !p.reset) {
+                Some(by) => (h.clone(), held(by, reached, p.work_branch).0),
+                None => (h.clone(), kind),
             }
-            (h.clone(), classify(lin.as_ref(), &running, &p.cx, p.reset && (p.named || reached), reached).0)
         }).collect();
         let refused: Vec<(String, Kind, Option<String>)> = verdicts.iter().filter(|v| v.1.refused()).map(|(h, k)| {
             let lin = p.lineages.get(h).and_then(|t| parse(t));

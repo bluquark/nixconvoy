@@ -37,6 +37,21 @@
 //! branch origin never had as far as this run can see: the same query
 //! tells a dropped branch (switched over, the increment named) from one
 //! whose first push is on its way (refused, as any in-flight increment).
+//!
+//! A branch holds a target back when an increment of it reached the target
+//! but was deployed to other targets alone (an apply naming them): its
+//! Reaches: trailer names the target, its Deployed: one does not, and no
+//! later increment's deploy on that branch switched the target since
+//! (nixconvoy's held_targets).  The union carries that work, so switching
+//! the target would roll the increment out from a checkout that chose not
+//! to: a held target is left alone, or the deploy refused when this
+//! checkout's own work reaches it (Params::held), as for an in-flight
+//! increment - until the holding checkout deploys the target or lands with
+//! --release.  A main checkout's own work is main's advance, which a hold
+//! must not stop fleet-wide (the nightly's lock): it is left behind on
+//! the held target instead (Params::work_branch).  A --reset unions no
+//! other branch, so nothing is held under it: the target gets this
+//! checkout's view alone, the hold standing.
 use super::{listed, Halt, Query, Run, Script, BRANCHES_FILE};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -137,6 +152,8 @@ pub enum Kind {
     InFlight,
     /// Work of a branch deploy-branches does not list here - refused.
     Unlisted,
+    /// Held back by another branch whose work the union carries - refused.
+    Held,
     /// Would be refused, but this checkout's work does not reach the target:
     /// left running the other checkout's work, not switched.
     LeftAlone,
@@ -155,6 +172,7 @@ impl Kind {
             Kind::CatchUp => "catch-up",
             Kind::InFlight => "in-flight",
             Kind::Unlisted => "unlisted",
+            Kind::Held => "held",
             Kind::LeftAlone => "left-alone",
             Kind::Abandoned => "abandoned",
             Kind::Overridden => "overridden",
@@ -162,7 +180,7 @@ impl Kind {
     }
 
     pub fn refused(self) -> bool {
-        matches!(self, Kind::InFlight | Kind::Unlisted)
+        matches!(self, Kind::InFlight | Kind::Unlisted | Kind::Held)
     }
 }
 
@@ -245,6 +263,20 @@ pub fn classify(lin: Option<&Lineage>, running: &str, cx: &Context, take_over: b
     (kind, why)
 }
 
+/// The verdict on a target the branches `by` hold back (Params::held):
+/// refused when `reached` by a work branch's own work, left alone
+/// otherwise (a main checkout's own work being main's advance).
+pub fn held(by: &[String], reached: bool, work_branch: bool) -> (Kind, String) {
+    let why = format!("held back by {}: the union carries its work, deployed from that checkout to other targets alone", by.join(", "));
+    if !reached {
+        return (Kind::LeftAlone, format!("{why}; this checkout's work does not reach it"));
+    }
+    if !work_branch {
+        return (Kind::LeftAlone, format!("{why}; left behind on main's advance"));
+    }
+    (Kind::Held, why)
+}
+
 /// The order targets are switched and reported in: the router last, so
 /// everything else still has connectivity while it copies.
 pub fn switch_order(names: &[String], router: &str) -> Vec<String> {
@@ -266,6 +298,10 @@ pub struct Params {
     pub reset: bool,
     /// The candidates were named on the command line.
     pub named: bool,
+    /// This checkout deploys a work branch of its own: a hold refuses it
+    /// when its work reaches the target.  A main checkout is left behind
+    /// on the target instead.
+    pub work_branch: bool,
     /// The targets this checkout's own work reaches: those whose
     /// configuration reads a file that work changed (nixconvoy's
     /// reached_targets, by the eval memo's scan).
@@ -274,6 +310,8 @@ pub struct Params {
     pub running: BTreeMap<String, Option<String>>,
     /// The union's toplevel of each reachable target.
     pub built: BTreeMap<String, String>,
+    /// Each target held back, by the other branches holding it (sorted).
+    pub held: BTreeMap<String, Vec<String>>,
     /// Each probed target's lineage file.
     pub lineages: BTreeMap<String, String>,
 }
@@ -290,7 +328,21 @@ pub struct Outcome {
 /// The die message of a deploy refusing `refused` (in report order), each
 /// with the announcement ref of its dead deploy when the refusal is one.
 pub fn refusal(refused: &[(String, Kind, Option<String>)]) -> String {
+    let (held, refused): (Vec<_>, Vec<_>) = refused.iter().cloned().partition(|(_, k, _)| *k == Kind::Held);
+    let held: Vec<&str> = held.iter().map(|(h, _, _)| h.as_str()).collect();
     let targets: Vec<&str> = refused.iter().map(|(h, _, _)| h.as_str()).collect();
+    if targets.is_empty() {
+        let one = held.len() == 1;
+        return format!(
+            "nothing switched or committed: {} {} held back by another branch (see above): the union carries work that checkout deployed to other targets alone, and this checkout's work reaches {} too.  Deploy it there (nixconvoy apply {} from that checkout) or land it with --release; or deploy with {RESET_FLAG} {} to switch {} to this checkout's view alone, without the held work (and without every other branch's), the hold standing.",
+            held.join(", "),
+            if one { "is" } else { "are" },
+            if one { "it" } else { "them" },
+            held.join(" "),
+            held.join(" "),
+            if one { "it" } else { "them" }
+        );
+    }
     let mut fixes = Vec::new();
     if refused.iter().any(|(_, k, d)| *k == Kind::InFlight && d.is_none()) {
         fixes.push("re-run once that deploy ends, or push its branch from its checkout".to_string());
@@ -304,6 +356,13 @@ pub fn refusal(refused: &[(String, Kind, Option<String>)]) -> String {
     }
     if refused.iter().any(|(_, k, _)| *k == Kind::Unlisted) {
         fixes.push(format!("list its branch in {BRANCHES_FILE} (`nixconvoy pull` once that line is on main)"));
+    }
+    if !held.is_empty() {
+        fixes.push(format!(
+            "{} held back by another branch: deploy it there (nixconvoy apply {} from that checkout) or land it with --release",
+            held.join(", "),
+            held.join(" ")
+        ));
     }
     let fix = fixes.join("; or ");
     let mut c = fix.chars();
@@ -371,7 +430,8 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         let lin = p.lineages.get(h).and_then(|text| parse(text));
         let running = p.running.get(h).cloned().flatten().unwrap_or_default();
         let reached = p.reached.contains(h);
-        let (mut kind, mut why) = classify(lin.as_ref(), &running, &p.cx, p.reset && (p.named || reached), reached);
+        let take_over = p.reset && (p.named || reached);
+        let (mut kind, mut why) = classify(lin.as_ref(), &running, &p.cx, take_over, reached);
         // The pending increment of a branch origin has no tip of: its
         // first push on its way (in flight), or the branch deleted since
         // with its subagent worktree - then whatever the union lacks of
@@ -388,6 +448,12 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
                     }
                 }
             }
+        }
+        // A hold (never under --reset: no other branch is unioned) over
+        // any verdict but a refusal of its own, which says more.
+        let hold = p.held.get(h).filter(|by| !by.is_empty() && !kind.refused() && !p.reset);
+        if let Some(by) = hold {
+            (kind, why) = held(by, reached, p.work_branch);
         }
         if kind.refused() {
             let dead = lin

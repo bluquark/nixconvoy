@@ -102,8 +102,11 @@ Deploy (nixconvoy apply [-m <msg>] [--reset] [--allow <protection> ...]
      a commit of the union's tree whose message carries the lineage below,
      on the target's previous record (git log --first-parent is its deploy
      history), origin/main, each unioned branch's tip and the increment's
-     commit, which is made now with its -m message and Affected:/Deployed:
-     trailers
+     commit, which is made now with its -m message and its trailers:
+     Reaches:, the targets the increment reaches (a changed file their
+     evaluation reads, or a lock entry it names) among those deployable
+     from here; Deployed:, the candidates running the branch's tip once the
+     deploy is over
   6. build the drifting candidates' closures straight from the evaluated
      .drvs (no re-eval), on the configured builder if any, unsandboxed
      when a dry-run shows only trivial builders left.  Nothing drifting and
@@ -151,13 +154,27 @@ An increment that changes nothing any target's evaluation reads (the eval
 memo's read scan over the staged snapshot, no eval: docs, dotfiles, a
 COMMIT_MSG.md) is committed onto the work branch and pushed without a
 deploy - nothing probed, evaluated, built or switched, the commit's
-trailers Affected: none and Deployed: none - after the precheck when a
+trailers Reaches: none and Deployed: none - after the precheck when a
 staged file is one it reads.  Nothing need be reachable.  The targets' drift
 (another branch's work, main's) waits for the next deploy reaching one, or
 for an apply naming targets, which always deploys; an apply with nothing
 staged converges every target on the union.  The scan sees the staged
 snapshot alone: a reader another unlanded branch adds for a changed file
 is caught up by that branch's deploys.
+
+A target an increment reaches but a target filter left out is held back:
+named by the commit's Reaches: trailer and not its Deployed: one, with no
+later increment's deploy on the branch switching it since (a deploy with
+nothing staged that switches it commits an empty increment saying so).  The
+union every deploy builds carries that work, so until the holding checkout
+deploys the target (nixconvoy apply <target> there, or an apply naming no
+target) or lands with --release, a deploy from any other work branch leaves
+the target alone - or is refused when its own work reaches it, as for an
+in-flight increment - a main checkout's deploy (the nightly's) leaves it
+behind on main's advance, and `land` refuses.  --reset unions no other
+branch, so it switches the target to this checkout's view alone, without
+the held work, the hold standing.  `status` shows what each checkout holds
+back.
 
 Land (nixconvoy land [<name> ...] | --union | --annex <input>): commit the work branch's
 tree minus COMMIT_MSG.md onto origin/main with COMMIT_MSG.md as the message,
@@ -167,7 +184,9 @@ brought onto the new main (see Pull); checkouts on other machines rebase at
 their next deploy.  A subagent worktree stays too, idle on its reset branch:
 `close` removes it (the session-exit sweep does, once its agent is done).
 Run from any checkout with the worktrees' <name>s (a unique prefix will do),
-land and abandon act on each in turn.  The checkout's annexes land first
+land and abandon act on each in turn.  A branch holding a target back (see
+Apply) is refused unless --release: the landed work then rolls out there with
+the next deploy from anywhere.  The checkout's annexes land first
 (see Annexes); --annex <input> lands that one annex alone.  --union lands
 this checkout and its subagent worktrees as one unit - for subagents that
 each did a piece of this checkout's task: every sub's branch (one on its
@@ -217,8 +236,8 @@ and reset the work branch (local and origin) onto origin/main, staying on
 it; a subagent worktree stays too (close removes it); its annexes are
 reset onto their default branch likewise.  Untracked files survive; the
 old tip remains reachable via the reflog.
-No target is touched: the ones its increments were deployed to (named from
-their Deployed: trailers) keep running them until the next deploy by
+No target is touched: the ones running its increments (named from their
+Deployed: trailers) keep running them until the next deploy by
 anyone, whose verdict names what it reverts ("will switch (catch-up: ...;
 reverting <branch>'s abandoned increment <sha>)").  --apply-now runs that
 deploy at once, so the targets drop the work now, from the checkout abandon
@@ -374,8 +393,9 @@ SYNOPSIS = """\
 apply [-m <msg>] [--reset] [--allow <protection> ...] [--dry-activate] [<target> | @<tag> ...]
 review [<worktree> | <branch> ...] [<diff-arg> ...]
 review --union [<diff-arg> ...]
-land [<worktree> ...]
-land (--union | --annex <input>)
+land [--release] [<worktree> ...]
+land [--release] --union
+land --annex <input>
 abandon [--apply-now [--allow <protection> ...]] [<worktree> ...]
 abandon [--apply-now [--allow <protection> ...]] --union
 abandon --annex <input>
@@ -397,6 +417,9 @@ restricts switching to (at most) those.
 --allow <protection> admits a switch that would stop, restart or reload a unit
 of a group the target's configuration protects (nixconvoy.protected.<name>).
 --dry-activate stops before any switch, printing what each would do.
+land --release lands work a target is held back from (increments that reach
+it, deployed to other targets alone), for the next deploy anywhere to roll
+out there.
 abandon --apply-now deploys at once, so the targets drop the abandoned work
 now rather than at the next deploy.  --union acts on this checkout and its
 subagent worktrees as one unit; a path (with a /) names an agent checkout."""
@@ -471,6 +494,7 @@ def main() -> None:
     branch: str | None = None
     force = False
     union = False
+    release = False
     while args:
         a = args.pop(0)
         if a == "-m" and args:
@@ -485,6 +509,8 @@ def main() -> None:
             branch = args.pop(0)
         elif a == "--union" and subcmd in ("land", "abandon"):
             union = True
+        elif a == "--release" and subcmd == "land":
+            release = True
         elif a == "--force" and subcmd == "close":
             force = True
         elif a == "--after" and subcmd == "close" and args and args[0].isdigit():
@@ -534,7 +560,7 @@ def main() -> None:
             commands.open_worktree(names[0], lock_reason)
         return
     if annex_name is not None:
-        if names or apply_now or msg or reset or dry or allow or after or stopped or union:
+        if names or apply_now or msg or reset or dry or allow or after or stopped or union or release:
             bad_usage()
         take_lock()
         if subcmd == "land":
@@ -568,7 +594,7 @@ def main() -> None:
             bad_usage()
         if union and subcmd == "land":
             take_lock()
-            commands.land_union()
+            commands.land_union(release)
             return
         parent_too = False
         if union:
@@ -597,7 +623,7 @@ def main() -> None:
             if lock is None:
                 die(f"another nixconvoy is running in {name}'s worktree")
             if subcmd == "land":
-                commands.land()
+                commands.land(release)
             else:
                 commands.abandon(apply_now)
             lock.close()
@@ -613,7 +639,7 @@ def main() -> None:
             return
     take_lock()
     if subcmd == "land":
-        commands.land()
+        commands.land(release)
     elif subcmd == "abandon":
         commands.abandon(apply_now)
         if apply_now:

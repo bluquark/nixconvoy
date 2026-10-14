@@ -245,7 +245,8 @@ def lineage_line(top: str, *, by: tuple[str, str] = OTHER,
 
 def report(text: str, *, tips: dict[str, str] | None = None,
            reset: bool = False, named: bool = True, reached: bool = True, running: str = NEW,
-           in_flight: dict[str, str] | None = None, dead: list[str] | None = None) -> tuple[str, str]:
+           in_flight: dict[str, str] | None = None, dead: list[str] | None = None,
+           held: dict[str, list[str]] | None = None) -> tuple[str, str]:
     """nixconvoy-plan's drift verdict on one drifting target carrying `text` as
     its lineage file: its report line, and the deploy's die message."""
     out, err = io.StringIO(), io.StringIO()
@@ -255,9 +256,9 @@ def report(text: str, *, tips: dict[str, str] | None = None,
             "drift", me=list(ME), union="u" * 40, listed=sorted(LISTED),
             tips={BRANCH: BASE} if tips is None else tips, in_flight=in_flight or {},
             dead=dead or [], tz_offset=0, router="choko", targets=["side1"], candidates=["side1"],
-            reset=reset, named=named, reached=["side1"] if reached else [],
+            reset=reset, named=named, work_branch=True, reached=["side1"] if reached else [],
             running={"side1": running},
-            built={"side1": "/nix/store/union-system"},
+            built={"side1": "/nix/store/union-system"}, held=held or {},
             lineages={"side1": text})
     proc.DYING = False
     return out.getvalue().strip(), err.getvalue().strip().removeprefix("nixconvoy: ")
@@ -412,6 +413,14 @@ def lineage_cases() -> None:
     assert report(lineage_line(OLD)) == ("side1: will switch", "")
     assert report(lineage_line(NEW), running=OLD)[0] == "side1: will switch"
     assert report(lineage_line(NEW), running="/nix/store/union-system")[0] == "side1: up to date"
+    # Held back by another branch: refused when reached, else left alone.
+    line, died = report("", held={"side1": ["work/chikuwa/1"]})
+    assert line == ("side1: refused: held back by work/chikuwa/1: the union carries its work, "
+                    "deployed from that checkout to other targets alone"), line
+    assert died.startswith("nothing switched or committed: side1 is held back by another branch") \
+        and "nixconvoy apply side1 from that checkout" in died, died
+    line, died = report("", held={"side1": ["work/chikuwa/1"]}, reached=False)
+    assert line.startswith("side1: left alone: held back by") and not died, (line, died)
 
     text = lineage_line(NEW)
     p = targets.parse_probe(f"{NEW}\n{text}")
@@ -1131,9 +1140,22 @@ def announce_cases(d: Path) -> None:
         # a parent not here is left out.  Pushed before the switch.
         ann = checkout.Announce(wb, snap)
         assert ann.collect()
-        committed = checkout.deployed_commit(snap, "two\n\nAffected: a\nDeployed: a")
+        committed = checkout.deployed_commit(snap, "two\n\nReaches: a\nDeployed: a")
         main = proc.rev("refs/remotes/origin/main")
         assert main is not None
+        # Holds replay oldest first: reached and not deployed holds, a later
+        # deploy of the target releases, a commit without trailers is
+        # nothing, and so is one from before Reaches: (Affected:).
+        chain = checkout.deployed_commit(snap, "h0\n\nAffected: a, b, c, d\nDeployed: a")
+        chain = out_at(co, chain, "h1\n\nReaches: a, b, c\nDeployed: a")
+        chain = out_at(co, chain, "plain")
+        chain = out_at(co, chain, "h2\n\nReaches: b\nDeployed: b")
+        chain = out_at(co, chain, "h3\n\nReaches: none\nDeployed: none")
+        assert checkout.held_targets(f"{main}..{chain}") == {"c"}
+        assert checkout.held_targets(f"{main}..{chain}^") == {"c"}
+        assert checkout.held_targets(f"{main}..{chain}~2") == {"b", "c"}
+        assert checkout.held_targets(f"{main}..{chain}~3") == {"b", "c"}
+        assert checkout.held_targets(f"{chain}~5..{chain}~4") == set()  # h0 alone
         rec1 = checkout.record_commit("a", snap, ["", main, "f" * 40, committed], "two", '{"doc": 1}')
         assert sh(co, "log", "-1", "--format=%P", rec1).split() == [main, committed]
         assert sh(co, "log", "-1", "--format=%s%n%b", rec1) == 'deploy a: two\n{"doc": 1}'
@@ -1199,6 +1221,11 @@ def announce_cases(d: Path) -> None:
     finally:
         os.chdir(prev)
     print("announcements: ok")
+
+
+def out_at(co: Path, parent: str, msg: str) -> str:
+    """A commit of `parent`'s tree on `parent` with the message `msg`."""
+    return sh(co, "commit-tree", f"{parent}^{{tree}}", "-p", parent, "-m", msg)
 
 
 def dies(f: Callable[[], object]) -> str:
@@ -1740,12 +1767,15 @@ def open_cases(d: Path) -> None:
         put(co, "COMMIT_MSG.md", "the union\n- the sub's piece\n", "parent increment")
         sh(co, "push", "--quiet", "origin", "work/tester/9")
         sh(w, "switch", "--quiet", "-c", "work/tester/9-task")
-        put(w, "s.txt", "sub\n", "sub increment")
+        put(w, "s.txt", "sub\n", "sub increment\n\nReaches: a, b\nDeployed: a")
         sh(w, "push", "--quiet", "origin", "work/tester/9-task")
         put(w, "n.txt", "unstaged\n")
         sh(w, "reset", "--quiet", "n.txt")
+        # The sub holds b back: its increment reached b, deployed to a alone.
+        assert checkout.held_targets("origin/main..HEAD", str(w)) == {"b"}
+        assert "work/tester/9-task holds back b:" in dies(commands.land_union)
         with contextlib.redirect_stdout(io.StringIO()):
-            commands.land_union()
+            commands.land_union(release=True)
         main = sh(co, "rev-parse", "origin/main")
         assert sh(co, "ls-tree", "--name-only", main).split() == [".gitignore", "a.txt", "deploy-branches", "p.txt", "s.txt"]
         assert sh(co, "log", "-1", "--format=%B", main).strip() == "the union\n\n- the sub's piece"
