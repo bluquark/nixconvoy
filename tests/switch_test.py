@@ -301,6 +301,63 @@ def target_cases() -> None:
     print("targets: ok")
 
 
+def protected_cases() -> None:
+    """The protected-units gate: a group's units touched refuse the switch
+    with its why and the exact --allow command (one for every refused target,
+    an apply for an abandon --apply-now); --allow <name> admits them; the
+    memo entry round-trips and rejects the old flat list."""
+    net = memo.Protection("risky-network-reload-or-restart",
+                          ("systemd-networkd.service", "nftables.service"),
+                          "risk of breaking essential LAN/WAN functionality")
+    db = memo.Protection("database", ("postgresql.service",), "drops every connection")
+    top = memo.Top("/nix/store/new", "/nix/store/new.drv", (db, net), True, False)
+    ent = memo.memo_entry(json.loads(json.dumps({
+        "out": top.out, "drv": top.drv, "last": True, "assessed": False,
+        "protected": {p.name: {"units": list(p.units), "why": p.why} for p in top.protected}})))
+    assert ent == top, ent
+    assert memo.memo_entry({"out": "o", "drv": "d", "protected": ["nftables.service"]}) is None
+    assert memo.memo_entry({"out": "o", "drv": "d"}) == memo.Top("o", "d", (), False, False)
+
+    report = ("would restart the following units: nftables.service, nginx.service\n"
+              "would reload the following units: postgresql.service\n")
+
+    def dry_activate(target: str, toplevel: str) -> tuple[dict[str, list[str]], str | None]:
+        del target, toplevel
+        return targets.unit_changes(report), None
+
+    dry_activate0, argv0 = targets.dry_activate, sys.argv
+    targets.dry_activate = dry_activate
+    sys.argv = ["nixconvoy", "apply", "-m", "a change", "router"]
+    try:
+        gate = targets.protected_units_gate
+        with contextlib.redirect_stdout(io.StringIO()):
+            r = gate("router", top.out, top.protected, frozenset())
+            assert isinstance(r, targets.Refusal), r
+            assert r == targets.Refusal("router", "reload postgresql.service (database: drops every "
+                                        "connection); restart nftables.service (risky-network-reload-"
+                                        "or-restart: risk of breaking essential LAN/WAN functionality)",
+                                        ("database", net.name)), r
+            assert targets.refusals_message([r]) == (
+                f"{r}\nTo do it deliberately, re-run:\n  nixconvoy apply --allow database "
+                "--allow risky-network-reload-or-restart -m 'a change' router"), targets.refusals_message([r])
+            r = gate("router", top.out, top.protected, frozenset({"database"}))
+            assert isinstance(r, targets.Refusal) and targets.refusals_message([r]).endswith(
+                "re-run:\n  nixconvoy apply --allow risky-network-reload-or-restart -m 'a change' router"), r
+            assert gate("router", top.out, top.protected, frozenset({"database", net.name})) is None
+            assert gate("router", top.out, (), frozenset()) is None
+            r2 = gate("db", top.out, (db,), frozenset())
+            assert isinstance(r2, targets.Refusal) and r2.names == ("database",), r2
+            m = targets.refusals_message([r, "dry-activating the new system on x failed", r2])
+            assert m.endswith("on x failed\n" + str(r2) + "\nTo do it deliberately, re-run:\n  nixconvoy apply "
+                              "--allow database --allow risky-network-reload-or-restart -m 'a change' router"), m
+            assert "re-run" not in targets.refusals_message(["dry-activating the new system on x failed"])
+            sys.argv = ["nixconvoy", "abandon", "--apply-now", "task"]
+            assert targets.refusals_message([r2]).endswith("re-run:\n  nixconvoy apply --allow database")
+    finally:
+        targets.dry_activate, sys.argv = dry_activate0, argv0
+    print("protected: ok")
+
+
 def lineage_cases() -> None:
     """The drift core (nixos/pkgs/switch-guard/src/plan/drift.rs, whose own
     tests hold the cases) on the lineages lineage_doc writes."""
@@ -1614,6 +1671,7 @@ if __name__ == "__main__":
         main()
     lineage_cases()
     target_cases()
+    protected_cases()
     with tempfile.TemporaryDirectory() as d:
         guard_cases(Path(d))
     with tempfile.TemporaryDirectory() as d:

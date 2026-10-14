@@ -85,11 +85,13 @@ def previous_record(lineage: str) -> str:
 
 
 def deploy(filter_targets: list[str], msg: str | None, reset: bool,
-           danger: bool = False, dry: bool = False) -> None:
+           allow: frozenset[str] = frozenset(), dry: bool = False) -> None:
     """`reset`: this checkout's view alone - no other work branch in the
     union, no wait for a deploy under way, and a target running another
     checkout's refused work switched over when this work reaches it or
     `filter_targets` names it.
+    `allow`: the protected groups (nixconvoy.protected.<name>) a switch may
+    stop, restart or reload units of, this run.
     `dry`: stop after the dry activation of every target that would be
     switched, printing the units it would stop, restart or reload; nothing
     is switched, committed or pushed."""
@@ -156,7 +158,7 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
         signal.signal(sig, exit_on_signal)
     settled = False
     try:
-        settled = run_deploy(filter_targets, candidates, all_targets, msg, reset, danger, dry, skip,
+        settled = run_deploy(filter_targets, candidates, all_targets, msg, reset, allow, dry, skip,
                              me, main0, wb, snap, ann, fetch, probes)
     finally:
         if ann is not None and not settled:
@@ -176,7 +178,7 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
 
 
 def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: list[str],
-               msg: str | None, reset: bool, danger: bool, dry: bool, skip: bool, me: str,
+               msg: str | None, reset: bool, allow: frozenset[str], dry: bool, skip: bool, me: str,
                main0: str | None, wb: str | None, snap: str, ann: Announce | None,
                fetch: Future[subprocess.CompletedProcess[str]], probes: dict[str, Future[Probe]]) -> bool:
     """The deploy from its union on: whether its announcement is settled by
@@ -428,13 +430,13 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         # core compares once this returns).
         PERF.mark("copy")
 
-        def copy_then_gate(name: str, top: Top, quiet: bool) -> str | None:
+        def copy_then_gate(name: str, top: Top, quiet: bool) -> str | targets.Refusal | None:
             targets.copy_closure(name, top.out, quiet)
             if dry:
                 # The gate's verdict is part of the report, not a stop.
-                return targets.protected_units_gate(name, top.out, top.protected, danger)
+                return targets.protected_units_gate(name, top.out, top.protected, allow)
             if top.protected:
-                return targets.protected_units_gate(name, top.out, top.protected, danger)
+                return targets.protected_units_gate(name, top.out, top.protected, allow)
             return None
 
         if dry and plan:
@@ -449,7 +451,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         if dry:
             if refusals:
                 die("--dry-activate: nothing was switched, committed or pushed; a deploy "
-                    "would stop here:\n" + "\n".join(f"  {r}" for r in refusals))
+                    "would stop here:\n" + targets.refusals_message(refusals))
             if plan:
                 print(f"--dry-activate: {', '.join(plan)} would be switched (union {union}); "
                       f"nothing was switched, committed or pushed")
@@ -461,7 +463,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                 print(f"--dry-activate: nothing drifts from the union ({union}); nothing to switch")
             return True
         if refusals:
-            die(refusals[0])
+            die(targets.refusals_message(refusals))
         if unpushed:
             die(f"pushing the deploy records to origin failed; nothing was switched:\n{unpushed}")
         return False
