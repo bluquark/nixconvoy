@@ -44,8 +44,8 @@ class Config:
     # A target's ssh address (user@name): nixconvoy.toml's ssh_address, a
     # template over {target}; the builder is addressed through it too.
     ssh_template: str = "{target}"
-    # A subagent worktree of the main checkout owns "<prefix>-<name>";
-    # {machine} is this machine's hostname.
+    # A checkout owns "<prefix><leaf>", its subagent worktrees "<prefix><leaf>-<name>"
+    # (the main checkout's "<prefix>main-<name>"); {machine} is this machine's hostname.
     branch_prefix: str = "work/{machine}/"
     # Where `open <name>` puts a task worktree, relative to the checkout
     # (gitignored: a nested worktree); any worktree nested in a checkout

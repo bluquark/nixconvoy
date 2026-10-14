@@ -1118,6 +1118,10 @@ def open_checkout(path: Path, branch: str | None) -> Path:
     elif not owned(branch, pats):
         die(f"{branch} is not a work branch of this machine's: one named {prefix}... that "
             f"deploy-branches lists")
+    elif branch.removeprefix(prefix) == "main" or "-" in branch.removeprefix(prefix):
+        # "<leaf>-<name>" is a subagent worktree's branch, "main-<name>" the main checkout's.
+        die(f"{branch}: a checkout's branch is {prefix}<leaf> with a leaf that is not 'main' "
+            f"and holds no '-'")
     d.parent.mkdir(parents=True, exist_ok=True)
     if branch in local:
         p = git("worktree", "add", "--quiet", str(d), branch, check=False)

@@ -3,7 +3,7 @@ use crate::plan::{drive, Effect, Query, Replay, Reply};
 use proptest::prelude::*;
 use serde_json::json;
 
-const BRANCH: &str = "haswell-wsl-deploys2";
+const BRANCH: &str = "work/haswell-wsl/2";
 const NEW: &str = "/nix/store/new-system";
 const OLD: &str = "/nix/store/old-system";
 const ME: (&str, &str) = ("haswell-wsl", "/home/blu/projects/homelab3");
@@ -55,7 +55,7 @@ fn doc(top: &str, by: (&str, &str), pending: Option<(&str, Option<&str>)>, other
 fn cx(tips: &[(&str, &str)]) -> Context {
     Context {
         me: (ME.0.into(), ME.1.into()),
-        listed: ["main", BRANCH, "haswell-wsl-deploys3", "chikuwa-deploys1"].iter().map(|s| s.to_string()).collect(),
+        listed: ["main", BRANCH, "work/haswell-wsl/3", "work/chikuwa/1"].iter().map(|s| s.to_string()).collect(),
         tips: tips.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
         in_flight: BTreeMap::new(),
         dead: BTreeSet::new(),
@@ -83,7 +83,7 @@ fn lin(top: &str, by: (&str, &str), pending: Option<(&str, Option<&str>)>, other
 
 fn std_lin() -> Lineage {
     let b = base();
-    lin(NEW, OTHER, Some((BRANCH, Some(&b))), &["chikuwa-deploys1"], T0)
+    lin(NEW, OTHER, Some((BRANCH, Some(&b))), &["work/chikuwa/1"], T0)
 }
 
 #[test]
@@ -101,14 +101,14 @@ fn classifies_lineages() {
 
     // A lineage without an announcement (nothing tells its deploy's end)
     // stays in flight however old; the writer's `at` is display only.
-    let old = lin(NEW, OTHER, Some((BRANCH, Some(&b))), &["chikuwa-deploys1"], T0 - 7200.0);
+    let old = lin(NEW, OTHER, Some((BRANCH, Some(&b))), &["work/chikuwa/1"], T0 - 7200.0);
     assert_eq!(k(Some(&old), &at_base, false).0, Kind::InFlight);
 
     // An announced increment is in flight while origin's pending ref of
     // its branch is uncleared - whatever commit the renewals left there,
     // dead or not (then said so) - and abandoned the moment it is cleared:
     // its deploy ended without the push.
-    let announced = lin_ann(NEW, OTHER, Some((BRANCH, Some(&b))), Some("p"), &["chikuwa-deploys1"], T0);
+    let announced = lin_ann(NEW, OTHER, Some((BRANCH, Some(&b))), Some("p"), &["work/chikuwa/1"], T0);
     let mut live = at_base.clone();
     live.in_flight.insert(BRANCH.into(), "p".into());
     let (kind, why) = k(Some(&announced), &live, false);
@@ -140,12 +140,12 @@ fn classifies_lineages() {
     assert_eq!(classify(Some(&std_lin()), NEW, &at_base, true, false).0, Kind::Overridden);
     assert_eq!(classify(Some(&std_lin()), NEW, &cx(&[(BRANCH, &landed())]), false, false).0, Kind::CatchUp);
 
-    let unl = lin(NEW, OTHER, Some(("M3-Air-deploys9", Some(&b))), &["chikuwa-deploys1"], T0);
-    let (kind, why) = k(Some(&unl), &cx(&[("M3-Air-deploys9", &b)]), false);
-    assert!(kind == Kind::Unlisted && why.contains("M3-Air-deploys9"), "{why}");
-    assert_eq!(k(Some(&unl), &cx(&[("M3-Air-deploys9", &landed())]), false).0, Kind::Unlisted);
+    let unl = lin(NEW, OTHER, Some(("work/M3-Air/9", Some(&b))), &["work/chikuwa/1"], T0);
+    let (kind, why) = k(Some(&unl), &cx(&[("work/M3-Air/9", &b)]), false);
+    assert!(kind == Kind::Unlisted && why.contains("work/M3-Air/9"), "{why}");
+    assert_eq!(k(Some(&unl), &cx(&[("work/M3-Air/9", &landed())]), false).0, Kind::Unlisted);
     // Pushed work of a branch not listed here is refused too.
-    let pushed_unl = lin(NEW, OTHER, None, &["M3-Air-deploys9"], T0);
+    let pushed_unl = lin(NEW, OTHER, None, &["work/M3-Air/9"], T0);
     assert_eq!(k(Some(&pushed_unl), &at_base, false).0, Kind::Unlisted);
 
     assert_eq!(k(None, &at_base, false), (Kind::Untracked, String::new()));
@@ -158,7 +158,7 @@ fn classifies_lineages() {
     assert_eq!(parse(&v1).map(|l| l.machine), Some(OTHER.0.to_string()));
     assert_eq!(k(Some(&lin(OLD, OTHER, None, &[], T0)), &at_base, false).0, Kind::Untracked);
     assert_eq!(k(Some(&lin(NEW, ME, Some((BRANCH, Some(&b))), &[], T0)), &at_base, false).0, Kind::ThisBranch);
-    assert_eq!(k(Some(&lin(NEW, OTHER, None, &["chikuwa-deploys1"], T0)), &at_base, false).0, Kind::CatchUp);
+    assert_eq!(k(Some(&lin(NEW, OTHER, None, &["work/chikuwa/1"], T0)), &at_base, false).0, Kind::CatchUp);
 
     // The nightly's unpushed lock commit on main.
     let nightly = lin(NEW, ("chikuwa", "/var/lib/homelab"), Some(("main", Some(&b))), &[], T0);
@@ -257,19 +257,19 @@ fn run(p: Params) -> (Vec<Effect>, Result<Outcome, String>) {
 #[test]
 fn names_the_abandoned_increments() {
     let b = base();
-    let pushed = doc(OLD, OTHER, None, &["chikuwa-deploys1"], T0);
+    let pushed = doc(OLD, OTHER, None, &["work/chikuwa/1"], T0);
     let mut p =
         params(&["chikuwa", "choko"], &["chikuwa", "choko"], (false, false), &[("chikuwa", Some(pushed.clone())), ("choko", Some(pushed))]);
-    // The lineage holds BRANCH at h..h and chikuwa-deploys1 at c..c; origin
-    // has BRANCH reset (at `b`) and chikuwa-deploys1 still at c..c.
-    p.cx = cx(&[(BRANCH, &b), ("chikuwa-deploys1", &"c".repeat(40))]);
+    // The lineage holds BRANCH at h..h and work/chikuwa/1 at c..c; origin
+    // has BRANCH reset (at `b`) and work/chikuwa/1 still at c..c.
+    p.cx = cx(&[(BRANCH, &b), ("work/chikuwa/1", &"c".repeat(40))]);
     let (asked, fx, out) = run_with(p.clone(), "abandoned");
     assert_eq!(out.unwrap().plan, ["chikuwa", "choko"]);
     assert_eq!(asked, [Query::Fate { branch: BRANCH.into(), tip: "h".repeat(40), union: "u".repeat(40), checkout: Some(OTHER.1.into()) }]);
     let line = format!("  chikuwa: will switch (catch-up: runs pushed work deployed by haswell-wsl:/home/blu/projects/homelab2 (pid 4242) at 13:46; reverting {BRANCH}'s abandoned increment hhhhhhhhhhhh)");
     assert_eq!(fx[0], Effect::Print(line));
     assert!(
-        matches!(&fx[1], Effect::Print(l) if l.ends_with("reverting haswell-wsl-deploys2's abandoned increment hhhhhhhhhhhh)")),
+        matches!(&fx[1], Effect::Print(l) if l.ends_with("reverting work/haswell-wsl/2's abandoned increment hhhhhhhhhhhh)")),
         "{fx:?}"
     );
 
@@ -287,7 +287,7 @@ fn names_the_abandoned_increments() {
     // A pending increment of a branch origin has no tip of: in flight
     // while its first push is on its way, caught up once the branch is
     // gone with its subagent worktree and the union lacks the increment.
-    let sub = "haswell-wsl-deploys2-agent-x";
+    let sub = "work/haswell-wsl/2-agent-x";
     let first = doc(OLD, OTHER, Some((sub, None)), &[], T0);
     let mut p = params(&["chikuwa"], &["chikuwa"], (false, false), &[("chikuwa", Some(first))]);
     p.cx = cx(&[(BRANCH, &b)]);
@@ -351,7 +351,7 @@ fn reports_the_plan() {
     let (fx, out) = run(p.clone());
     let msg = out.unwrap_err();
     assert!(msg.starts_with("nothing switched or committed: side1 runs another"), "{msg}");
-    assert_eq!(fx[0], Effect::Print("  side1: refused: runs an increment of haswell-wsl-deploys2 deployed by haswell-wsl:/home/blu/projects/homelab2 (pid 4242) at 13:46 whose push has not landed (origin/haswell-wsl-deploys2 is still at aaaaaaaaaaaa)".into()));
+    assert_eq!(fx[0], Effect::Print("  side1: refused: runs an increment of work/haswell-wsl/2 deployed by haswell-wsl:/home/blu/projects/homelab2 (pid 4242) at 13:46 whose push has not landed (origin/work/haswell-wsl/2 is still at aaaaaaaaaaaa)".into()));
     assert_eq!(fx[1], Effect::Print("  choko: will switch".into()));
     assert_eq!(fx[2], Effect::Print("  chikuwa: differs but excluded by the target filter".into()));
     assert_eq!(fx.len(), 3);
@@ -421,7 +421,7 @@ fn reports_the_plan() {
 }
 
 fn arb_name() -> impl Strategy<Value = String> {
-    prop::sample::select(vec!["main", BRANCH, "haswell-wsl-deploys3", "chikuwa-deploys1", "M3-Air-deploys9", "x"]).prop_map(str::to_string)
+    prop::sample::select(vec!["main", BRANCH, "work/haswell-wsl/3", "work/chikuwa/1", "work/M3-Air/9", "x"]).prop_map(str::to_string)
 }
 
 fn arb_top() -> impl Strategy<Value = String> {

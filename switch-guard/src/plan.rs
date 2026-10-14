@@ -138,7 +138,7 @@ pub enum Query {
 
     /// deploy-branches as the checkout now has it -> Names.
     Listed,
-    /// origin's *-deploys* branches and their tips, in ref order -> Refs.
+    /// origin's work branches (the listed patterns and this prefix's shape) and their tips, in ref order -> Refs.
     Branches,
     /// Whether `sha` changes nothing but MSG_FILE since its merge base with
     /// origin/main -> Flag.
