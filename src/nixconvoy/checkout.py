@@ -478,10 +478,33 @@ def ensure_on_work_branch(wb: str) -> None:
         git("branch", "--quiet", "-D", prev, check=False)
 
 
+def fold_subject(msg: str) -> str:
+    """A blank line after the subject, or git folds the whole first
+    paragraph (subject + bullets) into %s."""
+    lines = msg.splitlines()
+    if len(lines) > 1 and lines[1].strip():
+        return "\n".join([lines[0], "", *lines[1:]])
+    return msg
+
+
+def landing_message(given: str | None, on_file: str, draft: str, where: str) -> str:
+    """What a landing of `where` commits under: `given` (land -m) when
+    passed, else `on_file` (its MSG_FILE as the landing reads it) - "" when
+    neither says anything.  -m beside a MSG_FILE, committed (`on_file`) or
+    not (`draft`, the one on disk), is refused: it is for a branch without
+    one."""
+    if given is None:
+        return fold_subject(on_file.strip())
+    if on_file.strip() or draft.strip():
+        die(f"{where} has a {MSG_FILE} and -m was given: land -m is for a branch without one, "
+            f"so remove the file or drop -m")
+    return fold_subject(given.strip())
+
+
 def warn_no_msgfile(wb: str) -> None:
     if rev(f"HEAD:{MSG_FILE}") is None:
-        print(f"note: {wb} carries work but no {MSG_FILE} yet - it is required "
-              "to land", file=sys.stderr)
+        print(f"note: {wb} carries work but no {MSG_FILE} yet - landing needs "
+              "it, or land -m <msg>", file=sys.stderr)
 
 
 def index_tree(cwd: str | None = None, *, less_msg: bool = False) -> str:

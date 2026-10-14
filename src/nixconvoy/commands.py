@@ -38,6 +38,7 @@ from .checkout import (
     git_op_in_progress,
     held_targets,
     identity_of,
+    landing_message,
     listed_tips,
     lock_checkout,
     lock_live,
@@ -78,13 +79,27 @@ def holds(wb: str, tip: str, main: str, release: bool, cwd: str | None = None) -
     them = ", ".join(held)
     if not release:
         die(f"{wb} holds back {them}: increments of it reach {'it' if len(held) == 1 else 'them'} "
-            f"but were deployed to other targets alone.  `nixconvoy apply {' '.join(held)}` from its "
+            f"but were deployed to other targets alone.  `nixconvoy apply --catch-up {' '.join(held)}` from its "
             f"checkout deploys them there first; `land --release` lands them as they are, for the "
             f"next deploy anywhere to roll out")
     print(f"releasing {them}: the next deploy anywhere rolls the landed work out there")
 
 
-def land(release: bool = False) -> None:
+def main_message(wb: str, given: str | None) -> str:
+    """The main commit's message (checkout.landing_message over HEAD's
+    MSG_FILE and the one on disk), refused when there is none."""
+    on_file = out(["git", "show", f"HEAD:{MSG_FILE}"]) if rev(f"HEAD:{MSG_FILE}") else ""
+    try:
+        draft = Path(MSG_FILE).read_text(encoding="utf-8")
+    except OSError:
+        draft = ""
+    msg = landing_message(given, on_file, draft, wb)
+    if not msg:
+        die(f"{wb} has no {MSG_FILE}; write one (it becomes the main commit message), or pass -m <msg>")
+    return msg
+
+
+def land(release: bool = False, message: str | None = None) -> None:
     await_background_push()
     git(*fetch_args())
     pop_tmp_commits()
@@ -98,9 +113,7 @@ def land(release: bool = False) -> None:
     main = rev("refs/remotes/origin/main")
     if main is None or tree_less_msg("HEAD") == out(["git", "rev-parse", "origin/main^{tree}"]):
         die("no changes vs origin/main to land")
-    msg = out(["git", "show", f"HEAD:{MSG_FILE}"]) if rev(f"HEAD:{MSG_FILE}") else ""
-    if not msg:
-        die(f"{wb} has no {MSG_FILE}; write one (it becomes the main commit message)")
+    msg = main_message(wb, message)
     # A branch forked from another's tip (a subagent worktree made by hand at
     # its parent's) would land that branch's increments under this message.
     carried = [b for b, tip in listed_tips(allowed_branches()).items()
@@ -110,11 +123,6 @@ def land(release: bool = False) -> None:
         die(f"{wb} contains the unlanded increments of {', '.join(carried)}; land "
             "that branch first, then re-run")
     holds(wb, "HEAD", main, release)
-    # A blank line after the subject, or git folds the whole first paragraph
-    # (subject + bullets) into %s.
-    lines = msg.splitlines()
-    if len(lines) > 1 and lines[1].strip():
-        msg = "\n".join([lines[0], "", *lines[1:]])
     # The submodules first: main must never pin a branch about to go.
     gone = submodule.orphaned(Path.cwd())
     if gone:
@@ -204,7 +212,7 @@ def abandon(apply_now: bool = False) -> None:
             print(f"deployed to {where}: deploying now to revert it")
         else:
             print(f"deployed to {where}; whichever targets run it keep it until the next deploy "
-                  f"reverts it (`nixconvoy apply`, or `abandon --apply-now` for both at once)")
+                  f"reverts it (`nixconvoy apply --catch-up`, or `abandon --apply-now` for both at once)")
     finish(wb)
 
 
@@ -1210,12 +1218,13 @@ def close_checkout(path: Path, *, force: bool = False) -> None:
     print(f"checkout {d} removed, with {', '.join(sorted(names)) or 'no branch of its own'} here and on origin")
 
 
-def land_union(release: bool = False) -> None:
+def land_union(release: bool = False, message: str | None = None) -> None:
     """`nixconvoy land --union`: this checkout and its subagent worktrees
     landed as one commit on main - each sub's branch merged into this
     branch's tree (mergiraf on the conflicts, as a deploy's union) under
-    this checkout's MSG_FILE - every branch reset onto the new main, here
-    and on origin, each worktree staying."""
+    this checkout's MSG_FILE (or `message`) with each sub's MSG_FILE
+    appended - every branch reset onto the new main, here and on origin,
+    each worktree staying."""
     await_background_push()
     git(*fetch_args())
     pop_tmp_commits()
@@ -1232,12 +1241,7 @@ def land_union(release: bool = False) -> None:
     if main is None:
         die("origin/main not found")
     main_tree = out(["git", "rev-parse", f"{main}^{{tree}}"])
-    msg = out(["git", "show", f"HEAD:{MSG_FILE}"]) if rev(f"HEAD:{MSG_FILE}") else ""
-    if not msg:
-        die(f"{wb} has no {MSG_FILE}; write one (it becomes the main commit message)")
-    lines = msg.splitlines()
-    if len(lines) > 1 and lines[1].strip():
-        msg = "\n".join([lines[0], "", *lines[1:]])
+    msg = main_message(wb, message)
 
     # The participants: each sub on its work branch with work beyond main.
     parts: list[tuple[Path, str]] = []
@@ -1267,6 +1271,12 @@ def land_union(release: bool = False) -> None:
         if not parts:
             die(f"no subagent worktree under {here.name} holds work to land; `nixconvoy land` "
                 f"lands this checkout alone")
+        # Each sub's MSG_FILE, as its branch carries it, appended in turn.
+        for d, _ in parts:
+            if ok(["git", "cat-file", "-e", f"HEAD:{MSG_FILE}"], cwd=str(d)):
+                sub_msg = out(["git", "show", f"HEAD:{MSG_FILE}"], cwd=str(d)).strip()
+                if sub_msg:
+                    msg = f"{msg}\n\n{sub_msg}"
         own = {wb, *(b for _, b in parts)}
         for d, b in [(here, wb), *parts]:
             carried = [x for x, tip in listed_tips(allowed_branches()).items()
@@ -1359,7 +1369,7 @@ def land_union(release: bool = False) -> None:
             "fix them and `nixconvoy pull`")
 
 
-def land_submodule(name: str) -> None:
+def land_submodule(name: str, message: str | None = None) -> None:
     """`land --submodule <name>`: the one submodule landed on its
     repository's default branch and pinned there as a commit on the work
     branch, pushed; its worktree stays, and the submodule repositories'
@@ -1375,8 +1385,8 @@ def land_submodule(name: str) -> None:
         die("staged but undeployed changes present; deploy or unstage them first")
     ensure_rebased()
     sub = submodule.present_one(Path.cwd(), name)
-    fallback = (out(["git", "show", f"HEAD:{MSG_FILE}"]) if rev(f"HEAD:{MSG_FILE}") else "").partition("\n")[0]
-    submodule.land_one(sub, wb, fallback or f"{name} landed")
+    on_file = out(["git", "show", f"HEAD:{MSG_FILE}"]) if rev(f"HEAD:{MSG_FILE}") else ""
+    submodule.land_one(sub, wb, on_file.partition("\n")[0] or f"{name} landed", message)
     push_work_branch(wb)
     if not submodule.catch_up_repos():
         sys.exit(1)

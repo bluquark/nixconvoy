@@ -8,6 +8,7 @@ scratch git repos.  Run by the flake's lint check (nix/lint.nix)."""
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import hashlib
 import io
@@ -22,7 +23,7 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from pathlib import Path
 
-from nixconvoy import checkout, commands, config, deploy, guard, memo, proc, review, switch, targets
+from nixconvoy import checkout, cli, commands, config, deploy, guard, memo, proc, review, switch, targets
 from nixconvoy.union import UnionQueries
 
 REAL_GUARD = switch.switch_guard_cmd
@@ -418,7 +419,7 @@ def lineage_cases() -> None:
     assert line == ("side1: refused: held back by work/chikuwa/1: the union carries its work, "
                     "deployed from that checkout to other targets alone"), line
     assert died.startswith("nothing switched or committed: side1 is held back by another branch") \
-        and "nixconvoy apply side1 from that checkout" in died, died
+        and "nixconvoy apply --catch-up side1 from that checkout" in died, died
     line, died = report("", held={"side1": ["work/chikuwa/1"]}, reached=False)
     assert line.startswith("side1: left alone: held back by") and not died, (line, died)
 
@@ -1723,11 +1724,14 @@ def open_cases(d: Path) -> None:
         os.chdir(co)
         # land --union: the parent's increment and the sub's, each deployed
         # (committed on its work branch and pushed), land as one commit
-        # under the parent's COMMIT_MSG.md; every branch resets onto it.
+        # under the parent's COMMIT_MSG.md with the sub's appended; every
+        # branch resets onto it.
         put(co, "p.txt", "parent\n")
         put(co, "COMMIT_MSG.md", "the union\n- the sub's piece\n", "parent increment")
         sh(co, "push", "--quiet", "origin", "work/tester/9")
         sh(w, "switch", "--quiet", "-c", "work/tester/9-task")
+        (w / "COMMIT_MSG.md").write_text("the sub: s.txt\n- its detail\n")
+        sh(w, "add", "COMMIT_MSG.md")
         put(w, "s.txt", "sub\n", "sub increment\n\nReaches: a, b\nDeployed: a")
         sh(w, "push", "--quiet", "origin", "work/tester/9-task")
         put(w, "n.txt", "unstaged\n")
@@ -1739,13 +1743,77 @@ def open_cases(d: Path) -> None:
             commands.land_union(release=True)
         main = sh(co, "rev-parse", "origin/main")
         assert sh(co, "ls-tree", "--name-only", main).split() == [".gitignore", "a.txt", "deploy-branches", "p.txt", "s.txt"]
-        assert sh(co, "log", "-1", "--format=%B", main).strip() == "the union\n\n- the sub's piece"
+        assert sh(co, "log", "-1", "--format=%B", main).strip() == (
+            "the union\n\n- the sub's piece\n\nthe sub: s.txt\n- its detail")  # the sub's appended
         assert sh(co, "rev-parse", "HEAD") == main and checkout.branch_at(co) == "work/tester/9"
         assert sh(w, "rev-parse", "HEAD") == main and checkout.branch_at(w) == "work/tester/9-task"
         assert sh(co, "rev-parse", "origin/work/tester/9") == main
         assert sh(co, "rev-parse", "origin/work/tester/9-task") == main
         assert not sh(co, "status", "--porcelain") and sh(w, "status", "--porcelain") == "?? n.txt"
         assert f"has no {config.MSG_FILE}" in dies(commands.land_union)  # consumed by the landing
+        # land -m: a quick landing with no COMMIT_MSG.md, folded like one;
+        # beside the file, committed or a draft on disk, it is refused.
+        put(co, "q.txt", "quick\n", "quick increment")
+        sh(co, "push", "--quiet", "origin", "work/tester/9")
+        put(w, "s2.txt", "sub\n", "sub increment 2")
+        sh(w, "push", "--quiet", "origin", "work/tester/9-task")
+        with contextlib.redirect_stdout(io.StringIO()):
+            commands.land_union(message="quick land\n- by -m\n")
+        main = sh(co, "rev-parse", "origin/main")
+        assert sh(co, "log", "-1", "--format=%B", main).strip() == "quick land\n\n- by -m"
+        landed = sh(co, "ls-tree", "--name-only", main).split()
+        assert sh(co, "rev-parse", "HEAD") == main and "q.txt" in landed and "s2.txt" in landed
+        assert sh(w, "rev-parse", "HEAD") == main
+        put(co, "r.txt", "r\n")
+        put(co, "COMMIT_MSG.md", "from the file\n", "r increment")
+        sh(co, "push", "--quiet", "origin", "work/tester/9")
+        tip = sh(co, "rev-parse", "HEAD")
+        assert f"work/tester/9 has a {config.MSG_FILE} and -m was given" in dies(lambda: commands.land(message="from -m"))
+        assert sh(co, "rev-parse", "HEAD") == tip and sh(co, "rev-parse", "origin/main") == main
+        assert not sh(co, "status", "--porcelain")
+        with contextlib.redirect_stdout(io.StringIO()):
+            commands.land()
+        main = sh(co, "rev-parse", "origin/main")
+        assert sh(co, "log", "-1", "--format=%B", main).strip() == "from the file"
+        put(co, "r2.txt", "r\n", "r2 increment")
+        sh(co, "push", "--quiet", "origin", "work/tester/9")
+        (co / "COMMIT_MSG.md").write_text("a draft\n")  # on disk alone: refused too
+        assert f"has a {config.MSG_FILE} and -m was given" in dies(lambda: commands.land(message="from -m"))
+        assert (co / "COMMIT_MSG.md").read_text() == "a draft\n" and sh(co, "rev-parse", "origin/main") == main
+        (co / "COMMIT_MSG.md").unlink()
+        with contextlib.redirect_stdout(io.StringIO()):
+            commands.land(message="from -m")
+        main = sh(co, "rev-parse", "origin/main")
+        assert sh(co, "log", "-1", "--format=%B", main).strip() == "from -m"
+        assert sh(co, "rev-parse", "HEAD") == main and not sh(co, "status", "--porcelain")
+        # Which message a landing commits under.
+        assert checkout.landing_message(None, "s\n- b\n", "", "x") == "s\n\n- b"
+        assert checkout.landing_message(None, "", "draft\n", "x") == ""  # a draft is not HEAD's
+        assert checkout.landing_message("m\n- b", "", "", "x") == "m\n\n- b"
+        assert checkout.landing_message(" m ", "", " \n", "x") == "m"  # a blank file is none
+        assert f"x has a {config.MSG_FILE} and -m was given" in dies(lambda: checkout.landing_message("m", "f\n", "f\n", "x"))
+        assert f"sub y has a {config.MSG_FILE}" in dies(lambda: checkout.landing_message("m", "", "d\n", "sub y"))
+        assert f"x has a {config.MSG_FILE}" in dies(lambda: checkout.landing_message("m", "f\n", "d\n", "x"))
+        # The CLI: -m is land's alone, one non-empty message for one branch,
+        # never a flag's name.
+        argv0 = sys.argv
+        try:
+            for argv in (["abandon", "-m", "x"], ["abandon", "-m", "x", "--submodule", "dep"],
+                         ["land", "-m", ""], ["land", "-m", " ", "--union"], ["land", "-m", "--union"],
+                         ["land", "-m", "x", "a", "b"], ["land", "-m"], ["apply", "-m", "x", "--catch-up"],
+                         ["land", "--catch-up"]):
+                sys.argv = ["nixconvoy", *argv]
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+                    try:
+                        cli.main()
+                    except SystemExit as e:
+                        assert e.code == 1, (argv, e.code)
+                    else:
+                        raise AssertionError(argv)
+                assert err.getvalue().startswith("usage: nixconvoy apply"), (argv, err.getvalue())
+        finally:
+            sys.argv = argv0
+            atexit.unregister(proc.PERF.write)
         with contextlib.redirect_stdout(io.StringIO()):
             assert commands.open_worktree("task", "claude agent task (pid 1 start 2) 5.6") == w  # reused, relocked
         assert checkout.worktree_lock(w) == "claude agent task (pid 1 start 2) 5.6"

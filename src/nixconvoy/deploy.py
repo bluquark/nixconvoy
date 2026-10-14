@@ -124,8 +124,11 @@ def commit_unreached(wb: str, msg: str, snap: str) -> None:
 
 
 def deploy(filter_targets: list[str], msg: str | None, reset: bool,
-           allow: frozenset[str] = frozenset(), dry: bool = False) -> None:
-    """`reset`: this checkout's view alone - no other work branch in the
+           allow: frozenset[str] = frozenset(), dry: bool = False, catch_up: bool = False) -> None:
+    """`msg` describes the staged increment; `catch_up` (--catch-up) is
+    the deploy of nothing staged, converging the targets on the union as
+    it is - one or the other, as the staging decides.
+    `reset`: this checkout's view alone - no other work branch in the
     union, no wait for a deploy under way, and a target running another
     checkout's refused work switched over when this work reaches it or
     `filter_targets` names it.
@@ -193,6 +196,9 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
         print(told)
     PERF.mark("snapshot")
     if staged_differs():
+        if catch_up:
+            die('staged changes present, which --catch-up would not deploy: describe this increment '
+                'with -m "...", or unstage it')
         if not msg and not dry:
             die('staged changes present; describe this increment with -m "..."')
         if wb is None:
@@ -215,6 +221,9 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
             start_probes()
     elif msg:
         die("nothing is staged; stage the change or drop -m")
+    elif not catch_up and not dry:
+        die("nothing is staged: `nixconvoy apply --catch-up` converges the targets on the union as it "
+            'is; a staged change deploys as an increment with -m "..."')
     else:
         ensure_rebased()
 

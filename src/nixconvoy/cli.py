@@ -19,7 +19,8 @@ Model:
     origin/main.
   - COMMIT_MSG.md at a work branch's root describes the branch's work since
     its last landing.  It never reaches main's tree: `land` consumes it as
-    the commit message.
+    the commit message (`land -m <msg>`, for a branch without one, lands
+    under <msg>).
   - Targets are inferred: each target's ground truth is its running system
     (/run/current-system), compared against the union build.  Every deploy
     converges whatever differs.
@@ -28,8 +29,11 @@ Model:
     crate's (nixconvoy-plan, nixconvoy-switch: Sans-I/O cores); this program
     performs the git, eval, build and ssh they ask for.
 
-Deploy (nixconvoy apply [-m <msg>] [--reset] [--allow <protection> ...]
-         [--dry-activate] [<target> | @<tag> ...]):
+Deploy (nixconvoy apply [--reset] [--allow <protection> ...] -m <msg> | --catch-up
+         [<target> | @<tag> ...]; apply [...] --dry-activate [...]): -m describes
+  the staged increment the deploy commits; --catch-up, with nothing
+  staged, converges the targets on the union as it is (the nightlies', and
+  a main checkout's, deploy).
   1. start fetching origin; enumerate the targets from the hosts directory
   2. probe every target's running system and its lineage
      (/var/lib/nixconvoy/lineage.json, in the same round trip; a local_only
@@ -176,12 +180,14 @@ branch, so it switches the target to this checkout's view alone, without
 the held work, the hold standing.  `status` shows what each checkout holds
 back.
 
-Land (nixconvoy land [<name> ...] | --union | --submodule <input>): commit the work branch's
-tree minus COMMIT_MSG.md onto origin/main with COMMIT_MSG.md as the message,
-push main, reset this branch (and its origin copy) onto the new main, the
+Land (nixconvoy land [-m <msg>] [<name> ...] | --union | --submodule <input>):
+commit the work branch's tree minus COMMIT_MSG.md onto origin/main with
+COMMIT_MSG.md as the message (or -m <msg>, for a branch without the file:
+both at once is refused; with --submodule, the submodule's file), push
+main, reset this branch (and its origin copy) onto the new main, the
 checkout staying on it.  Every other checkout on this machine is then
-brought onto the new main (see Pull); checkouts on other machines rebase at
-their next deploy.  A subagent worktree stays too, idle on its reset branch:
+brought onto the new main (see Pull); checkouts on other machines rebase
+at their next deploy.  A subagent worktree stays too, idle on its reset branch:
 `close` removes it (the session-exit sweep does, once its agent is done).
 Run from any checkout with the worktrees' <name>s (a unique prefix will do),
 land and abandon act on each in turn.  A branch holding a target back (see
@@ -193,7 +199,8 @@ each did a piece of this checkout's task: every sub's branch (one on its
 work branch with work beyond main; a sub holding undeployed commits stops
 it) is merged into this branch's tree as a deploy's union merges them
 (mergiraf on the conflicts), and that lands as one commit under this
-checkout's COMMIT_MSG.md; each branch is reset onto the new main, each
+checkout's COMMIT_MSG.md (or -m) with each sub's COMMIT_MSG.md appended;
+each branch is reset onto the new main, each
 worktree staying, its unstaged edits kept (an edited file the landing
 changes stops it before main moves).
 
@@ -381,12 +388,14 @@ from .targets import ALLOW_FLAG
 # The synopsis: one line per form.  <x> a value, [x] optional, (a | b) one
 # of, ... repeated.  USAGE_NOTES follows it under --help only.
 SYNOPSIS = """\
-apply [-m <msg>] [--reset] [--allow <protection> ...] [--dry-activate] [<target> | @<tag> ...]
+apply [--reset] [--allow <protection> ...] -m <msg> [<target> | @<tag> ...]
+apply [--reset] [--allow <protection> ...] --catch-up [<target> | @<tag> ...]
+apply [--reset] [--allow <protection> ...] --dry-activate [<target> | @<tag> ...]
 review [<worktree> | <branch> ...] [<diff-arg> ...]
 review --union [<diff-arg> ...]
-land [--release] [<worktree> ...]
-land [--release] --union
-land --submodule <input>
+land [-m <msg>] [--release] [<worktree> ...]
+land [-m <msg>] [--release] --union
+land [-m <msg>] --submodule <input>
 abandon [--apply-now [--allow <protection> ...]] [<worktree> ...]
 abandon [--apply-now [--allow <protection> ...]] --union
 abandon --submodule <input>
@@ -402,6 +411,9 @@ pull
 status
 """
 USAGE_NOTES = """\
+-m describes the staged increment a deploy commits once its targets are
+switched; --catch-up is the deploy of nothing staged, converging the targets
+on the union as it is.
 With no targets named, every target whose running system differs from the union
 is switched; naming targets, or @tag for the targets nixconvoy.toml tags so,
 restricts switching to (at most) those.
@@ -419,20 +431,32 @@ subagent worktrees as one unit; a path (with a /) names an agent checkout."""
 def usage(stream: IO[str] | None = None) -> str:
     """The synopsis, colored when `stream` (stdout) is a terminal: the
     subcommand bold, flags yellow and the value a flag takes cyan,
-    positional values green."""
+    positional values green; inside [...] the brackets, "..." and "|"
+    gray, the flags, their values and the positionals dim."""
     paint = painter(stream)
+    depth = 0
 
     def color(m: re.Match[str]) -> str:
+        nonlocal depth
+        if m.group("open"):
+            depth += 1
+            return paint("[", "gray")
+        if m.group("close"):
+            depth -= 1
+            return paint("]", "gray")
+        if m.group("mark"):
+            return paint(m.group("mark"), "gray") if depth else m.group("mark")
+        dim = "dim " if depth else ""
         if m.group("flag"):
-            return paint(m.group("flag"), "yellow") + (
-                " " + paint(m.group("fval"), "cyan") if m.group("fval") else "")
-        return paint(m.group("pos"), "green")
+            return paint(m.group("flag"), dim + "yellow") + (
+                " " + paint(m.group("fval"), dim + "cyan") if m.group("fval") else "")
+        return paint(m.group("pos"), dim + "green")
 
     lines = []
     for form in SYNOPSIS.splitlines():
         sub, _, rest = form.partition(" ")
-        rest = re.sub(r"(?P<flag>(?<![\w<])--?\w[\w-]*)(?: (?P<fval><[\w-]+>))?|(?P<pos>@?<[\w-]+>)",
-                      color, rest)
+        rest = re.sub(r"(?P<open>\[)|(?P<close>\])|(?P<mark>\.\.\.|\|)"
+                      r"|(?P<flag>(?<![\w<])--?\w[\w-]*)(?: (?P<fval><[\w-]+>))?|(?P<pos>@?<[\w-]+>)", color, rest)
         lines.append(f"{TOOL} {paint(sub, 'bold')} {rest}".rstrip())
     lines[0] = "usage: " + lines[0]
     return "\n".join("       " + ln if i else ln for i, ln in enumerate(lines))
@@ -486,9 +510,10 @@ def main() -> None:
     force = False
     union = False
     release = False
+    catch_up = False
     while args:
         a = args.pop(0)
-        if a == "-m" and args:
+        if a == "-m" and args and not args[0].startswith("-"):
             msg = args.pop(0)
         elif a == "--submodule" and subcmd == "open":
             sub_flag = True
@@ -510,6 +535,8 @@ def main() -> None:
             stopped = args.pop(0)
         elif a == "--reset":
             reset = True
+        elif a == "--catch-up" and subcmd == "apply":
+            catch_up = True
         elif a == ALLOW_FLAG and args and not args[0].startswith("-"):
             allow.add(args.pop(0))
         elif a == DRY_FLAG:
@@ -551,11 +578,12 @@ def main() -> None:
             commands.open_worktree(names[0], lock_reason)
         return
     if sub_name is not None:
-        if names or apply_now or msg or reset or dry or allow or after or stopped or union or release:
+        if names or apply_now or reset or dry or allow or after or stopped or union or release \
+                or (msg is not None and (subcmd != "land" or not msg.strip())):
             bad_usage()
         take_lock()
         if subcmd == "land":
-            commands.land_submodule(sub_name)
+            commands.land_submodule(sub_name, msg)
         elif subcmd == "abandon":
             commands.abandon_submodule(sub_name)
         else:
@@ -581,11 +609,12 @@ def main() -> None:
     top = Path.cwd()
     here = top.resolve()
     if subcmd in ("land", "abandon"):
-        if msg or reset or dry or (allow and not apply_now) or (union and names):
+        if reset or dry or (allow and not apply_now) or (union and names) \
+                or (msg is not None and (subcmd != "land" or not msg.strip() or len(names) > 1)):
             bad_usage()
         if union and subcmd == "land":
             take_lock()
-            commands.land_union(release)
+            commands.land_union(release, msg)
             return
         parent_too = False
         if union:
@@ -614,7 +643,7 @@ def main() -> None:
             if lock is None:
                 die(f"another nixconvoy is running in {name}'s worktree")
             if subcmd == "land":
-                commands.land(release)
+                commands.land(release, msg)
             else:
                 commands.abandon(apply_now)
             lock.close()
@@ -626,17 +655,23 @@ def main() -> None:
                 print(f"== {here.name}")
                 commands.abandon(apply_now)
             if apply_now:
-                deploy([], None, False, frozenset(allow))
+                deploy([], None, False, frozenset(allow), catch_up=True)
             return
     take_lock()
     if subcmd == "land":
-        commands.land(release)
+        commands.land(release, msg)
     elif subcmd == "abandon":
         commands.abandon(apply_now)
         if apply_now:
-            deploy([], None, False, frozenset(allow))
+            deploy([], None, False, frozenset(allow), catch_up=True)
     else:  # apply
-        deploy(names, msg, reset, frozenset(allow), dry)
+        if catch_up and msg is not None:
+            bad_usage()
+        if dry and (catch_up or msg is not None):
+            # Accepted so a deploy's command line reruns with the flag added.
+            print(f"note: {'--catch-up' if catch_up else '-m'} does nothing with {DRY_FLAG}: "
+                  "nothing is committed", file=sys.stderr)
+        deploy(names, msg, reset, frozenset(allow), dry, catch_up)
 
 
 def is_path(arg: str) -> bool:

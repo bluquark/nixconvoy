@@ -5,7 +5,7 @@ one checkout ever reverting what another already switched.
 
 nixconvoy is for the way a homelab actually evolves: lots of small,
 experimental changes, tested in production, kept honest by NixOS's atomic
-switches and generations.  You stage a change, run `nixconvoy apply`, and the
+switches and generations.  You stage a change, run `nixconvoy apply -m "..."`, and the
 targets that differ from the result are switched.  If the target does not come
 back reachable and healthy, the switch rolls itself back.  Only after the
 targets run the change is it committed, so a branch never claims more than
@@ -30,7 +30,8 @@ what is deployed.
   reachable; the targets' drift waits for the next deploy reaching one,
   or for an apply naming targets.
 - **`land` lands a branch on main**, as one commit whose message is the
-  branch's `COMMIT_MSG.md`; **`abandon`** discards it.  Either way the
+  branch's `COMMIT_MSG.md` (or `-m <msg>`, for a quick landing of a
+  branch without one: both at once is refused); **`abandon`** discards it.  Either way the
   checkout stays on its work branch, reset onto the new main (a subagent
   worktree too: `close` removes one), and every
   other checkout on the machine is rebased onto it.  Neither touches a
@@ -220,11 +221,12 @@ nixconvoy.switchLast = true;                # the router: switched alone, after 
 ## Commands
 
 ```
-nixconvoy apply [-m <msg>] [--reset] [<target> | @<tag> ...]   deploy
+nixconvoy apply [--reset] -m <msg> [<target> | @<tag> ...]   deploy the staged increment
+nixconvoy apply [--reset] --catch-up [<target> | @<tag> ...]   nothing staged: converge the targets on the union as it is
 nixconvoy apply --dry-activate [<target> | @<tag> ...]   build and copy, then only report what each switch would do
-nixconvoy land [--release] [<worktree> ...]   land the work branch on main (--release: targets its increments held back included)
+nixconvoy land [-m <msg>] [--release] [<worktree> ...]   land the work branch on main (-m: under <msg>, for a branch without COMMIT_MSG.md; --release: targets its increments held back included)
 nixconvoy abandon [--apply-now] [<worktree> ...]   discard it (--apply-now: and deploy, reverting it now)
-nixconvoy land --union | abandon [--apply-now] --union   this checkout and its task worktrees as one unit (one main commit)
+nixconvoy land [-m <msg>] --union | abandon [--apply-now] --union   this checkout and its task worktrees as one unit (one main commit, the subs' COMMIT_MSG.md appended)
 nixconvoy close [--force] [<worktree> ...]   remove task worktrees holding nothing of their own (--force: whatever they hold)
 nixconvoy close [--force] <path> ...   remove an agent checkout likewise, with its work branch
 nixconvoy close [--force] --submodule <input>   remove a submodule worktree likewise
@@ -235,7 +237,7 @@ nixconvoy review --union [<diff-arg> ...]   the checkout's and its task worktree
 nixconvoy open [--lock <reason>] <name>   a task worktree <checkout>/<worktrees>/<name> (what the plugin's create hook runs)
 nixconvoy open [--branch <work-branch>] <path>   an agent checkout at that path on a work branch of this machine's
 nixconvoy open --submodule <input>   the flake input developed in place under this checkout (see Submodules)
-nixconvoy land --submodule <input> | abandon --submodule <input>   one submodule alone, ahead of the checkout's landing
+nixconvoy land [-m <msg>] --submodule <input> | abandon --submodule <input>   one submodule alone, ahead of the checkout's landing (-m: under <msg>, for a submodule without its own COMMIT_MSG.md)
 ```
 
 `nixconvoy --help` and the docstring of `src/nixconvoy/cli.py` describe each
@@ -255,7 +257,8 @@ their own once its agent has stopped (a resume of the agent recreates it)
 or the session that spawned the agent has exited.  When the task
 worktrees each did a piece of their parent's task, `land --union` merges
 their branches into the parent's tree and lands it all as one commit
-under the parent's COMMIT_MSG.md (`review --union` shows each,
+under the parent's COMMIT_MSG.md with each sub's appended (`review
+--union` shows each,
 `abandon --union` discards each).  `nixconvoy open <path>` makes a
 further agent checkout beside the others instead - a worktree at that
 path on a listed work branch of this machine's, numbered after the path's

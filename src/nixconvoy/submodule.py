@@ -48,7 +48,9 @@ from .checkout import (
     PENDING_REFS,
     TMP_PREFIX,
     allowed_branches,
+    fold_subject,
     index_tree,
+    landing_message,
     tree_less_msg,
 )
 from .config import MSG_FILE, cfg
@@ -829,10 +831,12 @@ def land_all(wb: str, fallback_msg: str) -> None:
         land_one(sub, wb, fallback_msg)
 
 
-def land_one(sub: Sub, wb: str, fallback_msg: str) -> None:
+def land_one(sub: Sub, wb: str, fallback_msg: str, given: str | None = None) -> None:
     """The submodule landed on its repository's default branch as one
-    commit (the MSG_FILE in its worktree - tracked or not, it is read here
-    alone - else `fallback_msg`) and pinned there, as a commit on `wb`."""
+    commit (`given`, land --submodule's -m, for a worktree without a
+    MSG_FILE; else the MSG_FILE in its worktree - tracked or not, it is
+    read here alone - else `fallback_msg`) and pinned there, as a commit
+    on `wb`."""
     top = Path.cwd()
     cur = branch_at(sub.dir)
     if cur != wb:
@@ -875,12 +879,10 @@ def land_one(sub: Sub, wb: str, fallback_msg: str) -> None:
                 f"(in {sub.dir}), deploy, then re-run")
         tree = tree_less_msg(merged, cwd=str(sub.dir))
         try:
-            msg = (sub.dir / MSG_FILE).read_text(encoding="utf-8").strip() or fallback_msg
+            on_file = (sub.dir / MSG_FILE).read_text(encoding="utf-8")
         except OSError:
-            msg = fallback_msg
-        lines = msg.splitlines()
-        if len(lines) > 1 and lines[1].strip():
-            msg = "\n".join([lines[0], "", *lines[1:]])
+            on_file = ""
+        msg = landing_message(given, on_file, "", f"submodule {sub.name}") or fold_subject(fallback_msg)
         if tree == out(["git", "rev-parse", f"{main}^{{tree}}"], cwd=str(sub.dir)):
             landed = main
         else:
