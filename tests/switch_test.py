@@ -224,15 +224,15 @@ def main() -> None:
 
 
 
-BRANCH, BASE, LANDED = "haswell-wsl-deploys2", "a" * 40, "b" * 40
+BRANCH, BASE, LANDED = "work/haswell-wsl/2", "a" * 40, "b" * 40
 ME = ("haswell-wsl", "/home/blu/projects/homelab3")
 OTHER = ("haswell-wsl", "/home/blu/projects/homelab2")
-LISTED = {"main", BRANCH, "haswell-wsl-deploys3", "chikuwa-deploys1"}
+LISTED = {"main", BRANCH, "work/haswell-wsl/3", "work/chikuwa/1"}
 
 
 def lineage_line(top: str, *, by: tuple[str, str] = OTHER,
                  pending: tuple[str, str | None] | None = (BRANCH, BASE), announce: str = "",
-                 others: tuple[str, ...] = ("chikuwa-deploys1",), at: float = 1e6,
+                 others: tuple[str, ...] = ("work/chikuwa/1",), at: float = 1e6,
                  key: str = "") -> str:
     own = pending[0] if pending else BRANCH
     doc = switch.lineage_doc(
@@ -362,13 +362,13 @@ def lineage_cases() -> None:
     """The drift core (nixos/pkgs/switch-guard/src/plan/drift.rs, whose own
     tests hold the cases) on the lineages lineage_doc writes."""
     line, died = report(lineage_line(NEW))
-    assert line.startswith("side1: refused: runs an increment of haswell-wsl-deploys2 deployed by "
+    assert line.startswith("side1: refused: runs an increment of work/haswell-wsl/2 deployed by "
                            "haswell-wsl:/home/blu/projects/homelab2 (pid 4242) at 13:46"), line
     assert f"origin/{BRANCH} is still at {BASE[:12]}" in line, line
     assert died.startswith("nothing switched or committed: side1 runs another") and \
         "--reset side1" in died, died
     line, died = report(lineage_line(NEW), reached=False)
-    assert line.startswith("side1: left alone: runs an increment of haswell-wsl-deploys2") and \
+    assert line.startswith("side1: left alone: runs an increment of work/haswell-wsl/2") and \
         line.endswith("this checkout's work does not reach it") and not died, (line, died)
     line, died = report(lineage_line(NEW), tips={BRANCH: LANDED})
     assert line.startswith("side1: will switch (catch-up: ") and not died, (line, died)
@@ -404,8 +404,8 @@ def lineage_cases() -> None:
     assert line.startswith("side1: left alone: "), line
     line, _ = report(lineage_line(NEW), reset=True, named=False)
     assert line.endswith("taken over by --reset"), line
-    line, _ = report(lineage_line(NEW, pending=None, others=("M3-Air-deploys9",)))
-    assert "side1: refused: runs work of M3-Air-deploys9" in line, line
+    line, _ = report(lineage_line(NEW, pending=None, others=("work/M3-Air/9",)))
+    assert "side1: refused: runs work of work/M3-Air/9" in line, line
     assert report(lineage_line(NEW, by=ME))[0].startswith("side1: will switch (this-branch: ")
     assert report("") == ("side1: will switch", "")
     assert report("{not json") == ("side1: will switch", "")
@@ -426,19 +426,19 @@ def lineage_cases() -> None:
             switch.current_branch = lambda: branch
             r = {"HEAD": head, f"refs/remotes/origin/{branch}": origin, "refs/remotes/origin/main": "m"}
             switch.rev = lambda ref: r.get(ref)
-            return switch.lineage_record("u", [("chikuwa-deploys1", "c")], snap)["pending"]
+            return switch.lineage_record("u", [("work/chikuwa/1", "c")], snap)["pending"]
 
-        assert record("haswell-wsl-deploys3", "h", "h", "") is None
-        assert record("haswell-wsl-deploys3", "h", "h", "s") == {
-            "branch": "haswell-wsl-deploys3", "base": "h", "head": "s"}
-        switch.current_branch = lambda: "haswell-wsl-deploys3"
+        assert record("work/haswell-wsl/3", "h", "h", "") is None
+        assert record("work/haswell-wsl/3", "h", "h", "s") == {
+            "branch": "work/haswell-wsl/3", "base": "h", "head": "s"}
+        switch.current_branch = lambda: "work/haswell-wsl/3"
         assert switch.lineage_record("u", [], "s", "p")["pending"] == {
-            "branch": "haswell-wsl-deploys3", "base": "h", "head": "s", "announce": "p",
-            "key": "haswell-wsl-deploys3"}
+            "branch": "work/haswell-wsl/3", "base": "h", "head": "s", "announce": "p",
+            "key": "work/haswell-wsl/3"}
         assert switch.lineage_record("u", [], "s", "p", "k")["pending"] == {
-            "branch": "haswell-wsl-deploys3", "base": "h", "head": "s", "announce": "p", "key": "k"}
-        assert record("haswell-wsl-deploys3", "h2", "h", "") == {
-            "branch": "haswell-wsl-deploys3", "base": "h", "head": "h2"}
+            "branch": "work/haswell-wsl/3", "base": "h", "head": "s", "announce": "p", "key": "k"}
+        assert record("work/haswell-wsl/3", "h2", "h", "") == {
+            "branch": "work/haswell-wsl/3", "base": "h", "head": "h2"}
         assert record("main", "lock", "m", "") == {"branch": "main", "base": "m", "head": "lock"}
         # Detached at origin/main counts as main's; a hand commit there is pending.
         assert record(None, "m", None, "") is None
@@ -560,7 +560,7 @@ def reach_cases(d: Path) -> None:
     what each target's lineage recorded of the branch."""
     scratch_env()
     origin, co = d / "origin.git", d / "homelab9"
-    wb = "tester-deploys9"
+    wb = "work/tester/9"
     sh(d, "init", "--quiet", "--bare", "-b", "main", str(origin))
     sh(d, "clone", "--quiet", str(origin), str(co))
     lock = {"version": 7, "root": "root", "nodes": {
@@ -620,7 +620,7 @@ def reach_cases(d: Path) -> None:
         # one at HEAD empties it, an unknown or foreign one is ignored.
         assert reached({"a": lineage(**{wb: c_x}), "b": lineage(**{wb: c_q})}) == {"a"}
         assert reached({"a": lineage(**{wb: c_q}), "b": lineage(**{wb: c_q})}) == set()
-        assert reached({"a": lineage(**{wb: "f" * 40}), "b": lineage(**{"other-deploys1": c_q})}) == {"a", "b"}
+        assert reached({"a": lineage(**{wb: "f" * 40}), "b": lineage(**{"work/other/1": c_q})}) == {"a", "b"}
         assert reached({"a": "", "b": "{not json"}) == {"a", "b"}
         # A file moved out of a directory a target reads whole changes that
         # target, though the move lists no path it reads any more.
@@ -678,10 +678,10 @@ def git_cases(d: Path) -> None:
         raise AssertionError("did not die")
 
     origin, seed, co = d / "origin.git", d / "seed", d / "homelab9"
-    wb = "tester-deploys9"
+    wb = "work/tester/9"
     sh(d, "init", "--quiet", "--bare", "-b", "main", str(origin))
     sh(d, "clone", "--quiet", str(origin), str(seed))
-    put(seed, "deploy-branches", f"{wb}*\nother-deploys1\n")
+    put(seed, "deploy-branches", f"{wb}*\nwork/other/1\n")
     put(seed, "a.txt", "one\ntwo\nthree\n", "seed")
     sh(seed, "push", "--quiet", "origin", "HEAD:main")
     sh(d, "clone", "--quiet", str(origin), str(co))
@@ -733,10 +733,10 @@ def git_cases(d: Path) -> None:
         sh(co, "commit", "--quiet", "-m", "b")
 
         # The union: another branch merged, COMMIT_MSG.md dropped.
-        sh(seed, "switch", "--quiet", "-c", "other-deploys1")
+        sh(seed, "switch", "--quiet", "-c", "work/other/1")
         put(seed, "o.txt", "other\n", "other")
         put(seed, "COMMIT_MSG.md", "theirs\n", "their msg")
-        sh(seed, "push", "--quiet", "origin", "other-deploys1")
+        sh(seed, "push", "--quiet", "origin", "work/other/1")
         sh(co, "fetch", "--quiet")
         fetched: Future[subprocess.CompletedProcess[str]] = Future()
         fetched.set_result(subprocess.CompletedProcess([], 0))
@@ -745,8 +745,8 @@ def git_cases(d: Path) -> None:
 
         def stage(wt: str, union: str, listed: list[str], branches: list[tuple[str, str]]) -> bool:
             assert sh(Path(wt), "rev-parse", "HEAD") == union
-            assert listed == ["other-deploys1", f"{wb}*"], listed
-            assert [b for b, _ in branches] == ["other-deploys1"], branches
+            assert listed == ["work/other/1", f"{wb}*"], listed
+            assert [b for b, _ in branches] == ["work/other/1"], branches
             staged.append(sorted(p.name for p in Path(wt).iterdir()))
             return False
 
@@ -764,7 +764,7 @@ def git_cases(d: Path) -> None:
             return done
 
         done = union()
-        assert done["branches"] == [["other-deploys1", proc.rev("refs/remotes/origin/other-deploys1")]], done
+        assert done["branches"] == [["work/other/1", proc.rev("refs/remotes/origin/work/other/1")]], done
         assert sh(co, "rev-parse", f"{done['union']}^") == proc.rev("refs/remotes/origin/main")
         assert staged == [[".git", "a.txt", "b.txt", "deploy-branches", "o.txt"]], staged
         # A fetch that moved origin/main redoes the union on the refreshed
@@ -775,10 +775,10 @@ def git_cases(d: Path) -> None:
 
         # A conflict mergiraf cannot solve names the branch's checkout.
         put(seed, "b.txt", "theirs\n", "their b")
-        sh(seed, "push", "--quiet", "origin", "other-deploys1")
+        sh(seed, "push", "--quiet", "origin", "work/other/1")
         sh(co, "fetch", "--quiet")
         err = dies(union)
-        assert "cannot union work branch other-deploys1;" in err, err
+        assert "cannot union work branch work/other/1;" in err, err
         assert "\n  b.txt\n" in err, err
 
         # A sync from main: main fast-forwarded, the work branch rebased
@@ -797,33 +797,33 @@ def git_cases(d: Path) -> None:
         # branch's tip.  Nothing of its own, so a pull leaves it alone...
         left = (True, "detached HEAD left as is: nothing of its own, its commits are already on origin")
         rv = co / "worktrees" / "review"
-        sh(co, "worktree", "add", "--quiet", "--detach", str(rv), "origin/other-deploys1")
+        sh(co, "worktree", "add", "--quiet", "--detach", str(rv), "origin/work/other/1")
         assert (got := checkout.update_checkout(rv)) == left, got
         # ...also once that branch was rebased, the old tip forgotten (its
         # commits patch-equivalent)...
-        sh(seed, "switch", "--quiet", "other-deploys1")
+        sh(seed, "switch", "--quiet", "work/other/1")
         sh(seed, "rebase", "--quiet", "origin/main")
-        sh(seed, "push", "--quiet", "--force", "origin", "other-deploys1")
-        sh(co, "reflog", "expire", "--expire=all", "refs/remotes/origin/other-deploys1")
+        sh(seed, "push", "--quiet", "--force", "origin", "work/other/1")
+        sh(co, "reflog", "expire", "--expire=all", "refs/remotes/origin/work/other/1")
         sh(co, "fetch", "--quiet")
-        assert sh(rv, "rev-parse", "HEAD") != proc.rev("refs/remotes/origin/other-deploys1")
+        assert sh(rv, "rev-parse", "HEAD") != proc.rev("refs/remotes/origin/work/other/1")
         assert (got := checkout.update_checkout(rv)) == left, got
         # ...or at that tip while the branch moved on and was landed (the
         # remote-tracking ref's reflog remembers the tip as once pushed)...
-        sh(rv, "checkout", "--quiet", "--detach", "origin/other-deploys1")
+        sh(rv, "checkout", "--quiet", "--detach", "origin/work/other/1")
         put(seed, "o.txt", "other, more\n", "more")
-        sh(seed, "push", "--quiet", "origin", "other-deploys1")
+        sh(seed, "push", "--quiet", "origin", "work/other/1")
         sh(co, "fetch", "--quiet")
         more = sh(seed, "rev-parse", "HEAD")
         sh(seed, "rm", "--quiet", "COMMIT_MSG.md")
         sh(seed, "commit", "--quiet", "-m", "squashed")
         landed = sh(seed, "commit-tree", "HEAD^{tree}", "-p", "origin/main", "-m", "squashed")
-        sh(seed, "push", "--quiet", "--force", "origin", f"{landed}:main", f"{landed}:other-deploys1")
+        sh(seed, "push", "--quiet", "--force", "origin", f"{landed}:main", f"{landed}:work/other/1")
         sh(co, "fetch", "--quiet")
         assert (got := checkout.update_checkout(rv)) == left, got
         # ...or at the landed tip itself, forgotten (its tree less
         # COMMIT_MSG.md is main's)...
-        sh(co, "reflog", "expire", "--expire=all", "refs/remotes/origin/other-deploys1")
+        sh(co, "reflog", "expire", "--expire=all", "refs/remotes/origin/work/other/1")
         sh(rv, "checkout", "--quiet", "--detach", more)
         assert (got := checkout.update_checkout(rv)) == left, got
         # ...but a commit of its own strands.
@@ -1065,10 +1065,10 @@ def announce_cases(d: Path) -> None:
     what it leaves behind."""
     scratch_env()
     origin, seed, co = d / "origin.git", d / "seed", d / "homelab9"
-    wb = "tester-deploys9"
+    wb = "work/tester/9"
     sh(d, "init", "--quiet", "--bare", "-b", "main", str(origin))
     sh(d, "clone", "--quiet", str(origin), str(seed))
-    put(seed, "deploy-branches", f"{wb}*\nother-deploys1\n")
+    put(seed, "deploy-branches", f"{wb}*\nwork/other/1\n")
     put(seed, "a.txt", "one\n", "seed")
     sh(seed, "push", "--quiet", "origin", "HEAD:main")
     sh(d, "clone", "--quiet", str(origin), str(co))
@@ -1256,7 +1256,7 @@ def annex_cases(d: Path) -> None:
     config.set_cfg(config.parse(f'flake = "nixos"\n[annexes.dep]\nrepo = "{ax_repo}"\n'))
 
     origin, seed, co = d / "origin.git", d / "seed", d / "homelab9"
-    wb = "tester-deploys9"
+    wb = "work/tester/9"
     v1 = sh(ax_seed, "rev-parse", "HEAD")
     lock = {"nodes": {"dep": {"flake": False, "locked": locked(v1, "refs/heads/main"),
                               "original": {"type": "git", "url": str(ax_origin)}},
@@ -1264,7 +1264,7 @@ def annex_cases(d: Path) -> None:
             "root": "root", "version": 7}
     sh(d, "init", "--quiet", "--bare", "-b", "main", str(origin))
     sh(d, "clone", "--quiet", str(origin), str(seed))
-    put(seed, "deploy-branches", "tester-deploys*\n")
+    put(seed, "deploy-branches", "work/tester/*\n")
     put(seed, ".gitignore", "annexes/\n")
     put(seed, "nixos/flake.lock", proc.dump_json(lock) + "\n", "seed")
     sh(seed, "push", "--quiet", "origin", "HEAD:main")
@@ -1354,7 +1354,7 @@ def annex_cases(d: Path) -> None:
         # Another checkout relocks the annex on its own branch: the union
         # merges the two annex branches, pushed as the annex origin's
         # refs/nixconvoy/union/dep, and locks the node there.
-        co8, wb8 = d / "homelab8", "tester-deploys8"
+        co8, wb8 = d / "homelab8", "work/tester/8"
         sh(d, "clone", "--quiet", str(origin), str(co8))
         os.chdir(co8)
         with contextlib.redirect_stdout(io.StringIO()):
@@ -1664,7 +1664,7 @@ def open_cases(d: Path) -> None:
     origin, seed, co = d / "origin.git", d / "seed", d / "homelab9"
     sh(d, "init", "--quiet", "--bare", "-b", "main", str(origin))
     sh(d, "clone", "--quiet", str(origin), str(seed))
-    put(seed, "deploy-branches", "tester-deploys*\n")
+    put(seed, "deploy-branches", "work/tester/*\n")
     put(seed, ".gitignore", "worktrees/\nannexes/\n")
     put(seed, "a.txt", "one\n", "seed")
     sh(seed, "push", "--quiet", "origin", "HEAD:main")
@@ -1673,12 +1673,12 @@ def open_cases(d: Path) -> None:
     os.chdir(co)
     try:
         with contextlib.redirect_stdout(io.StringIO()):
-            checkout.ensure_on_work_branch("tester-deploys9")
+            checkout.ensure_on_work_branch("work/tester/9")
             w = commands.open_worktree("task", "claude agent task (pid 1 start 2) 3.4")
         assert w == co / "worktrees/task" and checkout.branch_at(w) == "worktree-task"
         assert sh(w, "rev-parse", "HEAD") == sh(co, "rev-parse", "origin/main")
         assert checkout.worktree_lock(w) == "claude agent task (pid 1 start 2) 3.4"
-        assert checkout.identity_of(w.resolve(), "worktree-task") == checkout.Checkout("sub", "tester-deploys9-task")
+        assert checkout.identity_of(w.resolve(), "worktree-task") == checkout.Checkout("sub", "work/tester/9-task")
         assert checkout.sub_parent(w.resolve()) == co.resolve() and checkout.sub_parent(co.resolve()) is None
         # Nested deeper, still this checkout's; a worktree of another
         # repository nested here (an annex) is nobody's subagent.
@@ -1713,14 +1713,14 @@ def open_cases(d: Path) -> None:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             five = commands.open_checkout(d / "homelab5", None)
             one = commands.open_checkout(d / "other", None)
-        assert five == d / "homelab5" and checkout.branch_at(five) == "tester-deploys5"
-        assert one == d / "other" and checkout.branch_at(one) == "tester-deploys1"
+        assert five == d / "homelab5" and checkout.branch_at(five) == "work/tester/5"
+        assert one == d / "other" and checkout.branch_at(one) == "work/tester/1"
         assert sh(five, "rev-parse", "HEAD") == sh(co, "rev-parse", "origin/main")
-        assert sh(five, "config", "branch.tester-deploys5.merge") == "refs/heads/main"
-        assert checkout.identity_of(five.resolve(), "tester-deploys5") == checkout.Checkout("agent", "tester-deploys5")
+        assert sh(five, "config", "branch.work/tester/5.merge") == "refs/heads/main"
+        assert checkout.identity_of(five.resolve(), "work/tester/5") == checkout.Checkout("agent", "work/tester/5")
         assert "exists already" in dies(lambda: commands.open_checkout(d / "homelab5", None))
         assert "nested" in dies(lambda: commands.open_checkout(co / "inside", None))
-        assert "not a work branch" in dies(lambda: commands.open_checkout(d / "x", "other-deploys1"))
+        assert "not a work branch" in dies(lambda: commands.open_checkout(d / "x", "work/other/1"))
         # Removed once it holds nothing of its own, its branch with it.
         put(five, "b.txt", "b\n")
         assert "holds edits" in dies(lambda: commands.close_checkout(d / "homelab5"))
@@ -1728,7 +1728,7 @@ def open_cases(d: Path) -> None:
             commands.close_checkout(d / "homelab5", force=True)
             commands.close_checkout(d / "other")
         assert not five.exists() and not one.exists()
-        assert not sh(co, "branch", "--list", "tester-deploys5", "tester-deploys1")
+        assert not sh(co, "branch", "--list", "work/tester/5", "work/tester/1")
         assert "no worktree of this repository" in dies(lambda: commands.close_checkout(foreign))
         os.chdir(w)
         assert "primary worktree" in dies(lambda: commands.close_checkout(co))
@@ -1738,10 +1738,10 @@ def open_cases(d: Path) -> None:
         # under the parent's COMMIT_MSG.md; every branch resets onto it.
         put(co, "p.txt", "parent\n")
         put(co, "COMMIT_MSG.md", "the union\n- the sub's piece\n", "parent increment")
-        sh(co, "push", "--quiet", "origin", "tester-deploys9")
-        sh(w, "switch", "--quiet", "-c", "tester-deploys9-task")
+        sh(co, "push", "--quiet", "origin", "work/tester/9")
+        sh(w, "switch", "--quiet", "-c", "work/tester/9-task")
         put(w, "s.txt", "sub\n", "sub increment")
-        sh(w, "push", "--quiet", "origin", "tester-deploys9-task")
+        sh(w, "push", "--quiet", "origin", "work/tester/9-task")
         put(w, "n.txt", "unstaged\n")
         sh(w, "reset", "--quiet", "n.txt")
         with contextlib.redirect_stdout(io.StringIO()):
@@ -1749,10 +1749,10 @@ def open_cases(d: Path) -> None:
         main = sh(co, "rev-parse", "origin/main")
         assert sh(co, "ls-tree", "--name-only", main).split() == [".gitignore", "a.txt", "deploy-branches", "p.txt", "s.txt"]
         assert sh(co, "log", "-1", "--format=%B", main).strip() == "the union\n\n- the sub's piece"
-        assert sh(co, "rev-parse", "HEAD") == main and checkout.branch_at(co) == "tester-deploys9"
-        assert sh(w, "rev-parse", "HEAD") == main and checkout.branch_at(w) == "tester-deploys9-task"
-        assert sh(co, "rev-parse", "origin/tester-deploys9") == main
-        assert sh(co, "rev-parse", "origin/tester-deploys9-task") == main
+        assert sh(co, "rev-parse", "HEAD") == main and checkout.branch_at(co) == "work/tester/9"
+        assert sh(w, "rev-parse", "HEAD") == main and checkout.branch_at(w) == "work/tester/9-task"
+        assert sh(co, "rev-parse", "origin/work/tester/9") == main
+        assert sh(co, "rev-parse", "origin/work/tester/9-task") == main
         assert not sh(co, "status", "--porcelain") and sh(w, "status", "--porcelain") == "?? n.txt"
         assert f"has no {config.MSG_FILE}" in dies(commands.land_union)  # consumed by the landing
         with contextlib.redirect_stdout(io.StringIO()):

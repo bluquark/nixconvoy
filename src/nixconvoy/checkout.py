@@ -78,9 +78,9 @@ def allowed_branches() -> set[str]:
         die(f"{BRANCHES_FILE} is missing from the repo root: list the work branches "
             f"(patterns, `*` the wildcard) one per line, e.g. `{this_prefix()}*`")
     pats = {ln.strip() for ln in lines if ln.strip() and not ln.lstrip().startswith("#")}
-    bad = [p for p in pats if not re.fullmatch(r"[\w.*-]+", p)]
+    bad = [p for p in pats if not re.fullmatch(r"[\w.*/-]+", p)]
     if bad:
-        die(f"{BRANCHES_FILE}: a pattern may hold letters, digits, '.', '-', '_' and '*' "
+        die(f"{BRANCHES_FILE}: a pattern may hold letters, digits, '.', '-', '_', '/' and '*' "
             f"only: {', '.join(bad)}")
     return pats
 
@@ -180,7 +180,7 @@ def identity_of(here: Path, cur: str | None, pats: set[str] | None = None) -> Ch
     """What the checkout at `here` with `cur` checked out is: on one of
     this machine's listed work branches it owns that branch (a subagent's
     when it is nested in another checkout); a subagent worktree on
-    any other branch owns <parent's work branch>-<name> (<branch_prefix>-<name>
+    any other branch owns <parent's work branch>-<name> (<branch_prefix>main-<name>
     under the main checkout); a checkout that owned a work branch before
     (its note) still does; anything else is the main checkout, with no work
     branch of its own."""
@@ -189,7 +189,7 @@ def identity_of(here: Path, cur: str | None, pats: set[str] | None = None) -> Ch
         return Checkout("sub" if parent is not None else "agent", cur)
     if parent is not None:
         pb = branch_at(parent) or noted_branch(parent)
-        base = pb if pb and owned(pb, pats) else this_prefix()
+        base = pb if pb and owned(pb, pats) else this_prefix() + "main"
         return Checkout("sub", f"{base}-{here.name}")
     noted = noted_branch(here)
     if noted and owned(noted, pats):

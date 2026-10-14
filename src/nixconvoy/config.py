@@ -46,7 +46,7 @@ class Config:
     ssh_template: str = "{target}"
     # A subagent worktree of the main checkout owns "<prefix>-<name>";
     # {machine} is this machine's hostname.
-    branch_prefix: str = "{machine}-deploys"
+    branch_prefix: str = "work/{machine}/"
     # Where `open <name>` puts a task worktree, relative to the checkout
     # (gitignored: a nested worktree); any worktree nested in a checkout
     # is one of its task worktrees, wherever it was made.
@@ -214,7 +214,7 @@ def parse(text: str) -> Config:
         hosts_dir=_str(doc, "hosts_dir", CONFIG_FILE),
         system=_str(doc, "system", CONFIG_FILE, "x86_64-linux"),
         ssh_template=_template(doc, "ssh_address", "{target}", "target"),
-        branch_prefix=_template(doc, "branch_prefix", "{machine}-deploys", "machine"),
+        branch_prefix=_template(doc, "branch_prefix", "work/{machine}/", "machine"),
         worktrees=worktrees,
         precheck_attr=_str(pre, "attr", "precheck"),
         precheck_globs=_strs(pre, "globs", "precheck"),

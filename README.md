@@ -157,8 +157,9 @@ flake = "nixos"              # directory holding flake.nix (default ".")
 hosts_dir = "nixos/hosts"    # default "<flake>/hosts"
 system = "x86_64-linux"
 ssh_address = "me@{target}.lan"   # ssh address template (default "{target}"); the builder's too
-branch_prefix = "{machine}-deploys"   # {machine}: this machine's hostname; a worktree under
-                                      # a plain checkout owns "<prefix>-<name>"
+branch_prefix = "work/{machine}/"    # {machine}: this machine's hostname: a checkout owns
+                                     # "<prefix><N>", a task worktree "<checkout's branch>-<name>"
+                                     # ("<prefix>main-<name>" under a plain checkout)
 worktrees = "worktrees"      # where `open <name>` puts a task worktree, under the checkout (gitignored)
 
 [precheck]                   # a flake check proven before any build

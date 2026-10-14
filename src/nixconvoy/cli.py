@@ -14,7 +14,7 @@ Model:
     main checkout: it deploys main plus the pushed work branches and owns
     nothing.  A subagent (task) worktree - one nested in a checkout,
     <checkout>/<worktrees>/<name> by `open` - owns <parent's branch>-<name>
-    (<branch_prefix>-<name> under a main checkout) from its first deploy.
+    (<branch_prefix>main-<name> under a main checkout) from its first deploy.
     After a land or abandon a checkout stays on its work branch, reset onto
     origin/main.
   - COMMIT_MSG.md at a work branch's root describes the branch's work since
@@ -238,7 +238,7 @@ subagent worktree wherever it was made.  <path> (with a /): an agent
 checkout beside the others - a worktree of this repository at that path,
 outside every checkout, on a work branch of this machine's: --branch, else
 <branch_prefix><N> for the digits the path's name ends with (homelab5 ->
-...-deploys5) when that is listed and free, else the first listed free
+work/<machine>/5) when that is listed and free, else the first listed free
 number; origin's copy of the branch when it has one (a checkout removed
 before), else new off origin's default branch.  --annex:
 the flake input <input> developed in place: a worktree of its repository
