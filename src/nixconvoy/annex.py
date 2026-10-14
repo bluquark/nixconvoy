@@ -1227,6 +1227,8 @@ def notes(d: Path) -> list[str]:
                      cwd=str(ax.dir)) or "0") if default else "?"
         n_staged = len(out(["git", "diff", "--cached", "--name-only"], cwd=str(ax.dir)).splitlines())
         n_unstaged = len(out(["git", "diff", "--name-only"], cwd=str(ax.dir)).splitlines())
+        n_untracked = len(out(["git", "ls-files", "--others", "--exclude-standard"],
+                              cwd=str(ax.dir)).splitlines())
         parts = [f"annex {ax.name}"]
         if ahead != "0":
             parts.append(f"+{ahead}")
@@ -1234,6 +1236,8 @@ def notes(d: Path) -> list[str]:
             parts.append(f"staged {n_staged}")
         if n_unstaged:
             parts.append(f"unstaged {n_unstaged}")
+        if n_untracked:
+            parts.append(f"untracked {n_untracked}")
         cur = branch_at(ax.dir)
         if cur is None:
             parts.append("detached!")

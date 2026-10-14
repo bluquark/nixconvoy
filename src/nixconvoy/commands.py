@@ -878,7 +878,7 @@ def status() -> None:
     def line(d: Path) -> tuple[str, bool]:
         """The checkout's state after its name, and whether it is quiet -
         nothing of its own, nothing pending, no agent at work - and so
-        rendered gray as a whole."""
+        rendered gray as a whole.  An annex holding anything keeps it lit."""
         cur = g(d, "symbolic-ref", "--short", "-q", "HEAD") or None
         head = g(d, "rev-parse", "HEAD")
         ident = identity_of(d, cur, pats)
@@ -906,7 +906,8 @@ def status() -> None:
             live = alive is not False
         op = git_op_in_progress(d)
         deploying = deploy_running(d)
-        quiet = not own and not any(counts.values()) and not live and op is None and not deploying
+        quiet = (not own and not any(counts.values()) and not live and op is None and not deploying
+                 and not annex.own(d))
         p = (lambda text, _style: text) if quiet else paint
         if cur is None:
             where = (p("detached at origin/main", "green") if head == main
@@ -990,9 +991,7 @@ def status() -> None:
             print(f"  {paint(e, 'yellow')}")
     repos = annex.configured()
     if repos:
-        print(paint("annexes (nixconvoy.toml, `nixconvoy open --annex <input>`):", "dim"))
-        for name, repo in sorted(repos.items()):
-            print(f"  {paint(name, 'bold')}: {repo}")
+        print(paint(f"annexes: {', '.join(sorted(repos))} (nixconvoy open --annex <input>)", "dim"))
     stray = annex.repo_notes()
     if stray:
         print(paint("annex repositories edited outside any annex:", "dim"))

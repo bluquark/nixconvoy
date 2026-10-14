@@ -365,6 +365,8 @@ from .targets import ALLOW_FLAG
 # of, ... repeated.  USAGE_NOTES follows it under --help only.
 SYNOPSIS = """\
 apply [-m <msg>] [--reset] [--allow <protection> ...] [--dry-activate] [<target> | @<tag> ...]
+review [<worktree> | <branch> ...] [<diff-arg> ...]
+review --union [<diff-arg> ...]
 land [<worktree> ...]
 land (--union | --annex <input>)
 abandon [--apply-now [--allow <protection> ...]] [<worktree> ...]
@@ -380,8 +382,6 @@ close --after <pid>
 close --stopped <pid> < <hook-input>
 pull
 status
-review [<worktree> | <branch> ...] [<diff-arg> ...]
-review --union [<diff-arg> ...]
 """
 USAGE_NOTES = """\
 With no targets named, every target whose running system differs from the union
@@ -397,13 +397,21 @@ subagent worktrees as one unit; a path (with a /) names an agent checkout."""
 
 def usage(stream: IO[str] | None = None) -> str:
     """The synopsis, colored when `stream` (stdout) is a terminal: the
-    subcommand bold, flags yellow, values cyan."""
+    subcommand bold, flags yellow and the value a flag takes cyan,
+    positional values green."""
     paint = painter(stream)
+
+    def color(m: re.Match[str]) -> str:
+        if m.group("flag"):
+            return paint(m.group("flag"), "yellow") + (
+                " " + paint(m.group("fval"), "cyan") if m.group("fval") else "")
+        return paint(m.group("pos"), "green")
+
     lines = []
     for form in SYNOPSIS.splitlines():
         sub, _, rest = form.partition(" ")
-        rest = re.sub(r"<[\w-]+>", lambda m: paint(m.group(), "cyan"), rest)
-        rest = re.sub(r"(?<![\w<])--?\w[\w-]*", lambda m: paint(m.group(), "yellow"), rest)
+        rest = re.sub(r"(?P<flag>(?<![\w<])--?\w[\w-]*)(?: (?P<fval><[\w-]+>))?|(?P<pos>@?<[\w-]+>)",
+                      color, rest)
         lines.append(f"{TOOL} {paint(sub, 'bold')} {rest}".rstrip())
     lines[0] = "usage: " + lines[0]
     return "\n".join("       " + ln if i else ln for i, ln in enumerate(lines))
