@@ -221,23 +221,22 @@ nixconvoy.switchLast = true;                # the router: switched alone, after 
 ## Commands
 
 ```
-nixconvoy apply [--reset] -m <msg> [<target> | @<tag> ...]   deploy the staged increment
-nixconvoy apply [--reset] --catch-up [<target> | @<tag> ...]   nothing staged: converge the targets on the union as it is
+nixconvoy apply -m <msg> [--reset] [<target> | @<tag> ...]   deploy the staged increment
+nixconvoy apply --catch-up [--reset] [<target> | @<tag> ...]   nothing staged: converge the targets on the union as it is
 nixconvoy apply --dry-activate [<target> | @<tag> ...]   build and copy, then only report what each switch would do
 nixconvoy land [-m <msg>] [--release] [<worktree> ...]   land the work branch on main (-m: under <msg>, for a branch without COMMIT_MSG.md; --release: targets its increments held back included)
 nixconvoy abandon [--apply-now] [<worktree> ...]   discard it (--apply-now: and deploy, reverting it now)
-nixconvoy land [-m <msg>] --union | abandon [--apply-now] --union   this checkout and its task worktrees as one unit (one main commit, the subs' COMMIT_MSG.md appended)
-nixconvoy close [--force] [<worktree> ...]   remove task worktrees holding nothing of their own (--force: whatever they hold)
-nixconvoy close [--force] <path> ...   remove an agent checkout likewise, with its work branch
-nixconvoy close [--force] --submodule <input>   remove a submodule worktree likewise
+nixconvoy land --union [-m <msg>] | abandon --union [--apply-now]   this checkout and its task worktrees as one unit (one main commit, the subs' COMMIT_MSG.md appended)
+nixconvoy close [<worktree> ... | <path> ...] [--force]   remove task worktrees, or agent checkouts by path (with their work branch), holding nothing of their own (--force: whatever they hold)
+nixconvoy close --submodule <input> [--force]   remove a submodule worktree likewise
 nixconvoy pull                 rebase every checkout on this machine onto origin/main
 nixconvoy status               every checkout on this machine, and origin's other branches
 nixconvoy review [<worktree> | <branch> ...] [<diff-arg> ...]   the pending landing: COMMIT_MSG.md, then the diff
 nixconvoy review --union [<diff-arg> ...]   the checkout's and its task worktrees' together
-nixconvoy open [--lock <reason>] <name>   a task worktree <checkout>/<worktrees>/<name> (what the plugin's create hook runs)
-nixconvoy open [--branch <work-branch>] <path>   an agent checkout at that path on a work branch of this machine's
+nixconvoy open <name> [--lock <reason>]   a task worktree <checkout>/<worktrees>/<name> (what the plugin's create hook runs)
+nixconvoy open <path> [--branch <work-branch>]   an agent checkout at that path on a work branch of this machine's
 nixconvoy open --submodule <input>   the flake input developed in place under this checkout (see Submodules)
-nixconvoy land [-m <msg>] --submodule <input> | abandon --submodule <input>   one submodule alone, ahead of the checkout's landing (-m: under <msg>, for a submodule without its own COMMIT_MSG.md)
+nixconvoy land --submodule <input> [-m <msg>] | abandon --submodule <input>   one submodule alone, ahead of the checkout's landing (-m: under <msg>, for a submodule without its own COMMIT_MSG.md)
 ```
 
 `nixconvoy --help` and the docstring of `src/nixconvoy/cli.py` describe each

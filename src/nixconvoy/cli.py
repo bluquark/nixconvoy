@@ -29,8 +29,8 @@ Model:
     crate's (nixconvoy-plan, nixconvoy-switch: Sans-I/O cores); this program
     performs the git, eval, build and ssh they ask for.
 
-Deploy (nixconvoy apply [--reset] [--allow <protection> ...] -m <msg> | --catch-up
-         [<target> | @<tag> ...]; apply [...] --dry-activate [...]): -m describes
+Deploy (nixconvoy apply -m <msg> | --catch-up [--reset] [--allow <protection> ...]
+         [<target> | @<tag> ...]; apply --dry-activate [...]): -m describes
   the staged increment the deploy commits; --catch-up, with nothing
   staged, converges the targets on the union as it is (the nightlies', and
   a main checkout's, deploy).
@@ -388,23 +388,22 @@ from .targets import ALLOW_FLAG
 # The synopsis: one line per form.  <x> a value, [x] optional, (a | b) one
 # of, ... repeated.  USAGE_NOTES follows it under --help only.
 SYNOPSIS = """\
-apply [--reset] [--allow <protection> ...] -m <msg> [<target> | @<tag> ...]
-apply [--reset] [--allow <protection> ...] --catch-up [<target> | @<tag> ...]
-apply [--reset] [--allow <protection> ...] --dry-activate [<target> | @<tag> ...]
+apply -m <msg> [--reset] [--allow <protection> ...] [<target> | @<tag> ...]
+apply --catch-up [--reset] [--allow <protection> ...] [<target> | @<tag> ...]
+apply --dry-activate [--reset] [--allow <protection> ...] [<target> | @<tag> ...]
 review [<worktree> | <branch> ...] [<diff-arg> ...]
 review --union [<diff-arg> ...]
 land [-m <msg>] [--release] [<worktree> ...]
-land [-m <msg>] [--release] --union
-land [-m <msg>] --submodule <input>
+land --union [-m <msg>] [--release]
+land --submodule <input> [-m <msg>]
 abandon [--apply-now [--allow <protection> ...]] [<worktree> ...]
-abandon [--apply-now [--allow <protection> ...]] --union
+abandon --union [--apply-now [--allow <protection> ...]]
 abandon --submodule <input>
-open [--lock <reason>] <name>
-open [--branch <work-branch>] <path>
+open <name> [--lock <reason>]
+open <path> [--branch <work-branch>]
 open --submodule <input>
-close [--force] [<worktree> ...]
-close [--force] <path> ...
-close [--force] --submodule <input>
+close [<worktree> ... | <path> ...] [--force]
+close --submodule <input> [--force]
 close --after <pid>
 close --stopped <pid> < <hook-input>
 pull
