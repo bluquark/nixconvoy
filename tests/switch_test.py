@@ -1608,7 +1608,7 @@ def submodule_cases(d: Path) -> None:
             assert submodule.catch_up(co, wb) == []
         assert sh(ax, "rev-parse", "HEAD") == new_main
         assert (ax / "tool.py").read_text() == "edited\n" and not sh(ax, "diff", "--cached", "--name-only")
-        assert pinned() == pin_before
+        assert pin_before == dep_main and pinned() == new_main  # the pin follows the fast-forward
         assert not sh(dep_seed, "ls-remote", str(dep_origin), f"refs/heads/{wb}")
         sh(ax, "reset", "--quiet", "--hard", dep_main)
         (ax / "more.txt").write_text("mine\n")  # what the landing added

@@ -294,77 +294,66 @@ submodule named after the input (`git submodule add --name <input> <url>
 <path>`), take it in flake.nix as a relative path input
 (`inputs.<input>.url = "path:./<path from the flake directory>"`, so
 flake.lock names no rev: the gitlink in the tree is the pin) with
-`inputs.self.submodules = true`, so nix fetches it from the .gitmodules
-url at the pinned rev, and name its repository's checkout on this machine
-in `nixconvoy.toml` (`[submodules.<input>] repo = "..."`; its origin must
-be that url).  Never `git submodule update` it: that clones a second copy
-of the repository under .git/modules, which a worktree's removal deletes
-with any unpushed commit.  Then, from a checkout on a work branch:
+`inputs.self.submodules = true`, and name its repository's checkout on
+this machine in `nixconvoy.toml` (`[submodules.<input>] repo = "..."`;
+its origin must be the .gitmodules url).  nix reads a committed tree's
+submodules from that url at the pinned rev, so the rev must be pushed,
+and a checkout with uncommitted changes' from their directories, so a
+hand `nix` command there wants every submodule planted or the committed
+tree named (`git+file://<checkout>?rev=<HEAD>&dir=<flake dir>`); a
+deploy evaluates a clean worktree of the staged snapshot and needs
+neither.  A submodule's own flake gaining an input wants `nix flake
+lock` likewise, its inputs being locked in the parent's lock file.
+Never `git submodule update`: that clones a second copy under
+.git/modules, which a worktree's removal deletes with any unpushed
+commit.  From a checkout on a work branch:
 
-- **`nixconvoy open --submodule <input>`** plants a worktree of that
-  repository at the submodule's path, on a branch named after the
-  checkout's work branch, off the repository's default branch.  Work
-  there as in the checkout: stage what is ready to deploy.  A checkout
-  or subagent worktree that never opens it keeps the directory empty, as
-  git leaves an unpopulated submodule; the build needs nothing there.
+- **`open --submodule <input>`** plants a worktree of the repository at
+  the submodule's path, on a branch named after the checkout's work
+  branch, off the default branch; stage there what is ready to deploy.
+  A checkout that never opens it keeps the directory empty, as git
+  leaves an unpopulated submodule.
 - **A deploy carries it as a tree change.**  `apply` commits the
   worktree's staged state onto its branch with the `-m` message, pushes
-  it to the repository's origin and stages the gitlink on the pushed rev.
-  The increment then carries the submodule like any other edit: the
-  union, the eval memo and the lineage see a gitlink an input's path
-  reads.  Two work branches moving the same submodule meet in the union
-  as a gitlink conflict: the branches are merged in the repository (its
-  configured checkout, else a bare mirror under
-  `~/.cache/nixconvoy/submodules/`; mergiraf on the conflicts), the merge
-  pushed to the origin's `refs/nixconvoy/union/<input>/<sha>` and pinned
-  there - a derived value like the union commit, the same again on a
-  retry, and kept.  Two branches that conflict are a union conflict like
-  any other.  Once
-  one of them lands, every other checkout's catch-up (a deploy, `pull`,
-  the landing itself) brings its worktree onto the landed default branch
-  the way it brings the checkout onto main - fast-forwarded when it has
-  nothing of its own, rebased with its staged and unstaged state
-  otherwise, pushed and pinned - and a deploy refuses to pin a submodule
-  still behind that branch.  A rebase that is not clean is reported, the
-  worktree left as it was, to resolve by hand there.
-- **`land` lands the submodule first:** its tip merged onto the
-  repository's default branch (as the union merges it) and squashed there
-  as one commit (the `COMMIT_MSG.md` in the worktree, tracked or not,
-  else the checkout's), the default branch's commit pinned as a commit of
-  the work branch, then main.  It refuses a submodule whose HEAD is not
-  what the tree pins.  `abandon` discards it, resetting it onto the
-  default branch.  Either way the worktree stays, like the checkout;
-  `land --submodule <input>` and `abandon --submodule <input>` do it for
-  one submodule ahead of the checkout's own landing, the abandon putting
-  the pin back to origin/main's, staged for the next deploy to revert it
-  on the targets.  `close --submodule <input>` removes the worktree with
-  its branch, here and on its origin (the last tip kept under
-  `refs/nixconvoy/past/<branch>/<sha>` there: nix fetches a rev only
-  while a ref holds it, and a pushed work branch or deploy record goes on
-  pinning the tip a force push or removal left behind; a landing deletes
-  the past refs nothing pins any more), refusing what would lose work
-  unless `--force`; the directory stays, empty; a task worktree's
-  submodules go with it.
-- **How nix reads a submodule:** from a committed tree, the .gitmodules
-  url at the pinned rev, which must therefore be pushed; from a checkout
-  with uncommitted changes, the submodule's own directory at that rev,
-  which must therefore be a planted worktree - every submodule the flake
-  takes, or nix fails on the unpopulated one.  A deploy evaluates a clean
-  worktree of the staged snapshot after the push, so neither constrains
-  it; a hand `nix` command in a checkout with changes wants every
-  submodule planted (`open --submodule` each), or the committed tree
-  named instead (`git+file://<checkout>?rev=<HEAD>&dir=<flake dir>`).
-  A submodule's own flake
-  gaining an input wants `nix flake lock` likewise, since its inputs are
-  locked in the parent's lock file.
-- **Never work in the repository's own checkout.**  `status` lists the
-  submodules and flags edits there, and nixconvoy leaves a
-  `nixconvoy-submodule` marker in that repository's git dir, so a global
-  pre-commit hook can refuse an agent's commit on its default branch
-  there (`[ -f "$(git rev-parse --git-common-dir)/nixconvoy-submodule" ]`
-  in the repository's own worktree, `git rev-parse --git-dir` being the
-  common dir; a repository setting its own `core.hooksPath`, husky's say,
-  bypasses global hooks).
+  it and stages the gitlink on the pushed rev, which the union, the eval
+  memo and the lineage then see like any edit.  Two work branches moving
+  the same submodule meet in the union as a gitlink conflict: the
+  branches are merged in the repository (its configured checkout, else a
+  bare mirror under `~/.cache/nixconvoy/submodules/`; mergiraf on the
+  conflicts), the merge pushed to the origin's
+  `refs/nixconvoy/union/<input>/<sha>` and pinned there - deterministic,
+  the same again on a retry, and kept; branches that conflict are a
+  union conflict like any other.  Once one lands, every other checkout's
+  catch-up (a deploy, `pull`, the landing itself) brings its worktree
+  onto the landed default branch as it brings the checkout onto main -
+  fast-forwarded when it has nothing of its own, rebased with its staged
+  and unstaged state otherwise, pushed and pinned; one whose rebase is
+  not clean is reported and left as it was, to resolve by hand.  A
+  deploy refuses to pin a submodule still behind that branch, and a
+  worktree reset below the work the tree deploys (`abandon --submodule`
+  drops it deliberately).
+- **`land` lands the submodule first:** its tip merged onto the default
+  branch as the union merges it and squashed there as one commit (the
+  `COMMIT_MSG.md` in the worktree, tracked or not, else the checkout's),
+  that commit pinned as a commit of the work branch, then main; a
+  submodule whose HEAD is not what the tree pins is refused.  `abandon`
+  resets it onto the default branch.  Either leaves the worktree in
+  place; `land --submodule <input>` and `abandon --submodule <input>` do
+  one ahead of the checkout's landing, the abandon putting the pin back
+  to origin/main's, staged for the next deploy.  `close --submodule
+  <input>` removes the worktree and its branch, here and on its origin,
+  refusing what would lose work unless `--force`; the directory stays,
+  empty; a task worktree's submodules go with it.  A tip a force push or
+  removal leaves behind stays under `refs/nixconvoy/past/<branch>/<sha>`
+  while a pushed work branch or deploy record pins it (nix fetches a rev
+  only while a ref holds it); a landing deletes the rest.
+- **Never work in the repository's own checkout.**  `status` flags
+  edits there, and the `nixconvoy-submodule` marker nixconvoy leaves in
+  its git dir lets a global pre-commit hook refuse an agent's commit on
+  the default branch there (`[ -f "$(git rev-parse
+  --git-common-dir)/nixconvoy-submodule" ]` with `git rev-parse
+  --git-dir` the common dir; a repository setting its own
+  `core.hooksPath`, husky's say, bypasses global hooks).
 
 ## How it is built
 

@@ -37,11 +37,20 @@ import sys
 import tempfile
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import NamedTuple
 
 from . import proc
-from .checkout import DEPLOYING_REFS, MACHINE_ENV, PENDING_REFS, TMP_PREFIX, index_tree, tree_less_msg
+from .checkout import (
+    DEPLOYING_REFS,
+    MACHINE_ENV,
+    PENDING_REFS,
+    TMP_PREFIX,
+    allowed_branches,
+    index_tree,
+    tree_less_msg,
+)
 from .config import MSG_FILE, cfg
 from .guard import decide
 from .proc import die, git, is_ancestor, ok, out, run, solve_with_mergiraf
@@ -135,6 +144,11 @@ def default_branch_of(repo: Path) -> str | None:
 
 def default_branch(repo: Path) -> str:
     return default_branch_of(repo) or die(f"{repo}: origin has neither a HEAD, main nor master branch")
+
+
+def has_own(sub: Sub, default: str) -> bool:
+    """Whether the worktree's HEAD carries commits origin/<default> lacks."""
+    return not ok(["git", "merge-base", "--is-ancestor", "HEAD", f"refs/remotes/origin/{default}"], cwd=str(sub.dir))
 
 
 def rev_in(d: Path, ref: str) -> str | None:
@@ -569,8 +583,7 @@ def carries_one(sub: Sub, top: Path) -> bool:
         return True
     head = rev_in(sub.dir, "HEAD")
     default = default_branch_of(sub.repo)
-    return default is None or (pin(sub, top) != head and not ok(
-        ["git", "merge-base", "--is-ancestor", "HEAD", f"refs/remotes/origin/{default}"], cwd=str(sub.dir)))
+    return default is None or (pin(sub, top) != head and has_own(sub, default))
 
 
 def carries(top: Path) -> bool:
@@ -684,22 +697,21 @@ def catch_up_one(sub: Sub, wb: str, top: Path) -> str | None:
             return (f"submodule {sub.name}: its origin could not be fetched (above), so its branch "
                     f"cannot be brought onto the default branch before it is pinned")
         return None
-    upstream = f"refs/remotes/origin/{default_branch(sub.repo)}"
+    default = default_branch(sub.repo)
     was = rev_in(sub.dir, "HEAD")
-    own = not ok(["git", "merge-base", "--is-ancestor", "HEAD", upstream], cwd=str(sub.dir))
-    good, status = onto(sub.dir, upstream)
+    own = has_own(sub, default)
+    good, status = onto(sub.dir, f"refs/remotes/origin/{default}")
     if not good:
         return f"submodule {sub.name}: {status}"
     head = rev_in(sub.dir, "HEAD")
     if head is None or was is None or head == was:
         return None
     print(f"submodule {sub.name}: {status}")
-    if own:
-        if rev_in(sub.dir, f"refs/remotes/origin/{wb}") is not None:
-            push_branch(sub, wb)
-        if pin(sub, top) == was:
-            set_pin(sub, head, top)
-            print(f"submodule {sub.name}: pinned on {head[:12]} ({wb})")
+    if own and rev_in(sub.dir, f"refs/remotes/origin/{wb}") is not None:
+        push_branch(sub, wb)
+    if pin(sub, top) == was:
+        set_pin(sub, head, top)
+        print(f"submodule {sub.name}: pinned on {head[:12]} ({wb})")
     return None
 
 
@@ -835,16 +847,25 @@ def land_one(sub: Sub, wb: str, fallback_msg: str) -> None:
             f"stage and deploy them, or put them aside ({len(loose)} path(s))")
     if not fetch_refs(sub.name, sub.repo):
         die(f"submodule {sub.name}: cannot land it unfetched")
+    refuse_dropped(sub, wb, top)
     default = default_branch(sub.repo)
     main = rev_in(sub.dir, f"refs/remotes/origin/{default}")
     head = rev_in(sub.dir, "HEAD")
     assert main is not None and head is not None
     # The branch's own commits squashed onto the default branch - its
     # tip merged there as a deploy's union merges it (mergiraf on the
-    # conflicts); one with none keeps its rev.
+    # conflicts); one with none follows the pin, when a landing elsewhere
+    # put that ahead of it on the default branch, else keeps its rev.
     landed = head
-    if not ok(["git", "merge-base", "--is-ancestor", head, main], cwd=str(sub.dir)):
-        deployed = pin(sub, top)
+    pinned = pin(sub, top)
+    if is_ancestor(head, main, cwd=str(sub.dir)):
+        if pinned is not None and pinned != head and is_ancestor(pinned, main, cwd=str(sub.dir)):
+            if git("reset", "--quiet", "--keep", pinned, cwd=str(sub.dir), check=False).returncode != 0:
+                git("reset", "--quiet", "--hard", pinned, cwd=str(sub.dir))
+            push_branch(sub, wb)
+            landed = pinned
+    else:
+        deployed = pinned
         if deployed != head:
             die(f"submodule {sub.name}'s HEAD ({head[:12]}) is not what the tree pins "
                 f"({(deployed or 'nothing')[:12]}): deploy it first")
@@ -909,6 +930,7 @@ def reset_one(sub: Sub, wb: str) -> None:
     cur = branch_at(sub.dir)
     if cur != wb:
         die(f"submodule {sub.name} ({sub.dir}) is on {cur or 'a detached HEAD'}, not {wb}")
+    fetch_once(sub.name, sub.repo)
     default = default_branch(sub.repo)
     main = rev_in(sub.dir, f"refs/remotes/origin/{default}")
     prev = rev_in(sub.dir, "HEAD") or ""
@@ -935,8 +957,7 @@ def keeps(sub: Sub, top: Path) -> str | None:
     default = default_branch_of(sub.repo)
     if default is None:
         return "its repository's origin has no default branch to judge it against"
-    if not ok(["git", "merge-base", "--is-ancestor", "HEAD", f"refs/remotes/origin/{default}"],
-              cwd=str(sub.dir)):
+    if has_own(sub, default):
         return f"it carries commits not on origin/{default}; land or abandon it (--submodule {sub.name})"
     if off_default(sub, top):
         return f"the tree still pins a rev not on origin/{default}; land or abandon it (--submodule {sub.name})"
@@ -952,6 +973,9 @@ def remove_one(sub: Sub) -> None:
     shutil.rmtree(sub.dir, ignore_errors=True)
     sub.dir.mkdir(parents=True, exist_ok=True)
     git("worktree", "prune", cwd=str(sub.repo), check=False)
+    if cur is not None and not any(fnmatchcase(cur, p) for p in allowed_branches()):
+        print(f"submodule {sub.name}: {cur} is no work branch of this machine's; kept")
+        cur = None
     if cur is not None:
         git("branch", "--quiet", "-D", cur, cwd=str(sub.repo), check=False)
         old = rev_in(sub.repo, f"refs/remotes/origin/{cur}")
@@ -1000,8 +1024,7 @@ def own(top: Path) -> bool:
         if out(["git", "status", "--porcelain"], cwd=str(sub.dir)):
             return True
         default = default_branch_of(sub.repo)
-        if default is None or not ok(["git", "merge-base", "--is-ancestor", "HEAD",
-                                      f"refs/remotes/origin/{default}"], cwd=str(sub.dir)):
+        if default is None or has_own(sub, default):
             return True
     return False
 
