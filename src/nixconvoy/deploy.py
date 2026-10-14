@@ -148,8 +148,11 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
     # Non-candidates are probed best-effort so the Affected: trailer can
     # still cover them.
     probe_names: list[str] = [] if skip else [n for n in all_targets if not remote_only(n)]
-    pool = ThreadPoolExecutor(1 + len(probe_names))
+    pool = ThreadPoolExecutor(1 + len(probe_names) + len(annex.present(Path.cwd())))
     fetch = pool.submit(git, *fetch_args("--no-auto-gc"))
+    carrying = annex.carries(Path.cwd())  # read before the prefetch moves the refs it reads
+    if not dry:  # a dry activation brings no annex along
+        annex.prefetch(Path.cwd(), pool)
     probes: dict[str, Future[Probe]] = {}
 
     def start_probes() -> None:
@@ -169,14 +172,18 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
             "until pushed) or parked on origin/main")
 
     # An increment that changes nothing any target's evaluation reads is
-    # committed without a deploy (commit_unreached): decided before the
-    # probes start, on the staged state as it is - the rebase onto a
-    # fetched origin/main changes what the targets read, not what the
-    # increment changes, so it is decided again after one.
+    # committed without a deploy (commit_unreached), the targets left to
+    # the next deploy reaching one; naming targets asks for a deploy.  The
+    # probes start at once unless the staged state as it is looks that
+    # way; what decides is a scan of the final snapshot, after the annex
+    # step (a relock reaches targets) and the rebase onto origin/main.
     PERF.mark("reach")
-    unreached = (wb is not None and bool(msg) and not dry and not skip and not reset and staged_differs()
-                 and not annex.carries(Path.cwd()) and not increment_reaches(staged_snapshot(), all_targets))
-    if not unreached:
+    scanned = ""  # the snapshot the early scan judged, so an unchanged one is not scanned again
+    if (wb is not None and bool(msg) and not dry and not skip and not reset and not filter_targets
+            and staged_differs() and not carrying):
+        scanned = staged_snapshot()
+    maybe_unreached = bool(scanned) and not increment_reaches(scanned, all_targets)
+    if not maybe_unreached:
         start_probes()
 
     snap = ""
@@ -195,13 +202,12 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
         # would commit main's changes away.
         ensure_rebased()
         snap = staged_snapshot()
-        if unreached:
+        if maybe_unreached:
             assert msg is not None
             fetch.result()
-            decided = snap
             ensure_rebased()  # onto the fetched origin/main, as the union would be
             snap = staged_snapshot()
-            if snap == decided or not increment_reaches(snap, all_targets):
+            if snap == scanned or not increment_reaches(snap, all_targets):
                 pool.shutdown(wait=False)
                 commit_unreached(wb, msg, snap)
                 return

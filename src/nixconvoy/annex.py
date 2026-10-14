@@ -35,10 +35,12 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import urlencode
 
+from . import proc
 from .checkout import DATELESS_ENV, DEPLOYING_REFS, MACHINE_ENV, PENDING_REFS, TMP_PREFIX, tree_less_msg
 from .config import MSG_FILE, cfg
 from .guard import decide
@@ -325,8 +327,10 @@ class Pending(NamedTuple):
     relock: Relock
 
 
-# Per run: the annex repositories fetched, and the rebased annexes.
+# Per run: the annex repositories fetched, the fetches under way beside
+# the deploy's own (prefetch), and the rebased annexes.
 FETCHED: set[Path] = set()
+PREFETCH: dict[Path, Future[bool]] = {}
 PENDING: dict[tuple[str, str], Pending] = {}
 
 
@@ -336,15 +340,27 @@ def fetch_refs(name: str, repo: Path) -> bool:
     p = run(["git", "fetch", "--quiet", "--prune", "origin", *ANNEX_REFSPECS],
             cwd=str(repo), check=False, timeout=300)
     if p.returncode != 0:
-        print(f"note: annex {name}: fetching its origin failed:\n{(p.stderr or '').strip()}", file=sys.stderr)
+        if not proc.DYING:  # killed by a die under way: not news
+            print(f"note: annex {name}: fetching its origin failed:\n{(p.stderr or '').strip()}", file=sys.stderr)
         return False
     FETCHED.add(repo)
     return True
 
 
 def fetch_once(name: str, repo: Path) -> bool:
-    """fetch_refs once per run."""
-    return repo in FETCHED or fetch_refs(name, repo)
+    """fetch_refs once per run, a prefetch under way waited for."""
+    if repo in FETCHED:
+        return True
+    under_way = PREFETCH.pop(repo, None)
+    return under_way.result() if under_way is not None else fetch_refs(name, repo)
+
+
+def prefetch(top: Path, pool: ThreadPoolExecutor) -> None:
+    """The present annexes' origins fetched on `pool`, beside the deploy's
+    own fetch, for the catch-up of the annex step to find done."""
+    for ax in present(top):
+        if ax.repo not in FETCHED and ax.repo not in PREFETCH:
+            PREFETCH[ax.repo] = pool.submit(fetch_refs, ax.name, ax.repo)
 
 
 def locked_revs(name: str) -> set[str]:
@@ -730,6 +746,16 @@ def solve_rebase(wt: Path, checkout: Path) -> bool:
         if out(["git", "status", "--porcelain", "-uno"], cwd=str(ax.dir)):
             print(f"note: annex {name} has edits, which its rebase onto the landed branch cannot keep", file=sys.stderr)
             return None
+        tip_locked = tip_lock_rev(wt, name) or (str(me["rev"]) if isinstance(me.get("rev"), str) else None)
+        gone = reset_below_deployed(ax, tip_locked)
+        if gone:  # a hand reset: relocking onto HEAD would drop them in silence
+            assert tip_locked is not None
+            print(f"note: {dropped_message(ax, wb, tip_locked, gone)}", file=sys.stderr)
+            return None
+        behind = left_behind(ax, tip_locked)
+        if behind:
+            print(f"note: annex {name}: relocking onto its worktree leaves {len(behind)} deployed commit(s) "
+                  f"behind as such (rebased, amended or dropped):\n  " + "\n  ".join(behind), file=sys.stderr)
         if not fetch_once(name, ax.repo):
             return None
         was = rev_in(ax.dir, "HEAD")
@@ -872,19 +898,91 @@ def present_one(top: Path, name: str) -> Annex:
     return found[0]
 
 
+def carries_one(ax: Annex) -> bool:
+    """Whether the annex has something a deploy would carry into the lock:
+    staged changes, or a HEAD beyond its default branch as last fetched
+    that the lock does not deploy yet."""
+    if staged(ax.dir):
+        return True
+    head = rev_in(ax.dir, "HEAD")
+    default = default_branch_of(ax.repo)
+    return default is None or (locked_rev(ax.name)[0] != head and not ok(
+        ["git", "merge-base", "--is-ancestor", "HEAD", f"refs/remotes/origin/{default}"], cwd=str(ax.dir)))
+
+
 def carries(top: Path) -> bool:
-    """Whether an annex present under `top` has something a deploy would
-    carry into the lock: staged changes, or a HEAD beyond its default
-    branch as last fetched that the lock does not deploy yet."""
-    for ax in present(top):
-        if staged(ax.dir):
-            return True
-        head = rev_in(ax.dir, "HEAD")
-        default = default_branch_of(ax.repo)
-        if default is None or (locked_rev(ax.name)[0] != head and not ok(
-                ["git", "merge-base", "--is-ancestor", "HEAD", f"refs/remotes/origin/{default}"], cwd=str(ax.dir))):
-            return True
-    return False
+    """carries_one over the annexes present under `top`."""
+    return any(carries_one(ax) for ax in present(top))
+
+
+def reset_below_deployed(ax: Annex, locked: str | None) -> list[str]:
+    """The deployed commits a worktree reset below its own work dropped:
+    when HEAD holds nothing beyond the default branch as fetched while
+    `locked` (the rev the lock deploys of this annex) does, the commits of
+    `locked` beyond HEAD, one line each.  Empty while HEAD still carries
+    work of its own - a rebase, an amend or a squash of the deployed
+    commits is the branch's business, said by left_behind - or the lock
+    deploys nothing of the branch's."""
+    default = default_branch_of(ax.repo)
+    if locked is None or default is None or rev_in(ax.dir, f"{locked}^{{commit}}") is None:
+        return []
+    upstream = f"refs/remotes/origin/{default}"
+    d = str(ax.dir)
+    if is_ancestor(locked, "HEAD", cwd=d) or is_ancestor(locked, upstream, cwd=d) \
+            or not is_ancestor("HEAD", upstream, cwd=d):
+        return []
+    return out(["git", "log", "--format=%h %s", f"HEAD..{locked}", "--not", upstream], cwd=d).splitlines()
+
+
+def dropped_message(ax: Annex, wb: str, locked: str, gone: list[str]) -> str:
+    return (f"annex {ax.name}'s worktree ({ax.dir}) was reset below the work the lock deploys on {wb}; "
+            f"{len(gone)} commit(s) would leave the lock and the targets:\n  " + "\n  ".join(gone)
+            + f"\nput them back (git -C {ax.dir} reset --keep {locked[:12]}), or drop them deliberately: "
+            f"nixconvoy abandon --annex {ax.name}")
+
+
+def left_behind(ax: Annex, locked: str | None) -> list[str]:
+    """The deployed commits (up to `locked`) a relock onto HEAD leaves behind
+    as such - rebased, amended, squashed or dropped - as `git cherry` tells
+    them from the patches HEAD holds: one line each."""
+    d = str(ax.dir)
+    if locked is None or rev_in(ax.dir, f"{locked}^{{commit}}") is None or is_ancestor(locked, "HEAD", cwd=d):
+        return []
+    gone = [ln[2:] for ln in out(["git", "cherry", "HEAD", locked], cwd=d).splitlines() if ln.startswith("+ ")]
+    return [out(["git", "log", "-1", "--format=%h %s", sha], cwd=d) for sha in gone]
+
+
+def refuse_dropped(ax: Annex, wb: str) -> None:
+    """Die when the worktree was reset below the work the lock deploys on
+    `wb`, rather than relock it away in silence."""
+    locked = locked_rev(ax.name)[0]
+    gone = reset_below_deployed(ax, locked)
+    if gone:
+        assert locked is not None
+        die(dropped_message(ax, wb, locked, gone))
+
+
+def tip_lock_rev(wt: Path, name: str) -> str | None:
+    """The rev `name`'s node locks at the tip the rebase under way in `wt`
+    replays (rebase-merge/orig-head: the branch as it was, tmp commits
+    included), None when unknown."""
+    try:
+        orig = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path", "rebase-merge/orig-head"],
+                        cwd=str(wt))).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    p = run(["git", "show", f"{orig}:{lock_path()}"], cwd=str(wt), check=False)
+    if p.returncode != 0:
+        return None
+    try:
+        lock = load_json(p.stdout)
+    except ValueError:
+        return None
+    if not isinstance(lock, dict) or node_key(lock, name) is None:
+        return None
+    locked = lock_node(lock, name).get("locked")
+    r = locked.get("rev") if isinstance(locked, dict) else None
+    return r if isinstance(r, str) else None
 
 
 def catch_up(top: Path, wb: str) -> list[str]:
@@ -900,44 +998,55 @@ def catch_up(top: Path, wb: str) -> list[str]:
     something waits to be relocked."""
     problems: list[str] = []
     for ax in present(top):
-        cur = branch_at(ax.dir)
-        if cur != wb:
-            problems.append(f"annex {ax.name} ({ax.dir}) is on {cur or 'a detached HEAD'}, not {wb}")
-            continue
-        if not fetch_once(ax.name, ax.repo):
-            if carries(top):
-                problems.append(f"annex {ax.name}: its origin could not be fetched (above), so its branch "
-                                f"cannot be brought onto the default branch before its relock")
-            continue
-        upstream = f"refs/remotes/origin/{default_branch(ax.repo)}"
-        was = rev_in(ax.dir, "HEAD")
-        own = not ok(["git", "merge-base", "--is-ancestor", "HEAD", upstream], cwd=str(ax.dir))
-        prev = Path.cwd()
-        os.chdir(ax.dir)
         try:
-            done = decide("rebase", mode="onto", upstream=upstream)
-        finally:
-            os.chdir(prev)
-        assert isinstance(done, dict)
-        status = str(done.get("status"))
-        if done.get("ok") is not True:
-            problems.append(f"annex {ax.name}: {status}")
-            continue
-        head = rev_in(ax.dir, "HEAD")
-        if head is None or was is None or head == was:
-            continue
-        print(f"annex {ax.name}: {status}")
-        if own:
-            if rev_in(ax.dir, f"refs/remotes/origin/{wb}") is not None:
-                push_branch(ax, wb)
-            if locked_rev(ax.name)[0] == was and relock(ax.name, wb, head):
-                print(f"annex {ax.name}: {lock_path()} locks {head[:12]} on {wb}")
+            problem = catch_up_one(ax, wb)
+        except SystemExit:  # a die() along the way, said above: this annex's alone
+            proc.DYING = False
+            problem = f"annex {ax.name}: failed (above)"
+        if problem is not None:
+            problems.append(problem)
     return problems
+
+
+def catch_up_one(ax: Annex, wb: str) -> str | None:
+    """catch_up for one annex: the problem, or None."""
+    cur = branch_at(ax.dir)
+    if cur != wb:
+        return (f"annex {ax.name} ({ax.dir}) is on {cur or 'a detached HEAD'}, not {wb}: "
+                f"`git -C {ax.dir} switch {wb}`")
+    if not fetch_once(ax.name, ax.repo):
+        if carries_one(ax):
+            return (f"annex {ax.name}: its origin could not be fetched (above), so its branch "
+                    f"cannot be brought onto the default branch before its relock")
+        return None
+    upstream = f"refs/remotes/origin/{default_branch(ax.repo)}"
+    was = rev_in(ax.dir, "HEAD")
+    own = not ok(["git", "merge-base", "--is-ancestor", "HEAD", upstream], cwd=str(ax.dir))
+    prev = Path.cwd()
+    os.chdir(ax.dir)
+    try:
+        done = decide("rebase", mode="onto", upstream=upstream)
+    finally:
+        os.chdir(prev)
+    assert isinstance(done, dict)
+    status = str(done.get("status"))
+    if done.get("ok") is not True:
+        return f"annex {ax.name}: {status}"
+    head = rev_in(ax.dir, "HEAD")
+    if head is None or was is None or head == was:
+        return None
+    print(f"annex {ax.name}: {status}")
+    if own:
+        if rev_in(ax.dir, f"refs/remotes/origin/{wb}") is not None:
+            push_branch(ax, wb)
+        if locked_rev(ax.name)[0] == was and relock(ax.name, wb, head):
+            print(f"annex {ax.name}: {lock_path()} locks {head[:12]} on {wb}")
+    return None
 
 
 def sync(wb: str | None, msg: str | None, *, dry: bool = False) -> list[str]:
     """A deploy's annex step: each present annex brought onto its default
-    branch (catch_up, a problem there ending the deploy), its staged state
+    branch (catch_up, a problem there ending the deploy; not when `dry`), its staged state
     committed onto `wb` with `msg`, pushed, and its lock node relocked on
     it, staged here.  What changed, one line each.  `dry` (a dry
     activation) commits and pushes nothing, so an annex change it cannot
@@ -949,14 +1058,17 @@ def sync(wb: str | None, msg: str | None, *, dry: bool = False) -> list[str]:
     if wb is None:
         die(f"{ANNEX_DIR}/ in the main checkout, which has no work branch to carry an annex: "
             f"remove it, or work in a checkout on a work branch")
-    for problem in catch_up(top, wb):
-        die(f"{problem}; nothing was deployed")
-    told = []
     for ax in found:
         cur = branch_at(ax.dir)
         if cur != wb:
             die(f"annex {ax.name} ({ax.dir}) is on {cur or 'a detached HEAD'}, not {wb}: "
                 f"`git -C {ax.dir} switch {wb}`")
+        refuse_dropped(ax, wb)
+    if not dry:  # a dry activation rebases, pushes and relocks nothing
+        for problem in catch_up(top, wb):
+            die(f"{problem}; nothing was deployed")
+    told = []
+    for ax in found:
         mark(ax.repo)
         if out(["git", "diff", "--name-only"], cwd=str(ax.dir)):
             print(f"note: annex {ax.name} has unstaged edits, which are not deployed", file=sys.stderr)
@@ -977,13 +1089,19 @@ def sync(wb: str | None, msg: str | None, *, dry: bool = False) -> list[str]:
         # Behind the landed default branch, a relock would move the input
         # backwards for every target main's lock reaches.
         if not ok(["git", "merge-base", "--is-ancestor", f"refs/remotes/origin/{default}", head], cwd=str(ax.dir)):
-            die(f"annex {ax.name}'s {wb} does not contain origin/{default}: rebase it in {ax.dir}, then re-run")
+            die(f"annex {ax.name}'s {wb} does not contain origin/{default}"
+                + (" (a dry activation brings no annex along): deploy first" if dry
+                   else f": rebase it in {ax.dir}, then re-run"))
         if dry and (rev_in(ax.dir, f"refs/remotes/origin/{wb}") != head or locked_rev(ax.name)[0] != head):
             die(f"annex {ax.name} has commits not deployed yet, which a dry activation cannot carry: "
                 f"deploy first")
         if rev_in(ax.dir, f"refs/remotes/origin/{wb}") != head:
             push_branch(ax, wb)
             told.append(f"annex {ax.name}: pushed {wb} ({head[:12]})")
+        behind = left_behind(ax, locked_rev(ax.name)[0])
+        if behind:
+            print(f"note: annex {ax.name}: relocking onto {head[:12]} leaves {len(behind)} deployed commit(s) "
+                  f"behind as such (rebased, amended or dropped):\n  " + "\n  ".join(behind), file=sys.stderr)
         if relock(ax.name, wb, head):
             told.append(f"annex {ax.name}: {lock_path()} locks {head[:12]} on {wb}")
     return told

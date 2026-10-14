@@ -147,11 +147,9 @@ pub fn onto(s: &mut Script, upstream: &str) -> Run<Outcome> {
     })
 }
 
-pub const STRANDED: &str =
-    "the detached HEAD carries commits not on origin/main; push them (git push origin HEAD:main) or put them on a branch, then re-run";
 pub const LEFT: &str = "detached HEAD left as is: nothing of its own, its commits are already on origin";
 
-/// STRANDED for any upstream.
+/// Why a detached HEAD with commits of its own is left alone.
 fn stranded(upstream: &str) -> String {
     let up = short(upstream);
     let branch = up.split_once('/').map_or(up, |(_, b)| b);
@@ -250,7 +248,7 @@ fn on_work_branch(s: &mut Script, wb: &str) -> Run<()> {
     match cur.as_deref() {
         Some("main") => {}
         _ if safe => {}
-        None => return Err(Halt::Die(STRANDED.into())),
+        None => return Err(Halt::Die(stranded(MAIN))),
         Some(other) => {
             return Err(Halt::Die(format!(
                 "on branch {other}, which carries commits not on origin/main; deploys run from {wb} or from main"

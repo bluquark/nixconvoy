@@ -433,7 +433,7 @@ proptest! {
             // Moved along when behind origin/main, refused when it holds
             // commits of its own.
             if !prefix(before.commits(), main) {
-                prop_assert_eq!(out, Err(STRANDED.into()));
+                prop_assert_eq!(out, Err(stranded(MAIN)));
                 prop_assert_eq!(&r, &before);
             } else if before.work == tree_of(before.commits()) || tree_of(main) == tree_of(before.commits()) {
                 prop_assert_eq!(out, Ok(Ok("fast-forwarded the detached HEAD onto origin/main".into())));
@@ -627,7 +627,10 @@ fn moves_onto_the_work_branch() {
     r.index.insert(3, 3);
     r.answer(&Query::Commit { msg: "by hand".into() });
     let (_, _, out) = run(&mut r.clone(), Params::OnWorkBranch { wb: WB.into() }, 100);
-    assert_eq!(out, Some(Err(STRANDED.into())));
+    assert_eq!(
+        out,
+        Some(Err("the detached HEAD carries commits not on origin/main; push them (git push origin HEAD:main) or put them on a branch, then re-run".into()))
+    );
     // A fresh branch with nothing of its own (a subagent worktree's) is fine too.
     r.head = Head::On("feature".into());
     r.branches.insert("feature".into(), r.branches["main"].clone());
@@ -663,7 +666,7 @@ fn leaves_a_review_checkout_alone() {
     };
     let mut r = build(&s);
     let (_, _, out) = run(&mut r.clone(), Params::Sync { wb: Some(WB.into()) }, 100);
-    assert_eq!(out, Some(Ok(Err(STRANDED.into()))));
+    assert_eq!(out, Some(Ok(Err(stranded(MAIN)))));
     // On origin, as fetched and as the fetch will find it.
     r.origin.insert("haswell-wsl-deploys2".into(), r.commits().clone());
     r.remote.insert("haswell-wsl-deploys2".into(), r.commits().clone());
@@ -690,7 +693,7 @@ fn reports_what_blocks_a_rebase() {
     assert_eq!(ask([pre(), vec![some("merge")]].concat()), Ok(Err("a merge is in progress; finish or abort it first".into())));
     assert_eq!(
         ask([pre(), vec![Reply::Text(None), Reply::Text(None), Reply::Flag(false), Reply::Flag(false)]].concat()),
-        Ok(Err(STRANDED.into()))
+        Ok(Err(stranded(MAIN)))
     );
     assert_eq!(
         ask([pre(), vec![Reply::Text(None), Reply::Text(None), Reply::Flag(false), Reply::Flag(true), Reply::Text(None)]].concat()),

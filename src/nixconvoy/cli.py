@@ -152,9 +152,12 @@ memo's read scan over the staged snapshot, no eval: docs, dotfiles, a
 COMMIT_MSG.md) is committed onto the work branch and pushed without a
 deploy - nothing probed, evaluated, built or switched, the commit's
 trailers Affected: none and Deployed: none - after the precheck when a
-staged file is one it reads.  It is decided before the probes start, so
-nothing need be reachable; an apply with nothing staged still converges
-every target on the union.
+staged file is one it reads.  Nothing need be reachable.  The targets' drift
+(another branch's work, main's) waits for the next deploy reaching one, or
+for an apply naming targets, which always deploys; an apply with nothing
+staged converges every target on the union.  The scan sees the staged
+snapshot alone: a reader another unlanded branch adds for a changed file
+is caught up by that branch's deploys.
 
 Land (nixconvoy land [<name> ...] | --union | --annex <input>): commit the work branch's
 tree minus COMMIT_MSG.md onto origin/main with COMMIT_MSG.md as the message,
@@ -270,7 +273,11 @@ repository's default branch and squashed there as one commit (the
 COMMIT_MSG.md in the annex worktree, tracked or not, else the checkout's)
 - and relocks the node on the default branch as a commit of the work
 branch, then lands main; the annex worktree stays, its branch reset onto
-the landed commit.  `land --annex <input>` lands that one annex ahead of
+the landed commit.  A deploy refuses an annex whose worktree was reset below the work the
+lock deploys (nothing of its own left: a hand reset; a rebase or amend
+keeps work of its own and passes, the deploy naming the deployed commits
+its relock leaves behind as such): put it back, or `abandon --annex`
+drops it deliberately.  `land --annex <input>` lands that one annex ahead of
 the checkout (the relock commit pushed on the work branch); `abandon
 --annex <input>` resets it onto the default branch and puts its lock node
 back to what origin/main locks, staged for the next deploy to revert it on

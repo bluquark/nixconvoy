@@ -105,6 +105,8 @@ def abort_children() -> None:
 
 def die(msg: str) -> NoReturn:
     global DYING
+    if DYING and threading.current_thread() is not threading.main_thread():
+        raise SystemExit(1)  # a worker's child killed by the die under way: its report is noise
     with CHILDREN_LOCK:
         DYING = True
         for c in list(CHILDREN):

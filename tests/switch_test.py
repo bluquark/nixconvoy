@@ -22,7 +22,7 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from pathlib import Path
 
-from nixconvoy import checkout, commands, config, guard, memo, proc, review, switch, targets
+from nixconvoy import checkout, commands, config, deploy, guard, memo, proc, review, switch, targets
 from nixconvoy.union import UnionQueries
 
 REAL_GUARD = switch.switch_guard_cmd
@@ -644,6 +644,15 @@ def reach_cases(d: Path) -> None:
         assert memo.reached_between(str(co), tip, targets, f"{c_x}^", c_x) == {"a"}
         assert memo.reached_between(str(co), tip, targets, c_x, c_x) == set()
         assert memo.reached_between(str(co), tip, ["b"], f"{c_x}^", c_x) == set()
+        # The staged increment a deploy decides on: docs reach nothing,
+        # a module its target.
+        (co / "README.md").write_text("docs, staged\n")
+        sh(co, "add", "README.md")
+        assert not deploy.increment_reaches(checkout.staged_snapshot(), targets)
+        (co / "nixos/modules/x.nix").write_text("{ ... }: { x = 2; }\n")
+        sh(co, "add", "nixos/modules/x.nix")
+        assert deploy.increment_reaches(checkout.staged_snapshot(), targets)
+        sh(co, "reset", "--quiet", "--hard", "HEAD")
     finally:
         os.chdir(prev)
     print("reach: ok")
@@ -1292,6 +1301,37 @@ def annex_cases(d: Path) -> None:
         assert annex.sync(wb, None, dry=True) == []  # deployed state: a dry run may carry it
         assert annex.own(co)
         assert annex.notes(co) == ["annex dep +1"]
+        # A worktree reset below what the lock deploys: refused rather than
+        # relocked away; a hand rebase of it (the same patch) passes.
+        sh(ax, "reset", "--quiet", "--hard", v1)
+        err = dies(lambda: annex.sync(wb, "again"))
+        assert "was reset below the work the lock deploys" in err and "dep: v2" in err, err
+        sh(ax, "reset", "--quiet", "--hard", v2)
+        sh(ax, "commit", "--quiet", "--amend", "-m", "dep: v2, amended")
+        with contextlib.redirect_stdout(io.StringIO()):
+            told = annex.sync(wb, "same patch")
+        v2b = sh(ax, "rev-parse", "HEAD")
+        assert v2b != v2 and annex.locked_rev("dep") == (v2b, f"refs/heads/{wb}") and len(told) == 2, told
+        sh(ax, "reset", "--quiet", "--hard", v2)
+        noted = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(noted):
+            annex.sync(wb, "back")  # the same patch again: nothing to say
+        assert annex.locked_rev("dep") == (v2, f"refs/heads/{wb}") and not noted.getvalue(), noted.getvalue()
+        # An amend that changes the patch: relocked, the deployed commit it
+        # leaves behind named.
+        (ax / "tool.py").write_text("v2, changed\n")
+        sh(ax, "add", "tool.py")
+        sh(ax, "commit", "--quiet", "--amend", "--no-edit")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(noted):
+            annex.sync(wb, "changed")
+        v2c = sh(ax, "rev-parse", "HEAD")
+        assert annex.locked_rev("dep") == (v2c, f"refs/heads/{wb}")
+        assert "leaves 1 deployed commit(s) behind" in noted.getvalue() and v2[:7] in noted.getvalue(), noted.getvalue()
+        sh(ax, "reset", "--quiet", "--hard", v2)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            annex.sync(wb, "back")
+        assert annex.locked_rev("dep") == (v2, f"refs/heads/{wb}")
+        assert sh(ax_seed, "ls-remote", str(ax_origin), f"refs/heads/{wb}").split()[0] == v2
 
         # A landing refuses what it would lose or never deployed.
         (ax / "tool.py").write_text("v2 edited\n")
@@ -1550,6 +1590,7 @@ def annex_cases(d: Path) -> None:
         os.chdir(co)
         with contextlib.redirect_stdout(io.StringIO()):
             ax = annex.create("dep", wb)  # from origin/main: nothing of its own
+            assert annex.restore_lock(annex.present_one(co, "dep"))  # the orphaned lock back to main's
         sh(ax, "reset", "--quiet", "--hard", ax_main)
         (ax / "tool.py").write_text("edited\n")  # unstaged, a file the landing left alone
         lock_before = (co / "nixos/flake.lock").read_text()
@@ -1574,6 +1615,14 @@ def annex_cases(d: Path) -> None:
         os.chdir(co)
         with contextlib.redirect_stdout(io.StringIO()):
             assert annex.catch_up(co, wb) == []
+        assert sh(ax, "rev-parse", "HEAD") == new_main
+        # A dry activation leaves the annex where it is; the deploy's own
+        # annex step brings it along.
+        sh(ax, "reset", "--quiet", "--hard", ax_main)
+        assert annex.carries(co) is False
+        assert annex.sync(wb, None, dry=True) == [] and sh(ax, "rev-parse", "HEAD") == ax_main
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert annex.sync(wb, None) == []
         assert sh(ax, "rev-parse", "HEAD") == new_main
         with contextlib.redirect_stdout(io.StringIO()):
             annex.remove_all(co)

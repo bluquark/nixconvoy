@@ -23,10 +23,12 @@ what is deployed.
   modules both stay deployed; a real conflict stops the deploy and names
   the branch.
 - **Targets are inferred.**  Each target's ground truth is its running
-  system.  Whatever differs from the union is switched; a no-op deploy evaluates and switches nothing.  An increment
-  that changes nothing any target's evaluation reads (docs, dotfiles) is
-  committed and pushed without a deploy: nothing probed, built or
-  switched, so nothing need be reachable.
+  system.  Whatever differs from the union is switched; a no-op deploy
+  evaluates and switches nothing.  An increment that changes nothing any
+  target's evaluation reads (docs, dotfiles) is committed and pushed
+  without a deploy: nothing probed, built or switched, so nothing need be
+  reachable; the targets' drift waits for the next deploy reaching one,
+  or for an apply naming targets.
 - **`land` lands a branch on main**, as one commit whose message is the
   branch's `COMMIT_MSG.md`; **`abandon`** discards it.  Either way the
   checkout stays on its work branch, reset onto the new main (a subagent
@@ -319,7 +321,10 @@ branch:
   `COMMIT_MSG.md` in the annex worktree, tracked or not, else the
   checkout's), the node relocked on the default branch as a commit of the
   work branch, then main.  It refuses an annex whose HEAD is not what the
-  lock deploys.  `abandon` discards it, resetting it onto the default
+  lock deploys; a deploy refuses one whose worktree was reset below the work the
+  lock deploys (nothing of its own left: a hand reset; a rebase or amend
+  keeps work of its own and passes, the deploy naming what its relock
+  leaves behind), which `abandon --annex` drops deliberately.  `abandon` discards it, resetting it onto the default
   branch.  Either way the annex worktree stays, like the checkout; `land
   --annex <input>` and `abandon --annex <input>` do it for one annex ahead
   of the checkout's own landing, the abandon putting the lock node back to
