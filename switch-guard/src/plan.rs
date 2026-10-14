@@ -69,11 +69,13 @@ pub enum Query {
     },
     /// HEAD's subject -> Text.
     HeadSubject,
-    /// Rebase onto origin/main, keeping or dropping commits that become
-    /// empty, in the checkout or the aside worktree -> Ran.
+    /// Rebase onto `upstream` (a remote-tracking ref), keeping or dropping
+    /// commits that become empty, in the checkout or the aside worktree ->
+    /// Ran.
     Rebase {
         keep_empty: bool,
         aside: bool,
+        upstream: String,
     },
     RebaseAbort {
         aside: bool,
@@ -98,9 +100,11 @@ pub enum Query {
         branch: String,
         start: Option<String>,
     },
-    /// Move the detached HEAD onto origin/main, local changes carried along
+    /// Move the detached HEAD onto `upstream`, local changes carried along
     /// -> Ran.
-    Detach,
+    Detach {
+        upstream: String,
+    },
     /// Whether HEAD is already on origin: an ancestor of origin/main or of
     /// origin's tip of a listed work branch -> Flag.
     Pushed,

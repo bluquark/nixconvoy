@@ -111,7 +111,7 @@ impl Repo {
         Reply::Ran { ok, detail: detail.into() }
     }
 
-    fn rebase(&mut self, keep_empty: bool, aside: bool) -> Reply {
+    fn rebase(&mut self, keep_empty: bool, aside: bool, upstream: &str) -> Reply {
         let name = if aside {
             match &self.aside {
                 Some(b) => b.clone(),
@@ -126,7 +126,9 @@ impl Repo {
         if !aside && (self.index != tree_of(self.commits()) || self.work != self.index) {
             return Repo::ran(false, "error: cannot rebase: You have unstaged changes.");
         }
-        let main = self.origin["main"].clone();
+        let Some(main) = self.resolve(upstream) else {
+            return Repo::ran(false, "invalid upstream");
+        };
         let mine = self.branches[&name].clone();
         if prefix(&main, &mine) {
             return Repo::ran(true, "");
@@ -189,7 +191,7 @@ impl Repo {
                 Repo::ran(true, "")
             }
             Query::HeadSubject => Reply::Text(self.commits().last().map(|c| c.subject.clone())),
-            Query::Rebase { keep_empty, aside } => self.rebase(*keep_empty, *aside),
+            Query::Rebase { keep_empty, aside, upstream } => self.rebase(*keep_empty, *aside, upstream),
             Query::RebaseAbort { aside } => match self.rebasing.take() {
                 Some((b, a)) if a == *aside => {
                     self.op = None;
@@ -239,8 +241,10 @@ impl Repo {
                 self.head = Head::On(branch.clone());
                 Repo::ran(true, "")
             }
-            Query::Detach => {
-                let main = self.origin["main"].clone();
+            Query::Detach { upstream } => {
+                let Some(main) = self.resolve(upstream) else {
+                    return Repo::ran(false, "invalid upstream");
+                };
                 let cur = tree_of(self.commits());
                 if self.work != cur && tree_of(&main) != cur {
                     return Repo::ran(false, "error: Your local changes would be overwritten");
@@ -696,4 +700,41 @@ fn reports_what_blocks_a_rebase() {
     let mut it = vec![ran(true), some("x"), Reply::Flag(true)].into_iter();
     let out = drive(Replay::new(Params::Sync { wb: None }, program), 20, move |_| it.next().unwrap()).2;
     assert_eq!(out, Ok(Ok("up to date".into())));
+}
+
+#[test]
+fn onto_brings_an_annex_onto_its_default_branch() {
+    // An annex worktree: nothing of its own, unstaged edits to a file the
+    // landing did not touch.  Onto fast-forwards it, the edits intact; the
+    // same edits to a file the landing changed leave it exactly as it was,
+    // saying so.
+    let s = Shape {
+        root: vec![(0, Some(0)), (1, Some(1))],
+        main: vec![vec![(2, Some(2))]],
+        fork: 0,
+        local: vec![],
+        staged: vec![],
+        unstaged: vec![(1, Some(9))],
+        op: false,
+        detached: false,
+    };
+    let mut r = build(&s);
+    r.origin.insert("dev".into(), r.origin["main"].clone());
+    let dev = "refs/remotes/origin/dev";
+    let before = r.clone();
+    let (asked, _, out) = run(&mut r, Params::Onto { upstream: dev.into() }, 100);
+    assert_eq!(out, Some(Ok(Ok(format!("fast-forwarded {WB} onto origin/dev")))));
+    assert!(asked.iter().any(|q| matches!(q, Query::Rebase { upstream, .. } if upstream == dev)), "{asked:?}");
+    assert_eq!(r.commits(), &r.origin["dev"]);
+    assert_eq!(r.index, tree_of(r.commits()));
+    assert_eq!(r.work.get(&1), Some(&9));
+    assert_eq!(r.work.get(&2), Some(&2));
+    let mut r = before;
+    r.work.insert(2, 9); // the landing's file, edited here too
+    let before = r.clone();
+    let (_, _, out) = run(&mut r, Params::Onto { upstream: dev.into() }, 100);
+    let msg = out.unwrap().unwrap().unwrap_err();
+    assert!(msg.starts_with(&format!("rebasing {WB} onto origin/dev is not clean, left as it was; run `git rebase origin/dev`")), "{msg}");
+    r.next_id = before.next_id; // the tmp commit's id, spent
+    assert_eq!(r, before);
 }

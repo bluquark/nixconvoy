@@ -551,6 +551,7 @@ def scratch_env() -> None:
     memo.union_objects.cache_clear()
     memo.eval_key_shape.cache_clear()
     memo.target_eval_reads.cache_clear()
+    memo.file_facts.cache_clear()
 
 
 def reach_cases(d: Path) -> None:
@@ -1498,10 +1499,10 @@ def annex_cases(d: Path) -> None:
         # branch is pushed once the rebase is through.
         sh(co, "push", "--quiet", "--force", "origin", f"{after_land}:refs/heads/main")
         os.chdir(co8)
-        put(ax8, "tool3.py", "c\n")
-        with contextlib.redirect_stdout(io.StringIO()):
-            annex.sync(wb8, "dep: c")  # staged relock, as a deploy's sync leaves it
+        put(ax8, "tool3.py", "c\n", "dep: c")  # a deploy's increment from before the landing...
         t2 = sh(ax8, "rev-parse", "HEAD")
+        sh(ax8, "push", "--quiet", "--force", "origin", wb8)
+        annex.relock("dep", wb8, t2)  # ...its relock staged, as that deploy's sync left it
         sh(co8, "fetch", "--quiet")
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):
@@ -1518,6 +1519,66 @@ def annex_cases(d: Path) -> None:
         assert sh(ax_seed, "ls-remote", str(ax_origin), f"refs/heads/{wb8}").split()[0] == b2
         assert sh(ax_seed, "ls-remote", str(ax_origin), f"{annex.PAST_REFS}/{wb8}/{t2}").split()[0] == t2
         assert annex.PENDING == {}
+
+        # The default branch moving again, with no lock conflict to meet it
+        # (no deploy relocked anything since): the catch-up every pull,
+        # landing and deploy runs brings each annex worktree onto the new
+        # tip as it brings the checkout onto main.  One with commits of its
+        # own (co8's, relocked in its branch) is rebased, pushed and the
+        # lock relocked, staged; one with nothing of its own is
+        # fast-forwarded with its unstaged edits intact, nothing pushed or
+        # relocked; one whose edits touch what landed is left as it was and
+        # named, failing the pull.
+        sh(ax_seed, "fetch", "--quiet")
+        sh(ax_seed, "reset", "--quiet", "--hard", "origin/main")
+        put(ax_seed, "more.txt", "m\n", "upstream once more")
+        sh(ax_seed, "push", "--quiet", "origin", "HEAD:main")
+        new_main = sh(ax_seed, "rev-parse", "HEAD")
+        annex.FETCHED.clear()
+        os.chdir(co)
+        with contextlib.redirect_stdout(io.StringIO()):
+            good, status = checkout.update_checkout(co8)
+        assert good, status
+        b3 = sh(ax8, "rev-parse", "HEAD")
+        assert b3 != b2 and proc.is_ancestor(new_main, b3, cwd=str(ax8))
+        assert sh(ax8, "show", f"{b3}:tool3.py") == "c" and sh(ax8, "show", f"{b3}:more.txt") == "m"
+        assert sh(ax_seed, "ls-remote", str(ax_origin), f"refs/heads/{wb8}").split()[0] == b3
+        os.chdir(co8)
+        assert annex.locked_rev("dep") == (b3, f"refs/heads/{wb8}")
+        assert sh(co8, "diff", "--cached", "--name-only") == "nixos/flake.lock"
+        sh(co8, "commit", "--quiet", "-m", "dep: b on the new main")
+        os.chdir(co)
+        with contextlib.redirect_stdout(io.StringIO()):
+            ax = annex.create("dep", wb)  # from origin/main: nothing of its own
+        sh(ax, "reset", "--quiet", "--hard", ax_main)
+        (ax / "tool.py").write_text("edited\n")  # unstaged, a file the landing left alone
+        lock_before = (co / "nixos/flake.lock").read_text()
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert annex.catch_up(co, wb) == []
+        assert sh(ax, "rev-parse", "HEAD") == new_main
+        assert (ax / "tool.py").read_text() == "edited\n" and not sh(ax, "diff", "--cached", "--name-only")
+        assert (co / "nixos/flake.lock").read_text() == lock_before
+        assert not sh(ax_seed, "ls-remote", str(ax_origin), f"refs/heads/{wb}")
+        sh(ax, "reset", "--quiet", "--hard", ax_main)
+        (ax / "more.txt").write_text("mine\n")  # what the landing added
+        with contextlib.redirect_stdout(io.StringIO()):
+            problems = annex.catch_up(co, wb)
+        assert len(problems) == 1 and "is not clean, left as it was" in problems[0], problems
+        assert sh(ax, "rev-parse", "HEAD") == ax_main and (ax / "more.txt").read_text() == "mine\n"
+        assert not sh(ax, "status", "--porcelain", "-uno")
+        os.chdir(co8)
+        with contextlib.redirect_stdout(io.StringIO()):
+            good, status = checkout.update_checkout(co)
+        assert not good and "annex dep: rebasing" in status and "is not clean" in status, status
+        (ax / "more.txt").unlink()
+        os.chdir(co)
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert annex.catch_up(co, wb) == []
+        assert sh(ax, "rev-parse", "HEAD") == new_main
+        with contextlib.redirect_stdout(io.StringIO()):
+            annex.remove_all(co)
+        os.chdir(co8)
+        sh(co8, "reset", "--quiet", "--hard", "HEAD~1")
 
         # A github input: its lock names no branch, so the landing judges
         # the deployed rev alone.

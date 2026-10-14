@@ -11,14 +11,13 @@ import signal
 import socket
 import sys
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import NamedTuple
 
 from . import proc
 from .config import builder, cfg
 from .memo import Protection
-from .proc import die, load_json, ok, run, stream
+from .proc import die, load_json, ok, run
 
 # Seconds one probe of a target may take, so a stalled ssh session holds
 # neither a deploy's start nor verification past the deadline.
@@ -94,30 +93,6 @@ def expand_targets(names: list[str], all_targets: list[str]) -> list[str]:
     if unknown:
         die(f"unknown target(s) {', '.join(unknown)}; the inventory has: {', '.join(all_targets)}")
     return list(dict.fromkeys(found))
-
-
-def exec_on(names: list[str], argv: list[str]) -> None:
-    """`argv` on each target `names` designate (every target addressable from
-    here when none), concurrently, the output of each held and printed
-    under its name once it finishes; dies naming the targets where it failed."""
-    all_targets = flake_target_names()
-    targets = expand_targets(names, all_targets) or [h for h in all_targets if not remote_only(h)]
-    for h in targets:
-        if remote_only(h):
-            die(f"{h} is reachable only from itself (nixconvoy.toml: local_only)")
-    def on(h: str) -> int:
-        held = f"[{h}] " if len(targets) > 1 else ""
-        try:
-            return stream(target_cmd(h, argv), held_as=held or None)
-        except FileNotFoundError:  # this machine itself, no shell to say so
-            print(f"{held}{argv[0]}: command not found")
-            return 127
-
-    with ThreadPoolExecutor(len(targets)) as pool:
-        codes = {h: pool.submit(on, h) for h in targets}
-    failed = [f"{h} (exit {f.result()})" for h, f in codes.items() if f.result() != 0]
-    if failed:
-        die(f"failed on {', '.join(failed)}")
 
 
 def ssh_address(name: str) -> str:

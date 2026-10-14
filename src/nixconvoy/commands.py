@@ -13,7 +13,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import IO, NamedTuple
 
-from . import annex, memo, proc, targets
+from . import annex, proc
 from .checkout import (
     MACHINE_ENV,
     PAST_REFS,
@@ -32,7 +32,6 @@ from .checkout import (
     current_branch,
     deploy_running,
     drop_worktree,
-    ensure_on_work_branch,
     ensure_rebased,
     fetch_args,
     git_common,
@@ -54,50 +53,17 @@ from .checkout import (
     require_work_branch,
     sibling_checkouts,
     staged_differs,
-    staged_snapshot,
     sub_dir,
     sub_parent,
     summarize,
     this_prefix,
     tree_less_msg,
-    warn_no_msgfile,
     work_branch_name,
     worktree_lock,
 )
 from .config import MSG_FILE
 from .guard import binary, decide
 from .proc import die, git, is_ancestor, ok, out, painter, rev, run, solve_with_mergiraf
-
-
-def commit_only(msg: str | None) -> None:
-    if not msg:
-        die('commit requires -m "..."')
-    await_background_push()
-    git(*fetch_args())
-    pop_tmp_commits()
-    wb = require_work_branch("commit")
-    for told in annex.sync(wb, msg):
-        print(told)
-    if not staged_differs():
-        die("nothing is staged")
-    # No build gate here, so a staged change the precheck reads is checked alone.
-    if memo.precheck_files(out(["git", "diff", "--cached", "--name-only"]).splitlines()):
-        snap = staged_snapshot()
-        objs = memo.union_objects(snap)
-        if memo.precheck_unproven(objs):
-            targets.check_builder()
-            wt = add_worktree(snap)
-            try:
-                print("running the precheck...")
-                err = memo.precheck_gate(wt, objs)
-            finally:
-                drop_worktree(wt)
-            if err:
-                die(f"{err}; nothing was committed")
-    ensure_on_work_branch(wb)
-    git("commit", "--quiet", "-m", msg)
-    warn_no_msgfile(wb)
-    push_work_branch(wb)
 
 
 def land() -> None:
@@ -1403,7 +1369,6 @@ __all__ = [
     "close_annex",
     "close_checkout",
     "close_worktrees",
-    "commit_only",
     "enter_sub",
     "holds_work",
     "land",

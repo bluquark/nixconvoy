@@ -41,6 +41,7 @@ from urllib.parse import urlencode
 
 from .checkout import DATELESS_ENV, DEPLOYING_REFS, MACHINE_ENV, PENDING_REFS, TMP_PREFIX, tree_less_msg
 from .config import MSG_FILE, cfg
+from .guard import decide
 from .proc import die, git, is_ancestor, load_json, ok, out, run, solve_with_mergiraf
 
 ANNEX_DIR = "annexes"
@@ -871,10 +872,74 @@ def present_one(top: Path, name: str) -> Annex:
     return found[0]
 
 
+def carries(top: Path) -> bool:
+    """Whether an annex present under `top` has something a deploy would
+    carry into the lock: staged changes, or a HEAD beyond its default
+    branch as last fetched that the lock does not deploy yet."""
+    for ax in present(top):
+        if staged(ax.dir):
+            return True
+        head = rev_in(ax.dir, "HEAD")
+        default = default_branch_of(ax.repo)
+        if default is None or (locked_rev(ax.name)[0] != head and not ok(
+                ["git", "merge-base", "--is-ancestor", "HEAD", f"refs/remotes/origin/{default}"], cwd=str(ax.dir))):
+            return True
+    return False
+
+
+def catch_up(top: Path, wb: str) -> list[str]:
+    """Each annex present under `top` (the current directory, whose lock a
+    relock edits) brought onto its repository's default branch as fetched,
+    the way a checkout is brought onto origin/main (the rebase core's
+    Onto: its staged and unstaged state riding along as tmp commits; a
+    fast-forward when it has nothing of its own).  One with commits of its
+    own is pushed where its origin has the branch, and the lock naming its
+    old tip (a deploy's staged relock) relocked on the new.  The problems,
+    one line each, for the annexes left as they were: a rebase that is not
+    clean, a worktree off `wb`, an origin that cannot be fetched while
+    something waits to be relocked."""
+    problems: list[str] = []
+    for ax in present(top):
+        cur = branch_at(ax.dir)
+        if cur != wb:
+            problems.append(f"annex {ax.name} ({ax.dir}) is on {cur or 'a detached HEAD'}, not {wb}")
+            continue
+        if not fetch_once(ax.name, ax.repo):
+            if carries(top):
+                problems.append(f"annex {ax.name}: its origin could not be fetched (above), so its branch "
+                                f"cannot be brought onto the default branch before its relock")
+            continue
+        upstream = f"refs/remotes/origin/{default_branch(ax.repo)}"
+        was = rev_in(ax.dir, "HEAD")
+        own = not ok(["git", "merge-base", "--is-ancestor", "HEAD", upstream], cwd=str(ax.dir))
+        prev = Path.cwd()
+        os.chdir(ax.dir)
+        try:
+            done = decide("rebase", mode="onto", upstream=upstream)
+        finally:
+            os.chdir(prev)
+        assert isinstance(done, dict)
+        status = str(done.get("status"))
+        if done.get("ok") is not True:
+            problems.append(f"annex {ax.name}: {status}")
+            continue
+        head = rev_in(ax.dir, "HEAD")
+        if head is None or was is None or head == was:
+            continue
+        print(f"annex {ax.name}: {status}")
+        if own:
+            if rev_in(ax.dir, f"refs/remotes/origin/{wb}") is not None:
+                push_branch(ax, wb)
+            if locked_rev(ax.name)[0] == was and relock(ax.name, wb, head):
+                print(f"annex {ax.name}: {lock_path()} locks {head[:12]} on {wb}")
+    return problems
+
+
 def sync(wb: str | None, msg: str | None, *, dry: bool = False) -> list[str]:
-    """A deploy's (or commit's) annex step: each present annex's staged
-    state committed onto `wb` with `msg`, pushed, and its lock node relocked
-    on it, staged here.  What changed, one line each.  `dry` (a dry
+    """A deploy's annex step: each present annex brought onto its default
+    branch (catch_up, a problem there ending the deploy), its staged state
+    committed onto `wb` with `msg`, pushed, and its lock node relocked on
+    it, staged here.  What changed, one line each.  `dry` (a dry
     activation) commits and pushes nothing, so an annex change it cannot
     carry is refused instead."""
     top = Path.cwd()
@@ -884,6 +949,8 @@ def sync(wb: str | None, msg: str | None, *, dry: bool = False) -> list[str]:
     if wb is None:
         die(f"{ANNEX_DIR}/ in the main checkout, which has no work branch to carry an annex: "
             f"remove it, or work in a checkout on a work branch")
+    for problem in catch_up(top, wb):
+        die(f"{problem}; nothing was deployed")
     told = []
     for ax in found:
         cur = branch_at(ax.dir)
@@ -904,9 +971,13 @@ def sync(wb: str | None, msg: str | None, *, dry: bool = False) -> list[str]:
         assert head is not None
         # Nothing of its own yet: the lock stays as it was (the branch is
         # off the default branch's tip, maybe past the locked rev).
-        if ok(["git", "merge-base", "--is-ancestor", head,
-               f"refs/remotes/origin/{default_branch(ax.repo)}"], cwd=str(ax.dir)):
+        default = default_branch(ax.repo)
+        if ok(["git", "merge-base", "--is-ancestor", head, f"refs/remotes/origin/{default}"], cwd=str(ax.dir)):
             continue
+        # Behind the landed default branch, a relock would move the input
+        # backwards for every target main's lock reaches.
+        if not ok(["git", "merge-base", "--is-ancestor", f"refs/remotes/origin/{default}", head], cwd=str(ax.dir)):
+            die(f"annex {ax.name}'s {wb} does not contain origin/{default}: rebase it in {ax.dir}, then re-run")
         if dry and (rev_in(ax.dir, f"refs/remotes/origin/{wb}") != head or locked_rev(ax.name)[0] != head):
             die(f"annex {ax.name} has commits not deployed yet, which a dry activation cannot carry: "
                 f"deploy first")

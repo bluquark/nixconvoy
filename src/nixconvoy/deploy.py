@@ -18,6 +18,7 @@ from .checkout import (
     PENDING_REFS,
     WAIT_STALE,
     Announce,
+    add_worktree,
     adopt_commit,
     announced,
     announcer_dead,
@@ -25,6 +26,7 @@ from .checkout import (
     commit_deployed,
     current_branch,
     deployed_commit,
+    drop_worktree,
     ensure_on_work_branch,
     ensure_rebased,
     fetch_args,
@@ -42,7 +44,7 @@ from .checkout import (
 from .config import builder
 from .guard import binary, decide
 from .memo import Top
-from .proc import PERF, die, dump_json, git, is_ancestor, load_json, rev
+from .proc import PERF, die, dump_json, git, is_ancestor, load_json, out, rev
 from .switch import lineage_record, switch
 from .targets import Probe, expand_targets, flake_target_names, remote_only
 from .union import UnionQueries
@@ -84,6 +86,42 @@ def previous_record(lineage: str) -> str:
     return rec if isinstance(rec, str) else ""
 
 
+def increment_reaches(snap: str, all_targets: list[str]) -> bool:
+    """Whether the staged increment `snap` (staged_snapshot) changes
+    something a target's evaluation reads - a path of the eval memo's read
+    scan over the snapshot, or a lock entry of an input those files name -
+    by the scan alone, no eval; one that cannot tell reaches every target."""
+    wt = add_worktree(snap)
+    try:
+        return bool(memo.reached_between(wt, snap, all_targets, "HEAD", snap))
+    finally:
+        drop_worktree(wt)
+
+
+def commit_unreached(wb: str, msg: str, snap: str) -> None:
+    """The increment `snap`, reaching no target: committed onto `wb` and
+    pushed, after the precheck when a staged file is one it reads (no
+    build gates it), with nothing probed, evaluated, built or switched -
+    the targets have nothing to catch up on from it."""
+    paths = out(["git", "diff", "--name-only", "HEAD", snap]).splitlines()
+    if memo.precheck_files(paths):
+        objs = memo.union_objects(snap)
+        if memo.precheck_unproven(objs):
+            targets.check_builder()
+            wt = add_worktree(snap)
+            try:
+                print("running the precheck...")
+                err = memo.precheck_gate(wt, objs)
+            finally:
+                drop_worktree(wt)
+            if err:
+                die(f"{err}; nothing was committed")
+    PERF.mark("commit-push")
+    commit_deployed(wb, snap, f"{msg}\n\nAffected: none\nDeployed: none")
+    push_work_branch(wb)
+    print(f"reaches no target: committed onto {wb} and pushed; nothing probed, built or switched")
+
+
 def deploy(filter_targets: list[str], msg: str | None, reset: bool,
            allow: frozenset[str] = frozenset(), dry: bool = False) -> None:
     """`reset`: this checkout's view alone - no other work branch in the
@@ -112,8 +150,12 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
     probe_names: list[str] = [] if skip else [n for n in all_targets if not remote_only(n)]
     pool = ThreadPoolExecutor(1 + len(probe_names))
     fetch = pool.submit(git, *fetch_args("--no-auto-gc"))
-    probes: dict[str, Future[Probe]] = {n: pool.submit(targets.probe, n) for n in probe_names}
-    pool.shutdown(wait=False)
+    probes: dict[str, Future[Probe]] = {}
+
+    def start_probes() -> None:
+        nonlocal probes
+        probes = {n: pool.submit(targets.probe, n) for n in probe_names}
+        pool.shutdown(wait=False)
 
     pop_tmp_commits()
     wb = work_branch()
@@ -125,6 +167,17 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
         die(f"on branch {cur}, which deploy-branches does not list as a work branch; the "
             "main checkout deploys from main (a hand commit there is claimed as main's "
             "until pushed) or parked on origin/main")
+
+    # An increment that changes nothing any target's evaluation reads is
+    # committed without a deploy (commit_unreached): decided before the
+    # probes start, on the staged state as it is - the rebase onto a
+    # fetched origin/main changes what the targets read, not what the
+    # increment changes, so it is decided again after one.
+    PERF.mark("reach")
+    unreached = (wb is not None and bool(msg) and not dry and not skip and not reset and staged_differs()
+                 and not annex.carries(Path.cwd()) and not increment_reaches(staged_snapshot(), all_targets))
+    if not unreached:
+        start_probes()
 
     snap = ""
     PERF.mark("annex")
@@ -142,6 +195,17 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
         # would commit main's changes away.
         ensure_rebased()
         snap = staged_snapshot()
+        if unreached:
+            assert msg is not None
+            fetch.result()
+            decided = snap
+            ensure_rebased()  # onto the fetched origin/main, as the union would be
+            snap = staged_snapshot()
+            if snap == decided or not increment_reaches(snap, all_targets):
+                pool.shutdown(wait=False)
+                commit_unreached(wb, msg, snap)
+                return
+            start_probes()
     elif msg:
         die("nothing is staged; stage the change or drop -m")
     else:
@@ -193,7 +257,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         unreachable = [h for h in candidates if running.get(h) is None]
         if unreachable:
             die(f"unreachable: {', '.join(unreachable)} - nothing was committed; "
-                f"fix connectivity (or restrict targets / use `commit`) and re-run")
+                f"fix connectivity (or restrict targets) and re-run")
         if ann is not None:
             # A target running this checkout's announced increment from
             # an earlier run that ended unsettled: still its claim.

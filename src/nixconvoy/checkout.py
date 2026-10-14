@@ -319,7 +319,7 @@ class GitQueries:
 
             empty = "--empty=keep" if ask.get("keep_empty") else "--empty=drop"
             where = self.where(ask)
-            p = git("rebase", "--quiet", empty, "origin/main", cwd=where, check=False)
+            p = git("rebase", "--quiet", empty, arg("upstream"), cwd=where, check=False)
             # Stopped on the lock alone, where main locks an annex this
             # branch relocked (its landing elsewhere): the annex follows.
             while p.returncode != 0 and annex.solve_rebase(Path(where or Path.cwd()).resolve(), Path.cwd().resolve()):
@@ -357,7 +357,7 @@ class GitQueries:
                 self.aside = ""
             return {"ran": True, "detail": ""}
         if kind == "detach":
-            return ran(git("switch", "--quiet", "--detach", "origin/main", check=False))
+            return ran(git("switch", "--quiet", "--detach", arg("upstream"), check=False))
         if kind == "pushed":
             return {"flag": any(is_ancestor("HEAD", t) for t in listed_tips(allowed_branches()).values())}
         if kind == "on_origin":
@@ -421,8 +421,12 @@ def sibling_checkouts() -> list[Path]:
 def update_checkout(path: Path) -> tuple[bool, str]:
     """Fetch and bring the checkout at `path` onto origin/main under its
     deploy lock, pushing its work branch (origin's copy is what every other
-    deploy unions): (ok, what happened).  A checkout that cannot be is left
-    exactly as it was."""
+    deploy unions), then its annex worktrees onto their default branches
+    (annex.catch_up): (ok, what happened).  A checkout that cannot be is
+    left exactly as it was; an annex that cannot be is named, the checkout
+    itself brought along."""
+    from . import annex  # noqa: PLC0415 - annex builds on this module
+
     prev = Path.cwd()
     os.chdir(path)
     try:
@@ -430,13 +434,19 @@ def update_checkout(path: Path) -> tuple[bool, str]:
         if lock is None:
             return False, "skipped: an nixconvoy is running there"
         try:
-            done = decide("rebase", mode="sync", wb=work_branch_name())
+            wb = work_branch_name()
+            done = decide("rebase", mode="sync", wb=wb)
+            assert isinstance(done, dict)
+            good, status = done.get("ok") is True, str(done.get("status"))
+            if good and wb is not None:
+                problems = annex.catch_up(path, wb)
+                if problems:
+                    good, status = False, "; ".join([status, *problems])
         finally:
             lock.close()
     finally:
         os.chdir(prev)
-    assert isinstance(done, dict)
-    return done.get("ok") is True, str(done.get("status"))
+    return good, status
 
 
 def catch_up(paths: list[Path]) -> bool:

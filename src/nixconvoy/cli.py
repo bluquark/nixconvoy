@@ -147,6 +147,15 @@ Deploy (nixconvoy apply [-m <msg>] [--reset] [--allow <protection> ...]
      a deploy elsewhere is refused there rather than reverting the
      increment, until the re-run ends with the push (or a hand clear)
 
+An increment that changes nothing any target's evaluation reads (the eval
+memo's read scan over the staged snapshot, no eval: docs, dotfiles, a
+COMMIT_MSG.md) is committed onto the work branch and pushed without a
+deploy - nothing probed, evaluated, built or switched, the commit's
+trailers Affected: none and Deployed: none - after the precheck when a
+staged file is one it reads.  It is decided before the probes start, so
+nothing need be reachable; an apply with nothing staged still converges
+every target on the union.
+
 Land (nixconvoy land [<name> ...] | --union | --annex <input>): commit the work branch's
 tree minus COMMIT_MSG.md onto origin/main with COMMIT_MSG.md as the message,
 push main, reset this branch (and its origin copy) onto the new main, the
@@ -173,6 +182,14 @@ rebased in a throwaway worktree).  Each checkout is taken under its deploy
 lock (one whose nixconvoy is running is skipped) and either ends up rebased
 with its staged/unstaged state intact and its work branch pushed, or is
 left exactly as it was: a rebase that isn't clean is aborted and reported.
+Each annex worktree of a checkout follows (see Annexes), onto its
+repository's default branch as fetched, by the same rebase: fast-forwarded
+when it has nothing of its own, its staged and unstaged state riding
+along; one with commits of its own is pushed where its origin has the
+branch, and a lock naming its old tip relocked on the new, staged.  One
+that cannot follow - its rebase not clean, its origin unreachable while a
+relock waits on it - is named in the checkout's line, which then counts
+as failed, and left as it was.
 
 Status (nixconvoy status): after a fetch, every checkout on this machine as
 a tree (the main checkouts, the work-branch ones, each with its subagent
@@ -227,7 +244,7 @@ the flake input <input> developed in place: a worktree of its repository
 branch - origin's copy of that branch when it has one, else new off the
 repository's default branch, with its upstream set there.  annexes/ must
 be gitignored (a nested checkout).  Work there as in the checkout: stage
-what is ready, and each deploy (or commit) commits the annex's staged
+what is ready, and each deploy commits the annex's staged
 state onto that branch with the -m message, pushes it to the annex's
 origin and points the flake.lock node at the pushed rev (nix flake lock
 --override-input on a scratch copy of the flake, so the input's own
@@ -240,9 +257,13 @@ origin's refs/nixconvoy/union/<input>/<sha> and the union's node locked
 there - deterministic, so retries and the eval memo agree; a union ref no
 ref of origin (nor its deploy history of 90 days) locks any more is deleted
 by the next union, a day after its push; annex branches that conflict are
-reported as any union conflict.  Once one lands, the other's
-rebase onto main meets the landed node and rebases its annex branch onto
-the landed default branch, pushing it and relocking on it.  The annex branch is pushed before the build, since the build fetches
+reported as any union conflict.  Once one lands, every other checkout's catch-up (a deploy's annex step,
+pull, a landing's) brings its annex worktree onto the landed default
+branch as it brings the checkout onto main (see Pull), and a deploy whose
+annex is still behind that branch refuses to relock it there, since the
+lock would move the input backwards for every target main reaches; a
+deployed relock the rebase onto main replays meets the landed node as a
+lock conflict, resolved the same way.  The annex branch is pushed before the build, since the build fetches
 it, so it may run ahead of what is deployed; the work branch's lock is the
 claim.  land lands each annex first - its tip merged onto the
 repository's default branch and squashed there as one commit (the
@@ -295,11 +316,6 @@ and no resume relocked it, whether session PID runs or not: resuming the
 agent recreates it (the PreToolUse hook on SendMessage).  It keeps a
 worktree whose lock names no session.
 
-Commit (nixconvoy commit -m <msg>): commit + push the staged state onto the
-work branch without probing, building or switching anything - for changes
-that affect no NixOS target, or to publish work while a target is unreachable.
-A staged change to what the precheck reads is checked on its own first.
-
 --reset deploys this checkout's view alone: the other work branches are
 left out of the union (and no deploy under way is waited for), so every
 target switched loses their work, and a target
@@ -320,12 +336,6 @@ be switched instead, and prints the units each would stop, restart or
 reload.  Nothing is switched, committed or pushed, and the staged changes
 need no -m; the run fails where a deploy would stop: a dry activation that
 fails, or protected units the switch would touch without --allow.
-
-Exec (nixconvoy exec [<target> | @<tag> ...] -- <command> [<arg> ...]): the command on
-each named target (every target addressable from here when none is named),
-concurrently, each target's output printed under its name once it finishes.
-Arguments are passed as they are (a pipeline wants `sh -c '...'`); the exit
-status is non-zero when it failed anywhere.
 
 Env: NIXCONVOY_SKIP_SWITCH=1 exercises only the branch/union machinery: no
 probe, eval, build or switch.  NIXCONVOY_FAIL_VERIFY=1 fails a confirmed
@@ -349,13 +359,12 @@ from . import annex, commands, proc, review
 from .checkout import lock_checkout, require_work_branch, sub_parent
 from .deploy import deploy
 from .proc import PERF, PERF_FILE, TOOL, die, git, ok, out, painter
-from .targets import ALLOW_FLAG, exec_on
+from .targets import ALLOW_FLAG
 
 # The synopsis: one line per form.  <x> a value, [x] optional, (a | b) one
 # of, ... repeated.  USAGE_NOTES follows it under --help only.
 SYNOPSIS = """\
 apply [-m <msg>] [--reset] [--allow <protection> ...] [--dry-activate] [<target> | @<tag> ...]
-commit -m <msg>
 land [<worktree> ...]
 land (--union | --annex <input>)
 abandon [--apply-now [--allow <protection> ...]] [<worktree> ...]
@@ -373,7 +382,6 @@ pull
 status
 review [<worktree> | <branch> ...] [<diff-arg> ...]
 review --union [<diff-arg> ...]
-exec [<target> | @<tag> ...] -- <command> [<arg> ...]
 """
 USAGE_NOTES = """\
 With no targets named, every target whose running system differs from the union
@@ -421,8 +429,7 @@ def main() -> None:
         print(usage())
         print(USAGE_NOTES)
         return
-    if args[0] not in ("apply", "land", "commit", "abandon", "close", "pull", "status", "review", "exec",
-                       "open"):
+    if args[0] not in ("apply", "land", "abandon", "close", "pull", "status", "review", "open"):
         bad_usage()
     subcmd = args.pop(0)
     start = Path.cwd()
@@ -433,14 +440,6 @@ def main() -> None:
     if subcmd == "review":
         os.chdir(start)  # its paths are the caller's
         sys.exit(review.main(args))
-    if subcmd == "exec":
-        if "--" not in args or args[0] in ("-h", "--help"):
-            bad_usage()
-        at = args.index("--")
-        if not args[at + 1:]:
-            bad_usage()
-        exec_on(args[:at], args[at + 1:])
-        return
     if subcmd not in ("status", "close", "open"):
         atexit.register(PERF.write, Path.cwd() / PERF_FILE)
     msg: str | None = None
@@ -604,10 +603,6 @@ def main() -> None:
         commands.abandon(apply_now)
         if apply_now:
             deploy([], None, False, frozenset(allow))
-    elif subcmd == "commit":
-        if reset or allow or dry or names:
-            bad_usage()
-        commands.commit_only(msg)
     else:  # apply
         deploy(names, msg, reset, frozenset(allow), dry)
 

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 /// Bumped on any change of the messages below; nixconvoy sends the version
 /// it speaks.
-pub const PROTOCOL: u64 = 6;
+pub const PROTOCOL: u64 = 7;
 
 fn field<'a>(v: &'a Value, k: &str) -> Result<&'a Value, String> {
     v.get(k).ok_or_else(|| format!("missing {k} in {v}"))
@@ -104,6 +104,7 @@ fn rebase_params(v: &Value) -> Result<rebase::Params, String> {
         "pop_tmp" => rebase::Params::PopTmp,
         "ensure_rebased" => rebase::Params::EnsureRebased,
         "sync" => rebase::Params::Sync { wb: opt_text(field(v, "wb")?)? },
+        "onto" => rebase::Params::Onto { upstream: text(v, "upstream")? },
         "on_work_branch" => rebase::Params::OnWorkBranch { wb: text(v, "wb")? },
         m => return Err(format!("unknown rebase mode {m}")),
     })
@@ -150,7 +151,7 @@ pub fn query(q: &Query) -> Value {
         Query::Contains { a, b } => ("contains", vec![("a", s(a)), ("b", s(b))]),
         Query::OpInProgress => ("op_in_progress", vec![]),
         Query::CurrentBranch => ("current_branch", vec![]),
-        Query::Detach => ("detach", vec![]),
+        Query::Detach { upstream } => ("detach", vec![("upstream", s(upstream))]),
         Query::Pushed => ("pushed", vec![]),
         Query::OnOrigin => ("on_origin", vec![]),
         Query::StagedDiffers => ("staged_differs", vec![]),
@@ -158,7 +159,9 @@ pub fn query(q: &Query) -> Value {
         Query::AddAll => ("add_all", vec![]),
         Query::Pop { mixed } => ("pop", vec![("mixed", json!(mixed))]),
         Query::HeadSubject => ("head_subject", vec![]),
-        Query::Rebase { keep_empty, aside } => ("rebase", vec![("keep_empty", json!(keep_empty)), ("aside", json!(aside))]),
+        Query::Rebase { keep_empty, aside, upstream } => {
+            ("rebase", vec![("keep_empty", json!(keep_empty)), ("aside", json!(aside)), ("upstream", s(upstream))])
+        }
         Query::RebaseAbort { aside } => ("rebase_abort", vec![("aside", json!(aside))]),
         Query::Rev { name } => ("rev", vec![("name", s(name))]),
         Query::Fetch => ("fetch", vec![]),
@@ -289,14 +292,21 @@ mod tests {
     #[test]
     fn round_trip() {
         assert!(start(r#"{"protocol":0,"core":"rebase","mode":"pop_tmp"}"#).is_err());
-        let mut c = start(r#"{"protocol":6,"core":"rebase","mode":"pop_tmp"}"#).unwrap();
+        let mut c = start(r#"{"protocol":7,"core":"rebase","mode":"pop_tmp"}"#).unwrap();
         assert_eq!(c.decide(None), (r#"{"effects":[],"next":{"ask":"head_subject"}}"#.to_string(), true));
         assert_eq!(reply(r#"{"text":null}"#).unwrap(), Reply::Text(None));
         let (line, more) = c.decide(Some(Reply::Text(None)));
         assert_eq!(line, r#"{"effects":[],"next":{"done":{"ok":true,"status":""}}}"#);
         assert!(!more);
         assert_eq!(rebase_params(&serde_json::json!({"mode": "sync", "wb": null})), Ok(rebase::Params::Sync { wb: None }));
-        assert_eq!(query(&Query::Detach).to_string(), r#"{"ask":"detach"}"#);
+        assert_eq!(
+            query(&Query::Detach { upstream: super::super::MAIN.into() }).to_string(),
+            r#"{"ask":"detach","upstream":"refs/remotes/origin/main"}"#
+        );
+        assert_eq!(
+            rebase_params(&serde_json::json!({"mode": "onto", "upstream": "refs/remotes/origin/dev"})),
+            Ok(rebase::Params::Onto { upstream: "refs/remotes/origin/dev".into() })
+        );
         assert_eq!(reply(r#"{"refs":[["a","b"]]}"#).unwrap(), Reply::Refs(vec![("a".into(), "b".into())]));
         assert_eq!(
             reply(r#"{"merge":false,"files":["x"],"detail":"d"}"#).unwrap(),
@@ -304,16 +314,16 @@ mod tests {
         );
         assert_eq!(reply(r#"{"ran":true,"detail":""}"#).unwrap(), Reply::Ran { ok: true, detail: String::new() });
         assert_eq!(query(&Query::Switch { branch: "b".into(), start: None }).to_string(), r#"{"ask":"switch","branch":"b","start":null}"#);
-        let mut d = start(r#"{"protocol":6,"core":"drift","me":["h","/c"],"union":"u","listed":["main"],"tips":{},"in_flight":{},"dead":[],"tz_offset":0,"router":"choko","targets":["a"],"candidates":["a"],"reset":false,"named":false,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"lineages":{"a":""}}"#).unwrap();
+        let mut d = start(r#"{"protocol":7,"core":"drift","me":["h","/c"],"union":"u","listed":["main"],"tips":{},"in_flight":{},"dead":[],"tz_offset":0,"router":"choko","targets":["a"],"candidates":["a"],"reset":false,"named":false,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"lineages":{"a":""}}"#).unwrap();
         let (line, _) = d.decide(None);
         assert_eq!(
             line,
             r#"{"effects":[{"print":"  a: will switch"}],"next":{"done":{"affected":["a"],"drift":{"a":["untracked",""]},"plan":["a"]}}}"#
         );
-        let mut u = start(r#"{"protocol":6,"core":"union","wb":"w","reset":true,"main0":null}"#).unwrap();
+        let mut u = start(r#"{"protocol":7,"core":"union","wb":"w","reset":true,"main0":null}"#).unwrap();
         assert_eq!(u.decide(None).0, r#"{"effects":[{"mark":"union"}],"next":{"ask":"listed"}}"#);
         let mut p =
-            start(r#"{"protocol":6,"core":"prune","name":"agent-x","named":false,"own_session_ends":false,"stopped":null}"#).unwrap();
+            start(r#"{"protocol":7,"core":"prune","name":"agent-x","named":false,"own_session_ends":false,"stopped":null}"#).unwrap();
         assert_eq!(p.decide(None).0, r#"{"effects":[],"next":{"ask":"lock"}}"#);
         assert_eq!(
             p.decide(Some(Reply::Text(Some("pid 7".into())))).0,

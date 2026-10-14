@@ -23,8 +23,10 @@ what is deployed.
   modules both stay deployed; a real conflict stops the deploy and names
   the branch.
 - **Targets are inferred.**  Each target's ground truth is its running
-  system.  Whatever differs from the union is switched; a no-op deploy
-  evaluates and switches nothing.
+  system.  Whatever differs from the union is switched; a no-op deploy evaluates and switches nothing.  An increment
+  that changes nothing any target's evaluation reads (docs, dotfiles) is
+  committed and pushed without a deploy: nothing probed, built or
+  switched, so nothing need be reachable.
 - **`land` lands a branch on main**, as one commit whose message is the
   branch's `COMMIT_MSG.md`; **`abandon`** discards it.  Either way the
   checkout stays on its work branch, reset onto the new main (a subagent
@@ -208,7 +210,6 @@ nixconvoy.switchLast = true;                # the router: switched alone, after 
 ```
 nixconvoy apply [-m <msg>] [--reset] [<target> | @<tag> ...]   deploy
 nixconvoy apply --dry-activate [<target> | @<tag> ...]   build and copy, then only report what each switch would do
-nixconvoy commit -m <msg>      commit + push the staged state, no build or switch
 nixconvoy land [<worktree> ...]   land the work branch on main
 nixconvoy abandon [--apply-now] [<worktree> ...]   discard it (--apply-now: and deploy, reverting it now)
 nixconvoy land --union | abandon [--apply-now] --union   this checkout and its task worktrees as one unit (one main commit)
@@ -219,7 +220,6 @@ nixconvoy pull                 rebase every checkout on this machine onto origin
 nixconvoy status               every checkout on this machine, and origin's other branches
 nixconvoy review [<worktree> | <branch> ...] [<diff-arg> ...]   the pending landing: COMMIT_MSG.md, then the diff
 nixconvoy review --union [<diff-arg> ...]   the checkout's and its task worktrees' together
-nixconvoy exec [<target> | @<tag> ...] -- <command> [<arg> ...]   run a command on each target, concurrently
 nixconvoy open [--lock <reason>] <name>   a task worktree <checkout>/<worktrees>/<name> (what the plugin's create hook runs)
 nixconvoy open [--branch <work-branch>] <path>   an agent checkout at that path on a work branch of this machine's
 nixconvoy open --annex <input>   the flake input developed in place under this checkout (see Annexes)
@@ -286,7 +286,7 @@ branch:
   at `<checkout>/annexes/<input>`, on a branch named after the checkout's
   work branch, off the repository's default branch.  Work there as in the
   checkout: stage what is ready to deploy.
-- **A deploy carries it as a lock change.**  `apply` (and `commit`)
+- **A deploy carries it as a lock change.**  `apply`
   commits the annex's staged state onto its branch with the `-m` message,
   pushes it to the annex's origin and points the `flake.lock` node at the
   pushed rev (`nix flake lock --override-input` on a scratch copy of the
@@ -305,10 +305,14 @@ branch:
   the next union, a day after it was pushed (`refs/nixconvoy/stamp/<sha>`
   dates each pushed union and past ref).  Two
   annex branches that conflict are a union conflict like any other.  Once
-  one of them lands, the other checkout's rebase onto main meets the
-  landed node and rebases its annex branch onto the landed default branch
-  (pushed, the node relocked on it); an annex rebase that is not clean is
-  resolved by hand in the annex worktree.
+  one of them lands, every other checkout's catch-up (a deploy, `pull`,
+  the landing itself) brings its annex worktree onto the landed default
+  branch the way it brings the checkout onto main - fast-forwarded when
+  it has nothing of its own, rebased with its staged and unstaged state
+  otherwise, pushed and the node relocked on it - and a deploy refuses to
+  relock an annex still behind that branch.  An annex rebase that is not
+  clean is reported, the annex left as it was, to resolve by hand in the
+  annex worktree.
 - **`land` lands the annex first:** its tip merged onto the
   repository's default branch (as the union merges it) and squashed there
   as one commit (the

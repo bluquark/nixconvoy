@@ -5,6 +5,10 @@
 //! review reads it - is left alone; one carrying commits of its own is
 //! refused, since switching to the work branch would strand them.
 //!
+//! The same routine (`onto`) brings an annex worktree onto its repository's
+//! default branch, under the Onto params: nixconvoy runs it in that
+//! worktree, naming the upstream.
+//!
 //! The checked-out branch is rebased with its staged and unstaged/untracked
 //! changes riding along as two tmp commits, so they get the same merge
 //! machinery (mergiraf) as real commits; two resets then restore the exact
@@ -25,6 +29,10 @@ pub enum Params {
     PopTmp,
     /// Make HEAD contain origin/main, dying when that isn't clean.
     EnsureRebased,
+    /// Make HEAD contain `upstream` (an annex worktree, its repository's
+    /// default branch as fetched), a dead run's tmp commits unwound first;
+    /// Err says why it was left as it was.
+    Onto { upstream: String },
     /// Fetch, then bring the checkout and its work branch (None: the main
     /// checkout has none) onto origin/main and push the branch.
     Sync { wb: Option<String> },
@@ -50,6 +58,10 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
             Err(e) => Err(Halt::Die(e)),
         },
         Params::Sync { wb } => sync(s, wb.as_deref()),
+        Params::Onto { upstream } => {
+            pop_tmp(s)?;
+            onto(s, upstream)
+        }
         Params::OnWorkBranch { wb } => on_work_branch(s, wb).map(|()| Ok(String::new())),
     }
 }
@@ -86,17 +98,27 @@ fn verb(ff: bool) -> &'static str {
     }
 }
 
+/// `upstream` as a person names it: origin/main.
+fn short(upstream: &str) -> &str {
+    upstream.strip_prefix("refs/remotes/").unwrap_or(upstream)
+}
+
 pub fn onto_main(s: &mut Script) -> Run<Outcome> {
-    if contains(s, MAIN, "HEAD")? {
+    onto(s, MAIN)
+}
+
+pub fn onto(s: &mut Script, upstream: &str) -> Run<Outcome> {
+    let up = short(upstream);
+    if contains(s, upstream, "HEAD")? {
         return Ok(Ok("up to date".into()));
     }
     if let Some(op) = s.text(Query::OpInProgress)? {
         return Ok(Err(format!("a {op} is in progress; finish or abort it first")));
     }
     let Some(br) = branch(s)? else {
-        return detached_onto_main(s);
+        return detached_onto(s, upstream);
     };
-    let ff = contains(s, "HEAD", MAIN)?;
+    let ff = contains(s, "HEAD", upstream)?;
     let staged = s.flag(Query::StagedDiffers)?;
     if staged {
         s.must(Query::Commit { msg: TMP_STAGED.into() }, "committing the staged changes aside")?;
@@ -106,7 +128,7 @@ pub fn onto_main(s: &mut Script) -> Run<Outcome> {
     if unstaged {
         s.must(Query::Commit { msg: TMP_UNSTAGED.into() }, "committing the unstaged changes aside")?;
     }
-    let rebased = s.ran(Query::Rebase { keep_empty: true, aside: false })?;
+    let rebased = s.ran(Query::Rebase { keep_empty: true, aside: false, upstream: upstream.into() })?;
     if rebased.is_err() {
         s.tolerate(Query::RebaseAbort { aside: false })?;
     }
@@ -117,9 +139,9 @@ pub fn onto_main(s: &mut Script) -> Run<Outcome> {
         s.must(Query::Pop { mixed: false }, "restoring the staged changes")?;
     }
     Ok(match rebased {
-        Ok(()) => Ok(format!("{} {br} onto origin/main", verb(ff))),
+        Ok(()) => Ok(format!("{} {br} onto {up}", verb(ff))),
         Err(detail) => Err(format!(
-            "rebasing {br} onto origin/main is not clean, left as it was; run `git rebase origin/main` there, resolve, then re-run:\n{}",
+            "rebasing {br} onto {up} is not clean, left as it was; run `git rebase {up}` there, resolve, then re-run:\n{}",
             no_hints(&detail)
         )),
     })
@@ -129,15 +151,23 @@ pub const STRANDED: &str =
     "the detached HEAD carries commits not on origin/main; push them (git push origin HEAD:main) or put them on a branch, then re-run";
 pub const LEFT: &str = "detached HEAD left as is: nothing of its own, its commits are already on origin";
 
-/// A detached HEAD behind origin/main moved onto it; one at commits that
+/// STRANDED for any upstream.
+fn stranded(upstream: &str) -> String {
+    let up = short(upstream);
+    let branch = up.split_once('/').map_or(up, |(_, b)| b);
+    format!("the detached HEAD carries commits not on {up}; push them (git push origin HEAD:{branch}) or put them on a branch, then re-run")
+}
+
+/// A detached HEAD behind `upstream` moved onto it; one at commits that
 /// are on origin anyway left where it is.
-fn detached_onto_main(s: &mut Script) -> Run<Outcome> {
-    if !contains(s, "HEAD", MAIN)? {
-        return Ok(if s.flag(Query::OnOrigin)? { Ok(LEFT.into()) } else { Err(STRANDED.into()) });
+fn detached_onto(s: &mut Script, upstream: &str) -> Run<Outcome> {
+    let up = short(upstream);
+    if !contains(s, "HEAD", upstream)? {
+        return Ok(if s.flag(Query::OnOrigin)? { Ok(LEFT.into()) } else { Err(stranded(upstream)) });
     }
-    Ok(match s.ran(Query::Detach)? {
-        Ok(()) => Ok("fast-forwarded the detached HEAD onto origin/main".into()),
-        Err(detail) => Err(format!("cannot move the detached HEAD onto origin/main, left as it was:\n{}", no_hints(&detail))),
+    Ok(match s.ran(Query::Detach { upstream: upstream.into() })? {
+        Ok(()) => Ok(format!("fast-forwarded the detached HEAD onto {up}")),
+        Err(detail) => Err(format!("cannot move the detached HEAD onto {up}, left as it was:\n{}", no_hints(&detail))),
     })
 }
 
@@ -152,7 +182,7 @@ pub fn aside(s: &mut Script, wb: &str) -> Run<Outcome> {
     let ff = contains(s, &local, MAIN)?;
     let result = match s.ran(Query::AddWorktree { branch: wb.into() })? {
         Err(detail) => Err(format!("cannot check out {wb} to rebase it:\n{}", detail.trim())),
-        Ok(()) => match s.ran(Query::Rebase { keep_empty: false, aside: true })? {
+        Ok(()) => match s.ran(Query::Rebase { keep_empty: false, aside: true, upstream: MAIN.into() })? {
             Ok(()) => Ok(format!("{} {wb} onto origin/main", verb(ff))),
             Err(detail) => {
                 s.tolerate(Query::RebaseAbort { aside: true })?;

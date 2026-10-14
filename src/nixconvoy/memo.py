@@ -229,26 +229,68 @@ def lock_part(lock: object, named: Collection[str]) -> str:
 
 
 @functools.cache
+def overlay_regexes(ns: str) -> tuple[re.Pattern[str], re.Pattern[str]]:
+    """Any use of the overlay namespace `ns`, and its `inherit (pkgs.ns)`."""
+    return (re.compile(rf"pkgs\.{re.escape(ns)}(?![.\w\-])|{re.escape(ns)}\.\$\{{"),
+            re.compile(rf"inherit\s*\(\s*pkgs\.{re.escape(ns)}\s*\)"))
+
+
+@functools.cache
+def file_facts(wt: str, f: str) -> tuple[frozenset[str], tuple[str, ...], tuple[str, ...]]:
+    """What the .nix file `f` of the tree checked out in `wt` contributes to
+    target_eval_reads, the same whichever target asks: the words it names,
+    the repo paths its path literals name (a directory named counts whole;
+    the overlay file for the overlay's directory; outside the repo, `.` and
+    the overlay's own attribute files skipped) and the overlay attribute
+    files it uses.  Cached, since the targets' scans share most files."""
+    c = cfg()
+    flake_nix, overlay, ns = c.flake_file("flake.nix"), c.overlay, c.overlay_namespace
+    attr_files = eval_key_shape(wt) or {}
+    text = (Path(wt) / f).read_text()
+    # Comments left in: over-naming costs an eval, a `#` in a string
+    # hiding a name would serve a stale toplevel.
+    if f == flake_nix:
+        m = OUTPUTS_ARGS.search(text)
+        named = frozenset(WORD.findall(SPECIAL_ARGS.sub("", text[m.end():] if m else text)))
+    else:
+        named = frozenset(WORD.findall(text))
+    refs: list[str] = []
+    for m in PATH_LITERAL.finditer(text):
+        ref = os.path.normpath(Path(f).parent / m.group(1))
+        if ref.startswith("..") or Path(ref).is_absolute() or ref == ".":
+            continue  # outside the repo: not readable by the flake
+        if overlay and f == overlay and ref in attr_files.values():
+            continue
+        refs.append(overlay if overlay and ref == str(Path(overlay).parent) else ref)
+    uses: list[str] = []
+    if overlay and f != overlay and ns:
+        any_name, inherit_ns = overlay_regexes(ns)
+        code = inherit_ns.sub("", NIX_COMMENT.sub("", text))
+        names = (attr_files if any_name.search(code) else
+                 WORD.findall(text) if WITH_SCOPE.search(code) else
+                 [n for m in ATTR_NAME.finditer(text)
+                  for n in ([m.group(1)] if m.group(1) else WORD.findall(m.group(2)))])
+        uses = sorted(attr_files[n] for n in set(names) if n in attr_files)
+    return named, tuple(refs), tuple(uses)
+
+
+@functools.cache
 def target_eval_reads(wt: str, union: str, target: str) -> tuple[frozenset[str], frozenset[str]] | None:
     """What `target`'s evaluation can read in the `union` commit checked out
     in `wt`: the repo paths - flake.nix, the target's directory, transitively
     every path any of those .nix files names (a named directory counts
     whole) - and the flake input names those files mention (lock_part's
     pruning).  In flake.nix the other targets' directories are skipped.  The
-    scan is lexical (PATH_LITERAL), sound for a path built by concatenation
-    as long as its directory is named literally.  No scan can follow a
-    module reading another configuration through specialArgs (`self`, or
-    the whole `inputs`), so unless eval_key_shape rules that out the answer
-    is None: the whole tree.  The overlay's attribute files count only when
-    a scanned file names the attribute."""
-    attr_files = eval_key_shape(wt)
-    if attr_files is None:
+    scan is lexical (PATH_LITERAL, file_facts), sound for a path built by
+    concatenation as long as its directory is named literally.  No scan can
+    follow a module reading another configuration through specialArgs
+    (`self`, or the whole `inputs`), so unless eval_key_shape rules that out
+    the answer is None: the whole tree.  The overlay's attribute files count
+    only when a scanned file names the attribute."""
+    if eval_key_shape(wt) is None:
         return None
     c = cfg()
-    flake_nix, overlay, hosts_dir = c.flake_file("flake.nix"), c.overlay, c.hosts_path
-    ns = c.overlay_namespace
-    any_name = re.compile(rf"pkgs\.{re.escape(ns)}(?![.\w\-])|{re.escape(ns)}\.\$\{{") if ns else None
-    inherit_ns = re.compile(rf"inherit\s*\(\s*pkgs\.{re.escape(ns)}\s*\)") if ns else None
+    flake_nix, hosts_dir = c.flake_file("flake.nix"), c.hosts_path
     objs = union_objects(union)
     depth = hosts_dir.count("/") + 1
     other_targets = tuple(q for q, (t, _) in objs.items()
@@ -268,30 +310,10 @@ def target_eval_reads(wt: str, union: str, target: str) -> tuple[frozenset[str],
         for f in files:
             if not f.endswith(".nix"):
                 continue
-            text = (Path(wt) / f).read_text()
-            # Comments left in: over-naming costs an eval, a `#` in a string
-            # hiding a name would serve a stale toplevel.
-            if f == flake_nix:
-                m = OUTPUTS_ARGS.search(text)
-                named.update(WORD.findall(SPECIAL_ARGS.sub("", text[m.end():] if m else text)))
-            else:
-                named.update(WORD.findall(text))
-            for m in PATH_LITERAL.finditer(text):
-                ref = os.path.normpath(Path(f).parent / m.group(1))
-                if ref.startswith("..") or Path(ref).is_absolute():
-                    continue  # outside the repo: not readable by the flake
-                if ref == "." or (f == flake_nix and ref.startswith(other_targets)):
-                    continue
-                if overlay and f == overlay and ref in attr_files.values():
-                    continue
-                todo.append(overlay if overlay and ref == str(Path(overlay).parent) else ref)
-            if overlay and f != overlay and any_name and inherit_ns:
-                code = inherit_ns.sub("", NIX_COMMENT.sub("", text))
-                names = (attr_files if any_name.search(code) else
-                         WORD.findall(text) if WITH_SCOPE.search(code) else
-                         [n for m in ATTR_NAME.finditer(text)
-                          for n in ([m.group(1)] if m.group(1) else WORD.findall(m.group(2)))])
-                todo.extend(attr_files[n] for n in set(names) if n in attr_files)
+            words, refs, uses = file_facts(wt, f)
+            named.update(words)
+            todo.extend(ref for ref in refs if not (f == flake_nix and ref.startswith(other_targets)))
+            todo.extend(uses)
     return frozenset(seen), frozenset(named)
 
 
