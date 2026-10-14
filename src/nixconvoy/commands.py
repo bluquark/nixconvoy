@@ -13,7 +13,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import IO, NamedTuple
 
-from . import annex, proc
+from . import proc, submodule
 from .checkout import (
     MACHINE_ENV,
     PAST_REFS,
@@ -115,13 +115,13 @@ def land(release: bool = False) -> None:
     lines = msg.splitlines()
     if len(lines) > 1 and lines[1].strip():
         msg = "\n".join([lines[0], "", *lines[1:]])
-    # The annexes first: main must never lock a branch about to go.
-    gone = annex.orphaned(Path.cwd(), wb)
+    # The submodules first: main must never pin a branch about to go.
+    gone = submodule.orphaned(Path.cwd())
     if gone:
-        die(f"the lock deploys {wb}'s rev of annex {', '.join(gone)}, whose worktree is gone: "
-            f"`nixconvoy open --annex <input>` recreates it from origin's branch to land it, or "
-            f"`nixconvoy abandon --annex <input>` drops it")
-    annex.land_all(wb, msg)
+        die(f"the tree pins {wb}'s rev of submodule {', '.join(gone)}, whose worktree is gone: "
+            f"`nixconvoy open --submodule <input>` recreates it from origin's branch to land it, or "
+            f"`nixconvoy abandon --submodule <input>` drops it")
+    submodule.land_all(wb, msg)
     tree = tree_less_msg("HEAD")
 
     commit = out(["git", "commit-tree", tree, "-p", main, "-m", msg])
@@ -137,7 +137,7 @@ def land(release: bool = False) -> None:
     print(f"landed on main: {summarize(commit)}")
     siblings = sibling_checkouts()  # the parent of a subagent worktree included
     finish(wb)
-    if not (catch_up(siblings) & annex.catch_up_repos()):
+    if not (catch_up(siblings) & submodule.catch_up_repos()):
         die("some checkouts could not be brought onto the new main (see above); "
             "fix them and `nixconvoy pull`")
 
@@ -146,7 +146,7 @@ def pull() -> None:
     """This checkout and its siblings onto origin/main (cli docstring)."""
     await_background_push()
     binary("nixconvoy-plan")  # resolved before update_checkout moves into the others
-    if not (catch_up([Path.cwd(), *sibling_checkouts()]) & annex.catch_up_repos()):
+    if not (catch_up([Path.cwd(), *sibling_checkouts()]) & submodule.catch_up_repos()):
         sys.exit(1)
 
 
@@ -175,7 +175,7 @@ def abandon(apply_now: bool = False) -> None:
         if main is None:
             die("origin/main not found")
         prev = rev("HEAD") or ""
-        annex.reset_all(here, ident.wb)
+        submodule.reset_all(here, ident.wb)
         git("reset", "--quiet", "--hard", main)
         Path(MSG_FILE).unlink(missing_ok=True)
         print(f"nothing deployed from {sub_label(here)}; reset onto origin/main (was {prev[:12]}, "
@@ -193,7 +193,7 @@ def abandon(apply_now: bool = False) -> None:
         die("nothing to abandon")
 
     deployed = deployed_targets(f"{main}..{prev}")
-    annex.reset_all(here, wb)
+    submodule.reset_all(here, wb)
     git("reset", "--quiet", "--hard", main)
     Path(MSG_FILE).unlink(missing_ok=True)  # an uncommitted copy survives the hard reset
     git("branch", "-f", "main", main, check=False)
@@ -248,20 +248,19 @@ def close_worktrees(names: list[str], *, force: bool = False) -> None:
             print(f"{label}: {verdict}", flush=True)
 
 
-def close_annex(name: str, *, force: bool = False) -> None:
-    """`close --annex <input>`: the annex worktree removed with its
-    branch, unless that would lose work (`force`: removed anyway, its lock
-    node put back to origin/main's when it named the branch, staged)."""
+def close_submodule(name: str, *, force: bool = False) -> None:
+    """`close --submodule <input>`: the submodule worktree removed with
+    its branch, unless that would lose work (`force`: removed anyway, the
+    pin put back to origin/main's when it named the branch's work, staged)."""
     git(*fetch_args("--no-auto-gc"), check=False)
-    ax = annex.present_one(Path.cwd(), name)
-    wb = work_branch_name()
-    why = annex.keeps(ax, wb)
+    top = Path.cwd()
+    sub = submodule.present_one(top, name)
+    why = submodule.keeps(sub, top)
     if why is not None and not force:
-        die(f"annex {name} is kept: {why} (--force removes it anyway)")
-    # The lock first: its restore needs nix and the network, the removal nothing.
-    if bool(wb) and (annex.locked_rev(name)[1] == f"refs/heads/{wb}" or annex.lock_off_default(name, ax.repo)):
-        annex.restore_lock(ax)
-    annex.remove_one(ax)
+        die(f"submodule {name} is kept: {why} (--force removes it anyway)")
+    if work_branch_name() and submodule.off_default(sub, top):
+        submodule.restore(sub, top)
+    submodule.remove_one(sub)
 
 
 class Stop(NamedTuple):
@@ -501,7 +500,7 @@ class PruneQueries(GitQueries):
             # An agent that stopped may be resumed: what git ignores (its
             # builds, notes) is kept for it too.
             ignored = ["--ignored"] if self.stop is not None else []
-            return {"flag": bool(out(["git", "status", "--porcelain", *ignored])) or annex.own(self.d)}
+            return {"flag": bool(out(["git", "status", "--porcelain", *ignored])) or submodule.own(self.d)}
         if kind == "occupied":
             return {"flag": occupied(self.d, invoker=self.invoker)}
         if kind == "ran_again":
@@ -516,7 +515,7 @@ class PruneQueries(GitQueries):
             self.claim_out = claimed and ask.get("expect") is not None
             return {"flag": claimed}
         if kind == "remove_worktree":
-            annex.remove_all(self.d)  # nested in it: their registrations go first
+            submodule.remove_all(self.d)  # nested in it: their registrations go first
             os.chdir(self.parent)
             # git holds the name lock too, so a prune killed meanwhile
             # leaves it deleting under the lock.
@@ -752,7 +751,7 @@ def finish(wb: str) -> None:
 
 def remove_sub(here: Path, branches: list[str]) -> None:
     """`close --force`: the subagent worktree `here` removed with its
-    branches (`branches` and whatever it has checked out) and its annexes,
+    branches (`branches` and whatever it has checked out) and its submodules,
     here and on origin, whatever they hold; the process ends up in the
     parent."""
     parent = sub_parent(here)
@@ -765,7 +764,7 @@ def remove_sub(here: Path, branches: list[str]) -> None:
         die(f"{here} stayed locked for 60s by a create or a close; re-run")
     if worktree_lock(here) is not None:
         git("worktree", "unlock", str(here))
-    annex.remove_all(here)
+    submodule.remove_all(here)
     os.chdir(parent)
     git("worktree", "remove", "--force", str(here), pass_fds=(held.fileno(),))
     # Still held: a create of the name reuses no branch about to go.
@@ -897,7 +896,7 @@ def status() -> None:
     def line(d: Path) -> tuple[str, bool]:
         """The checkout's state after its name, and whether it is quiet -
         nothing of its own, nothing pending, no agent at work - and so
-        rendered gray as a whole.  An annex holding anything keeps it lit."""
+        rendered gray as a whole.  A submodule holding anything keeps it lit."""
         cur = g(d, "symbolic-ref", "--short", "-q", "HEAD") or None
         head = g(d, "rev-parse", "HEAD")
         ident = identity_of(d, cur, pats)
@@ -926,7 +925,7 @@ def status() -> None:
         op = git_op_in_progress(d)
         deploying = deploy_running(d)
         quiet = (not own and not any(counts.values()) and not live and op is None and not deploying
-                 and not annex.own(d))
+                 and not submodule.own(d))
         p = (lambda text, _style: text) if quiet else paint
         if cur is None:
             where = (p("detached at origin/main", "green") if head == main
@@ -951,7 +950,7 @@ def status() -> None:
             held = sorted(held_targets("origin/main..HEAD", str(d)))
             if held:
                 notes.append(p(f"holds back {', '.join(held)}", "yellow"))
-        notes += [p(a, "cyan") for a in annex.notes(d)]
+        notes += [p(a, "cyan") for a in submodule.notes(d)]
         if ident.kind == "sub" and not own and not any(counts.values()) and cur != ident.wb:
             if sessionless:
                 notes.append(p(f"empty, its create found no claude session: nixconvoy close {d.name} "
@@ -1012,12 +1011,12 @@ def status() -> None:
         print(paint("on origin only (other machines' checkouts):", "dim"))
         for e in elsewhere:
             print(f"  {paint(e, 'yellow')}")
-    repos = annex.configured()
+    repos = submodule.configured()
     if repos:
-        print(paint(f"annexes: {', '.join(sorted(repos))} (nixconvoy open --annex <input>)", "dim"))
-    stray = annex.repo_notes()
+        print(paint(f"submodules: {', '.join(sorted(repos))} (nixconvoy open --submodule <input>)", "dim"))
+    stray = submodule.repo_notes()
     if stray:
-        print(paint("annex repositories edited outside any annex:", "dim"))
+        print(paint("submodule repositories edited outside any checkout:", "dim"))
         for e in stray:
             print(f"  {paint(e, 'red')}")
     pending = pending_announcements()
@@ -1165,7 +1164,7 @@ def close_checkout(path: Path, *, force: bool = False) -> None:
     """`nixconvoy close <path>`: the agent checkout at `path` removed with
     its work branch, here and on origin (the tip kept under PAST_REFS),
     when it holds nothing of its own - no edits, nothing beyond
-    origin/main, no annex holding anything - or `force`."""
+    origin/main, no submodule holding anything - or `force`."""
     here = Path.cwd().resolve()
     d = path.expanduser().resolve()
     if d == here:
@@ -1188,20 +1187,20 @@ def close_checkout(path: Path, *, force: bool = False) -> None:
     cur = branch_at(d)
     wb = identity_of(d, cur).wb
     head = out(["git", "rev-parse", "HEAD"], cwd=str(d))
-    # Its annex worktrees are its own (removed with it), ignored or not.
+    # Its submodule worktrees are its own (removed with it): a pin they moved is not an edit.
     edits = [ln for ln in run(["git", "status", "--porcelain"], cwd=str(d), check=False).stdout.splitlines()
-             if ln[3:] != f"{annex.ANNEX_DIR}/" and not ln[3:].startswith(f"{annex.ANNEX_DIR}/")]
+             if ln[3:] not in submodule.paths(d)]
     tip = rev(f"refs/heads/{wb}") if wb else None
     kept = ("edits or untracked files" if edits
             else "commits not on origin/main" if not is_ancestor(head, "refs/remotes/origin/main")
             else f"its work branch {wb}, with commits not on origin/main"
             if tip and not is_ancestor(tip, "refs/remotes/origin/main")
-            else "an annex holding something" if annex.own(d) else None)
+            else "a submodule holding something" if submodule.own(d) else None)
     if kept and not force:
         die(f"{d} holds {kept}: land or abandon it first (--force removes it anyway)")
     if worktree_lock(d) is not None:
         git("worktree", "unlock", str(d), check=False)
-    annex.remove_all(d)
+    submodule.remove_all(d)
     lock.close()
     git("worktree", "remove", "--force", str(d))
     names = [b for b in {cur, wb} if b and owned(b)]
@@ -1276,16 +1275,17 @@ def land_union(release: bool = False) -> None:
             if carried:
                 die(f"{b} contains the unlanded increments of {', '.join(carried)}; land that branch "
                     f"first, then re-run")
-            gone = annex.orphaned(d, b)
+            gone = submodule.orphaned(d)
             if gone:
-                die(f"the lock deploys {b}'s rev of annex {', '.join(gone)}, whose worktree is gone: "
-                    f"`nixconvoy open --annex <input>` or `abandon --annex <input>` in {d.name} first")
+                die(f"the tree pins {b}'s rev of submodule {', '.join(gone)}, whose worktree is gone: "
+                    f"`nixconvoy open --submodule <input>` or `abandon --submodule <input>` in {d.name} first")
         for d, b in [(here, wb), *parts]:
             holds(b, "HEAD" if d == here else f"refs/heads/{b}", main, release)
 
         def merged_tree() -> str:
             """The branches merged in a throwaway worktree on this branch's
-            tip (the lock node by node, as a deploy's union): its tree."""
+            tip (a gitlink both moved on the union of its branches, as a
+            deploy's union): its tree."""
             wt = add_worktree("HEAD")
             try:
                 for d, b in parts:
@@ -1297,7 +1297,7 @@ def land_union(release: bool = False) -> None:
                     for f in out(["git", "diff", "--name-only", "--diff-filter=U"], cwd=wt).splitlines():
                         if f == MSG_FILE:
                             git("rm", "--quiet", "-f", f, cwd=wt, check=False)
-                        elif (annex.solve_lock(Path(wt)) if f == str(annex.lock_path())
+                        elif (submodule.solve_union(Path(wt), f) if submodule.at_path(Path(wt), f)
                               else solve_with_mergiraf(wt, f)):
                             git("add", "--", f, cwd=wt, check=False)
                         else:
@@ -1321,11 +1321,11 @@ def land_union(release: bool = False) -> None:
                     die(f"{d.name if d == here else sub_label(d)} has unstaged edits or untracked files "
                         f"the landing changes: {', '.join(clash)}; stage and deploy them, or put them aside")
 
-        # Proven to merge before any annex lands (which cannot be undone).
+        # Proven to merge before any submodule lands (which cannot be undone).
         clashes(merged_tree())
         for d, b in [(here, wb), *parts]:
             os.chdir(d)
-            annex.land_all(b, msg)
+            submodule.land_all(b, msg)
             os.chdir(here)
         tree = merged_tree()
         if tree == main_tree:
@@ -1354,57 +1354,60 @@ def land_union(release: bool = False) -> None:
         for lock in locks:
             lock.close()
     landed = {d for d, _ in parts}
-    if not (catch_up([d for d in sibling_checkouts() if d not in landed]) & annex.catch_up_repos()):
+    if not (catch_up([d for d in sibling_checkouts() if d not in landed]) & submodule.catch_up_repos()):
         die("some checkouts could not be brought onto the new main (see above); "
             "fix them and `nixconvoy pull`")
 
 
-def land_annex(name: str) -> None:
-    """`land --annex <name>`: the one annex landed on its repository's
-    default branch and relocked there as a commit on the work branch,
-    pushed; its worktree stays, and the annex repositories' own checkouts
-    follow (annex.catch_up_repos).  The checkout's own landing is untouched."""
+def land_submodule(name: str) -> None:
+    """`land --submodule <name>`: the one submodule landed on its
+    repository's default branch and pinned there as a commit on the work
+    branch, pushed; its worktree stays, and the submodule repositories'
+    own checkouts follow (submodule.catch_up_repos).  The checkout's own
+    landing is untouched."""
     await_background_push()
     git(*fetch_args())
     pop_tmp_commits()
-    wb = require_work_branch("land --annex")
+    wb = require_work_branch("land --submodule")
     if current_branch() != wb:
         die(f"land runs from the work branch ({wb}); currently on {current_branch() or '(detached HEAD)'}")
     if staged_differs():
         die("staged but undeployed changes present; deploy or unstage them first")
     ensure_rebased()
-    ax = annex.present_one(Path.cwd(), name)
+    sub = submodule.present_one(Path.cwd(), name)
     fallback = (out(["git", "show", f"HEAD:{MSG_FILE}"]) if rev(f"HEAD:{MSG_FILE}") else "").partition("\n")[0]
-    annex.land_one(ax, wb, fallback or f"{name} landed")
+    submodule.land_one(sub, wb, fallback or f"{name} landed")
     push_work_branch(wb)
-    if not annex.catch_up_repos():
+    if not submodule.catch_up_repos():
         sys.exit(1)
 
 
-def abandon_annex(name: str) -> None:
-    """`abandon --annex <name>`: the one annex reset onto its repository's
-    default branch, the lock node restored to origin/main's and staged for
-    the next deploy; its worktree stays."""
+def abandon_submodule(name: str) -> None:
+    """`abandon --submodule <name>`: the one submodule reset onto its
+    repository's default branch, the pin restored to origin/main's and
+    staged for the next deploy; its worktree stays."""
     await_background_push()
     git(*fetch_args())
     pop_tmp_commits()
-    wb = require_work_branch("abandon --annex")
-    ax = annex.present_one(Path.cwd(), name)
-    annex.reset_one(ax, wb)
-    if not annex.restore_lock(ax):
-        print(f"annex {name}: the lock still names what origin/main locks; nothing to revert")
+    wb = require_work_branch("abandon --submodule")
+    top = Path.cwd()
+    sub = submodule.present_one(top, name)
+    submodule.main_pin(sub, top)  # nothing reset for a restore that cannot follow
+    submodule.reset_one(sub, wb)
+    if not submodule.restore(sub, top):
+        print(f"submodule {name}: the tree still pins what origin/main pins; nothing to revert")
 
 
 __all__ = [
     "abandon",
-    "abandon_annex",
-    "close_annex",
+    "abandon_submodule",
     "close_checkout",
+    "close_submodule",
     "close_worktrees",
     "enter_sub",
     "holds_work",
     "land",
-    "land_annex",
+    "land_submodule",
     "land_union",
     "open_checkout",
     "open_worktree",

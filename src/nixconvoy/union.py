@@ -10,7 +10,7 @@ from concurrent.futures import Future
 from fnmatch import fnmatchcase
 from pathlib import Path
 
-from . import annex
+from . import submodule
 from .checkout import MACHINE_ENV, GitQueries, add_worktree, allowed_branches, drop_worktree, ran, summarize
 from .config import MSG_FILE, cfg
 from .proc import git, ok, out, rev, run, solve_with_mergiraf
@@ -69,8 +69,8 @@ class UnionQueries(GitQueries):
         if kind == "drop_file":
             return ran(git("rm", "--quiet", "-f", arg("file"), cwd=wt, check=False))
         if kind == "solve":
-            if arg("file") == str(annex.lock_path()):
-                return {"flag": annex.solve_lock(Path(wt))}
+            if submodule.at_path(Path(wt), arg("file")) is not None:
+                return {"flag": submodule.solve_union(Path(wt), arg("file"))}
             return {"flag": solve_with_mergiraf(wt, arg("file"))}
         if kind == "add":
             return ran(git("add", "--", arg("file"), cwd=wt, check=False))

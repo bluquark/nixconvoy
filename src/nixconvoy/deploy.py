@@ -13,7 +13,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
-from . import annex, memo, proc, targets
+from . import memo, proc, submodule, targets
 from .checkout import (
     PENDING_REFS,
     WAIT_STALE,
@@ -149,11 +149,11 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
     # Non-candidates are probed best-effort: the verdict reports their
     # drift, and a hold on one is read off its lineage.
     probe_names: list[str] = [] if skip else [n for n in all_targets if not remote_only(n)]
-    pool = ThreadPoolExecutor(1 + len(probe_names) + len(annex.present(Path.cwd())))
+    pool = ThreadPoolExecutor(1 + len(probe_names) + len(submodule.present(Path.cwd())))
     fetch = pool.submit(git, *fetch_args("--no-auto-gc"))
-    carrying = annex.carries(Path.cwd())  # read before the prefetch moves the refs it reads
-    if not dry:  # a dry activation brings no annex along
-        annex.prefetch(Path.cwd(), pool)
+    carrying = submodule.carries(Path.cwd())  # read before the prefetch moves the refs it reads
+    if not dry:  # a dry activation brings no submodule along
+        submodule.prefetch(Path.cwd(), pool)
     probes: dict[str, Future[Probe]] = {}
 
     def start_probes() -> None:
@@ -176,8 +176,8 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
     # committed without a deploy (commit_unreached), the targets left to
     # the next deploy reaching one; naming targets asks for a deploy.  The
     # probes start at once unless the staged state as it is looks that
-    # way; what decides is a scan of the final snapshot, after the annex
-    # step (a relock reaches targets) and the rebase onto origin/main.
+    # way; what decides is a scan of the final snapshot, after the submodule
+    # step (a pin reaches targets) and the rebase onto origin/main.
     PERF.mark("reach")
     scanned = ""  # the snapshot the early scan judged, so an unchanged one is not scanned again
     if (wb is not None and bool(msg) and not dry and not skip and not reset and not filter_targets
@@ -188,8 +188,8 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
         start_probes()
 
     snap = ""
-    PERF.mark("annex")
-    for told in annex.sync(wb, msg, dry=dry):
+    PERF.mark("submodules")
+    for told in submodule.sync(wb, msg, dry=dry):
         print(told)
     PERF.mark("snapshot")
     if staged_differs():

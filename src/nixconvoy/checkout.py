@@ -133,7 +133,7 @@ def git_common(d: Path) -> Path | None:
 def sub_parent(d: Path) -> Path | None:
     """The checkout the subagent worktree at `d` is nested in - the nearest
     directory above it holding a .git, when that is a worktree of the
-    same repository (an annex's nested checkout is another repository's);
+    same repository (a planted submodule worktree is another repository's);
     None when `d` is not one."""
     if not re.fullmatch(r"[\w.-]+", d.name) or (mine := git_common(d)) is None:
         return None
@@ -315,17 +315,17 @@ class GitQueries:
         if kind == "head_subject":
             return {"text": git("log", "-1", "--format=%s", check=False).stdout.strip() or None}
         if kind == "rebase":
-            from . import annex  # noqa: PLC0415 - annex builds on this module
+            from . import submodule  # noqa: PLC0415 - submodule builds on this module
 
             empty = "--empty=keep" if ask.get("keep_empty") else "--empty=drop"
             where = self.where(ask)
             p = git("rebase", "--quiet", empty, arg("upstream"), cwd=where, check=False)
-            # Stopped on the lock alone, where main locks an annex this
-            # branch relocked (its landing elsewhere): the annex follows.
-            while p.returncode != 0 and annex.solve_rebase(Path(where or Path.cwd()).resolve(), Path.cwd().resolve()):
+            # Stopped on gitlinks alone, where main pins a submodule this
+            # branch pinned too (its landing elsewhere): the submodule follows.
+            while p.returncode != 0 and submodule.solve_rebase(Path(where or Path.cwd()).resolve(), Path.cwd().resolve()):
                 if ok(["git", "diff", "--cached", "--quiet"], cwd=where):
-                    # Resolved to what HEAD has already (a later relock of
-                    # the same annex): kept as an empty commit where the
+                    # Resolved to what HEAD has already (a later pin of
+                    # the same submodule): kept as an empty commit where the
                     # core counts on its commits (its tmp commits), else skipped.
                     if not ask.get("keep_empty"):
                         p = git("rebase", "--skip", cwd=where, env={"GIT_EDITOR": "true"}, check=False)
@@ -335,9 +335,9 @@ class GitQueries:
                     git("commit", "--quiet", "--allow-empty", "--no-verify", "-C", stopped, cwd=where)
                 p = git("rebase", "--continue", cwd=where, env={"GIT_EDITOR": "true"}, check=False)
             if p.returncode == 0:
-                annex.push_pending()
+                submodule.push_pending()
             else:
-                annex.undo_pending()
+                submodule.undo_pending()
             return ran(p)
         if kind == "rebase_abort":
             return ran(git("rebase", "--abort", cwd=self.where(ask), check=False))
@@ -421,11 +421,11 @@ def sibling_checkouts() -> list[Path]:
 def update_checkout(path: Path) -> tuple[bool, str]:
     """Fetch and bring the checkout at `path` onto origin/main under its
     deploy lock, pushing its work branch (origin's copy is what every other
-    deploy unions), then its annex worktrees onto their default branches
-    (annex.catch_up): (ok, what happened).  A checkout that cannot be is
-    left exactly as it was; an annex that cannot be is named, the checkout
-    itself brought along."""
-    from . import annex  # noqa: PLC0415 - annex builds on this module
+    deploy unions), then its submodule worktrees onto their default
+    branches (submodule.catch_up): (ok, what happened).  A checkout that
+    cannot be is left exactly as it was; a submodule that cannot be is
+    named, the checkout itself brought along."""
+    from . import submodule  # noqa: PLC0415 - submodule builds on this module
 
     prev = Path.cwd()
     os.chdir(path)
@@ -439,7 +439,7 @@ def update_checkout(path: Path) -> tuple[bool, str]:
             assert isinstance(done, dict)
             good, status = done.get("ok") is True, str(done.get("status"))
             if good and wb is not None:
-                problems = annex.catch_up(path, wb)
+                problems = submodule.catch_up(path, wb)
                 if problems:
                     good, status = False, "; ".join([status, *problems])
         finally:
@@ -484,22 +484,29 @@ def warn_no_msgfile(wb: str) -> None:
               "to land", file=sys.stderr)
 
 
-def staged_snapshot() -> str:
-    """Ephemeral deterministic commit of the staged state on top of HEAD:
-    what gets built and switched, never what lands on a branch.  Built from a
-    copy of the index, since write-tree on the real one would rewrite its
-    cache-tree extension."""
+def index_tree(cwd: str | None = None, *, less_msg: bool = False) -> str:
+    """The tree of the index (`less_msg`: without MSG_FILE), through a copy,
+    since write-tree on the real one would rewrite its cache-tree
+    extension."""
     fd, tmpidx = tempfile.mkstemp()
     os.close(fd)
     try:
-        shutil.copy(out(["git", "rev-parse", "--git-path", "index"]), tmpidx)
-        p = run(["git", "write-tree"], env={"GIT_INDEX_FILE": tmpidx}, check=False)
+        shutil.copy(out(["git", "rev-parse", "--path-format=absolute", "--git-path", "index"], cwd=cwd), tmpidx)
+        env = {"GIT_INDEX_FILE": tmpidx}
+        if less_msg:
+            git("update-index", "--force-remove", MSG_FILE, env=env, cwd=cwd)
+        p = run(["git", "write-tree"], env=env, cwd=cwd, check=False)
         if p.returncode != 0:
-            die("cannot snapshot the index (unmerged paths?)")
-        tree = p.stdout.strip()
+            die(f"cannot snapshot the index{f' of {cwd}' if cwd else ''} (unmerged paths?)")
+        return p.stdout.strip()
     finally:
         Path(tmpidx).unlink()
-    return out(["git", "commit-tree", tree, "-p", "HEAD",
+
+
+def staged_snapshot() -> str:
+    """Ephemeral deterministic commit of the staged state on top of HEAD:
+    what gets built and switched, never what lands on a branch."""
+    return out(["git", "commit-tree", index_tree(), "-p", "HEAD",
                 "-m", "staged snapshot (not yet committed)"], env=MACHINE_ENV)
 
 

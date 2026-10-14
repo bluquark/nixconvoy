@@ -7,8 +7,8 @@
 # origin/main (a work branch deployed but not landed: nixconvoy's land
 # or abandon is its way out), is kept (exit 1 leaves it on disk, as
 # documented), as is one another live claude session has taken over, or
-# one holding an annex worktree (annexes/<input>, gitignored: nixconvoy's
-# close judges that and removes both in order).
+# one holding a submodule worktree (a gitlink whose directory nixconvoy
+# planted a worktree in: its close judges that and removes both in order).
 set -eu
 command -v jq >/dev/null 2>&1 || { echo "worktree-remove: jq missing" >&2; exit 1; }
 path=$(jq -r '.worktree_path')
@@ -60,11 +60,12 @@ if [ -n "$(git -C "$path" status --porcelain)" ] \
   echo "worktree-remove: $path has work not on origin/main, kept" >&2
   exit 1
 fi
-for a in "$path"/annexes/*/.git; do
-  [ -e "$a" ] || continue
-  echo "worktree-remove: $path holds an annex ($(basename "$(dirname "$a")")): left to nixconvoy close" >&2
+while IFS=$'\t' read -r meta sub; do
+  case "$meta" in 160000*) ;; *) continue ;; esac
+  [ -e "$path/$sub/.git" ] || continue
+  echo "worktree-remove: $path holds a submodule worktree ($sub): left to nixconvoy close" >&2
   exit 1
-done
+done < <(git -C "$path" ls-files -s)
 branch=$(git -C "$path" symbolic-ref --short -q HEAD || true)
 git -C "$top" worktree unlock "$path" 2>/dev/null || true
 git -C "$top" worktree remove --force "$path"

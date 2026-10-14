@@ -314,7 +314,34 @@ def target_eval_reads(wt: str, union: str, target: str) -> tuple[frozenset[str],
             named.update(words)
             todo.extend(ref for ref in refs if not (f == flake_nix and ref.startswith(other_targets)))
             todo.extend(uses)
+    # An input taken as a relative path is read from the tree: its
+    # directory, or the gitlink of a submodule (a commit object in objs).
+    seen.update(q for n, q in path_inputs(wt).items() if n in named and q in objs)
     return frozenset(seen), frozenset(named)
+
+
+@functools.cache
+def path_inputs(wt: str) -> dict[str, str]:
+    """The flake's root inputs locked as relative paths (`path:./...`): name
+    -> repo path, from flake.lock in `wt`."""
+    c = cfg()
+    try:
+        lock = load_json((Path(wt) / c.flake_file("flake.lock")).read_text())
+    except (OSError, ValueError):
+        return {}
+    if not (isinstance(lock, dict) and isinstance(lock.get("nodes"), dict) and isinstance(lock.get("root"), str)):
+        return {}
+    nodes = lock["nodes"]
+    root = nodes.get(lock["root"])
+    inputs = root.get("inputs") if isinstance(root, dict) else None
+    found: dict[str, str] = {}
+    for name, key in (inputs.items() if isinstance(inputs, dict) else ()):
+        node = nodes.get(key) if isinstance(key, str) else None
+        locked = node.get("locked") if isinstance(node, dict) else None
+        path = locked.get("path") if isinstance(locked, dict) and locked.get("type") == "path" else None
+        if isinstance(path, str) and not path.startswith("/"):
+            found[name] = os.path.normpath(f"{c.flake_path}/{path}")
+    return found
 
 
 def target_eval_key(wt: str, union: str, target: str) -> str:

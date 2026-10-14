@@ -560,6 +560,7 @@ def scratch_env() -> None:
     memo.union_objects.cache_clear()
     memo.eval_key_shape.cache_clear()
     memo.target_eval_reads.cache_clear()
+    memo.path_inputs.cache_clear()
     memo.file_facts.cache_clear()
 
 
@@ -600,6 +601,7 @@ def reach_cases(d: Path) -> None:
             tip = sh(co, "rev-parse", "HEAD")
             memo.union_objects.cache_clear()
             memo.target_eval_reads.cache_clear()
+            memo.path_inputs.cache_clear()
             return memo.reached_targets(str(co), tip, targets, tip, lineages or {})
 
         def lineage(**tips: str) -> str:
@@ -638,6 +640,15 @@ def reach_cases(d: Path) -> None:
         sh(co, "mv", "nixos/hosts/a/extra.nix", "nixos/modules/extra.nix")
         sh(co, "commit", "--quiet", "-m", "moved")
         assert reached({"a": lineage(**{wb: c_extra}), "b": lineage(**{wb: c_extra})}) == {"a"}
+        # An input taken as a relative path (a submodule's gitlink) is read
+        # from the tree: moving it reaches the targets naming the input.
+        lock["nodes"]["p"] = {"locked": {"path": "./vendor/p", "type": "path"}}
+        sh(co, "update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},nixos/vendor/p")
+        put(co, "nixos/flake.lock", proc.dump_json(lock), "p as a path input")
+        c_p = sh(co, "rev-parse", "HEAD")
+        sh(co, "update-index", "--add", "--cacheinfo", f"160000,{'2' * 40},nixos/vendor/p")
+        sh(co, "commit", "--quiet", "-m", "p moved")
+        assert reached({"a": lineage(**{wb: c_p}), "b": lineage(**{wb: c_p})}) == {"a"}
         # A recorded tip on main's side of the merge base (the branch had
         # nothing then; main moved since) is the merge base.
         upstream = sh(co, "commit-tree", f"{main0}^{{tree}}", "-p", main0, "-m", "upstream")
@@ -1240,156 +1251,136 @@ def dies(f: Callable[[], object]) -> str:
     raise AssertionError("did not die")
 
 
-def annex_cases(d: Path) -> None:
-    """The annex flow on scratch repos: the worktree, a deploy's sync (the
-    annex branch pushed, the lock node relocked and staged), a landing
-    (squashed onto the annex's main, the node relocked there) and the
-    removal; lock_with replaced, since the lock's hash is nix's to compute."""
+def submodule_cases(d: Path) -> None:
+    """The submodule flow on scratch repos: the planted worktree, a
+    deploy's sync (the branch pushed, the gitlink pinned and staged), the
+    union of two branches, a landing (squashed onto the submodule's main,
+    pinned there), the catch-up onto a moved main and the removal."""
     scratch_env()
-    from nixconvoy import annex  # noqa: PLC0415 - after scratch_env's config
-    ax_origin, ax_seed = d / "dep.git", d / "dep-seed"
-    sh(d, "init", "--quiet", "--bare", "-b", "main", str(ax_origin))
-    sh(d, "clone", "--quiet", str(ax_origin), str(ax_seed))
-    put(ax_seed, "tool.py", "v1\n", "dep v1")
-    sh(ax_seed, "push", "--quiet", "origin", "HEAD:main")
-    ax_repo = d / "dep"  # the repository's checkout here, never deployed from
-    sh(d, "clone", "--quiet", str(ax_origin), str(ax_repo))
-
-    def locked(rev: str, ref: str) -> dict[str, object]:
-        return {"lastModified": 1, "narHash": f"sha256-{rev[:8]}", "ref": ref, "rev": rev,
-                "revCount": 1, "type": "git", "url": str(ax_origin)}
-
-    fetched: list[str] = []
-
-    def fake_lock_with(name: str, ref: str, lock: dict[str, object], flake_nix: str) -> dict[str, object] | None:  # noqa: ARG001
-        fetched.append(ref)
-        assert name == "dep"
-        if ref.startswith("github:"):
-            got: dict[str, object] = {"type": "github", "owner": "o", "repo": "r", "rev": ref.split("/")[2],
-                                      "narHash": "sha256-gh", "lastModified": 1}
-        else:
-            q = dict(part.split("=", 1) for part in ref.partition("?")[2].split("&"))
-            # The origin, or the repository here for a tip not pushed yet.
-            assert ref.startswith((f"git+{ax_origin}?", f"git+file://{ax_repo.resolve()}?")), ref
-            got = locked(q["rev"], q["ref"])
-            got["url"] = ref[len("git+"):].partition("?")[0]
-        lock = json.loads(json.dumps(lock))
-        nodes = lock["nodes"]
-        assert isinstance(nodes, dict) and isinstance(nodes["dep"], dict)
-        nodes["dep"]["locked"] = got
-        return lock
-
-    annex.lock_with = fake_lock_with
-    config.set_cfg(config.parse(f'flake = "nixos"\n[annexes.dep]\nrepo = "{ax_repo}"\n'))
+    from nixconvoy import submodule  # noqa: PLC0415 - after scratch_env's config
+    dep_origin, dep_seed = d / "dep.git", d / "dep-seed"
+    sh(d, "init", "--quiet", "--bare", "-b", "main", str(dep_origin))
+    sh(d, "clone", "--quiet", str(dep_origin), str(dep_seed))
+    put(dep_seed, "tool.py", "v1\n", "dep v1")
+    sh(dep_seed, "push", "--quiet", "origin", "HEAD:main")
+    dep_repo = d / "dep"  # the repository's checkout here, never deployed from
+    sh(d, "clone", "--quiet", str(dep_origin), str(dep_repo))
+    config.set_cfg(config.parse(f'flake = "nixos"\n[submodules.dep]\nrepo = "{dep_repo}"\n'))
 
     origin, seed, co = d / "origin.git", d / "seed", d / "homelab9"
     wb = "work/tester/9"
-    v1 = sh(ax_seed, "rev-parse", "HEAD")
-    lock = {"nodes": {"dep": {"flake": False, "locked": locked(v1, "refs/heads/main"),
-                              "original": {"type": "git", "url": str(ax_origin)}},
+    path = "nixos/submodules/dep"
+    v1 = sh(dep_seed, "rev-parse", "HEAD")
+    lock = {"nodes": {"dep": {"flake": False, "locked": {"path": "./submodules/dep", "type": "path"},
+                              "original": {"path": "./submodules/dep", "type": "path"}, "parent": []},
                       "root": {"inputs": {"dep": "dep"}}},
             "root": "root", "version": 7}
     sh(d, "init", "--quiet", "--bare", "-b", "main", str(origin))
     sh(d, "clone", "--quiet", str(origin), str(seed))
     put(seed, "deploy-branches", "work/tester/*\n")
-    put(seed, ".gitignore", "annexes/\n")
+    put(seed, ".gitmodules", f'[submodule "dep"]\n\tpath = {path}\n\turl = {dep_origin}\n')
+    sh(seed, "update-index", "--add", "--cacheinfo", f"160000,{v1},{path}")
     put(seed, "nixos/flake.lock", proc.dump_json(lock) + "\n", "seed")
     sh(seed, "push", "--quiet", "origin", "HEAD:main")
     sh(d, "clone", "--quiet", str(origin), str(co))
+
+    def pinned(top: Path = co) -> str | None:
+        sub = submodule.at_path(top, path)
+        assert sub is not None
+        return submodule.pin(sub, top)
+
+    def dep(top: Path = co) -> submodule.Sub:
+        return submodule.present_one(top, "dep")
+
     prev = Path.cwd()
     os.chdir(co)
     try:
+        assert (co / path).is_dir() and not any((co / path).iterdir())  # unpopulated, as cloned
         with contextlib.redirect_stdout(io.StringIO()):
             checkout.ensure_on_work_branch(wb)
-            ax = annex.create("dep", wb)
-        assert ax == co / "annexes" / "dep" and annex.branch_at(ax) == wb
+            ax = submodule.create("dep", wb)
+        assert ax == co / path and submodule.branch_at(ax) == wb
         assert sh(ax, "rev-parse", "HEAD") == v1
         assert sh(ax, "config", f"branch.{wb}.merge") == "refs/heads/main"
-        assert (ax_repo / ".git" / annex.MARKER).exists()
-        assert not sh(co, "status", "--porcelain")  # gitignored
+        assert (dep_repo / ".git" / submodule.MARKER).exists()
+        assert not sh(co, "status", "--porcelain")  # planted at the pinned rev
         with contextlib.redirect_stdout(io.StringIO()):
-            assert annex.create("dep", wb) == ax  # idempotent
-        assert annex.sync(wb, None) == []  # nothing of its own: no push, the lock as it was
-        assert not annex.own(co) and annex.notes(co) == ["annex dep"]
+            assert submodule.create("dep", wb) == ax  # idempotent
+        assert submodule.sync(wb, None) == []  # nothing of its own: no push, the pin as it was
+        assert not submodule.own(co) and submodule.notes(co) == ["submodule dep"]
 
-        # Staged in the annex: committed on its branch, pushed, the node relocked and staged here.
+        # Staged in the worktree: committed on its branch, pushed, the gitlink pinned and staged here.
         put(ax, "tool.py", "v2\n")
-        assert "annex dep has staged changes" in dies(lambda: annex.sync(wb, None))
-        assert "dry activation cannot carry" in dies(lambda: annex.sync(wb, None, dry=True))
-        told = annex.sync(wb, "dep: v2")
+        assert "submodule dep has staged changes" in dies(lambda: submodule.sync(wb, None))
+        assert "dry activation cannot carry" in dies(lambda: submodule.sync(wb, None, dry=True))
+        told = submodule.sync(wb, "dep: v2")
         v2 = sh(ax, "rev-parse", "HEAD")
         assert v2 != v1 and sh(ax, "log", "-1", "--format=%s") == "dep: v2"
-        assert sh(ax_seed, "ls-remote", str(ax_origin), f"refs/heads/{wb}").split()[0] == v2
-        assert len(told) == 2 and "pushed" in told[0] and "locks" in told[1], told
-        assert fetched == [f"git+{ax_origin}?ref=refs/heads/{wb}&rev={v2}"]
-        assert sh(co, "diff", "--cached", "--name-only") == "nixos/flake.lock"
-        assert annex.locked_rev("dep") == (v2, f"refs/heads/{wb}")
-        assert annex.sync(wb, "again") == []  # settled: nothing to do
-        assert annex.sync(wb, None, dry=True) == []  # deployed state: a dry run may carry it
-        assert annex.own(co)
-        assert annex.notes(co) == ["annex dep +1"]
-        # A worktree reset below what the lock deploys: refused rather than
-        # relocked away; a hand rebase of it (the same patch) passes.
+        assert sh(dep_seed, "ls-remote", str(dep_origin), f"refs/heads/{wb}").split()[0] == v2
+        assert len(told) == 2 and "pushed" in told[0] and "pinned" in told[1], told
+        assert sh(co, "diff", "--cached", "--name-only") == path
+        assert pinned() == v2
+        assert submodule.sync(wb, "again") == []  # settled: nothing to do
+        assert submodule.sync(wb, None, dry=True) == []  # deployed state: a dry run may carry it
+        assert submodule.own(co)
+        assert submodule.notes(co) == ["submodule dep +1"]
+        # A worktree reset below what the tree deploys: refused rather than
+        # pinned away; a hand rebase of it (the same patch) passes.
         sh(ax, "reset", "--quiet", "--hard", v1)
-        err = dies(lambda: annex.sync(wb, "again"))
-        assert "was reset below the work the lock deploys" in err and "dep: v2" in err, err
+        err = dies(lambda: submodule.sync(wb, "again"))
+        assert "was reset below the work the tree deploys" in err and "dep: v2" in err, err
         sh(ax, "reset", "--quiet", "--hard", v2)
         sh(ax, "commit", "--quiet", "--amend", "-m", "dep: v2, amended")
         with contextlib.redirect_stdout(io.StringIO()):
-            told = annex.sync(wb, "same patch")
+            told = submodule.sync(wb, "same patch")
         v2b = sh(ax, "rev-parse", "HEAD")
-        assert v2b != v2 and annex.locked_rev("dep") == (v2b, f"refs/heads/{wb}") and len(told) == 2, told
+        assert v2b != v2 and pinned() == v2b and len(told) == 2, told
         sh(ax, "reset", "--quiet", "--hard", v2)
         noted = io.StringIO()
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(noted):
-            annex.sync(wb, "back")  # the same patch again: nothing to say
-        assert annex.locked_rev("dep") == (v2, f"refs/heads/{wb}") and not noted.getvalue(), noted.getvalue()
-        # An amend that changes the patch: relocked, the deployed commit it
+            submodule.sync(wb, "back")  # the same patch again: nothing to say
+        assert pinned() == v2 and not noted.getvalue(), noted.getvalue()
+        # An amend that changes the patch: pinned, the deployed commit it
         # leaves behind named.
         (ax / "tool.py").write_text("v2, changed\n")
         sh(ax, "add", "tool.py")
         sh(ax, "commit", "--quiet", "--amend", "--no-edit")
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(noted):
-            annex.sync(wb, "changed")
+            submodule.sync(wb, "changed")
         v2c = sh(ax, "rev-parse", "HEAD")
-        assert annex.locked_rev("dep") == (v2c, f"refs/heads/{wb}")
+        assert pinned() == v2c
         assert "leaves 1 deployed commit(s) behind" in noted.getvalue() and v2[:7] in noted.getvalue(), noted.getvalue()
         sh(ax, "reset", "--quiet", "--hard", v2)
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            annex.sync(wb, "back")
-        assert annex.locked_rev("dep") == (v2, f"refs/heads/{wb}")
-        assert sh(ax_seed, "ls-remote", str(ax_origin), f"refs/heads/{wb}").split()[0] == v2
+            submodule.sync(wb, "back")
+        assert pinned() == v2
+        assert sh(dep_seed, "ls-remote", str(dep_origin), f"refs/heads/{wb}").split()[0] == v2
 
         # A landing refuses what it would lose or never deployed.
         (ax / "tool.py").write_text("v2 edited\n")
-        assert "unstaged edits" in dies(lambda: annex.land_one(annex.present_one(co, "dep"), wb, "m"))
+        assert "unstaged edits" in dies(lambda: submodule.land_one(dep(), wb, "m"))
         sh(ax, "checkout", "--", "tool.py")
         (ax / "loose.txt").write_text("x\n")  # untracked: harmless, the worktree stays
         put(ax, "tool.py", "v3\n", "hand commit, never deployed")
-        assert "not what the lock deploys" in dies(lambda: annex.land_one(annex.present_one(co, "dep"), wb, "m"))
-        assert "not deployed yet" in dies(lambda: annex.sync(wb, None, dry=True))
+        assert "not what the tree pins" in dies(lambda: submodule.land_one(dep(), wb, "m"))
+        assert "not deployed yet" in dies(lambda: submodule.sync(wb, None, dry=True))
         sh(ax, "reset", "--quiet", "--hard", v2)
-        # An unstaged edit of the lock rides no relock.
-        (co / "nixos/flake.lock").write_text("{}\n")
-        assert annex.sync(wb, "again") == []
-        assert (co / "nixos/flake.lock").read_text() == "{}\n"
-        sh(co, "checkout", "--", "nixos/flake.lock")
 
-        # The deploy's commit of the lock, then the landing: the annex squashed onto its main.
+        # The deploy's commit of the pin, then the landing: the branch squashed onto its main.
         sh(co, "commit", "--quiet", "-m", "dep: v2")
 
-        # Another checkout relocks the annex on its own branch: the union
-        # merges the two annex branches, pushed as the annex origin's
-        # refs/nixconvoy/union/dep, and locks the node there.
+        # Another checkout pins the submodule on its own branch: the union
+        # merges the two branches, pushed as the submodule origin's
+        # refs/nixconvoy/union/dep, and pins the gitlink there.
         co8, wb8 = d / "homelab8", "work/tester/8"
         sh(d, "clone", "--quiet", str(origin), str(co8))
         os.chdir(co8)
         with contextlib.redirect_stdout(io.StringIO()):
             checkout.ensure_on_work_branch(wb8)
-            ax8 = annex.create("dep", wb8)
+            ax8 = submodule.create("dep", wb8)
         put(ax8, "tool2.py", "b\n")
         with contextlib.redirect_stdout(io.StringIO()):
-            annex.sync(wb8, "dep: b")
+            submodule.sync(wb8, "dep: b")
         b1 = sh(ax8, "rev-parse", "HEAD")
         sh(co8, "commit", "--quiet", "-m", "dep: b")
         sh(co8, "push", "--quiet", "origin", wb8)
@@ -1409,236 +1400,191 @@ def annex_cases(d: Path) -> None:
             return done
 
         done = union()
-        u_node = json.loads(sh(co, "show", f"{done['union']}:nixos/flake.lock"))["nodes"]["dep"]["locked"]
-        u = u_node["rev"]
-        assert u_node["ref"] == f"{annex.UNION_REFS}/dep/{u}", u_node
-        assert sh(ax_seed, "ls-remote", str(ax_origin), f"{annex.UNION_REFS}/dep/{u}").split()[0] == u
-        assert sh(ax_repo, "rev-parse", f"{u}^1") == v2 and sh(ax_repo, "rev-parse", f"{u}^2") == b1
-        assert sh(ax_repo, "show", f"{u}:tool.py") == "v2" and sh(ax_repo, "show", f"{u}:tool2.py") == "b"
-        assert fetched[-1] == f"git+{ax_origin}?ref={annex.UNION_REFS}/dep/{u}&rev={u}"
+        u = sh(co, "rev-parse", f"{done['union']}:{path}")
+        assert sh(dep_seed, "ls-remote", str(dep_origin), f"{submodule.UNION_REFS}/dep/{u}").split()[0] == u
+        assert sh(dep_repo, "rev-parse", f"{u}^1") == v2 and sh(dep_repo, "rev-parse", f"{u}^2") == b1
+        assert sh(dep_repo, "show", f"{u}:tool.py") == "v2" and sh(dep_repo, "show", f"{u}:tool2.py") == "b"
         assert union()["union"] == done["union"]  # deterministic
-        assert not sh(ax_repo, "worktree", "list", "--porcelain").count("annex-union")
-        # The annex branches conflicting is the other branch's conflict.
+        assert not sh(dep_repo, "worktree", "list", "--porcelain").count("submodule-merge")
+        # The branches conflicting is the other branch's conflict.
         put(ax8, "tool.py", "vB\n", "dep: vB")
         sh(ax8, "push", "--quiet", "--force", "origin", wb8)
         os.chdir(co8)
-        annex.relock("dep", wb8, sh(ax8, "rev-parse", "HEAD"))
+        submodule.set_pin(dep(co8), sh(ax8, "rev-parse", "HEAD"), co8)
         sh(co8, "commit", "--quiet", "-m", "dep: vB")
         sh(co8, "push", "--quiet", "origin", wb8)
         os.chdir(co)
         sh(co, "fetch", "--quiet")
         err = dies(union)
-        assert f"cannot union work branch {wb8};" in err and "nixos/flake.lock" in err, err
+        assert f"cannot union work branch {wb8};" in err and path in err, err
         sh(ax8, "reset", "--quiet", "--hard", b1)
         sh(ax8, "push", "--quiet", "--force", "origin", wb8)
         sh(co8, "reset", "--quiet", "--hard", "HEAD~1")
         sh(co8, "push", "--quiet", "--force", "origin", wb8)
         sh(co, "fetch", "--quiet")
         assert union()["union"] == done["union"]
-        # A union ref nothing locks goes with the next union; one a branch
-        # or deploy record of origin locks stays (main locks v1; v2 is on
-        # this checkout alone).
-        old_env = {**os.environ, "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z", "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z"}
-        sh(ax_repo, "push", "--quiet", "origin", f"{v1}:{annex.UNION_REFS}/dep/{v1}")
-        sh(ax_repo, "push", "--quiet", "origin", f"{v2}:{annex.UNION_REFS}/dep/{v2}")  # unstamped: stamped now
-        put(ax_seed, "junk.txt", "j\n", "a union nothing locks, stamped a day ago and more")
-        junk = sh(ax_seed, "rev-parse", "HEAD")
-        sh(ax_seed, "reset", "--quiet", "--hard", "HEAD~1")
-        old_stamp = subprocess.run(["git", "commit-tree", sh(ax_seed, "hash-object", "-t", "tree", "/dev/null"), "-m", "old"],
-                                   cwd=ax_seed, env=old_env, check=True, capture_output=True, text=True).stdout.strip()
-        sh(ax_seed, "push", "--quiet", "origin", f"{junk}:{annex.UNION_REFS}/dep/{junk}", f"{old_stamp}:{annex.STAMP_REFS}/{junk}")
-        annex.FETCHED.clear()
+        # Union refs are kept, pinned or not.
+        sh(dep_repo, "push", "--quiet", "origin", f"{v1}:{submodule.UNION_REFS}/dep/{v1}")
+        submodule.FETCHED.clear()
         assert union()["union"] == done["union"]
-        assert sh(ax_seed, "ls-remote", str(ax_origin), f"{annex.UNION_REFS}/dep/*").split()[1::2] == sorted(
-            [f"{annex.UNION_REFS}/dep/{u}", f"{annex.UNION_REFS}/dep/{v1}", f"{annex.UNION_REFS}/dep/{v2}"])
-        assert sh(ax_seed, "ls-remote", str(ax_origin), f"{annex.STAMP_REFS}/{u}")
-        assert sh(ax_seed, "ls-remote", str(ax_origin), f"{annex.STAMP_REFS}/{v2}")  # stamped for the next prune
-        assert not sh(ax_seed, "ls-remote", str(ax_origin), f"{annex.STAMP_REFS}/{junk}")
+        assert sh(dep_seed, "ls-remote", str(dep_origin), f"{submodule.UNION_REFS}/dep/*").split()[1::2] == sorted(
+            [f"{submodule.UNION_REFS}/dep/{u}", f"{submodule.UNION_REFS}/dep/{v1}"])
 
         put(co, "COMMIT_MSG.md", "dep v2 landed\n", "msg")
-        (ax / "COMMIT_MSG.md").write_text("dep v2 landed\n\nthe annex's own message\n")  # untracked
-        put(ax_seed, "other.txt", "x\n", "upstream meanwhile")
-        sh(ax_seed, "push", "--quiet", "origin", "HEAD:main")
-        # Past refs: the landing prunes those older than PAST_DAYS.
-        subprocess.run(["git", "commit", "--quiet", "--allow-empty", "-m", "ancient"], cwd=ax_seed, env=old_env, check=True)
-        ancient = sh(ax_seed, "rev-parse", "HEAD")
-        sh(ax_seed, "reset", "--quiet", "--hard", "HEAD~1")
-        sh(ax_seed, "push", "--quiet", "origin", f"{ancient}:{annex.PAST_REFS}/gone/{ancient}")
+        (ax / "COMMIT_MSG.md").write_text("dep v2 landed\n\nthe submodule's own message\n")  # untracked
+        put(dep_seed, "other.txt", "x\n", "upstream meanwhile")
+        sh(dep_seed, "push", "--quiet", "origin", "HEAD:main")
+        # Past refs: the landing deletes those no ref of origin pins (wb8 pins b1).
+        put(dep_seed, "junk.txt", "j\n", "a tip nothing pins")
+        junk = sh(dep_seed, "rev-parse", "HEAD")
+        sh(dep_seed, "reset", "--quiet", "--hard", "HEAD~1")
+        sh(dep_seed, "push", "--quiet", "origin", f"{junk}:{submodule.PAST_REFS}/gone/{junk}")
+        sh(dep_repo, "push", "--quiet", "origin", f"{b1}:{submodule.PAST_REFS}/keep/{b1}")
         # The repository's own checkout, idle on main since the clone, follows
         # in the sweep after the landing (the landing itself leaves it alone:
         # nothing of its may stop main's commit), like the main checkout
         # follows main, an untracked file of its riding along; one on
         # another branch is left where it is.
-        assert sh(ax_repo, "rev-parse", "HEAD") == v1 and annex.branch_at(ax_repo) == "main"
-        (ax_repo / "scratch.txt").write_text("s\n")
+        assert sh(dep_repo, "rev-parse", "HEAD") == v1 and submodule.branch_at(dep_repo) == "main"
+        (dep_repo / "scratch.txt").write_text("s\n")
         with contextlib.redirect_stdout(io.StringIO()):
-            annex.land_all(wb, "dep v2 landed")
-        assert not sh(ax_seed, "ls-remote", str(ax_origin), f"{annex.PAST_REFS}/gone/*")
-        ax_main = sh(ax_seed, "ls-remote", str(ax_origin), "refs/heads/main").split()[0]
-        assert sh(ax, "rev-parse", "HEAD") == ax_main
-        assert sh(ax_repo, "rev-parse", "HEAD") == v1
-        sh(ax_repo, "switch", "--quiet", "-c", "aside")
+            submodule.land_all(wb, "dep v2 landed")
+        assert not sh(dep_seed, "ls-remote", str(dep_origin), f"{submodule.PAST_REFS}/gone/*")
+        assert sh(dep_seed, "ls-remote", str(dep_origin), f"{submodule.PAST_REFS}/keep/{b1}").split()[0] == b1
+        # The branch's deployed tip v2, pinned by nothing once the landing moved wb: not kept.
+        assert not sh(dep_seed, "ls-remote", str(dep_origin), f"{submodule.PAST_REFS}/{wb}/*")
+        dep_main = sh(dep_seed, "ls-remote", str(dep_origin), "refs/heads/main").split()[0]
+        assert sh(ax, "rev-parse", "HEAD") == dep_main
+        assert sh(dep_repo, "rev-parse", "HEAD") == v1
+        sh(dep_repo, "switch", "--quiet", "-c", "aside")
         with contextlib.redirect_stdout(io.StringIO()) as noted:
-            assert annex.catch_up_repos()
-        assert sh(ax_repo, "rev-parse", "HEAD") == v1 and not noted.getvalue()
-        sh(ax_repo, "switch", "--quiet", "main")
+            assert submodule.catch_up_repos()
+        assert sh(dep_repo, "rev-parse", "HEAD") == v1 and not noted.getvalue()
+        sh(dep_repo, "switch", "--quiet", "main")
         with contextlib.redirect_stdout(io.StringIO()) as noted:
-            assert annex.catch_up_repos()
-        assert sh(ax_repo, "rev-parse", "HEAD") == ax_main and annex.branch_at(ax_repo) == "main"
-        assert f"{ax_repo} (annex dep): fast-forwarded main onto origin/main" in noted.getvalue(), noted.getvalue()
-        assert sh(ax_repo, "status", "--porcelain") == "?? scratch.txt"
-        (ax_repo / "scratch.txt").unlink()
-        assert sh(ax, "log", "-1", "--format=%B", ax_main) == "dep v2 landed\n\nthe annex's own message"
+            assert submodule.catch_up_repos()
+        assert sh(dep_repo, "rev-parse", "HEAD") == dep_main and submodule.branch_at(dep_repo) == "main"
+        assert f"{dep_repo} (submodule dep): fast-forwarded main onto origin/main" in noted.getvalue(), noted.getvalue()
+        assert sh(dep_repo, "status", "--porcelain") == "?? scratch.txt"
+        (dep_repo / "scratch.txt").unlink()
+        assert sh(ax, "log", "-1", "--format=%B", dep_main) == "dep v2 landed\n\nthe submodule's own message"
         assert not (ax / "COMMIT_MSG.md").exists()
-        assert sh(ax, "show", f"{ax_main}:tool.py") == "v2" and sh(ax, "show", f"{ax_main}:other.txt") == "x"
-        assert sh(ax, "rev-list", "--count", f"{v1}..{ax_main}") == "2"  # upstream's, then the squash
-        assert annex.locked_rev("dep") == (ax_main, "refs/heads/main")
+        assert sh(ax, "show", f"{dep_main}:tool.py") == "v2" and sh(ax, "show", f"{dep_main}:other.txt") == "x"
+        assert sh(ax, "rev-list", "--count", f"{v1}..{dep_main}") == "2"  # upstream's, then the squash
+        assert pinned() == dep_main
         after_land = sh(co, "rev-parse", "HEAD")
-        # The branch's deployed tip stays reachable on the annex origin.
-        assert sh(ax_seed, "ls-remote", str(ax_origin), f"{annex.PAST_REFS}/{wb}/{v2}").split()[0] == v2
-        assert not sh(co, "diff", "--cached") and sh(co, "log", "-1", "--format=%s").startswith("annex dep:")
-        assert (ax / "loose.txt").exists() and annex.own(co)  # untracked: kept, and the worktree's own
+        assert not sh(co, "diff", "--cached") and sh(co, "log", "-1", "--format=%s").startswith("submodule dep:")
+        assert (ax / "loose.txt").exists() and submodule.own(co)  # untracked: kept, and the worktree's own
         (ax / "loose.txt").unlink()
-        assert not annex.own(co)
+        assert not submodule.own(co)
         with contextlib.redirect_stdout(io.StringIO()):
-            annex.land_all(wb, "dep v2 landed")  # a retry: nothing left to do
-        assert sh(co, "log", "-1", "--format=%s").startswith("annex dep:")
+            submodule.land_all(wb, "dep v2 landed")  # a retry: nothing left to do
+        assert sh(co, "log", "-1", "--format=%s").startswith("submodule dep:")
 
         # Landed, the worktree stays on its branch at the landed commit, pushed so.
-        assert ax.exists() and annex.branch_at(ax) == wb
-        assert sh(ax_seed, "ls-remote", str(ax_origin), f"refs/heads/{wb}").split()[0] == ax_main
-        assert annex.keeps(annex.present_one(co, "dep"), wb) is None
-        # The removal (close --annex): worktree and branch gone, here and on
-        # the annex's origin, the branch's last tip kept under PAST_REFS there.
+        assert ax.exists() and submodule.branch_at(ax) == wb
+        assert sh(dep_seed, "ls-remote", str(dep_origin), f"refs/heads/{wb}").split()[0] == dep_main
+        assert submodule.keeps(dep(), co) is None
+        # The removal (close --submodule): worktree and branch gone, here and
+        # on the origin, the branch's last tip kept under PAST_REFS there;
+        # the directory stays, empty, so the gitlink is not deleted.
         with contextlib.redirect_stdout(io.StringIO()):
-            annex.remove_all(co)
-        assert not ax.exists() and not (co / "annexes").exists()
-        assert not sh(ax_seed, "ls-remote", str(ax_origin), f"refs/heads/{wb}")
-        assert sh(ax_seed, "ls-remote", str(ax_origin), f"{annex.PAST_REFS}/{wb}/{ax_main}").split()[0] == ax_main
-        assert annex.present(co) == []
-        assert f"refs/heads/{wb}" not in sh(ax_repo, "for-each-ref", "--format=%(refname)")
+            submodule.remove_all(co)
+        assert ax.is_dir() and not any(ax.iterdir()) and not sh(co, "status", "--porcelain")
+        assert not sh(dep_seed, "ls-remote", str(dep_origin), f"refs/heads/{wb}")
+        assert sh(dep_seed, "ls-remote", str(dep_origin), f"{submodule.PAST_REFS}/{wb}/{dep_main}").split()[0] == dep_main
+        assert submodule.present(co) == []
+        assert f"refs/heads/{wb}" not in sh(dep_repo, "for-each-ref", "--format=%(refname)")
 
-        # abandon --annex: reset onto the annex's main, the deployed relock
-        # put back to origin/main's, staged; close refuses until then.
+        # abandon --submodule: reset onto the submodule's main, the deployed
+        # pin put back to origin/main's, staged; close refuses until then.
         sh(co, "push", "--quiet", "origin", f"HEAD:refs/heads/{wb}")
         with contextlib.redirect_stdout(io.StringIO()):
-            ax = annex.create("dep", wb)  # from origin/main (the branch went)
+            ax = submodule.create("dep", wb)  # from origin/main (the branch went)
         put(ax, "tool.py", "v4\n")
         with contextlib.redirect_stdout(io.StringIO()):
-            annex.sync(wb, "dep: v4")
+            submodule.sync(wb, "dep: v4")
         v4 = sh(ax, "rev-parse", "HEAD")
-        assert annex.locked_rev("dep") == (v4, f"refs/heads/{wb}")
+        assert pinned() == v4
         sh(co, "commit", "--quiet", "-m", "dep: v4")
-        assert annex.orphaned(co, wb) == []
-        why = annex.keeps(annex.present_one(co, "dep"), wb)
+        assert submodule.orphaned(co) == []
+        why = submodule.keeps(dep(), co)
         assert why is not None and why.startswith("it carries commits not on origin/main"), why
         with contextlib.redirect_stdout(io.StringIO()):
-            annex.reset_one(annex.present_one(co, "dep"), wb)
-            assert annex.restore_lock(annex.present_one(co, "dep"))
-        assert ax.exists() and sh(ax, "rev-parse", "HEAD") == ax_main
-        assert sh(ax_seed, "ls-remote", str(ax_origin), f"refs/heads/{wb}").split()[0] == ax_main
-        assert annex.locked_rev("dep") == (v1, "refs/heads/main")  # origin/main's
-        assert sh(co, "diff", "--cached", "--name-only") == "nixos/flake.lock"
-        assert annex.keeps(annex.present_one(co, "dep"), wb) is None
-        sh(co, "reset", "--quiet", "--hard", "HEAD")  # the lock back on the branch...
-        why = annex.keeps(annex.present_one(co, "dep"), wb)
-        assert why is not None and why.startswith("the lock still names its branch"), why
+            submodule.reset_one(dep(), wb)
+            assert submodule.restore(dep(), co)
+        assert ax.exists() and sh(ax, "rev-parse", "HEAD") == dep_main
+        assert sh(dep_seed, "ls-remote", str(dep_origin), f"refs/heads/{wb}").split()[0] == dep_main
+        assert pinned() == v1  # origin/main's
+        assert sh(co, "diff", "--cached", "--name-only") == path
+        assert submodule.keeps(dep(), co) is None
+        sh(co, "reset", "--quiet", "--hard", "HEAD")  # the pin back on the branch's...
+        why = submodule.keeps(dep(), co)
+        assert why is not None and why.startswith("the tree still pins"), why
         with contextlib.redirect_stdout(io.StringIO()):
-            annex.remove_all(co)  # ...what --force does, the lock then restored
-        assert annex.orphaned(co, wb) == ["dep"]  # the worktree gone, the lock still on the branch
-
-        # A lock merge deletes a node the other side deleted, and adds one it added.
-        nodes = {"root": {"inputs": {"dep": "dep", "x": "x"}}, "dep": {"locked": {"rev": "1"}}, "x": {"locked": {"rev": "9"}}}
-        base_lock = {"nodes": nodes, "root": "root"}
-        theirs_lock = {"nodes": {"root": nodes["root"], "dep": nodes["dep"], "y": {"locked": {"rev": "8"}}}, "root": "root"}
-        got = annex.merge_locks(base_lock, base_lock, theirs_lock, resolve=lambda *_: None)
-        assert got is not None and isinstance(got["nodes"], dict) and set(got["nodes"]) == {"root", "dep", "y"}, got
-        assert annex.merge_locks(base_lock, theirs_lock, {"nodes": {**nodes, "x": {"locked": {"rev": "7"}}}, "root": "root"},
-                                 resolve=lambda *_: None) is None  # x deleted here, moved there
-        # The nodes of an annex's own inputs follow its node: theirs' when
-        # theirs is taken, dropped for nix to rewrite on a relock, ours' otherwise.
-        def tree(dep_rev: str, sub_rev: str) -> dict[str, object]:
-            return {"nodes": {"root": {"inputs": {"dep": "dep"}}, "dep": {"inputs": {"sub": "sub"}, "locked": {"rev": dep_rev}},
-                              "sub": {"locked": {"rev": sub_rev}}}, "root": "root"}
-        b3, o3, t3 = tree("1", "a"), tree("2", "b"), tree("3", "c")
-        got = annex.merge_locks(b3, o3, t3, resolve=lambda _n, _o, t: t)
-        assert got is not None and got["nodes"] == t3["nodes"], got
-        got = annex.merge_locks(b3, o3, t3, resolve=lambda _n, o, _t: o)
-        assert got is not None and got["nodes"] == o3["nodes"], got
-        got = annex.merge_locks(b3, o3, t3, resolve=lambda _n, _o, _t: annex.Relock(f"git+{ax_origin}?ref=r&rev=9", lambda n: n))
-        assert got is not None and json.dumps(got["nodes"]).count('"rev": "9"') == 1, got
-        same_dep = tree("2", "c")  # dep as ours, sub moved on both sides
-        assert annex.merge_locks(b3, o3, same_dep, resolve=lambda *_: None) is None
-        # A key the root reaches on one side and the annex alone on the other
-        # is nobody's own: three ways, a conflict.
-        o4 = tree("2", "b")
-        o4_nodes = o4["nodes"]
-        assert isinstance(o4_nodes, dict)
-        o4_nodes["root"] = {"inputs": {"dep": "dep", "foo": "sub"}}
-        assert annex.merge_locks(b3, o4, t3, resolve=lambda _n, _o, t: t) is None
+            submodule.remove_all(co)  # ...what --force does, the pin then restored
+        assert submodule.orphaned(co) == ["dep"]  # the worktree gone, the pin still the branch's
 
         # The landing on main: the other checkout's rebase onto it meets the
-        # landed node, rebases its annex branch onto the landed default
-        # branch and relocks on that - once, every later relock of the
-        # same annex (here the deploy's staged one, replayed as a tmp
-        # commit that resolves to nothing) locking the same tip; the annex
-        # branch is pushed once the rebase is through.
+        # landed gitlink, rebases its branch onto the landed default branch
+        # and pins that - once, every later pin of the same submodule (here
+        # the deploy's staged one, replayed as a tmp commit that resolves to
+        # nothing) pinning the same tip; the branch is pushed once the
+        # rebase is through.
         sh(co, "push", "--quiet", "--force", "origin", f"{after_land}:refs/heads/main")
         os.chdir(co8)
         put(ax8, "tool3.py", "c\n", "dep: c")  # a deploy's increment from before the landing...
         t2 = sh(ax8, "rev-parse", "HEAD")
         sh(ax8, "push", "--quiet", "--force", "origin", wb8)
-        annex.relock("dep", wb8, t2)  # ...its relock staged, as that deploy's sync left it
+        submodule.set_pin(dep(co8), t2, co8)  # ...its pin staged, as that deploy's sync left it
         sh(co8, "fetch", "--quiet")
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):
             checkout.ensure_rebased()
         assert proc.is_ancestor("refs/remotes/origin/main", "HEAD")
         b2 = sh(ax8, "rev-parse", "HEAD")
-        assert b2 not in (b1, t2) and proc.is_ancestor(ax_main, b2, cwd=str(ax8))
+        assert b2 not in (b1, t2) and proc.is_ancestor(dep_main, b2, cwd=str(ax8))
         assert sh(ax8, "show", f"{b2}:tool.py") == "v2" and sh(ax8, "show", f"{b2}:tool3.py") == "c"
-        assert annex.locked_rev("dep") == (b2, f"refs/heads/{wb8}")
-        assert json.loads(sh(co8, "show", "HEAD:nixos/flake.lock"))["nodes"]["dep"]["locked"]["url"] == str(ax_origin)
+        assert pinned(co8) == b2
         assert sh(co8, "log", "--format=%s", "origin/main..HEAD").split("\n") == ["dep: b"], sh(co8, "log", "--format=%s", "origin/main..HEAD")
         assert not sh(co8, "status", "--porcelain")
         assert printed.getvalue().count("rebased onto origin/main") == 1, printed.getvalue()
-        assert sh(ax_seed, "ls-remote", str(ax_origin), f"refs/heads/{wb8}").split()[0] == b2
-        assert sh(ax_seed, "ls-remote", str(ax_origin), f"{annex.PAST_REFS}/{wb8}/{t2}").split()[0] == t2
-        assert annex.PENDING == {}
+        assert sh(dep_seed, "ls-remote", str(dep_origin), f"refs/heads/{wb8}").split()[0] == b2
+        assert sh(dep_seed, "ls-remote", str(dep_origin), f"{submodule.PAST_REFS}/{wb8}/{t2}").split()[0] == t2
+        assert submodule.PENDING == {}
 
-        # The default branch moving again, with no lock conflict to meet it
-        # (no deploy relocked anything since): the catch-up every pull,
-        # landing and deploy runs brings each annex worktree onto the new
-        # tip as it brings the checkout onto main.  One with commits of its
-        # own (co8's, relocked in its branch) is rebased, pushed and the
-        # lock relocked, staged; one with nothing of its own is
-        # fast-forwarded with its unstaged edits intact, nothing pushed or
-        # relocked; one whose edits touch what landed is left as it was and
-        # named, failing the pull.
-        sh(ax_seed, "fetch", "--quiet")
-        sh(ax_seed, "reset", "--quiet", "--hard", "origin/main")
-        put(ax_seed, "more.txt", "m\n", "upstream once more")
-        sh(ax_seed, "push", "--quiet", "origin", "HEAD:main")
-        new_main = sh(ax_seed, "rev-parse", "HEAD")
-        annex.FETCHED.clear()
+        # The default branch moving again, with no conflict to meet it (no
+        # deploy pinned anything since): the catch-up every pull, landing
+        # and deploy runs brings each worktree onto the new tip as it brings
+        # the checkout onto main.  One with commits of its own (co8's,
+        # pinned in its branch) is rebased, pushed and pinned, staged; one
+        # with nothing of its own is fast-forwarded with its unstaged edits
+        # intact, nothing pushed or pinned; one whose edits touch what
+        # landed is left as it was and named, failing the pull.
+        sh(dep_seed, "fetch", "--quiet")
+        sh(dep_seed, "reset", "--quiet", "--hard", "origin/main")
+        put(dep_seed, "more.txt", "m\n", "upstream once more")
+        sh(dep_seed, "push", "--quiet", "origin", "HEAD:main")
+        new_main = sh(dep_seed, "rev-parse", "HEAD")
+        submodule.FETCHED.clear()
         os.chdir(co)
-        # The repository's own checkout follows in the sweep's last pass,
-        # a worktree of the annex present or not; an edit there that the
+        # The repository's own checkout follows in the sweep's last pass, a
+        # worktree of the submodule present or not; an edit there that the
         # new tip touches leaves it as it was, named.
-        assert sh(ax_repo, "rev-parse", "HEAD") == ax_main
-        (ax_repo / "more.txt").write_text("mine\n")
+        assert sh(dep_repo, "rev-parse", "HEAD") == dep_main
+        (dep_repo / "more.txt").write_text("mine\n")
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as said:
-            assert not annex.catch_up_repos()
-        assert f"{ax_repo} (annex dep): rebasing main onto origin/main is not clean" in said.getvalue(), said.getvalue()
-        assert sh(ax_repo, "rev-parse", "HEAD") == ax_main and (ax_repo / "more.txt").read_text() == "mine\n"
-        assert not sh(ax_repo, "status", "--porcelain", "-uno")
-        (ax_repo / "more.txt").unlink()
+            assert not submodule.catch_up_repos()
+        assert f"{dep_repo} (submodule dep): rebasing main onto origin/main is not clean" in said.getvalue(), said.getvalue()
+        assert sh(dep_repo, "rev-parse", "HEAD") == dep_main and (dep_repo / "more.txt").read_text() == "mine\n"
+        assert not sh(dep_repo, "status", "--porcelain", "-uno")
+        (dep_repo / "more.txt").unlink()
         with contextlib.redirect_stdout(io.StringIO()) as noted:
-            assert annex.catch_up_repos()
-        assert sh(ax_repo, "rev-parse", "HEAD") == new_main
-        assert f"{ax_repo} (annex dep): fast-forwarded main onto origin/main" in noted.getvalue(), noted.getvalue()
+            assert submodule.catch_up_repos()
+        assert sh(dep_repo, "rev-parse", "HEAD") == new_main
+        assert f"{dep_repo} (submodule dep): fast-forwarded main onto origin/main" in noted.getvalue(), noted.getvalue()
         with contextlib.redirect_stdout(io.StringIO()) as noted:
-            assert annex.catch_up_repos()  # settled: silent
+            assert submodule.catch_up_repos()  # settled: silent
         assert not noted.getvalue()
         with contextlib.redirect_stdout(io.StringIO()):
             good, status = checkout.update_checkout(co8)
@@ -1646,75 +1592,53 @@ def annex_cases(d: Path) -> None:
         b3 = sh(ax8, "rev-parse", "HEAD")
         assert b3 != b2 and proc.is_ancestor(new_main, b3, cwd=str(ax8))
         assert sh(ax8, "show", f"{b3}:tool3.py") == "c" and sh(ax8, "show", f"{b3}:more.txt") == "m"
-        assert sh(ax_seed, "ls-remote", str(ax_origin), f"refs/heads/{wb8}").split()[0] == b3
+        assert sh(dep_seed, "ls-remote", str(dep_origin), f"refs/heads/{wb8}").split()[0] == b3
         os.chdir(co8)
-        assert annex.locked_rev("dep") == (b3, f"refs/heads/{wb8}")
-        assert sh(co8, "diff", "--cached", "--name-only") == "nixos/flake.lock"
+        assert pinned(co8) == b3
+        assert sh(co8, "diff", "--cached", "--name-only") == path
         sh(co8, "commit", "--quiet", "-m", "dep: b on the new main")
         os.chdir(co)
         with contextlib.redirect_stdout(io.StringIO()):
-            ax = annex.create("dep", wb)  # from origin/main: nothing of its own
-            assert annex.restore_lock(annex.present_one(co, "dep"))  # the orphaned lock back to main's
-        sh(ax, "reset", "--quiet", "--hard", ax_main)
+            ax = submodule.create("dep", wb)  # from origin/main: nothing of its own
+            assert submodule.restore(dep(), co)  # the orphaned pin back to main's
+        sh(ax, "reset", "--quiet", "--hard", dep_main)
         (ax / "tool.py").write_text("edited\n")  # unstaged, a file the landing left alone
-        lock_before = (co / "nixos/flake.lock").read_text()
+        pin_before = pinned()
         with contextlib.redirect_stdout(io.StringIO()):
-            assert annex.catch_up(co, wb) == []
+            assert submodule.catch_up(co, wb) == []
         assert sh(ax, "rev-parse", "HEAD") == new_main
         assert (ax / "tool.py").read_text() == "edited\n" and not sh(ax, "diff", "--cached", "--name-only")
-        assert (co / "nixos/flake.lock").read_text() == lock_before
-        assert not sh(ax_seed, "ls-remote", str(ax_origin), f"refs/heads/{wb}")
-        sh(ax, "reset", "--quiet", "--hard", ax_main)
+        assert pinned() == pin_before
+        assert not sh(dep_seed, "ls-remote", str(dep_origin), f"refs/heads/{wb}")
+        sh(ax, "reset", "--quiet", "--hard", dep_main)
         (ax / "more.txt").write_text("mine\n")  # what the landing added
         with contextlib.redirect_stdout(io.StringIO()):
-            problems = annex.catch_up(co, wb)
+            problems = submodule.catch_up(co, wb)
         assert len(problems) == 1 and "is not clean, left as it was" in problems[0], problems
-        assert sh(ax, "rev-parse", "HEAD") == ax_main and (ax / "more.txt").read_text() == "mine\n"
+        assert sh(ax, "rev-parse", "HEAD") == dep_main and (ax / "more.txt").read_text() == "mine\n"
         assert not sh(ax, "status", "--porcelain", "-uno")
         os.chdir(co8)
         with contextlib.redirect_stdout(io.StringIO()):
             good, status = checkout.update_checkout(co)
-        assert not good and "annex dep: rebasing" in status and "is not clean" in status, status
+        assert not good and "submodule dep: rebasing" in status and "is not clean" in status, status
         (ax / "more.txt").unlink()
         os.chdir(co)
         with contextlib.redirect_stdout(io.StringIO()):
-            assert annex.catch_up(co, wb) == []
+            assert submodule.catch_up(co, wb) == []
         assert sh(ax, "rev-parse", "HEAD") == new_main
-        # A dry activation leaves the annex where it is; the deploy's own
-        # annex step brings it along.
-        sh(ax, "reset", "--quiet", "--hard", ax_main)
-        assert annex.carries(co) is False
-        assert annex.sync(wb, None, dry=True) == [] and sh(ax, "rev-parse", "HEAD") == ax_main
+        # A dry activation leaves the submodule where it is; the deploy's
+        # own submodule step brings it along.
+        sh(ax, "reset", "--quiet", "--hard", dep_main)
+        assert submodule.carries(co) is False
+        assert submodule.sync(wb, None, dry=True) == [] and sh(ax, "rev-parse", "HEAD") == dep_main
         with contextlib.redirect_stdout(io.StringIO()):
-            assert annex.sync(wb, None) == []
+            assert submodule.sync(wb, None) == []
         assert sh(ax, "rev-parse", "HEAD") == new_main
         with contextlib.redirect_stdout(io.StringIO()):
-            annex.remove_all(co)
-        os.chdir(co8)
-        sh(co8, "reset", "--quiet", "--hard", "HEAD~1")
-
-        # A github input: its lock names no branch, so the landing judges
-        # the deployed rev alone.
-        sh(co8, "reset", "--quiet", "--hard", "refs/remotes/origin/main")
-        gh_lock = json.loads(sh(co8, "show", "HEAD:nixos/flake.lock"))
-        gh_lock["nodes"]["dep"] = {"flake": False, "original": {"type": "github", "owner": "o", "repo": "r"},
-                                   "locked": {"type": "github", "owner": "o", "repo": "r", "rev": ax_main, "narHash": "sha256-gh"}}
-        put(co8, "nixos/flake.lock", proc.dump_json(gh_lock) + "\n", "dep from github")
-        sh(ax8, "reset", "--quiet", "--hard", ax_main)
-        put(ax8, "tool4.py", "d\n")
-        with contextlib.redirect_stdout(io.StringIO()):
-            annex.sync(wb8, "dep: d")
-        g1 = sh(ax8, "rev-parse", "HEAD")
-        assert fetched[-1] == f"github:o/r/{g1}" and annex.locked_rev("dep") == (g1, None)
-        sh(co8, "commit", "--quiet", "-m", "dep: d")
-        with contextlib.redirect_stdout(io.StringIO()):
-            annex.land_all(wb8, "dep d landed")
-        gh_main = sh(ax_seed, "ls-remote", str(ax_origin), "refs/heads/main").split()[0]
-        assert gh_main != ax_main and sh(ax8, "rev-parse", "HEAD") == gh_main
-        assert annex.locked_rev("dep") == (gh_main, None) and fetched[-1] == f"github:o/r/{gh_main}"
+            submodule.remove_all(co)
     finally:
         os.chdir(prev)
-    print("annexes: ok")
+    print("submodules: ok")
 
 
 def open_cases(d: Path) -> None:
@@ -1729,7 +1653,7 @@ def open_cases(d: Path) -> None:
     sh(d, "init", "--quiet", "--bare", "-b", "main", str(origin))
     sh(d, "clone", "--quiet", str(origin), str(seed))
     put(seed, "deploy-branches", "work/tester/*\n")
-    put(seed, ".gitignore", "worktrees/\nannexes/\n")
+    put(seed, ".gitignore", "worktrees/\n")
     put(seed, "a.txt", "one\n", "seed")
     sh(seed, "push", "--quiet", "origin", "HEAD:main")
     sh(d, "clone", "--quiet", str(origin), str(co))
@@ -1745,7 +1669,7 @@ def open_cases(d: Path) -> None:
         assert checkout.identity_of(w.resolve(), "worktree-task") == checkout.Checkout("sub", "work/tester/9-task")
         assert checkout.sub_parent(w.resolve()) == co.resolve() and checkout.sub_parent(co.resolve()) is None
         # Nested deeper, still this checkout's; a worktree of another
-        # repository nested here (an annex) is nobody's subagent.
+        # repository nested here (a submodule's) is nobody's subagent.
         deep = co / "elsewhere/deeper/other"
         sh(co, "worktree", "add", "--quiet", "--detach", str(deep), "origin/main")
         assert checkout.sub_parent(deep.resolve()) == co.resolve()
@@ -1753,8 +1677,8 @@ def open_cases(d: Path) -> None:
         foreign = d / "foreign"
         sh(d, "init", "--quiet", "-b", "main", str(foreign))
         put(foreign, "f.txt", "f\n", "foreign")
-        sh(foreign, "worktree", "add", "--quiet", "--detach", str(co / "annexes/foreign"))
-        assert checkout.sub_parent((co / "annexes/foreign").resolve()) is None
+        sh(foreign, "worktree", "add", "--quiet", "--detach", str(co / "worktrees/foreign"))
+        assert checkout.sub_parent((co / "worktrees/foreign").resolve()) is None
         assert commands.subs_of(co.resolve()) == [w.resolve()]
         # review: a name is a subagent worktree (exact, or a unique prefix)
         # or a branch (the worktree on it), never a diff argument.
@@ -1762,8 +1686,8 @@ def open_cases(d: Path) -> None:
         assert review.targets(["ta"], co) == ([w], [])
         assert review.targets(["worktree-task", "a.txt"], co) == ([w], ["a.txt"])
         assert review.targets(["--union", "--stat"], co) == ([co, w], ["--stat"])
-        assert "no subagent worktree, annex, branch or path named nope" in dies(lambda: review.targets(["nope"], co))
-        assert review.targets(["foreign"], co) == ([co / "annexes/foreign"], [])  # an annex by name
+        assert "no subagent worktree, submodule, branch or path named nope" in dies(lambda: review.targets(["nope"], co))
+        assert "named foreign" in dies(lambda: review.targets(["foreign"], co))  # no configured submodule
         put(w, "COMMIT_MSG.md", "task done\n")
         put(w, "b.txt", "two\n")
         with (d / "review.out").open("w") as f, contextlib.redirect_stdout(f):
@@ -1858,6 +1782,6 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as d:
         announce_cases(Path(d))
     with tempfile.TemporaryDirectory() as d:
-        annex_cases(Path(d))
+        submodule_cases(Path(d))
     with tempfile.TemporaryDirectory() as d:
         open_cases(Path(d))

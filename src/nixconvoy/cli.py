@@ -176,7 +176,7 @@ branch, so it switches the target to this checkout's view alone, without
 the held work, the hold standing.  `status` shows what each checkout holds
 back.
 
-Land (nixconvoy land [<name> ...] | --union | --annex <input>): commit the work branch's
+Land (nixconvoy land [<name> ...] | --union | --submodule <input>): commit the work branch's
 tree minus COMMIT_MSG.md onto origin/main with COMMIT_MSG.md as the message,
 push main, reset this branch (and its origin copy) onto the new main, the
 checkout staying on it.  Every other checkout on this machine is then
@@ -186,8 +186,8 @@ their next deploy.  A subagent worktree stays too, idle on its reset branch:
 Run from any checkout with the worktrees' <name>s (a unique prefix will do),
 land and abandon act on each in turn.  A branch holding a target back (see
 Apply) is refused unless --release: the landed work then rolls out there with
-the next deploy from anywhere.  The checkout's annexes land first
-(see Annexes); --annex <input> lands that one annex alone.  --union lands
+the next deploy from anywhere.  The checkout's submodules land first
+(see Open); --submodule <input> lands that one submodule alone.  --union lands
 this checkout and its subagent worktrees as one unit - for subagents that
 each did a piece of this checkout's task: every sub's branch (one on its
 work branch with work beyond main; a sub holding undeployed commits stops
@@ -204,14 +204,14 @@ rebased in a throwaway worktree).  Each checkout is taken under its deploy
 lock (one whose nixconvoy is running is skipped) and either ends up rebased
 with its staged/unstaged state intact and its work branch pushed, or is
 left exactly as it was: a rebase that isn't clean is aborted and reported.
-Each annex worktree of a checkout follows (see Annexes), onto its
+Each submodule worktree of a checkout follows (see Open), onto its
 repository's default branch as fetched, by the same rebase: fast-forwarded
 when it has nothing of its own, its staged and unstaged state riding
 along; one with commits of its own is pushed where its origin has the
-branch, and a lock naming its old tip relocked on the new, staged.  One
-that cannot follow - its rebase not clean, its origin unreachable while a
-relock waits on it - is named in the checkout's line, which then counts
-as failed, and left as it was.  The annex repository's own checkout, when
+branch, and a pin naming its old tip moved to the new, staged.  One that
+cannot follow - its rebase not clean, its origin unreachable while a pin
+waits on it - is named in the checkout's line, which then counts as
+failed, and left as it was.  The submodule repository's own checkout, when
 on its default branch, follows the same way, as the main checkout follows
 main.
 
@@ -226,16 +226,16 @@ Review (nixconvoy review [<worktree> | <branch> ...] [<diff-arg> ...] | review
 --union [<diff-arg> ...]): the review of
 the pending landing (review.py; `git review`, in the package's bin, is
 the same): COMMIT_MSG.md, then the diff against the merge-base with
-origin's default branch, then the annexes'.  A name is a subagent
-worktree's, an annex's (that annex alone) or a branch's (the worktree on
-it, else the branch against its merge-base, so an annex branch reviews
+origin's default branch, then the submodules'.  A name is a subagent
+worktree's, a submodule's (that one alone) or a branch's (the worktree on
+it, else the branch against its merge-base, so a submodule branch reviews
 from its repository too); one that is none of these is an error; --union reviews this checkout and then each
 subagent worktree; the rest are git diff arguments.
 
-Abandon (nixconvoy abandon [--apply-now] [<name> ...] | --union | --annex <input>):
+Abandon (nixconvoy abandon [--apply-now] [<name> ...] | --union | --submodule <input>):
 discard this checkout's work instead of landing it: hard-reset the checkout
 and reset the work branch (local and origin) onto origin/main, staying on
-it; a subagent worktree stays too (close removes it); its annexes are
+it; a subagent worktree stays too (close removes it); its submodules are
 reset onto their default branch likewise.  Untracked files survive; the
 old tip remains reachable via the reflog.
 No target is touched: the ones running its increments (named from their
@@ -247,7 +247,7 @@ ran in; it takes --allow.  --union abandons each
 subagent worktree holding anything, then this checkout.
 
 Open (nixconvoy open [--lock <reason>] <name> | [--branch <work-branch>] <path> |
---annex <input>): a worktree.  <name> (no / in it): a task worktree,
+--submodule <input>): a worktree.  <name> (no / in it): a task worktree,
 <root>/<worktrees>/<name> (nixconvoy.toml's `worktrees`, `worktrees/` by
 default, which must be gitignored; root: the checkout this one's subagent
 worktrees hang off) on the fresh branch worktree-<name> off origin's
@@ -261,60 +261,69 @@ outside every checkout, on a work branch of this machine's: --branch, else
 <branch_prefix><N> for the digits the path's name ends with (homelab5 ->
 work/<machine>/5) when that is listed and free, else the first listed free
 number; origin's copy of the branch when it has one (a checkout removed
-before), else new off origin's default branch.  --annex:
-the flake input <input> developed in place: a worktree of its repository
-(nixconvoy.toml's annexes.<input>.repo, whose origin the lock fetches) at
-<checkout>/annexes/<input>, on a branch named after this checkout's work
+before), else new off origin's default branch.  --submodule:
+the flake input <input> developed in place.  It is a git submodule of
+this repository named after the input (its .gitmodules entry; the gitlink
+in the tree is the pin) that flake.nix takes as a relative path input
+(path:./<dir>, so flake.lock names no rev) with inputs.self.submodules =
+true, so the build fetches it from the .gitmodules url at the pinned rev.
+open plants a worktree of its repository (nixconvoy.toml's
+submodules.<input>.repo, whose origin that url must name; never `git
+submodule update`, which would clone a second copy under .git/modules)
+at the submodule's path, on a branch named after this checkout's work
 branch - origin's copy of that branch when it has one, else new off the
-repository's default branch, with its upstream set there.  annexes/ must
-be gitignored (a nested checkout).  Work there as in the checkout: stage
-what is ready, and each deploy commits the annex's staged
-state onto that branch with the -m message, pushes it to the annex's
-origin and points the flake.lock node at the pushed rev (nix flake lock
---override-input on a scratch copy of the flake, so the input's own
-inputs follow), staged here, so the increment carries the annex as a lock
-change: the union, the eval memo and the lineage see nothing new.  Two work branches that moved the same annex meet in the union as
-a lock conflict the union resolves node by node: the annex branches are
-merged in the annex repository (its configured checkout, else a bare
-mirror under ~/.cache/nixconvoy/annexes/), the merge pushed to the annex
-origin's refs/nixconvoy/union/<input>/<sha> and the union's node locked
-there - deterministic, so retries and the eval memo agree; a union ref no
-ref of origin (nor its deploy history of 90 days) locks any more is deleted
-by the next union, a day after its push; annex branches that conflict are
-reported as any union conflict.  Once one lands, every other checkout's catch-up (a deploy's annex step,
-pull, a landing's) brings its annex worktree onto the landed default
-branch as it brings the checkout onto main (see Pull), and a deploy whose
-annex is still behind that branch refuses to relock it there, since the
-lock would move the input backwards for every target main reaches; a
-deployed relock the rebase onto main replays meets the landed node as a
-lock conflict, resolved the same way.  The annex branch is pushed before the build, since the build fetches
-it, so it may run ahead of what is deployed; the work branch's lock is the
-claim.  land lands each annex first - its tip merged onto the
-repository's default branch and squashed there as one commit (the
-COMMIT_MSG.md in the annex worktree, tracked or not, else the checkout's)
-- and relocks the node on the default branch as a commit of the work
-branch, then lands main; the annex worktree stays, its branch reset onto
-the landed commit.  A deploy refuses an annex whose worktree was reset below the work the
-lock deploys (nothing of its own left: a hand reset; a rebase or amend
-keeps work of its own and passes, the deploy naming the deployed commits
-its relock leaves behind as such): put it back, or `abandon --annex`
-drops it deliberately.  `land --annex <input>` lands that one annex ahead of
-the checkout (the relock commit pushed on the work branch); `abandon
---annex <input>` resets it onto the default branch and puts its lock node
-back to what origin/main locks, staged for the next deploy to revert it on
-the targets; the checkout's own abandon resets its annexes so.  status
-lists the configured annexes.  An annex repository's own checkout is never
-deployed from: status flags edits there, and nixconvoy leaves a
-`nixconvoy-annexed` marker in its git dir for a pre-commit hook to refuse
-an agent's commit on its default branch.
+repository's default branch, with its upstream set there.  Work there as
+in the checkout: stage what is ready, and each deploy commits the
+worktree's staged state onto that branch with the -m message, pushes it
+to the repository's origin and stages the gitlink on the pushed rev, so
+the increment carries the submodule as a tree change: the union, the eval
+memo and the lineage see nothing new.  Two work branches that moved the
+same submodule meet in the union as a gitlink conflict: the branches are
+merged in the submodule repository (its configured checkout, else a bare
+mirror under ~/.cache/nixconvoy/submodules/), the merge pushed to its
+origin's refs/nixconvoy/union/<input>/<sha> and pinned there -
+deterministic, so retries and the eval memo agree; branches that
+conflict are reported as any union conflict.  Once one lands, every
+other checkout's catch-up (a deploy's submodule step, pull, a landing's)
+brings its worktree onto the landed default branch as it brings the
+checkout onto
+main (see Pull), and a deploy whose submodule is still behind that branch
+refuses to pin it, since the pin would move the input backwards for every
+target main reaches; a deployed pin the rebase onto main replays meets
+the landed gitlink as a conflict, resolved the same way.  The branch is
+pushed before the build, since the build fetches it, so it may run ahead
+of what is deployed; the work branch's gitlink is the claim.  (nix reads
+a committed tree's submodules from their .gitmodules urls at the pinned
+rev, and a checkout with uncommitted changes' from their directories, so
+a hand `nix` command there wants every submodule planted; a deploy
+evaluates a clean worktree of the snapshot, so neither constrains it.)  land lands
+each submodule first - its tip merged onto the repository's default
+branch and squashed there as one commit (the COMMIT_MSG.md in the
+worktree, tracked or not, else the checkout's) - and pins the default
+branch's commit as a commit of the work branch, then lands main; the
+worktree stays, its branch reset onto the landed commit.  A deploy
+refuses a submodule whose worktree was reset below the work the tree
+deploys (nothing of its own left: a hand reset; a rebase or amend keeps
+work of its own and passes, the deploy naming the deployed commits its
+pin leaves behind as such): put it back, or `abandon --submodule` drops
+it deliberately.  `land --submodule <input>` lands that one submodule
+ahead of the checkout (the pin commit pushed on the work branch);
+`abandon --submodule <input>` resets it onto the default branch and puts
+the pin back to what origin/main pins, staged for the next deploy to
+revert it on the targets; the checkout's own abandon resets its
+submodules so.  status lists the configured submodules.  A submodule
+repository's own checkout is never deployed from: status flags edits
+there, and nixconvoy leaves a `nixconvoy-submodule` marker in its git
+dir for a pre-commit hook to refuse an agent's commit on its default
+branch there.
 
-Close (nixconvoy close [--force] [<name> ...] | [--force] <path> ... | --annex <input> |
+Close (nixconvoy close [--force] [<name> ...] | [--force] <path> ... | --submodule <input> |
 --after PID | --stopped PID): remove a worktree.  The named task worktrees when they hold
 nothing of their own - never deployed, no staged, unstaged or untracked
-change, HEAD and its work branch on origin, no annex holding anything -
+change, HEAD and its work branch on origin, no submodule holding anything -
 with their fresh branch, as nixconvoy-plan's prune core decides (a named
 one's lock counts its session as ended for it); --force removes a named
-one whatever it holds, with its branches and annexes, here and on origin.
+one whatever it holds, with its branches and submodules, here and on origin.
 With no name, every one under this checkout (a sweep), where one whose
 spawning claude session still runs is kept, whichever session asks: the
 session may resume its agent, which needs the worktree.  So is one at
@@ -323,14 +332,15 @@ work (a nixconvoy, git operation or push running in it), on a work branch
 holding anything; each kept one is said so, as is one a process works in.
 It all happens under a lock on the worktree's name, which open takes too,
 and the removal claims the lock it judged and leaves git to refuse a
-worktree locked meanwhile.  --annex <input>: that annex's worktree with
-its branch, here and on its origin (the last tip kept under
-refs/nixconvoy/past/<branch>/<sha> there for 90 days), unless that would lose work - edits, commits
-not on the default branch, a lock still naming its branch - which --force
-overrides, the lock node then put back to origin/main's, staged.  <path>:
+worktree locked meanwhile.  --submodule <input>: that submodule's
+worktree with its branch, here and on its origin (the last tip kept under
+refs/nixconvoy/past/<branch>/<sha> there while a pushed branch or deploy
+record pins it), unless that would lose work - edits, commits not on the default branch, a pin still off it
+- which --force overrides, the pin then put back to origin/main's,
+staged; the directory stays, empty, as an unpopulated submodule.  <path>:
 an agent checkout (never the primary worktree), with its work branch here
 and on origin, when it holds nothing of its own - no edits, nothing beyond
-origin/main, no annex holding anything - or --force.  `--after
+origin/main, no submodule holding anything - or --force.  `--after
 PID` detaches, sweeps what dead sessions left, waits for the claude session
 PID to exit and sweeps again (one waiter per session, logged to
 nixconvoy-prune.log in the common git dir): the Claude Code plugin's
@@ -383,7 +393,7 @@ import sys
 from pathlib import Path
 from typing import IO, NoReturn
 
-from . import annex, commands, proc, review
+from . import commands, proc, review, submodule
 from .checkout import lock_checkout, require_work_branch, sub_parent
 from .deploy import deploy
 from .proc import PERF, PERF_FILE, TOOL, die, git, ok, out, painter
@@ -397,16 +407,16 @@ review [<worktree> | <branch> ...] [<diff-arg> ...]
 review --union [<diff-arg> ...]
 land [--release] [<worktree> ...]
 land [--release] --union
-land --annex <input>
+land --submodule <input>
 abandon [--apply-now [--allow <protection> ...]] [<worktree> ...]
 abandon [--apply-now [--allow <protection> ...]] --union
-abandon --annex <input>
+abandon --submodule <input>
 open [--lock <reason>] <name>
 open [--branch <work-branch>] <path>
-open --annex <input>
+open --submodule <input>
 close [--force] [<worktree> ...]
 close [--force] <path> ...
-close [--force] --annex <input>
+close [--force] --submodule <input>
 close --after <pid>
 close --stopped <pid> < <hook-input>
 pull
@@ -490,8 +500,8 @@ def main() -> None:
     names: list[str] = []
     after = ""
     stopped = ""
-    annex_name: str | None = None
-    annex_flag = False
+    sub_name: str | None = None
+    sub_flag = False
     lock_reason: str | None = None
     branch: str | None = None
     force = False
@@ -501,10 +511,10 @@ def main() -> None:
         a = args.pop(0)
         if a == "-m" and args:
             msg = args.pop(0)
-        elif a == "--annex" and subcmd == "open":
-            annex_flag = True
-        elif a == "--annex" and subcmd in ("land", "abandon", "close") and args:
-            annex_name = args.pop(0)
+        elif a == "--submodule" and subcmd == "open":
+            sub_flag = True
+        elif a == "--submodule" and subcmd in ("land", "abandon", "close") and args:
+            sub_name = args.pop(0)
         elif a == "--lock" and subcmd == "open" and args:
             lock_reason = args.pop(0)
         elif a == "--branch" and subcmd == "open" and args:
@@ -547,11 +557,11 @@ def main() -> None:
         commands.status()
         return
     if subcmd == "open":
-        if msg or reset or allow or dry or len(names) != 1 or (branch and (annex_flag or lock_reason)) \
-                or (annex_flag and lock_reason):
+        if msg or reset or allow or dry or len(names) != 1 or (branch and (sub_flag or lock_reason)) \
+                or (sub_flag and lock_reason):
             bad_usage()
-        if annex_flag:
-            annex.create(names[0], require_work_branch("open --annex"))
+        if sub_flag:
+            submodule.create(names[0], require_work_branch("open --submodule"))
         elif is_path(names[0]):
             if lock_reason:
                 bad_usage()
@@ -561,16 +571,16 @@ def main() -> None:
         else:
             commands.open_worktree(names[0], lock_reason)
         return
-    if annex_name is not None:
+    if sub_name is not None:
         if names or apply_now or msg or reset or dry or allow or after or stopped or union or release:
             bad_usage()
         take_lock()
         if subcmd == "land":
-            commands.land_annex(annex_name)
+            commands.land_submodule(sub_name)
         elif subcmd == "abandon":
-            commands.abandon_annex(annex_name)
+            commands.abandon_submodule(sub_name)
         else:
-            commands.close_annex(annex_name, force=force)
+            commands.close_submodule(sub_name, force=force)
         return
     if subcmd == "close":
         if msg or reset or allow or dry or ((after or stopped) and (names or force)) or (after and stopped):

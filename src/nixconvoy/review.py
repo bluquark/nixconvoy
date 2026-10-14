@@ -2,13 +2,14 @@
 its diff - `git diff --cached`, from the merge-base with origin's default
 branch when the checkout is on a work branch (one deploy-branches lists),
 a subagent worktree or a worktree beside the primary one on a branch of
-its own (an annex worktree reviewed from its repository), so it shows
+its own (a submodule worktree reviewed from its repository), so it shows
 everything pending against main (COMMIT_MSG.md itself left out unless
-paths are given); then each annex under the checkout, from the merge-base
-with its origin's default branch.  Leading arguments name what to show
-instead of this checkout: a subagent worktree (nested in this checkout,
-else in any checkout of this repository; a unique prefix each), an annex
-of this checkout (its worktree against its origin's default branch) or a
+paths are given); then each submodule worktree under the checkout, from
+the merge-base with its origin's default branch.  Leading arguments name
+what to show instead of this checkout: a subagent worktree (nested in
+this checkout, else in any checkout of this repository; a unique prefix
+each), a submodule of this checkout (its worktree against its origin's
+default branch) or a
 branch (the worktree checked out on it, else the branch's tip against
 its merge-base, the message from its tree); one that is none of these,
 nor a path here, is an error, never a diff argument.  --union shows this
@@ -26,7 +27,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import IO
 
-from .annex import ANNEX_DIR
+from . import submodule
 from .checkout import sub_parent
 from .config import BRANCHES_FILE, MSG_FILE
 from .proc import die, painter, run
@@ -62,11 +63,12 @@ def default_of(d: Path) -> str:
 def resolve(name: str, here: Path, top: Path, all_wts: dict[Path, str | None]) -> Path | str | None:
     """What `name` shows: a subagent worktree (its exact name anywhere,
     else a unique prefix - this checkout's first), else this checkout's
-    annex `name`, else the worktree on the branch `name`, else that
+    submodule `name`, else the worktree on the branch `name`, else that
     branch itself; None when nothing."""
     subs = [w for w in all_wts if sub_parent(w) is not None]
-    if (top / ANNEX_DIR / name / ".git").exists():
-        return top / ANNEX_DIR / name
+    for sub in submodule.present(top):
+        if sub.name == name:
+            return sub.dir
     for w in subs:
         if w.name == name:
             return w
@@ -102,7 +104,7 @@ def targets(args: list[str], here: Path) -> tuple[list[Path | str], list[str]]:
             break
         got = resolve(a, here, top, all_wts)
         if got is None:
-            die(f"review: no subagent worktree, annex, branch or path named {a}")
+            die(f"review: no subagent worktree, submodule, branch or path named {a}")
         found.append(got)
         rest.pop(0)
     if union:
@@ -197,9 +199,8 @@ def show(o: Out, d: Path, args: list[str], all_wts: dict[Path, str | None]) -> N
     if (top / MSG_FILE).is_file():
         message(o, (top / MSG_FILE).read_text(encoding="utf-8"))
     o.diff(d, "--cached", *diff_args)
-    for a in sorted(top.glob("annexes/*/")):
-        if not (a / ".git").exists():
-            continue
+    for sub in submodule.present(top):
+        a = sub.dir
         default = default_of(a)
         if default == "origin/main" and run(["git", "rev-parse", "-q", "--verify", default], cwd=str(a),
                                             check=False).returncode != 0:
@@ -208,7 +209,7 @@ def show(o: Out, d: Path, args: list[str], all_wts: dict[Path, str | None]) -> N
         if p.returncode != 0:
             continue
         o.line("")
-        o.line(f"── annex {a.name} ──", "bold")
+        o.line(f"── submodule {sub.name} ──", "bold")
         o.diff(a, "--cached", p.stdout.strip(), "--", EXCLUDE_MSG)
 
 
@@ -224,8 +225,8 @@ def main(args: list[str]) -> int:
             if isinstance(t, str):
                 o.line(f"══ branch {t} ══", "heading")
                 show_branch(o, here, t, rest)
-            elif t.parent == toplevel(here) / ANNEX_DIR:
-                o.line(f"══ annex {t.name} ══", "heading")
+            elif (named := [s.name for s in submodule.present(toplevel(here)) if s.dir == t]):
+                o.line(f"══ submodule {named[0]} ══", "heading")
                 show(o, t, rest, all_wts)
             else:
                 parent = sub_parent(t)

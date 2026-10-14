@@ -5,7 +5,7 @@
 //! review reads it - is left alone; one carrying commits of its own is
 //! refused, since switching to the work branch would strand them.
 //!
-//! The same routine (`onto`) brings an annex worktree onto its repository's
+//! The same routine (`onto`) brings a submodule worktree onto its repository's
 //! default branch, under the Onto params: nixconvoy runs it in that
 //! worktree, naming the upstream.
 //!
@@ -29,7 +29,7 @@ pub enum Params {
     PopTmp,
     /// Make HEAD contain origin/main, dying when that isn't clean.
     EnsureRebased,
-    /// Make HEAD contain `upstream` (an annex worktree, its repository's
+    /// Make HEAD contain `upstream` (a submodule worktree, its repository's
     /// default branch as fetched), a dead run's tmp commits unwound first;
     /// Err says why it was left as it was.
     Onto { upstream: String },

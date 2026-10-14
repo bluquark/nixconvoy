@@ -69,9 +69,9 @@ class Config:
     caches: tuple[Cache, ...] = ()
     public_substituters: str = "https://cache.nixos.org"
     targets: dict[str, TargetConfig] = field(default_factory=dict)
-    # The flake inputs developed in place (annex.py): input name -> the
-    # repository's checkout on this machine, whose origin the lock fetches.
-    annexes: dict[str, str] = field(default_factory=dict)
+    # The flake inputs developed in place (submodule.py): input name -> the
+    # repository's checkout on this machine, whose origin nix fetches.
+    submodules: dict[str, str] = field(default_factory=dict)
 
     def target(self, name: str) -> TargetConfig:
         return self.targets.get(name, TargetConfig())
@@ -161,7 +161,7 @@ def parse(text: str) -> Config:
     if version != 1:
         raise ConfigError(f"{CONFIG_FILE}: version {version} is not supported (1 is)")
     known = {"version", "flake", "hosts_dir", "system", "ssh_address", "branch_prefix", "worktrees",
-             "precheck", "memo", "eval", "build", "targets", "annexes"}
+             "precheck", "memo", "eval", "build", "targets", "submodules"}
     for k in doc:
         if k not in known:
             raise ConfigError(f"{CONFIG_FILE}: unknown key {k}{_renamed(k)}")
@@ -192,16 +192,16 @@ def parse(text: str) -> Config:
         targets[name] = TargetConfig(local_only=_bool(t, "local_only", f"targets.{name}"),
                                      ssh_address=_str(t, "ssh_address", f"targets.{name}"),
                                      tags=_strs(t, "tags", f"targets.{name}"))
-    annexes: dict[str, str] = {}
-    for name, a in _table(doc.get("annexes", {}), "annexes").items():
-        t = _table(a, f"annexes.{name}")
+    submodules: dict[str, str] = {}
+    for name, a in _table(doc.get("submodules", {}), "submodules").items():
+        t = _table(a, f"submodules.{name}")
         for k in t:
             if k != "repo":
-                raise ConfigError(f"{CONFIG_FILE}: unknown key annexes.{name}.{k}")
-        repo = _str(t, "repo", f"annexes.{name}")
+                raise ConfigError(f"{CONFIG_FILE}: unknown key submodules.{name}.{k}")
+        repo = _str(t, "repo", f"submodules.{name}")
         if not repo:
-            raise ConfigError(f"{CONFIG_FILE}: annexes.{name}.repo is required")
-        annexes[name] = repo
+            raise ConfigError(f"{CONFIG_FILE}: submodules.{name}.repo is required")
+        submodules[name] = repo
     overlay = _str(memo, "overlay", "memo")
     namespace = _str(memo, "namespace", "memo")
     if bool(overlay) != bool(namespace):
@@ -225,7 +225,7 @@ def parse(text: str) -> Config:
         caches=tuple(caches),
         public_substituters=_str(build, "public_substituters", "build", "https://cache.nixos.org"),
         targets=targets,
-        annexes=annexes,
+        submodules=submodules,
     )
 
 

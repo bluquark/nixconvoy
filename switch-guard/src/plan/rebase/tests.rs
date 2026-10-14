@@ -706,8 +706,8 @@ fn reports_what_blocks_a_rebase() {
 }
 
 #[test]
-fn onto_brings_an_annex_onto_its_default_branch() {
-    // An annex worktree: nothing of its own, unstaged edits to a file the
+fn onto_brings_a_submodule_onto_its_default_branch() {
+    // A submodule worktree: nothing of its own, unstaged edits to a file the
     // landing did not touch.  Onto fast-forwards it, the edits intact; the
     // same edits to a file the landing changed leave it exactly as it was,
     // saying so.
