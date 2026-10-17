@@ -74,15 +74,15 @@ no work.
   refused until listed.
 - **Held-back targets.**  An increment deployed to named targets alone is
   committed with the targets it reaches (`Reaches:`) and the ones now
-  running the branch's tip (`Deployed:`); a target in the first and not the
+  running the branch's tip (`Applied:`); a target in the first and not the
   second is held back until a deploy from that checkout switches it.  The
   union carries the work, so every other work branch's deploy leaves a held
   target alone, or is refused when its own work reaches it; a main
   checkout's deploy (a nightly's) leaves it behind rather than fail; and
-  `land` refuses until `--release` - no restricted apply rolls out
-  elsewhere by accident - unless the branch builds the target just as
+  `land` refuses until `--not-yet-applied` - no restricted apply rolls
+  out elsewhere by accident - unless the branch builds the target just as
   main does (`land` evaluates the held targets at its tip and at main),
-  which releases it on its own.
+  so nothing is held there.
 - **Deploy records.**  Before a target is switched, its deploy record - a
   commit of the exact tree it will run, on its previous record, main, the
   unioned branches and the increment - is pushed to origin, so no target
@@ -235,9 +235,9 @@ nixconvoy open <path> [--branch <work-branch>]   an agent checkout at that path 
 nixconvoy open --submodule <input>   the flake input developed in place under this checkout (see Submodules)
 
 # Deploying and committing changes
-nixconvoy apply [<target> | @<tag> ...] [-m <msg>] [--reset] [--dry-activate]   deploy the staged increment (-m: its message, default "<checkout>: increment <n>"), or with nothing staged converge the targets on the union as it is; --dry-activate: build and copy, then only report what each switch would do
+nixconvoy apply [<target> | @<tag> ...] [-m <msg>] [--evict] [--dry-activate]   deploy the staged increment (-m: its message, default "<checkout>: increment <n>"), or with nothing staged converge the targets on the union as it is; --dry-activate: build and copy, then only report what each switch would do
 nixconvoy unapply [<worktree> ... | --with-subagents] [--back-to <rev>]   undo the increments from HEAD back to <rev> (default HEAD^, the latest one; origin/main: the whole branch): the branch reset there, then a deploy reverting them on the targets (--with-subagents: every subagent worktree holding increments, then this checkout, one deploy)
-nixconvoy land [<worktree> ... | --with-subagents] [-m <msg>] [--release]   land the work branch on main (--with-subagents: this checkout and its subagent worktrees as one unit, one main commit with the subs' COMMIT_MSG.md appended; -m: under <msg>, for a branch without COMMIT_MSG.md; --release: targets its increments held back included)
+nixconvoy land [<worktree> ... | --with-subagents] [-m <msg>] [--not-yet-applied]   land the work branch on main (--with-subagents: this checkout and its subagent worktrees as one unit, one main commit with the subs' COMMIT_MSG.md appended; -m: under <msg>, for a branch without COMMIT_MSG.md; --not-yet-applied: targets its increments held back included)
 nixconvoy review [<worktree> | <branch> ... | --with-subagents] [<diff-arg> ...]   the pending landing: COMMIT_MSG.md, then the diff (--with-subagents: the checkout's and its subagent worktrees' together)
 ```
 

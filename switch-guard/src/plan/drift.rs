@@ -11,7 +11,7 @@
 //! (`pending.announce`, its ref `pending.key`) and that ref is cleared
 //! (Context::in_flight lacks it), which only the deploy's own end does -
 //! its push, or its withdrawal having switched nothing - or the removal
-//! of its branch, or a hand clear; or the deploy is a --reset that names
+//! of its branch, or a hand clear; or the deploy is a --evict that names
 //! the target or reaches it.  Work of a branch deploy-branches here does
 //! not list stays refused until listed.  A deploy that died leaves its announcement up
 //! (nixconvoy tells one from its stopped renewals: Context::dead), so
@@ -41,23 +41,23 @@
 //!
 //! A branch holds a target back when an increment of it reached the target
 //! but was deployed to other targets alone (an apply naming them): its
-//! Reaches: trailer names the target, its Deployed: one does not, and no
+//! Reaches: trailer names the target, its Applied: one does not, and no
 //! later increment's deploy on that branch switched the target since
 //! (nixconvoy's held_targets).  The union carries that work, so switching
 //! the target would roll the increment out from a checkout that chose not
 //! to: a held target is left alone, or the deploy refused when this
 //! checkout's own work reaches it (Params::held), as for an in-flight
 //! increment - until the holding checkout deploys the target or lands with
-//! --release.  A main checkout's own work is main's advance, which a hold
+//! --not-yet-applied.  A main checkout's own work is main's advance, which a hold
 //! must not stop fleet-wide (the nightly's lock): it is left behind on
-//! the held target instead (Params::work_branch).  A --reset unions no
+//! the held target instead (Params::work_branch).  A --evict unions no
 //! other branch, so nothing is held under it: the target gets this
 //! checkout's view alone, the hold standing.
 use super::{listed, Halt, Query, Run, Script, BRANCHES_FILE};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const RESET_FLAG: &str = "--reset";
+pub const EVICT_FLAG: &str = "--evict";
 /// Origin's announcements, by branch (nixconvoy's PENDING_REFS).
 pub const PENDING_REFS: &str = "refs/nixconvoy/pending";
 
@@ -161,7 +161,7 @@ pub enum Kind {
     /// Refused, but its deploy is over: its announcement cleared without
     /// the push landing.
     Abandoned,
-    /// Refused, but taken over by a --reset that names or reaches the target.
+    /// Refused, but taken over by a --evict that names or reaches the target.
     Overridden,
 }
 
@@ -211,7 +211,7 @@ fn clock(at: f64, tz_offset: i64) -> String {
 }
 
 /// Whose work a drifting target runs, relative to this deploy's union, and
-/// why; `take_over` when a --reset names the target or reaches it, `reached`
+/// why; `take_over` when a --evict names the target or reaches it, `reached`
 /// when this checkout's own work changes something the target's configuration
 /// reads.
 pub fn classify(lin: Option<&Lineage>, running: &str, cx: &Context, take_over: bool, reached: bool) -> (Kind, String) {
@@ -256,7 +256,7 @@ pub fn classify(lin: Option<&Lineage>, running: &str, cx: &Context, take_over: b
         return (Kind::CatchUp, format!("runs pushed work deployed by {who}"));
     };
     if take_over {
-        return (Kind::Overridden, format!("{why}; taken over by {RESET_FLAG}"));
+        return (Kind::Overridden, format!("{why}; taken over by {EVICT_FLAG}"));
     }
     if !reached {
         return (Kind::LeftAlone, format!("{why}; this checkout's work does not reach it"));
@@ -294,9 +294,9 @@ pub struct Params {
     pub router: String,
     pub targets: Vec<String>,
     pub candidates: Vec<String>,
-    /// --reset: this checkout's view alone - refused work is taken over on
+    /// --evict: this checkout's view alone - refused work is taken over on
     /// the targets it reaches, and on every candidate when `named`.
-    pub reset: bool,
+    pub evict: bool,
     /// The candidates were named on the command line.
     pub named: bool,
     /// This checkout deploys a work branch of its own: a hold refuses it
@@ -335,7 +335,7 @@ pub fn refusal(refused: &[(String, Kind, Option<String>)]) -> String {
     if targets.is_empty() {
         let one = held.len() == 1;
         return format!(
-            "nothing switched or committed: {} {} held back by another branch (see above): the union carries work that checkout deployed to other targets alone, and this checkout's work reaches {} too.  Deploy it there (nixconvoy apply {} from that checkout) or land it with --release; or deploy with {RESET_FLAG} {} to switch {} to this checkout's view alone, without the held work (and without every other branch's), the hold standing.",
+            "nothing switched or committed: {} {} held back by another branch (see above): the union carries work that checkout deployed to other targets alone, and this checkout's work reaches {} too.  Deploy it there (nixconvoy apply {} from that checkout) or land it with --not-yet-applied; or deploy with {EVICT_FLAG} {} to switch {} to this checkout's view alone, without the held work (and without every other branch's), the hold standing.",
             held.join(", "),
             if one { "is" } else { "are" },
             if one { "it" } else { "them" },
@@ -360,7 +360,7 @@ pub fn refusal(refused: &[(String, Kind, Option<String>)]) -> String {
     }
     if !held.is_empty() {
         fixes.push(format!(
-            "{} held back by another branch: deploy it there (nixconvoy apply {} from that checkout) or land it with --release",
+            "{} held back by another branch: deploy it there (nixconvoy apply {} from that checkout) or land it with --not-yet-applied",
             held.join(", "),
             held.join(" ")
         ));
@@ -369,7 +369,7 @@ pub fn refusal(refused: &[(String, Kind, Option<String>)]) -> String {
     let mut c = fix.chars();
     let fix: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
     format!(
-        "nothing switched or committed: {} {} another checkout's work this union lacks, and this checkout's work reaches {} too (see above).  {fix}; or deploy with {RESET_FLAG} {} to revert it deliberately - along with every other branch's work there, which {RESET_FLAG} leaves out.",
+        "nothing switched or committed: {} {} another checkout's work this union lacks, and this checkout's work reaches {} too (see above).  {fix}; or deploy with {EVICT_FLAG} {} to revert it deliberately - along with every other branch's work there, which {EVICT_FLAG} leaves out.",
         targets.join(", "),
         if targets.len() == 1 { "runs" } else { "run" },
         if targets.len() == 1 { "it" } else { "them" },
@@ -431,7 +431,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         let lin = p.lineages.get(h).and_then(|text| parse(text));
         let running = p.running.get(h).cloned().flatten().unwrap_or_default();
         let reached = p.reached.contains(h);
-        let take_over = p.reset && (p.named || reached);
+        let take_over = p.evict && (p.named || reached);
         let (mut kind, mut why) = classify(lin.as_ref(), &running, &p.cx, take_over, reached);
         // The pending increment of a branch origin has no tip of: its
         // first push on its way (in flight), or the branch deleted since
@@ -450,9 +450,9 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
                 }
             }
         }
-        // A hold (never under --reset: no other branch is unioned) over
+        // A hold (never under --evict: no other branch is unioned) over
         // any verdict but a refusal of its own, which says more.
-        let hold = p.held.get(h).filter(|by| !by.is_empty() && !kind.refused() && !p.reset);
+        let hold = p.held.get(h).filter(|by| !by.is_empty() && !kind.refused() && !p.evict);
         if let Some(by) = hold {
             (kind, why) = held(by, reached, p.work_branch);
         }

@@ -901,19 +901,19 @@ def listed_tips(pats: set[str], cwd: str | None = None) -> dict[str, str]:
 
 
 def trailer_targets(value: str) -> set[str]:
-    """The targets a Reaches:/Deployed: trailer value names."""
+    """The targets a Reaches:/Applied: trailer value names."""
     return {h.strip() for h in value.split(",") if h.strip() and h.strip() != "none"}
 
 
 def held_targets(commits: str, cwd: str | None = None) -> set[str]:
     """The targets the increments in the range `commits` hold back: reached
     by one (its Reaches: trailer) that was deployed to other targets alone
-    (its Deployed: one), and not running the branch's tip after any later
-    increment's deploy (the Deployed: of each, oldest first).  Commits
+    (its Applied: one), and not running the branch's tip after any later
+    increment's deploy (the Applied: of each, oldest first).  Commits
     from before Reaches: (an Affected: trailer, the targets then drifting)
     hold nothing."""
     fmt = ("%(trailers:key=Reaches,valueonly,separator=%x2C)%x09"
-           "%(trailers:key=Deployed,valueonly,separator=%x2C)")
+           "%(trailers:key=Applied,valueonly,separator=%x2C)")
     held: set[str] = set()
     log = run(["git", "log", f"--format={fmt}", commits], cwd=cwd).stdout  # unstripped: a tab may lead
     for ln in reversed(log.splitlines()):

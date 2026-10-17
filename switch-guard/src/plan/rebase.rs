@@ -140,10 +140,7 @@ pub fn onto(s: &mut Script, upstream: &str) -> Run<Outcome> {
     }
     Ok(match rebased {
         Ok(()) => Ok(format!("{} {br} onto {up}", verb(ff))),
-        Err(detail) => Err(format!(
-            "rebasing {br} onto {up} is not clean, left as it was: {}",
-            no_hints(&detail)
-        )),
+        Err(detail) => Err(format!("rebasing {br} onto {up} is not clean, left as it was: {}", no_hints(&detail))),
     })
 }
 
@@ -184,10 +181,7 @@ pub fn aside(s: &mut Script, wb: &str) -> Run<Outcome> {
             Ok(()) => Ok(format!("{} {wb} onto origin/main", verb(ff))),
             Err(detail) => {
                 s.tolerate(Query::RebaseAbort { aside: true })?;
-                Err(format!(
-                    "rebasing {wb} onto origin/main is not clean, left as it was: {}",
-                    no_hints(&detail)
-                ))
+                Err(format!("rebasing {wb} onto origin/main is not clean, left as it was: {}", no_hints(&detail)))
             }
         },
     };

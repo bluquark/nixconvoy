@@ -56,7 +56,7 @@ struct Trace {
 }
 
 fn select_of(o: &Origin, p: &Params) -> Refs {
-    if p.reset {
+    if p.evict {
         return vec![];
     }
     o.refs
@@ -164,7 +164,7 @@ fn answer(o: &mut Origin, t: &mut Trace, q: &Query) -> Reply {
             ran(true)
         }
         Query::AwaitPending { union } => {
-            assert!(!t.p.as_ref().unwrap().reset, "a --reset waits for nobody");
+            assert!(!t.p.as_ref().unwrap().evict, "a --evict waits for nobody");
             assert_eq!(t.checked_out.as_ref(), Some(union), "waiting on a union not checked out");
             assert!(t.fetched && !t.stale, "waited before the fetch was collected and followed");
             if o.waits.is_empty() {
@@ -189,8 +189,8 @@ fn answer(o: &mut Origin, t: &mut Trace, q: &Query) -> Reply {
     }
 }
 
-fn params(reset: bool) -> Params {
-    Params { wb: WB.into(), reset, main0: Some("m0".into()) }
+fn params(evict: bool) -> Params {
+    Params { wb: WB.into(), evict, main0: Some("m0".into()) }
 }
 
 fn arb_refs() -> impl Strategy<Value = Refs> {
@@ -247,13 +247,13 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: 6000, failure_persistence: None, ..ProptestConfig::default() })]
 
     #[test]
-    fn unions(o in arb_origin(), reset in prop::bool::weighted(0.1)) {
-        let p = params(reset);
+    fn unions(o in arb_origin(), evict in prop::bool::weighted(0.1)) {
+        let p = params(evict);
         let (end, t, asked, fx, out) = run(&o, &p);
         // A wait is another deploy's progress: it costs no attempt.
         let waits = o.waits.len() - end.waits.len();
         prop_assert!(t.stages.len() <= ATTEMPTS && t.worktrees <= ATTEMPTS + waits);
-        if reset {
+        if evict {
             let merged = asked.iter().any(|q| matches!(q, Query::Branches | Query::Merge { .. } | Query::AwaitPending { .. }));
             prop_assert!(!merged);
         }

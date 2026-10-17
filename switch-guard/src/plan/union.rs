@@ -29,8 +29,8 @@ pub const WAITS: usize = 10;
 pub struct Params {
     /// This checkout's work branch.
     pub wb: String,
-    /// --reset: no other branch.
-    pub reset: bool,
+    /// --evict: no other branch.
+    pub evict: bool,
     /// origin/main before this run's fetch.
     pub main0: Option<String>,
 }
@@ -63,7 +63,7 @@ struct Seen {
 /// a refresh may bring a new one; the stage's drift verdicts get the same.
 fn select(s: &mut Script, p: &Params, seen: &mut Seen) -> Run<Vec<(String, String)>> {
     seen.listed = s.names(Query::Listed)?;
-    if p.reset {
+    if p.evict {
         return Ok(Vec::new());
     }
     let mut out = Vec::new();
@@ -128,7 +128,7 @@ fn guidance(s: &mut Script, c: &Conflict) -> Run<String> {
     let summary = s.text(Query::Summary { sha: c.sha.clone() })?.unwrap_or_default();
     let name = &c.name;
     Ok(format!(
-        "cannot union work branch {name}; mergiraf could not resolve:\n  {}\nits last deploy: {summary}\noptions:\n  - fix or rebase that branch in its own checkout, redeploy from there, re-run here\n  - if that work is abandoned: git push --force-with-lease origin origin/main:{name}\n  - --reset deploys ignoring all other branches (one-off; they return next deploy), reverting their work on every target it switches",
+        "cannot union work branch {name}; mergiraf could not resolve:\n  {}\nits last deploy: {summary}\noptions:\n  - fix or rebase that branch in its own checkout, redeploy from there, re-run here\n  - if that work is abandoned: git push --force-with-lease origin origin/main:{name}\n  - --evict deploys ignoring all other branches (one-off; they return next deploy), reverting their work on every target it switches",
         c.files.join(", ")
     ))
 }
@@ -173,7 +173,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
             moves += 1;
             continue;
         }
-        if !p.reset && s.flag(Query::AwaitPending { union: union.clone() })? {
+        if !p.evict && s.flag(Query::AwaitPending { union: union.clone() })? {
             waits += 1;
             if waits > WAITS {
                 return Err(Halt::Die(format!("waited for {WAITS} deploys in one run; re-run")));

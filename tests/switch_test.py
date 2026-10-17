@@ -245,7 +245,7 @@ def lineage_line(top: str, *, by: tuple[str, str] = OTHER,
 
 
 def report(text: str, *, tips: dict[str, str] | None = None,
-           reset: bool = False, named: bool = True, reached: bool = True, running: str = NEW,
+           evict: bool = False, named: bool = True, reached: bool = True, running: str = NEW,
            in_flight: dict[str, str] | None = None, dead: list[str] | None = None,
            held: dict[str, list[str]] | None = None) -> tuple[str, str]:
     """nixconvoy-plan's drift verdict on one drifting target carrying `text` as
@@ -257,7 +257,7 @@ def report(text: str, *, tips: dict[str, str] | None = None,
             "drift", me=list(ME), union="u" * 40, listed=sorted(LISTED),
             tips={BRANCH: BASE} if tips is None else tips, in_flight=in_flight or {},
             dead=dead or [], tz_offset=0, router="choko", targets=["side1"], candidates=["side1"],
-            reset=reset, named=named, work_branch=True, reached=["side1"] if reached else [],
+            evict=evict, named=named, work_branch=True, reached=["side1"] if reached else [],
             running={"side1": running},
             built={"side1": "/nix/store/union-system"}, held=held or {},
             lineages={"side1": text})
@@ -368,7 +368,7 @@ def lineage_cases() -> None:
                            "haswell-wsl:/home/blu/projects/homelab2 (pid 4242) at 13:46"), line
     assert f"origin/{BRANCH} is still at {BASE[:12]}" in line, line
     assert died.startswith("nothing switched or committed: side1 runs another") and \
-        "--reset side1" in died, died
+        "--evict side1" in died, died
     line, died = report(lineage_line(NEW), reached=False)
     assert line.startswith("side1: left alone: runs an increment of work/haswell-wsl/2") and \
         line.endswith("this checkout's work does not reach it") and not died, (line, died)
@@ -381,7 +381,7 @@ def lineage_cases() -> None:
     assert proc.load_json(announced)["pending"]["announce"] == "p" * 40  # type: ignore[index]
     line, died = report(announced, in_flight={BRANCH: "q" * 40})
     assert line.startswith("side1: refused: ") and "dead" not in line and \
-        "Re-run once that deploy ends, or push its branch from its checkout; or deploy with --reset side1" in died, (line, died)
+        "Re-run once that deploy ends, or push its branch from its checkout; or deploy with --evict side1" in died, (line, died)
     line, died = report(announced, in_flight={BRANCH: "q" * 40}, dead=[BRANCH])
     assert line.endswith("that deploy looks dead, its announcement no longer renewed") and \
         f"The deploy of {BRANCH} looks dead" in died and \
@@ -400,12 +400,12 @@ def lineage_cases() -> None:
     assert line.startswith("side1: will switch, reverting it: ") and not died, (line, died)
     line, died = report(lineage_line(NEW), in_flight={BRANCH: "q" * 40}, dead=[BRANCH])
     assert "dead" not in line and "push its branch from its checkout" in died, (line, died)
-    line, _ = report(lineage_line(NEW), reset=True)
-    assert line.endswith("taken over by --reset"), line
-    line, _ = report(lineage_line(NEW), reset=True, named=False, reached=False)
+    line, _ = report(lineage_line(NEW), evict=True)
+    assert line.endswith("taken over by --evict"), line
+    line, _ = report(lineage_line(NEW), evict=True, named=False, reached=False)
     assert line.startswith("side1: left alone: "), line
-    line, _ = report(lineage_line(NEW), reset=True, named=False)
-    assert line.endswith("taken over by --reset"), line
+    line, _ = report(lineage_line(NEW), evict=True, named=False)
+    assert line.endswith("taken over by --evict"), line
     line, _ = report(lineage_line(NEW, pending=None, others=("work/M3-Air/9",)))
     assert "side1: refused: runs work of work/M3-Air/9" in line, line
     assert report(lineage_line(NEW, by=ME))[0].startswith("side1: will switch (this-branch: ")
@@ -776,7 +776,7 @@ def git_cases(d: Path) -> None:
             printed = io.StringIO()
             try:
                 with contextlib.redirect_stdout(printed):
-                    done = guard.decide("union", q, wb=wb, reset=False,
+                    done = guard.decide("union", q, wb=wb, evict=False,
                                          main0=main0 or proc.rev("refs/remotes/origin/main"))
             finally:
                 q.drop()
@@ -1043,7 +1043,7 @@ def git_cases(d: Path) -> None:
         # holds nothing of its own.
         sub_wb = f"{wb}-review"
         sh(co, "worktree", "add", "--quiet", "-b", sub_wb, str(rv), "origin/main")
-        put(rv, "s.txt", "sub\n", "sub work\n\nReaches: a\nDeployed: a")
+        put(rv, "s.txt", "sub\n", "sub work\n\nReaches: a\nApplied: a")
         sh(rv, "push", "--quiet", "origin", sub_wb)
         sh(co, "fetch", "--quiet")
         tip = proc.rev(f"refs/remotes/origin/{sub_wb}")
@@ -1082,8 +1082,8 @@ def git_cases(d: Path) -> None:
         with contextlib.redirect_stdout(io.StringIO()):
             checkout.ensure_on_work_branch(wb9)
         assert "nothing to unapply: no increment beyond origin/main" in dies(commands.unapply)
-        put(co9, "i1.txt", "one\n", "inc 1\n\nReaches: a\nDeployed: a")
-        put(co9, "i2.txt", "two\n", "inc 2\n\nReaches: a, b\nDeployed: a, b")
+        put(co9, "i1.txt", "one\n", "inc 1\n\nReaches: a\nApplied: a")
+        put(co9, "i2.txt", "two\n", "inc 2\n\nReaches: a, b\nApplied: a, b")
         sh(co9, "push", "--quiet", "origin", wb9)
         sh(co9, "fetch", "--quiet")
         tip, parent = sh(co9, "rev-parse", "HEAD"), sh(co9, "rev-parse", "HEAD^")
@@ -1115,7 +1115,7 @@ def git_cases(d: Path) -> None:
         assert state(co9) == before and proc.rev(f"refs/remotes/origin/{wb9}") == parent
         sh(co9, "restore", "i1.txt")
         # --back-to origin/main: every increment, their targets together.
-        put(co9, "i3.txt", "three\n", "inc 3\n\nReaches: c\nDeployed: c")
+        put(co9, "i3.txt", "three\n", "inc 3\n\nReaches: c\nApplied: c")
         assert f"--back-to {tip[:12]} ({tip[:12]}) is not on {wb9}" in dies(lambda: commands.unapply(tip[:12]))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -1204,17 +1204,17 @@ def announce_cases(d: Path) -> None:
         # a parent not here is left out.  Pushed before the switch.
         ann = checkout.Announce(wb, snap)
         assert ann.collect()
-        committed = checkout.deployed_commit(snap, "two\n\nReaches: a\nDeployed: a")
+        committed = checkout.deployed_commit(snap, "two\n\nReaches: a\nApplied: a")
         main = proc.rev("refs/remotes/origin/main")
         assert main is not None
         # Holds replay oldest first: reached and not deployed holds, a later
         # deploy of the target releases, a commit without trailers is
         # nothing, and so is one from before Reaches: (Affected:).
-        chain = checkout.deployed_commit(snap, "h0\n\nAffected: a, b, c, d\nDeployed: a")
-        chain = out_at(co, chain, "h1\n\nReaches: a, b, c\nDeployed: a")
+        chain = checkout.deployed_commit(snap, "h0\n\nAffected: a, b, c, d\nApplied: a")
+        chain = out_at(co, chain, "h1\n\nReaches: a, b, c\nApplied: a")
         chain = out_at(co, chain, "plain")
-        chain = out_at(co, chain, "h2\n\nReaches: b\nDeployed: b")
-        chain = out_at(co, chain, "h3\n\nReaches: none\nDeployed: none")
+        chain = out_at(co, chain, "h2\n\nReaches: b\nApplied: b")
+        chain = out_at(co, chain, "h3\n\nReaches: none\nApplied: none")
         assert checkout.held_targets(f"{main}..{chain}") == {"c"}
         assert checkout.held_targets(f"{main}..{chain}^") == {"c"}
         assert checkout.held_targets(f"{main}..{chain}~2") == {"b", "c"}
@@ -1472,7 +1472,7 @@ def submodule_cases(d: Path) -> None:
             q = UnionQueries(lambda: "HEAD", settled, lambda: None, lambda *_: False)
             try:
                 with contextlib.redirect_stdout(io.StringIO()):
-                    done = guard.decide("union", q, wb=wb, reset=False, main0=proc.rev("refs/remotes/origin/main"))
+                    done = guard.decide("union", q, wb=wb, evict=False, main0=proc.rev("refs/remotes/origin/main"))
             finally:
                 q.drop()
             assert isinstance(done, dict)
@@ -1821,7 +1821,7 @@ def open_cases(d: Path) -> None:
         sh(w, "switch", "--quiet", "-c", "work/tester/9-task")
         (w / "COMMIT_MSG.md").write_text("the sub: s.txt\n- its detail\n")
         sh(w, "add", "COMMIT_MSG.md")
-        put(w, "s.txt", "sub\n", "sub increment\n\nReaches: a, b\nDeployed: a")
+        put(w, "s.txt", "sub\n", "sub increment\n\nReaches: a, b\nApplied: a")
         sh(w, "push", "--quiet", "origin", "work/tester/9-task")
         put(w, "n.txt", "unstaged\n")
         sh(w, "reset", "--quiet", "n.txt")
@@ -1829,7 +1829,7 @@ def open_cases(d: Path) -> None:
         assert checkout.held_targets("origin/main..HEAD", str(w)) == {"b"}
         # A held target is evaluated at the branch's tip (the landing tree,
         # without COMMIT_MSG.md) and at its base on main: built differently
-        # it refuses the landing, built the same it is released; --release
+        # it refuses the landing, built the same it is not held; --not-yet-applied
         # evaluates nothing.
         real_eval = memo.eval_toplevels
 
@@ -1853,7 +1853,7 @@ def open_cases(d: Path) -> None:
             memo.eval_toplevels = never
             with contextlib.redirect_stdout(told):
                 commands.holds("work/tester/9-task", "refs/heads/work/tester/9-task", sh(co, "rev-parse", "origin/main"), True)
-            assert "releasing b:" in told.getvalue()
+            assert "landing with b not yet applied:" in told.getvalue()
             memo.eval_toplevels = same
             with contextlib.redirect_stdout(told):
                 commands.land_with_subagents()

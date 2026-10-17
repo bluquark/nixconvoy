@@ -75,7 +75,7 @@ def unchanged_at(tip: str, main: str, held: list[str]) -> set[str]:
     touching a file every target reads (a shared lib) holds targets whose
     toplevel it leaves as it was.  One commit after the other: a deploy's
     worth of evals at a time."""
-    print(f"evaluating {', '.join(held)} at the branch's tip and at main (land --release skips this)...")
+    print(f"evaluating {', '.join(held)} at the branch's tip and at main (land --not-yet-applied skips this)...")
     base = out(["git", "merge-base", main, tip])
     landing = out(["git", "commit-tree", tree_less_msg(tip), "-p", rev(tip) or tip, "-m", "landing"],
                   env=MACHINE_ENV)
@@ -92,15 +92,15 @@ def unchanged_at(tip: str, main: str, held: list[str]) -> set[str]:
     return {h for h in held if at_tip[h].out == at_base[h].out}
 
 
-def holds(wb: str, tip: str, main: str, release: bool) -> None:
+def holds(wb: str, tip: str, main: str, not_yet_applied: bool = False) -> None:
     """The targets `wb`'s increments (`main..tip`) hold back: a landing is
-    refused on them unless `release`, which tells where the landed work
-    rolls out from - or unless the branch builds them as main does, which
-    releases them on its own."""
+    refused on them unless `not_yet_applied`, which tells where the landed
+    work rolls out from - or unless the branch builds them as main does,
+    which holds nothing."""
     held = sorted(held_targets(f"{main}..{tip}"))
     if not held:
         return
-    if not release:
+    if not not_yet_applied:
         same = unchanged_at(tip, main, held)
         if same:
             print(f"{', '.join(sorted(same))}: built the same at {wb}'s tip as at main, "
@@ -109,12 +109,12 @@ def holds(wb: str, tip: str, main: str, release: bool) -> None:
         if not held:
             return
     them = ", ".join(held)
-    if not release:
+    if not not_yet_applied:
         die(f"{wb} holds back {them}: increments of it reach {'it' if len(held) == 1 else 'them'} "
-            f"(built differently from main's) but were deployed to other targets alone.  "
-            f"`nixconvoy apply {' '.join(held)}` from its checkout deploys them there first; "
-            f"`land --release` lands them as they are, for the next deploy anywhere to roll out")
-    print(f"releasing {them}: the next deploy anywhere rolls the landed work out there")
+            f"(built differently from main's) but were applied to other targets alone.  "
+            f"`nixconvoy apply {' '.join(held)}` from its checkout applies them there first; "
+            f"`land --not-yet-applied` lands them as they are, for the next deploy anywhere to roll out")
+    print(f"landing with {them} not yet applied: the next deploy anywhere rolls the landed work out there")
 
 
 def main_message(wb: str, given: str | None) -> str:
@@ -131,7 +131,7 @@ def main_message(wb: str, given: str | None) -> str:
     return msg
 
 
-def land(release: bool = False, message: str | None = None) -> None:
+def land(message: str | None = None, not_yet_applied: bool = False) -> None:
     await_background_push()
     git(*fetch_args())
     pop_tmp_commits()
@@ -160,7 +160,7 @@ def land(release: bool = False, message: str | None = None) -> None:
         die(f"the tree pins {wb}'s rev of submodule {', '.join(gone)}, whose worktree is gone: "
             f"`nixconvoy open --submodule <input>` recreates it from origin's branch to land it, or "
             f"`nixconvoy close --submodule <input> --force` after it drops it")
-    holds(wb, "HEAD", main, release)
+    holds(wb, "HEAD", main, not_yet_applied)
     submodule.land_all(wb, msg)
     tree = tree_less_msg("HEAD")
 
@@ -192,9 +192,9 @@ def pull() -> None:
 
 def deployed_targets(commits: str) -> list[str]:
     """The targets the deploys of the commits in the range `commits` switched
-    (their Deployed: trailers), sorted."""
+    (their Applied: trailers), sorted."""
     names: set[str] = set()
-    for ln in out(["git", "log", "--format=%(trailers:key=Deployed,valueonly)", commits]).splitlines():
+    for ln in out(["git", "log", "--format=%(trailers:key=Applied,valueonly)", commits]).splitlines():
         names |= trailer_targets(ln)
     return sorted(names)
 
@@ -235,7 +235,7 @@ def unapply(back_to: str = "HEAD^") -> bool:
             "deploy or unstage them first")
     # A deploy's increment carries its trailers; a hand commit, or a pin
     # commit a failed landing left, is not one and is not crossed.
-    undone = out(["git", "log", "--format=%H%x09%(trailers:key=Deployed,valueonly,separator=%x2C)",
+    undone = out(["git", "log", "--format=%H%x09%(trailers:key=Applied,valueonly,separator=%x2C)",
                   f"{target}..HEAD"]).splitlines()
     for ln in undone:
         sha, _, trailer = ln.partition("\t")
@@ -1273,7 +1273,7 @@ def close_checkout(path: Path, *, force: bool = False) -> None:
     print(f"checkout {d} removed, with {', '.join(sorted(names)) or 'no branch of its own'} here and on origin")
 
 
-def land_with_subagents(release: bool = False, message: str | None = None) -> None:
+def land_with_subagents(message: str | None = None, not_yet_applied: bool = False) -> None:
     """`nixconvoy land --with-subagents`: this checkout and its subagent worktrees
     landed as one commit on main - each sub's branch merged into this
     branch's tree (mergiraf on the conflicts, as a deploy's union) under
@@ -1345,7 +1345,7 @@ def land_with_subagents(release: bool = False, message: str | None = None) -> No
                 die(f"the tree pins {b}'s rev of submodule {', '.join(gone)}, whose worktree is gone: "
                     f"`nixconvoy open --submodule <input>` in {d.name} first (then `close --submodule <input> --force` drops it)")
         for d, b in [(here, wb), *parts]:
-            holds(b, "HEAD" if d == here else f"refs/heads/{b}", main, release)
+            holds(b, "HEAD" if d == here else f"refs/heads/{b}", main, not_yet_applied)
 
         def merged_tree() -> str:
             """The branches merged in a throwaway worktree on this branch's

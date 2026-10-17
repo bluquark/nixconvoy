@@ -130,10 +130,10 @@ fn classifies_lineages() {
     assert!(kind == Kind::InFlight && !why.contains("dead"), "{why}");
 
     let (kind, why) = k(Some(&std_lin()), &at_base, true);
-    assert!(kind == Kind::Overridden && why.contains(RESET_FLAG), "{why}");
+    assert!(kind == Kind::Overridden && why.contains(EVICT_FLAG), "{why}");
 
     // Refused work on a target this checkout's work does not reach is left
-    // there; --reset still reverts it.
+    // there; --evict still reverts it.
     let (kind, why) = classify(Some(&std_lin()), NEW, &at_base, false, false);
     assert!(kind == Kind::LeftAlone && !kind.refused() && why.contains("does not reach it"), "{why}");
     assert_eq!(classify(Some(&old), NEW, &at_base, false, false).0, Kind::LeftAlone);
@@ -188,11 +188,11 @@ fn refusal_advice() {
             && a.contains("Re-run once that deploy ends, or push its branch from its checkout; or deploy with"),
         "{a}"
     );
-    assert!(a.contains(&format!("{RESET_FLAG} side1")) && !a.contains(BRANCHES_FILE) && !a.contains("dead"), "{a}");
+    assert!(a.contains(&format!("{EVICT_FLAG} side1")) && !a.contains(BRANCHES_FILE) && !a.contains("dead"), "{a}");
     let a = refusal(&[("side1".into(), Kind::Unlisted, None), ("side6".into(), Kind::InFlight, None)]);
     assert!(a.contains("side1, side6 run another") && a.contains("reaches them too"), "{a}");
     assert!(a.contains("Re-run once that deploy ends, or push its branch from its checkout; or list its branch in deploy-branches"), "{a}");
-    assert!(a.contains(&format!("{RESET_FLAG} side1 ")), "{a}");
+    assert!(a.contains(&format!("{EVICT_FLAG} side1 ")), "{a}");
     // A dead deploy's: the clear that ends it, named once per branch.
     let a = refusal(&[("side1".into(), Kind::InFlight, Some(BRANCH.into())), ("side6".into(), Kind::InFlight, Some(BRANCH.into()))]);
     assert!(a.starts_with(&format!("nothing switched or committed: side1, side6 run another checkout's work this union lacks, and this checkout's work reaches them too (see above).  The deploy of {BRANCH} looks dead")), "{a}");
@@ -216,7 +216,7 @@ fn clock_is_local() {
     assert_eq!(clock(0.0, -3600), "23:00");
 }
 
-fn params(targets: &[&str], candidates: &[&str], reset: (bool, bool), drifting: &[(&str, Option<String>)]) -> Params {
+fn params(targets: &[&str], candidates: &[&str], evict: (bool, bool), drifting: &[(&str, Option<String>)]) -> Params {
     let s = |v: &[&str]| v.iter().map(|h| h.to_string()).collect::<Vec<_>>();
     let b = base();
     Params {
@@ -225,8 +225,8 @@ fn params(targets: &[&str], candidates: &[&str], reset: (bool, bool), drifting: 
         router: "choko".into(),
         targets: s(targets),
         candidates: s(candidates),
-        reset: reset.0,
-        named: reset.1,
+        evict: evict.0,
+        named: evict.1,
         work_branch: true,
         reached: targets.iter().map(|h| h.to_string()).collect(),
         running: targets
@@ -250,7 +250,7 @@ fn held_targets() {
     let msg = out.unwrap_err();
     assert_eq!(
         msg,
-        "nothing switched or committed: choko is held back by another branch (see above): the union carries work that checkout deployed to other targets alone, and this checkout's work reaches it too.  Deploy it there (nixconvoy apply choko from that checkout) or land it with --release; or deploy with --reset choko to switch it to this checkout's view alone, without the held work (and without every other branch's), the hold standing."
+        "nothing switched or committed: choko is held back by another branch (see above): the union carries work that checkout deployed to other targets alone, and this checkout's work reaches it too.  Deploy it there (nixconvoy apply choko from that checkout) or land it with --not-yet-applied; or deploy with --evict choko to switch it to this checkout's view alone, without the held work (and without every other branch's), the hold standing."
     );
     assert_eq!(fx[1], Effect::Print("  side1: will switch".into()));
     assert_eq!(
@@ -266,7 +266,7 @@ fn held_targets() {
     let mut q = p.clone();
     q.lineages.insert("side1".into(), doc(OLD, OTHER, Some((BRANCH, Some(&b))), &[], T0));
     let msg = run(q.clone()).1.unwrap_err();
-    assert!(msg.starts_with("nothing switched or committed: side1 runs another checkout's work") && msg.contains("Re-run once that deploy ends, or push its branch from its checkout; or choko held back by another branch: deploy it there (nixconvoy apply choko from that checkout) or land it with --release; or deploy with"), "{msg}");
+    assert!(msg.starts_with("nothing switched or committed: side1 runs another checkout's work") && msg.contains("Re-run once that deploy ends, or push its branch from its checkout; or choko held back by another branch: deploy it there (nixconvoy apply choko from that checkout) or land it with --not-yet-applied; or deploy with"), "{msg}");
     q.lineages.insert("choko".into(), doc_ann(OLD, OTHER, Some((BRANCH, Some(&b))), Some("p"), &[], T0));
     q.cx.in_flight.insert(BRANCH.into(), "q".into());
     q.cx.dead.insert(BRANCH.into());
@@ -465,8 +465,8 @@ fn reports_the_plan() {
     );
     assert_eq!(fx[2], Effect::Print("  choko: will switch".into()));
 
-    // An unnamed --reset leaves it alone too; one naming the targets takes it over.
-    p.reset = true;
+    // An unnamed --evict leaves it alone too; one naming the targets takes it over.
+    p.evict = true;
     let (_, out) = run(p.clone());
     assert_eq!(out.unwrap().drift["side1"].0, Kind::LeftAlone);
     p.named = true;
@@ -475,7 +475,7 @@ fn reports_the_plan() {
     assert_eq!(out.drift["side1"].0, Kind::Overridden);
     assert_eq!(out.plan, ["side1", "choko"]);
 
-    // Named or not, a --reset never takes over a target outside the filter.
+    // Named or not, a --evict never takes over a target outside the filter.
     p.candidates = vec!["choko".into()];
     let (fx, out) = run(p);
     assert_eq!(out.unwrap().plan, ["choko"]);
@@ -532,7 +532,7 @@ fn arb_params() -> impl Strategy<Value = Params> {
         prop::collection::btree_map(target(), prop::collection::vec(arb_name(), 0..2), 0..3),
         any::<bool>(),
     )
-        .prop_map(|(targets, cands, (reset, named), reached, facts, tips, in_flight, dead, held, work_branch)| {
+        .prop_map(|(targets, cands, (evict, named), reached, facts, tips, in_flight, dead, held, work_branch)| {
             let targets: Vec<String> = targets.into_iter().collect();
             let mut p = Params {
                 cx: Context { tips, in_flight, dead, ..cx(&[]) },
@@ -540,7 +540,7 @@ fn arb_params() -> impl Strategy<Value = Params> {
                 router: "choko".into(),
                 candidates: cands.into_iter().filter(|c| targets.contains(c)).collect(),
                 targets: targets.clone(),
-                reset,
+                evict,
                 named,
                 work_branch,
                 reached,
@@ -571,7 +571,7 @@ proptest! {
     }
 
     /// The verdicts follow from the lineage, and only refusals are
-    /// demoted by a cleared announcement or --reset.
+    /// demoted by a cleared announcement or --evict.
     #[test]
     fn verdicts(text in arb_lineage(), running in arb_top(), p in arb_params()) {
         let lin = text.as_deref().and_then(parse);
@@ -596,7 +596,7 @@ proptest! {
             if !mine && unlisted { prop_assert!(matches!(kind, Kind::Unlisted | Kind::Abandoned)); }
             // An announced increment is judged by its branch's announcement
             // alone: uncleared, in flight (dead or not); cleared, abandoned.
-            // One without is in flight until its push lands or a --reset.
+            // One without is in flight until its push lands or a --evict.
             let announced_live = l.announce.is_some() && l.pending.as_ref().is_some_and(|(b, _)| p.cx.in_flight.contains_key(l.key.as_deref().unwrap_or(b)));
             if kind == Kind::InFlight {
                 let (b, base) = l.pending.clone().unwrap();
@@ -629,9 +629,9 @@ proptest! {
             let kind = if fate != "kept" && gone && classify(lin.as_ref(), &running, &p.cx, false, true).0 == Kind::InFlight {
                 Kind::CatchUp
             } else {
-                classify(lin.as_ref(), &running, &p.cx, p.reset && (p.named || reached), reached).0
+                classify(lin.as_ref(), &running, &p.cx, p.evict && (p.named || reached), reached).0
             };
-            match p.held.get(h).filter(|by| !by.is_empty() && !kind.refused() && !p.reset) {
+            match p.held.get(h).filter(|by| !by.is_empty() && !kind.refused() && !p.evict) {
                 Some(by) => (h.clone(), held(by, reached, p.work_branch).0),
                 None => (h.clone(), kind),
             }
@@ -641,8 +641,8 @@ proptest! {
             let dead = lin.filter(|l| l.announce.is_some()).and_then(|l| l.pending.as_ref().map(|(b, _)| l.key.clone().unwrap_or_else(|| b.clone()))).filter(|key| *k == Kind::InFlight && p.cx.dead.contains(key));
             (h.clone(), *k, dead)
         }).collect();
-        // A refusal needs a reached target, which a --reset takes over.
-        if p.reset { prop_assert!(refused.is_empty()); }
+        // A refusal needs a reached target, which a --evict takes over.
+        if p.evict { prop_assert!(refused.is_empty()); }
         match out {
             Ok(o) => {
                 prop_assert!(refused.is_empty());

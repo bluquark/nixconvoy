@@ -29,7 +29,7 @@ Model:
     crate's (nixconvoy-plan, nixconvoy-switch: Sans-I/O cores); this program
     performs the git, eval, build and ssh they ask for.
 
-Deploy (nixconvoy apply [<target> | @<tag> ...] [-m <msg>] [--reset]
+Deploy (nixconvoy apply [<target> | @<tag> ...] [-m <msg>] [--evict]
          [--allow <protection> ...] [--dry-activate]): -m describes the
   staged increment the deploy commits (default: "<checkout>: increment
   <n>", n its number on the branch); with nothing staged the deploy
@@ -73,7 +73,7 @@ Deploy (nixconvoy apply [<target> | @<tag> ...] [-m <msg>] [--reset]
      each other); one whose announcement goes 30 s without a renewal, or
      whose process is gone on this machine, is taken for dead and gone on
      without, with a warning; one settled (over, its push pending) is not
-     waited for; --reset waits for nobody
+     waited for; --evict waits for nobody
   5. evaluate every reachable target's toplevel for the union, one nix eval
      process per stale target, concurrently, memoized per target by the git
      hashes of the files its configuration references and the lock entries
@@ -93,7 +93,7 @@ Deploy (nixconvoy apply [<target> | @<tag> ...] [-m <msg>] [--reset]
      the deploy is refused whole.  An increment whose deploy is over - its
      announcement cleared (step 8) without the push landing - is
      abandoned: switched over with a warning; so is a refused target
-     under --reset, when this work reaches it or the target was named.
+     under --evict, when this work reaches it or the target was named.
      A dead deploy's announcement stays up, so its increment stays
      refused: the refusal names the deploy and the clear that ends it
      (git push --force origin origin/main:refs/nixconvoy/pending/<branch>),
@@ -110,7 +110,7 @@ Deploy (nixconvoy apply [<target> | @<tag> ...] [-m <msg>] [--reset]
      commit, which is made now with its -m message and its trailers:
      Reaches:, the targets the increment reaches (a changed file their
      evaluation reads, or a lock entry it names) among those deployable
-     from here; Deployed:, the candidates running the branch's tip once the
+     from here; Applied:, the candidates running the branch's tip once the
      deploy is over
   6. build the drifting candidates' closures straight from the evaluated
      .drvs (no re-eval), on the configured builder if any, unsandboxed
@@ -159,7 +159,7 @@ An increment that changes nothing any target's evaluation reads (the eval
 memo's read scan over the staged snapshot, no eval: docs, dotfiles, a
 COMMIT_MSG.md) is committed onto the work branch and pushed without a
 deploy - nothing probed, evaluated, built or switched, the commit's
-trailers Reaches: none and Deployed: none - after the precheck when a
+trailers Reaches: none and Applied: none - after the precheck when a
 staged file is one it reads.  Nothing need be reachable.  The targets' drift
 (another branch's work, main's) waits for the next deploy reaching one, or
 for an apply naming targets, which always deploys; an apply with nothing
@@ -168,22 +168,22 @@ snapshot alone: a reader another unlanded branch adds for a changed file
 is caught up by that branch's deploys.
 
 A target an increment reaches but a target filter left out is held back:
-named by the commit's Reaches: trailer and not its Deployed: one, with no
+named by the commit's Reaches: trailer and not its Applied: one, with no
 later increment's deploy on the branch switching it since (a deploy with
 nothing staged that switches it commits an empty increment saying so).  The
 union every deploy builds carries that work, so until the holding checkout
 deploys the target (nixconvoy apply <target> there, or an apply naming no
-target) or lands with --release, a deploy from any other work branch leaves
+target) or lands with --not-yet-applied, a deploy from any other work branch leaves
 the target alone - or is refused when its own work reaches it, as for an
 in-flight increment - a main checkout's deploy (the nightly's) leaves it
-behind on main's advance, and `land` refuses - unless the branch builds the
-target as main does (land evaluates the held targets at its tip and at
-main), which releases it.  --reset unions no other
+behind on main's advance, and `land` refuses without --not-yet-applied -
+unless the branch builds the target as main does (land evaluates the held
+targets at its tip and at main), so nothing is held there.  --evict unions no other
 branch, so it switches the target to this checkout's view alone, without
 the held work, the hold standing.  `status` shows what each checkout holds
 back.
 
-Land (nixconvoy land [<name> ... | --with-subagents] [-m <msg>] [--release]):
+Land (nixconvoy land [<name> ... | --with-subagents] [-m <msg>] [--not-yet-applied]):
 commit the work branch's tree minus COMMIT_MSG.md onto origin/main with
 COMMIT_MSG.md as the message (or -m <msg>, for a branch without the file:
 both at once is refused), push
@@ -194,8 +194,8 @@ at their next deploy.  A subagent worktree stays too, idle on its reset branch:
 `close` removes it (the session-exit sweep does, once its agent is done).
 Run from any checkout with the worktrees' <name>s (a unique prefix will do),
 land and unapply act on each in turn.  A branch holding a target back (see
-Apply) is refused unless --release: the landed work then rolls out there with
-the next deploy from anywhere.  The checkout's submodules land first
+Apply) is refused unless --not-yet-applied: the landed work then rolls out
+there with the next deploy from anywhere.  The checkout's submodules land first
 (see Open).
 --with-subagents lands this checkout and its subagent worktrees as one unit
 - for subagents that each did a piece of this checkout's task: every sub's
@@ -349,12 +349,12 @@ and no resume relocked it, whether session PID runs or not: resuming the
 agent recreates it (the PreToolUse hook on SendMessage).  It keeps a
 worktree whose lock names no session.
 
---reset deploys this checkout's view alone: the other work branches are
-left out of the union (and no deploy under way is waited for), so every
-target switched loses their work, and a target
-running another checkout's in-flight or unlisted work (step 5) is switched
-over too, reverting that work, when this checkout's work reaches it or the
-target is named (one left alone otherwise stays as it is).  It is a one-off:
+--evict evicts every other work branch from the targets it switches: they
+run this checkout's view alone, the other branches left out of the union
+(and no deploy under way waited for), and a target running another
+checkout's in-flight or unlisted work (step 5) is switched over too,
+reverting that work, when this checkout's work reaches it or the target is
+named (one left alone otherwise stays as it is).  It is a one-off:
 the others return on their next deploy - the durable fix is to reset the
 branch that carries the unwanted change (git push --force-with-lease origin
 origin/main:<branch>) or repair it in its own checkout.
@@ -409,10 +409,10 @@ close --stopped <pid> < <hook-input>
 pull
 status
 = Deploying and committing changes
-apply [<target> | @<tag> ...] [-m <msg>] [--reset] [--allow <protection> ...] [--dry-activate]
+apply [<target> | @<tag> ...] [-m <msg>] [--evict] [--allow <protection> ...] [--dry-activate]
 unapply [<worktree> ... | --with-subagents] [--back-to <rev>] [--allow <protection> ...]
 review [<worktree> | <branch> ... | --with-subagents] [<diff-arg> ...]
-land [<worktree> ... | --with-subagents] [-m <msg>] [--release]
+land [<worktree> ... | --with-subagents] [-m <msg>] [--not-yet-applied]
 """
 USAGE_NOTES = """\
 -m describes the staged increment a deploy commits once its targets are
@@ -424,10 +424,10 @@ restricts switching to (at most) those.
 --allow <protection> admits a switch that would stop, restart or reload a unit
 of a group the target's configuration protects (nixconvoy.protected.<name>).
 --dry-activate stops before any switch, printing what each would do.
-land --release lands work a target is held back from (increments that reach
-it, deployed to other targets alone), for the next deploy anywhere to roll
-out there; held targets the branch builds as main does (land evaluates them
-at its tip and at main) are released without it.
+land --not-yet-applied lands work a target is held back from (increments
+that reach it, applied to other targets alone), for the next deploy anywhere
+to roll out there; held targets the branch builds as main does (land
+evaluates them at its tip and at main) are not held, with or without it.
 unapply reverts this checkout's increments on the targets, from HEAD back
 to --back-to <rev> (HEAD^ by default: the latest one; origin/main: the whole
 branch): the work branch is reset onto <rev> (the reflog keeps the tip),
@@ -506,7 +506,7 @@ def main() -> None:
     if subcmd not in ("status", "close", "open"):
         atexit.register(PERF.write, Path.cwd() / PERF_FILE)
     msg: str | None = None
-    reset = False
+    evict = False
     allow: set[str] = set()
     dry = False
     back_to: str | None = None
@@ -519,7 +519,7 @@ def main() -> None:
     branch: str | None = None
     force = False
     with_subs = False
-    release = False
+    not_yet_applied = False
     while args:
         a = args.pop(0)
         if a == "-m" and args and not args[0].startswith("-"):
@@ -534,16 +534,16 @@ def main() -> None:
             branch = args.pop(0)
         elif a in ("--with-subagents", "--union") and subcmd in ("land", "unapply"):
             with_subs = True
-        elif a == "--release" and subcmd == "land":
-            release = True
+        elif a == "--not-yet-applied" and subcmd == "land":
+            not_yet_applied = True
         elif a == "--force" and subcmd == "close":
             force = True
         elif a == "--after" and subcmd == "close" and args and args[0].isdigit():
             after = args.pop(0)
         elif a == "--stopped" and subcmd == "close" and args and args[0].isdigit():
             stopped = args.pop(0)
-        elif a == "--reset":
-            reset = True
+        elif a == "--evict":
+            evict = True
         elif a == ALLOW_FLAG and args and not args[0].startswith("-"):
             allow.add(args.pop(0))
         elif a == DRY_FLAG:
@@ -560,17 +560,17 @@ def main() -> None:
             bad_usage()
 
     if subcmd == "pull":
-        if msg or reset or allow or dry or names:
+        if msg or evict or allow or dry or names:
             bad_usage()
         commands.pull()  # takes each checkout's lock itself, this one included
         return
     if subcmd == "status":
-        if msg or reset or allow or dry or names:
+        if msg or evict or allow or dry or names:
             bad_usage()
         commands.status()
         return
     if subcmd == "open":
-        if msg or reset or allow or dry or len(names) != 1 or (branch and (sub_flag or lock_reason)) \
+        if msg or evict or allow or dry or len(names) != 1 or (branch and (sub_flag or lock_reason)) \
                 or (sub_flag and lock_reason):
             bad_usage()
         if sub_flag:
@@ -585,13 +585,13 @@ def main() -> None:
             commands.open_worktree(names[0], lock_reason)
         return
     if sub_name is not None:
-        if names or back_to or reset or dry or allow or after or stopped or with_subs or release or msg is not None:
+        if names or back_to or evict or dry or allow or after or stopped or with_subs or not_yet_applied or msg is not None:
             bad_usage()
         take_lock()
         commands.close_submodule(sub_name, force=force)
         return
     if subcmd == "close":
-        if msg or reset or allow or dry or ((after or stopped) and (names or force)) or (after and stopped):
+        if msg or evict or allow or dry or ((after or stopped) and (names or force)) or (after and stopped):
             bad_usage()
         if stopped:
             stop = json.loads(sys.stdin.read() or "{}")
@@ -610,12 +610,12 @@ def main() -> None:
     top = Path.cwd()
     here = top.resolve()
     if subcmd in ("land", "unapply"):
-        if reset or dry or (allow and subcmd != "unapply") or (with_subs and names) \
+        if evict or dry or (allow and subcmd != "unapply") or (with_subs and names) \
                 or (msg is not None and (subcmd != "land" or not msg.strip() or len(names) > 1)):
             bad_usage()
         if with_subs and subcmd == "land":
             take_lock()
-            commands.land_with_subagents(release, msg)
+            commands.land_with_subagents(msg, not_yet_applied)
             return
         parent_too = False
         if with_subs:
@@ -646,7 +646,7 @@ def main() -> None:
             if lock is None:
                 die(f"another nixconvoy is running in {name}'s worktree")
             if subcmd == "land":
-                commands.land(release, msg)
+                commands.land(msg, not_yet_applied)
             else:
                 try:
                     due |= commands.unapply(back_to or "HEAD^")
@@ -672,7 +672,7 @@ def main() -> None:
             return
     take_lock()
     if subcmd == "land":
-        commands.land(release, msg)
+        commands.land(msg, not_yet_applied)
     elif subcmd == "unapply":
         if commands.unapply(back_to or "HEAD^"):
             deploy([], None, False, frozenset(allow))
@@ -680,7 +680,7 @@ def main() -> None:
         if dry and msg is not None:
             # Accepted so a deploy's command line reruns with the flag added.
             print(f"note: -m does nothing with {DRY_FLAG}: nothing is committed", file=sys.stderr)
-        deploy(names, msg, reset, frozenset(allow), dry)
+        deploy(names, msg, evict, frozenset(allow), dry)
 
 
 def is_path(arg: str) -> bool:

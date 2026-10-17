@@ -118,17 +118,17 @@ def commit_unreached(wb: str, msg: str, snap: str) -> None:
             if err:
                 die(f"{err}; nothing was committed")
     PERF.mark("commit-push")
-    commit_deployed(wb, snap, f"{msg}\n\nReaches: none\nDeployed: none")
+    commit_deployed(wb, snap, f"{msg}\n\nReaches: none\nApplied: none")
     push_work_branch(wb)
     print(f"reaches no target: committed onto {wb} and pushed; nothing probed, built or switched")
 
 
-def deploy(filter_targets: list[str], msg: str | None, reset: bool,
+def deploy(filter_targets: list[str], msg: str | None, evict: bool,
            allow: frozenset[str] = frozenset(), dry: bool = False) -> None:
     """`msg` describes the staged increment (default: the checkout's name
     and the increment's number on its branch); with nothing staged the
     deploy converges the targets on the union as it is.
-    `reset`: this checkout's view alone - no other work branch in the
+    `evict`: this checkout's view alone - no other work branch in the
     union, no wait for a deploy under way, and a target running another
     checkout's refused work switched over when this work reaches it or
     `filter_targets` names it.
@@ -186,7 +186,7 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
     if msg is None and wb is not None and not dry and (
             staged_differs() or any(submodule.staged(sub.dir, less_msg=True) for sub in submodule.present(Path.cwd()))):
         msg = f"{Path.cwd().name}: increment {int(out(['git', 'rev-list', '--count', 'refs/remotes/origin/main..HEAD'])) + 1}"
-    if (wb is not None and bool(msg) and not dry and not skip and not reset and not filter_targets
+    if (wb is not None and bool(msg) and not dry and not skip and not evict and not filter_targets
             and staged_differs() and not carrying):
         scanned = staged_snapshot()
     maybe_unreached = bool(scanned) and not increment_reaches(scanned, all_targets)
@@ -232,7 +232,7 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
     ann: Announce | None = None
     own = current_branch() or "main"  # detached: at origin/main (ensure_rebased)
     # A work branch holding targets back may end a hold with an empty
-    # increment (stage's release): announced like any increment.
+    # increment (the stage below): announced like any increment.
     if not dry and not skip and (snap or rev("HEAD") != rev(f"refs/remotes/origin/{own}")
                                  or (wb is not None and own == wb
                                      and held_targets("refs/remotes/origin/main..HEAD"))):
@@ -241,7 +241,7 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
         signal.signal(sig, exit_on_signal)
     settled = False
     try:
-        settled = run_deploy(filter_targets, candidates, all_targets, msg, reset, allow, dry, skip,
+        settled = run_deploy(filter_targets, candidates, all_targets, msg, evict, allow, dry, skip,
                              me, main0, wb, snap, ann, fetch, probes)
     finally:
         if ann is not None and not settled:
@@ -261,7 +261,7 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
 
 
 def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: list[str],
-               msg: str | None, reset: bool, allow: frozenset[str], dry: bool, skip: bool, me: str,
+               msg: str | None, evict: bool, allow: frozenset[str], dry: bool, skip: bool, me: str,
                main0: str | None, wb: str | None, snap: str, ann: Announce | None,
                fetch: Future[subprocess.CompletedProcess[str]], probes: dict[str, Future[Probe]]) -> bool:
     """The deploy from its union on: whether its announcement is settled by
@@ -324,7 +324,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         waited: the targets are then probed again, and the union redone
         with what landed."""
         nonlocal probes
-        if reset or skip:
+        if evict or skip:
             return False
         own = ann.key if ann is not None else None
         rank = (ann.since, ann.branch) if ann is not None else None
@@ -459,7 +459,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             "drift", me=[me, str(Path.cwd())], union=union,
             listed=sorted({*listed, "main"}), tips=origin_tips(),
             tz_offset=time.localtime().tm_gmtoff, router=last[0] if last else "",
-            targets=all_targets, candidates=candidates, reset=reset, named=bool(filter_targets),
+            targets=all_targets, candidates=candidates, evict=evict, named=bool(filter_targets),
             work_branch=wb is not None, reached=sorted(reached), running=running,
             built={h: t.out for h, t in tops.items()},
             lineages={h: p.lineage for h, p in probed.items()},
@@ -491,7 +491,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         # switch: the lineage the targets get names the commit origin will
         # hold, and the records reach origin before anything runs them.
         # The commit's trailers: Reaches, the targets the increment reaches
-        # among those deployable from here; Deployed, the probed targets
+        # among those deployable from here; Applied, the probed targets
         # running the branch's tip once this deploy is over (switched now,
         # or up to date with the union already, a non-candidate too: every
         # reachable target was evaluated) - a target in the first and not
@@ -506,17 +506,17 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             reaches = sorted(memo.reached_between(wt, union, [h for h in all_targets if not remote_only(h)],
                                                   "HEAD", snap))
             full = (f"{msg}\n\nReaches: {fmt(reaches) or 'none'}"
-                    f"\nDeployed: {fmt(deployed) or 'none'}")
+                    f"\nApplied: {fmt(deployed) or 'none'}")
             committed = deployed_commit(snap, full)
             subject = (msg or "").partition("\n")[0] or subject
         elif wb is not None and not dry and current_branch() == wb:
             # No increment, but a target this branch held back now runs its
-            # tip: an empty increment records the release, as the hold is
+            # tip: an empty increment records the hold's end, as a hold is
             # read from the branch's trailers alone.
             ends = sorted(held_targets("refs/remotes/origin/main..HEAD") & set(deployed))
             if ends:
                 subject = f"deployed to {fmt(ends)}, held back until now"
-                committed = deployed_commit("HEAD", f"{subject}\n\nReaches: none\nDeployed: {fmt(deployed)}")
+                committed = deployed_commit("HEAD", f"{subject}\n\nReaches: none\nApplied: {fmt(deployed)}")
         doc = lineage_record(union, branches, committed, ann.sha if ann else "", ann.key if ann else "")
         records, lineages = {}, {}
         if not dry:
@@ -581,7 +581,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
 
     queries = UnionQueries(lambda: snap or "HEAD", fetch, refresh, stage, await_pending)
     try:
-        done = decide("union", queries, wb=wb or "", reset=reset, main0=main0)
+        done = decide("union", queries, wb=wb or "", evict=evict, main0=main0)
         if skip or dry:
             return False
         assert isinstance(done, dict)
