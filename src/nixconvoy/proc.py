@@ -20,9 +20,6 @@ from typing import IO, NoReturn
 TOOL = "nixconvoy"
 
 
-PERF_ROTATE_BYTES = 2 << 20
-
-
 def xdg_dir(var: str, default: str) -> Path:
     """The XDG base directory `var` names; `default` under HOME when it is
     unset or relative (the spec says to ignore a relative value)."""
@@ -33,8 +30,7 @@ def xdg_dir(var: str, default: str) -> Path:
 class Perf:
     """Phase timings plus the slowest subprocess calls, appended as one JSON
     line per run (via atexit, so failed runs log too) to one log per machine
-    under the XDG state dir, since timings compare across a host's checkouts;
-    the previous PERF_ROTATE_BYTES of it are kept as perf.jsonl.1."""
+    under the XDG state dir, since timings compare across a host's checkouts."""
 
     def __init__(self) -> None:
         self.t0 = time.monotonic()
@@ -71,8 +67,6 @@ class Perf:
         try:
             path = xdg_dir("XDG_STATE_HOME", ".local/state") / TOOL / "perf.jsonl"
             path.parent.mkdir(parents=True, exist_ok=True)
-            if path.exists() and path.stat().st_size >= PERF_ROTATE_BYTES:
-                path.replace(path.with_suffix(".jsonl.1"))
             with path.open("a") as f:
                 f.write(dump_json(rec) + "\n")
         except (OSError, RuntimeError):  # RuntimeError: no resolvable HOME
