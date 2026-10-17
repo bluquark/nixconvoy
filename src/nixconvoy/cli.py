@@ -12,7 +12,7 @@ Model:
     state onto it and pushes it after a successful deploy.  A checkout on
     main (or any other branch, another machine's work branch included) is a
     main checkout: it deploys main plus the pushed work branches and owns
-    nothing.  A subagent (task) worktree - one nested in a checkout,
+    nothing.  A subagent worktree - one nested in a checkout,
     <checkout>/<worktrees>/<name> by `open` - owns <parent's branch>-<name>
     (<branch_prefix>main-<name> under a main checkout) from its first deploy.
     After a land or abandon a checkout stays on its work branch, reset onto
@@ -183,7 +183,7 @@ branch, so it switches the target to this checkout's view alone, without
 the held work, the hold standing.  `status` shows what each checkout holds
 back.
 
-Land (nixconvoy land [<name> ... | --union] [-m <msg>] | --submodule <input>):
+Land (nixconvoy land [<name> ... | --with-subagents] [-m <msg>] | --submodule <input>):
 commit the work branch's tree minus COMMIT_MSG.md onto origin/main with
 COMMIT_MSG.md as the message (or -m <msg>, for a branch without the file:
 both at once is refused; with --submodule, the submodule's file), push
@@ -196,11 +196,12 @@ Run from any checkout with the worktrees' <name>s (a unique prefix will do),
 land and abandon act on each in turn.  A branch holding a target back (see
 Apply) is refused unless --release: the landed work then rolls out there with
 the next deploy from anywhere.  The checkout's submodules land first
-(see Open); --submodule <input> lands that one submodule alone.  --union lands
-this checkout and its subagent worktrees as one unit - for subagents that
-each did a piece of this checkout's task: every sub's branch (one on its
-work branch with work beyond main; a sub holding undeployed commits stops
-it) is merged into this branch's tree as a deploy's union merges them
+(see Open); --submodule <input> lands that one submodule alone.
+--with-subagents lands this checkout and its subagent worktrees as one unit
+- for subagents that each did a piece of this checkout's task: every sub's
+branch (one on its work branch with work beyond main; a sub holding
+undeployed commits stops it) is merged into this branch's tree as a
+deploy's union merges them
 (mergiraf on the conflicts), and that lands as one commit under this
 checkout's COMMIT_MSG.md (or -m) with each sub's COMMIT_MSG.md appended;
 each branch is reset onto the new main, each
@@ -232,17 +233,18 @@ whether they are pushed, staged/unstaged/untracked counts, the
 COMMIT_MSG.md subject, a deploy or git operation in progress - then the
 work branches only origin holds (other machines' checkouts).
 
-Review (nixconvoy review [<worktree> | <branch> ... | --union] [<diff-arg> ...]):
+Review (nixconvoy review [<worktree> | <branch> ... | --with-subagents] [<diff-arg> ...]):
 the review of
 the pending landing (review.py; `git review`, in the package's bin, is
 the same): COMMIT_MSG.md, then the diff against the merge-base with
 origin's default branch, then the submodules'.  A name is a subagent
 worktree's, a submodule's (that one alone) or a branch's (the worktree on
 it, else the branch against its merge-base, so a submodule branch reviews
-from its repository too); one that is none of these is an error; --union reviews this checkout and then each
-subagent worktree; the rest are git diff arguments.
+from its repository too); one that is none of these is an error;
+--with-subagents reviews this checkout and then each subagent worktree; the
+rest are git diff arguments.
 
-Abandon (nixconvoy abandon [<name> ... | --union] [--apply-now] | --submodule <input>):
+Abandon (nixconvoy abandon [<name> ... | --with-subagents] [--apply-now] | --submodule <input>):
 discard this checkout's work instead of landing it: hard-reset the checkout
 and reset the work branch (local and origin) onto origin/main, staying on
 it; a subagent worktree stays too (close removes it); its submodules are
@@ -253,11 +255,11 @@ Deployed: trailers) keep running them until the next deploy by
 anyone, whose verdict names what it reverts ("will switch (catch-up: ...;
 reverting <branch>'s abandoned increment <sha>)").  --apply-now runs that
 deploy at once, so the targets drop the work now, from the checkout abandon
-ran in; it takes --allow.  --union abandons each
+ran in; it takes --allow.  --with-subagents abandons each
 subagent worktree holding anything, then this checkout.
 
 Open (nixconvoy open [--lock <reason>] <name> | [--branch <work-branch>] <path> |
---submodule <input>): a worktree.  <name> (no / in it): a task worktree,
+--submodule <input>): a worktree.  <name> (no / in it): a subagent worktree,
 <root>/<worktrees>/<name> (nixconvoy.toml's `worktrees`, `worktrees/` by
 default, which must be gitignored; root: the checkout this one's subagent
 worktrees hang off) on the fresh branch worktree-<name> off origin's
@@ -307,9 +309,10 @@ is never deployed from: status flags edits there, and nixconvoy leaves a
 refuse an agent's commit on its default branch there.
 
 Close (nixconvoy close [--force] [<name> ...] | [--force] <path> ... | --submodule <input> |
---after PID | --stopped PID): remove a worktree.  The named task worktrees when they hold
-nothing of their own - never deployed, no staged, unstaged or untracked
-change, HEAD and its work branch on origin, no submodule holding anything -
+--after PID | --stopped PID): remove a worktree.  The named subagent
+worktrees when they hold nothing of their own - never deployed, no staged,
+unstaged or untracked change, HEAD and its work branch on origin, no
+submodule holding anything -
 with their fresh branch, as nixconvoy-plan's prune core decides (a named
 one's lock counts its session as ended for it); --force removes a named
 one whatever it holds, with its branches and submodules, here and on origin.
@@ -404,10 +407,10 @@ pull
 status
 = Deploying and committing changes
 apply [<target> | @<tag> ...] [-m <msg>] [--reset] [--allow <protection> ...] [--dry-activate]
-review [<worktree> | <branch> ... | --union] [<diff-arg> ...]
-land [<worktree> ... | --union] [-m <msg>] [--release]
+review [<worktree> | <branch> ... | --with-subagents] [<diff-arg> ...]
+land [<worktree> ... | --with-subagents] [-m <msg>] [--release]
 land --submodule <input> [-m <msg>]
-abandon [<worktree> ... | --union] [--apply-now [--allow <protection> ...]]
+abandon [<worktree> ... | --with-subagents] [--apply-now [--allow <protection> ...]]
 abandon --submodule <input>
 """
 USAGE_NOTES = """\
@@ -425,7 +428,7 @@ it, deployed to other targets alone), for the next deploy anywhere to roll
 out there; held targets the branch builds as main does (land evaluates them
 at its tip and at main) are released without it.
 abandon --apply-now deploys at once, so the targets drop the abandoned work
-now rather than at the next deploy.  --union acts on this checkout and its
+now rather than at the next deploy.  --with-subagents acts on this checkout and its
 subagent worktrees as one unit; a path (with a /) names an agent checkout."""
 
 
@@ -511,7 +514,7 @@ def main() -> None:
     lock_reason: str | None = None
     branch: str | None = None
     force = False
-    union = False
+    with_subs = False
     release = False
     while args:
         a = args.pop(0)
@@ -525,8 +528,8 @@ def main() -> None:
             lock_reason = args.pop(0)
         elif a == "--branch" and subcmd == "open" and args:
             branch = args.pop(0)
-        elif a == "--union" and subcmd in ("land", "abandon"):
-            union = True
+        elif a in ("--with-subagents", "--union") and subcmd in ("land", "abandon"):
+            with_subs = True
         elif a == "--release" and subcmd == "land":
             release = True
         elif a == "--force" and subcmd == "close":
@@ -578,7 +581,7 @@ def main() -> None:
             commands.open_worktree(names[0], lock_reason)
         return
     if sub_name is not None:
-        if names or apply_now or reset or dry or allow or after or stopped or union or release \
+        if names or apply_now or reset or dry or allow or after or stopped or with_subs or release \
                 or (msg is not None and (subcmd != "land" or not msg.strip())):
             bad_usage()
         take_lock()
@@ -609,23 +612,23 @@ def main() -> None:
     top = Path.cwd()
     here = top.resolve()
     if subcmd in ("land", "abandon"):
-        if reset or dry or (allow and not apply_now) or (union and names) \
+        if reset or dry or (allow and not apply_now) or (with_subs and names) \
                 or (msg is not None and (subcmd != "land" or not msg.strip() or len(names) > 1)):
             bad_usage()
-        if union and subcmd == "land":
+        if with_subs and subcmd == "land":
             take_lock()
-            commands.land_union(release, msg)
+            commands.land_with_subagents(release, msg)
             return
         parent_too = False
-        if union:
+        if with_subs:
             # Each sub holding anything, then this checkout.
             if sub_parent(here) is not None:
-                die("abandon --union runs from the checkout the worktrees hang off")
+                die("abandon --with-subagents runs from the checkout the worktrees hang off")
             names = [str(d) for d in commands.subs_of(here) if commands.holds_work(d)]
             parent_too = commands.holds_work(here)
             if not names and not parent_too:
                 die("nothing to abandon here or in any subagent worktree")
-        named = [Path(n) if union else commands.find_sub(n) for n in names]
+        named = [Path(n) if with_subs else commands.find_sub(n) for n in names]
         deploys_from = here
         # The deploy runs from a checkout the abandon does not reset, whose
         # staged changes it would have to carry without a message.
@@ -647,7 +650,7 @@ def main() -> None:
             else:
                 commands.abandon(apply_now)
             lock.close()
-        if names or union:
+        if names or with_subs:
             if parent_too or apply_now:
                 os.chdir(deploys_from)
                 take_lock()
@@ -673,7 +676,7 @@ def main() -> None:
 
 def is_path(arg: str) -> bool:
     """An open/close argument naming an agent checkout by its path rather
-    than a task worktree by its name."""
+    than a subagent worktree by its name."""
     return "/" in arg or arg.startswith("~")
 
 

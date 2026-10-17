@@ -107,7 +107,7 @@ class Checkout(NamedTuple):
 
 
 def sub_dir() -> Path:
-    """Where `open <name>` puts a task worktree, under the checkout."""
+    """Where `open <name>` puts a subagent worktree, under the checkout."""
     return Path(cfg().worktrees)
 
 

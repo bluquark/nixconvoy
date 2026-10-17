@@ -12,7 +12,7 @@ each), a submodule of this checkout (its worktree against its origin's
 default branch) or a
 branch (the worktree checked out on it, else the branch's tip against
 its merge-base, the message from its tree); one that is none of these,
-nor a path here, is an error, never a diff argument.  --union shows this
+nor a path here, is an error, never a diff argument.  --with-subagents shows this
 checkout and then each subagent worktree nested in it.  The rest goes to
 git diff.  One pager stream on a terminal keeps the messages visible on
 long diffs; colors are per-line, since less -R drops attributes at line
@@ -87,17 +87,17 @@ def resolve(name: str, here: Path, top: Path, all_wts: dict[Path, str | None]) -
 
 
 def targets(args: list[str], here: Path) -> tuple[list[Path | str], list[str]]:
-    """The leading names resolved (--union: this checkout and its subagent
+    """The leading names resolved (--with-subagents: this checkout and its subagent
     worktrees), and the arguments left for git diff."""
     top = toplevel(here)
     all_wts = worktrees(here)
     found: list[Path | str] = []
-    union = False
+    with_subs = False
     rest = list(args)
     while rest:
         a = rest[0]
-        if a == "--union":
-            union = True
+        if a in ("--with-subagents", "--union"):
+            with_subs = True
             rest.pop(0)
             continue
         if a.startswith("-") or (here / a).exists():
@@ -107,7 +107,7 @@ def targets(args: list[str], here: Path) -> tuple[list[Path | str], list[str]]:
             die(f"review: no subagent worktree, submodule, branch or path named {a}")
         found.append(got)
         rest.pop(0)
-    if union:
+    if with_subs:
         found = [top, *sorted(w for w in all_wts if top in w.parents)]
     return found, rest
 

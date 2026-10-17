@@ -170,9 +170,9 @@ hosts_dir = "nixos/hosts"    # default "<flake>/hosts"
 system = "x86_64-linux"
 ssh_address = "me@{target}.lan"   # ssh address template (default "{target}"); the builder's too
 branch_prefix = "work/{machine}/"    # {machine}: this machine's hostname: a checkout owns
-                                     # "<prefix><N>", a task worktree "<checkout's branch>-<name>"
+                                     # "<prefix><N>", a subagent worktree "<checkout's branch>-<name>"
                                      # ("<prefix>main-<name>" under a plain checkout)
-worktrees = "worktrees"      # where `open <name>` puts a task worktree, under the checkout (gitignored)
+worktrees = "worktrees"      # where `open <name>` puts a subagent worktree, under the checkout (gitignored)
 
 [precheck]                   # a flake check proven before any build
 attr = "repo-lint"           # checks.<system>.<attr>
@@ -224,19 +224,19 @@ nixconvoy.switchLast = true;                # the router: switched alone, after 
 
 ```
 # Managing worktrees
-nixconvoy close [<worktree> ... | <path> ...] [--force]   remove task worktrees, or agent checkouts by path (with their work branch), holding nothing of their own (--force: whatever they hold)
+nixconvoy close [<worktree> ... | <path> ...] [--force]   remove subagent worktrees, or agent checkouts by path (with their work branch), holding nothing of their own (--force: whatever they hold)
 nixconvoy close --submodule <input> [--force]   remove a submodule worktree likewise
 nixconvoy pull                 rebase every checkout on this machine onto origin/main
 nixconvoy status               every checkout on this machine, and origin's other branches
-nixconvoy open <name> [--lock <reason>]   a task worktree <checkout>/<worktrees>/<name> (what the plugin's create hook runs)
+nixconvoy open <name> [--lock <reason>]   a subagent worktree <checkout>/<worktrees>/<name> (what the plugin's create hook runs)
 nixconvoy open <path> [--branch <work-branch>]   an agent checkout at that path on a work branch of this machine's
 nixconvoy open --submodule <input>   the flake input developed in place under this checkout (see Submodules)
 
 # Deploying and committing changes
 nixconvoy apply [<target> | @<tag> ...] [-m <msg>] [--reset] [--dry-activate]   deploy the staged increment (-m: its message, default "<checkout>: increment <n>"), or with nothing staged converge the targets on the union as it is; --dry-activate: build and copy, then only report what each switch would do
-nixconvoy land [<worktree> ... | --union] [-m <msg>] [--release]   land the work branch on main (--union: this checkout and its task worktrees as one unit, one main commit with the subs' COMMIT_MSG.md appended; -m: under <msg>, for a branch without COMMIT_MSG.md; --release: targets its increments held back included)
-nixconvoy abandon [<worktree> ... | --union] [--apply-now]   discard it (--union: likewise as one unit; --apply-now: and deploy, reverting it now)
-nixconvoy review [<worktree> | <branch> ... | --union] [<diff-arg> ...]   the pending landing: COMMIT_MSG.md, then the diff (--union: the checkout's and its task worktrees' together)
+nixconvoy land [<worktree> ... | --with-subagents] [-m <msg>] [--release]   land the work branch on main (--with-subagents: this checkout and its subagent worktrees as one unit, one main commit with the subs' COMMIT_MSG.md appended; -m: under <msg>, for a branch without COMMIT_MSG.md; --release: targets its increments held back included)
+nixconvoy abandon [<worktree> ... | --with-subagents] [--apply-now]   discard it (--with-subagents: likewise as one unit; --apply-now: and deploy, reverting it now)
+nixconvoy review [<worktree> | <branch> ... | --with-subagents] [<diff-arg> ...]   the pending landing: COMMIT_MSG.md, then the diff (--with-subagents: the checkout's and its subagent worktrees' together)
 nixconvoy land --submodule <input> [-m <msg>] | abandon --submodule <input>   one submodule alone, ahead of the checkout's landing (-m: under <msg>, for a submodule without its own COMMIT_MSG.md)
 ```
 
@@ -248,18 +248,18 @@ step of a deploy in full.
 A git worktree nested in a checkout - `<checkout>/<worktrees>/<name>`,
 the directory nixconvoy.toml names (`worktrees/` by default, gitignored),
 where `nixconvoy open <name>` makes one and the create hook below runs
-it - is that checkout's task worktree: it owns `<checkout's
+it - is that checkout's subagent worktree: it owns `<checkout's
 branch>-<name>` from its first deploy and deploys in parallel with its
 parent.  `land` and `abandon` leave it in place like any checkout, idle on
 its reset branch; `nixconvoy close <name>` removes it when it holds
 nothing of its own (`--force`: whatever it holds), as the sweeps do on
 their own once its agent has stopped (a resume of the agent recreates it)
-or the session that spawned the agent has exited.  When the task
-worktrees each did a piece of their parent's task, `land --union` merges
-their branches into the parent's tree and lands it all as one commit
-under the parent's COMMIT_MSG.md with each sub's appended (`review
---union` shows each,
-`abandon --union` discards each).  `nixconvoy open <path>` makes a
+or the session that spawned the agent has exited.  When the subagent
+worktrees each did a piece of their parent's task, `land
+--with-subagents` merges their branches into the parent's tree and lands
+it all as one commit under the parent's COMMIT_MSG.md with each sub's
+appended (`review --with-subagents` shows each, `abandon
+--with-subagents` discards each).  `nixconvoy open <path>` makes a
 further agent checkout beside the others instead - a worktree at that
 path on a listed work branch of this machine's, numbered after the path's
 name - and `close <path>` removes one holding nothing of its own.
@@ -346,7 +346,7 @@ commit.  From a checkout on a work branch:
   to origin/main's, staged for the next deploy.  `close --submodule
   <input>` removes the worktree and its branch, here and on its origin,
   refusing what would lose work unless `--force`; the directory stays,
-  empty; a task worktree's submodules go with it.  A tip a force push or
+  empty; a subagent worktree's submodules go with it.  A tip a force push or
   removal leaves behind stays under `refs/nixconvoy/past/<branch>/<sha>`
   while a pushed work branch or deploy record pins it (nix fetches a rev
   only while a ref holds it); a landing deletes the rest.

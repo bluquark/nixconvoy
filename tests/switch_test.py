@@ -1643,12 +1643,12 @@ def submodule_cases(d: Path) -> None:
 
 
 def open_cases(d: Path) -> None:
-    """`nixconvoy open <name>`: the task worktree under the checkout, its
+    """`nixconvoy open <name>`: the subagent worktree under the checkout, its
     branch and lock, reused on a second open; a worktree nested anywhere
     in a checkout is its subagent's, another repository's is not.  `open
     <path>` / `close <path>`: an agent checkout beside the others on a
-    free listed work branch.  `land --union`: the checkout and its task
-    worktree landed as one commit."""
+    free listed work branch.  `land --with-subagents`: the checkout and its
+    subagent worktree landed as one commit."""
     scratch_env()
     origin, seed, co = d / "origin.git", d / "seed", d / "homelab9"
     sh(d, "init", "--quiet", "--bare", "-b", "main", str(origin))
@@ -1686,7 +1686,8 @@ def open_cases(d: Path) -> None:
         assert review.targets(["task", "--stat"], co) == ([w], ["--stat"])
         assert review.targets(["ta"], co) == ([w], [])
         assert review.targets(["worktree-task", "a.txt"], co) == ([w], ["a.txt"])
-        assert review.targets(["--union", "--stat"], co) == ([co, w], ["--stat"])
+        assert review.targets(["--with-subagents", "--stat"], co) == ([co, w], ["--stat"])
+        assert review.targets(["--union", "--stat"], co) == ([co, w], ["--stat"])  # the old name, an alias
         assert "no subagent worktree, submodule, branch or path named nope" in dies(lambda: review.targets(["nope"], co))
         assert "named foreign" in dies(lambda: review.targets(["foreign"], co))  # no configured submodule
         put(w, "COMMIT_MSG.md", "task done\n")
@@ -1722,7 +1723,7 @@ def open_cases(d: Path) -> None:
         os.chdir(w)
         assert "primary worktree" in dies(lambda: commands.close_checkout(co))
         os.chdir(co)
-        # land --union: the parent's increment and the sub's, each deployed
+        # land --with-subagents: the parent's increment and the sub's, each deployed
         # (committed on its work branch and pushed), land as one commit
         # under the parent's COMMIT_MSG.md with the sub's appended; every
         # branch resets onto it.
@@ -1760,14 +1761,14 @@ def open_cases(d: Path) -> None:
         told = io.StringIO()
         try:
             memo.eval_toplevels = differs
-            assert "work/tester/9-task holds back b:" in dies(commands.land_union)
+            assert "work/tester/9-task holds back b:" in dies(commands.land_with_subagents)
             memo.eval_toplevels = never
             with contextlib.redirect_stdout(told):
                 commands.holds("work/tester/9-task", "refs/heads/work/tester/9-task", sh(co, "rev-parse", "origin/main"), True)
             assert "releasing b:" in told.getvalue()
             memo.eval_toplevels = same
             with contextlib.redirect_stdout(told):
-                commands.land_union()
+                commands.land_with_subagents()
             assert "b: built the same at work/tester/9-task's tip as at main" in told.getvalue()
         finally:
             memo.eval_toplevels = real_eval
@@ -1781,7 +1782,7 @@ def open_cases(d: Path) -> None:
         assert sh(co, "rev-parse", "origin/work/tester/9") == main
         assert sh(co, "rev-parse", "origin/work/tester/9-task") == main
         assert not sh(co, "status", "--porcelain") and sh(w, "status", "--porcelain") == "?? n.txt"
-        assert f"has no {config.MSG_FILE}" in dies(commands.land_union)  # consumed by the landing
+        assert f"has no {config.MSG_FILE}" in dies(commands.land_with_subagents)  # consumed by the landing
         # land -m: a quick landing with no COMMIT_MSG.md, folded like one;
         # beside the file, committed or a draft on disk, it is refused.
         put(co, "q.txt", "quick\n", "quick increment")
@@ -1789,7 +1790,7 @@ def open_cases(d: Path) -> None:
         put(w, "s2.txt", "sub\n", "sub increment 2")
         sh(w, "push", "--quiet", "origin", "work/tester/9-task")
         with contextlib.redirect_stdout(io.StringIO()):
-            commands.land_union(message="quick land\n- by -m\n")
+            commands.land_with_subagents(message="quick land\n- by -m\n")
         main = sh(co, "rev-parse", "origin/main")
         assert sh(co, "log", "-1", "--format=%B", main).strip() == "quick land\n\n- by -m"
         landed = sh(co, "ls-tree", "--name-only", main).split()
@@ -1830,7 +1831,7 @@ def open_cases(d: Path) -> None:
         argv0 = sys.argv
         try:
             for argv in (["abandon", "-m", "x"], ["abandon", "-m", "x", "--submodule", "dep"],
-                         ["land", "-m", ""], ["land", "-m", " ", "--union"], ["land", "-m", "--union"],
+                         ["land", "-m", ""], ["land", "-m", " ", "--with-subagents"], ["land", "-m", "--with-subagents"],
                          ["land", "-m", "x", "a", "b"], ["land", "-m"]):
                 sys.argv = ["nixconvoy", *argv]
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:

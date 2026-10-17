@@ -250,7 +250,7 @@ def abandon(apply_now: bool = False) -> None:
 
 
 def close_worktrees(names: list[str], *, force: bool = False) -> None:
-    """Remove the task worktrees that hold nothing of their own (cli
+    """Remove the subagent worktrees that hold nothing of their own (cli
     docstring: Close), as nixconvoy-plan's prune core decides: the named
     ones (their lock's session counted as ended for them, as abandon from
     inside counts it), or every one under this checkout.  `force` removes
@@ -1079,7 +1079,7 @@ def status() -> None:
 
 
 def open_worktree(name: str, lock_reason: str | None) -> Path:
-    """`nixconvoy open <name>`: the task worktree <root>/<worktrees>/<name>
+    """`nixconvoy open <name>`: the subagent worktree <root>/<worktrees>/<name>
     (nixconvoy.toml's `worktrees`; root: the checkout this one's subagent
     worktrees hang off) on the fresh branch worktree-<name> off origin's
     default branch - a worktree of that name is reused - owning <root's
@@ -1157,7 +1157,7 @@ def open_checkout(path: Path, branch: str | None) -> Path:
     while up != up.parent:
         if (up / ".git").exists():
             if git_common(up) == mine:
-                die(f"{d} would be nested in the checkout {up}: `nixconvoy open <name>` makes a task "
+                die(f"{d} would be nested in the checkout {up}: `nixconvoy open <name>` makes a subagent "
                     f"worktree there; an agent checkout goes beside the checkouts")
             break
         up = up.parent
@@ -1251,8 +1251,8 @@ def close_checkout(path: Path, *, force: bool = False) -> None:
     print(f"checkout {d} removed, with {', '.join(sorted(names)) or 'no branch of its own'} here and on origin")
 
 
-def land_union(release: bool = False, message: str | None = None) -> None:
-    """`nixconvoy land --union`: this checkout and its subagent worktrees
+def land_with_subagents(release: bool = False, message: str | None = None) -> None:
+    """`nixconvoy land --with-subagents`: this checkout and its subagent worktrees
     landed as one commit on main - each sub's branch merged into this
     branch's tree (mergiraf on the conflicts, as a deploy's union) under
     this checkout's MSG_FILE (or `message`) with each sub's MSG_FILE
@@ -1263,8 +1263,8 @@ def land_union(release: bool = False, message: str | None = None) -> None:
     pop_tmp_commits()
     here = Path.cwd().resolve()
     if sub_parent(here) is not None:
-        die("land --union runs from the checkout the worktrees hang off")
-    wb = require_work_branch("land --union")
+        die("land --with-subagents runs from the checkout the worktrees hang off")
+    wb = require_work_branch("land --with-subagents")
     if current_branch() != wb:
         die(f"land runs from the work branch ({wb}); currently on {current_branch() or '(detached HEAD)'}")
     if staged_differs():
@@ -1451,7 +1451,7 @@ __all__ = [
     "holds_work",
     "land",
     "land_submodule",
-    "land_union",
+    "land_with_subagents",
     "open_checkout",
     "open_worktree",
     "prune_after",
