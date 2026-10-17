@@ -17,7 +17,7 @@ gitlink there; `unapply` resets it onto the pin of the rev the checkout
 goes back to (`--back-to origin/main`: the gitlink restored to
 origin/main's).  The worktree stays either way, its
 branch reset onto the default branch like an agent checkout's, and
-`close --submodule` removes the worktree with its branch (`--force`: with
+`close <input>` removes the worktree with its branch (`--force`: with
 whatever it holds, the pin put back).  Two checkouts
 pinning the same submodule on different branches meet in the deploy's
 union as a gitlink conflict (solve_union): the branches are merged in the
@@ -622,7 +622,7 @@ def dropped_message(sub: Sub, wb: str, pinned: str, gone: list[str]) -> str:
     return (f"submodule {sub.name}'s worktree ({sub.dir}) was reset below the work the tree deploys on {wb}; "
             f"{len(gone)} commit(s) would leave the pin and the targets:\n  " + "\n  ".join(gone)
             + f"\nput them back (git -C {sub.dir} reset --keep {pinned[:12]}), or drop them deliberately: "
-            f"nixconvoy close --submodule {sub.name} --force")
+            f"nixconvoy close {sub.name} --force")
 
 
 def left_behind(sub: Sub, pinned: str | None) -> list[str]:
@@ -959,7 +959,7 @@ def moved_pins(top: Path, wb: str, tip: str, parent: str) -> list[tuple[Sub, str
             continue
         if was is None:
             die(f"the increment added submodule {sub.name}, whose worktree and branch would stay behind: "
-                f"`nixconvoy close --submodule {sub.name} --force` first")
+                f"`nixconvoy close {sub.name} --force` first")
         cur = branch_at(sub.dir)
         if cur != wb:
             die(f"submodule {sub.name} ({sub.dir}) is on {cur or 'a detached HEAD'}, not {wb}")
@@ -1004,16 +1004,16 @@ def remove_all(top: Path) -> None:
 
 
 def keeps(sub: Sub, top: Path) -> str | None:
-    """Why `close --submodule` keeps the worktree: what its removal would lose."""
+    """Why `close <input>` keeps the worktree: what its removal would lose."""
     if out(["git", "status", "--porcelain"], cwd=str(sub.dir)):
         return "it has uncommitted or untracked changes"
     default = default_branch_of(sub.repo)
     if default is None:
         return "its repository's origin has no default branch to judge it against"
     if has_own(sub, default):
-        return f"it carries commits not on origin/{default}; land or unapply it (--submodule {sub.name})"
+        return f"it carries commits not on origin/{default}; land or unapply this checkout"
     if off_default(sub, top):
-        return f"the tree still pins a rev not on origin/{default}; land or unapply it (--submodule {sub.name})"
+        return f"the tree still pins a rev not on origin/{default}; land or unapply this checkout"
     return None
 
 

@@ -10,7 +10,7 @@ what to show instead of this checkout (names.resolve): a subagent
 worktree, a submodule of this checkout (its worktree against its origin's
 default branch) or a branch (the worktree checked out on it, else the
 branch's tip against its merge-base, the message from its tree); one that
-is none of these, nor a path here, is an error, never a diff argument.  --with-subagents shows this
+is none of these, nor a path here, is an error, never a diff argument.  --with-children shows this
 checkout and then each subagent worktree nested in it.  The rest goes to
 git diff.  One pager stream on a terminal keeps the messages visible on
 long diffs; colors are per-line, since less -R drops attributes at line
@@ -60,17 +60,17 @@ def default_of(d: Path) -> str:
 
 
 def targets(args: list[str], here: Path) -> tuple[list[Path | Sub | str], list[str]]:
-    """The leading names resolved (names.resolve; --with-subagents: this
+    """The leading names resolved (names.resolve; --with-children: this
     checkout and its subagent worktrees), and the arguments left for git
     diff."""
     top = toplevel(here)
     found: list[Path | Sub | str] = []
-    with_subs = False
+    with_children = False
     rest = list(args)
     while rest:
         a = rest[0]
-        if a == "--with-subagents":
-            with_subs = True
+        if a == "--with-children":
+            with_children = True
             rest.pop(0)
             continue
         if a.startswith("-") or (here / a).exists():
@@ -80,7 +80,7 @@ def targets(args: list[str], here: Path) -> tuple[list[Path | Sub | str], list[s
             die(f"review: no subagent worktree, submodule, branch or path named {a}")
         found.append(got)
         rest.pop(0)
-    if with_subs:
+    if with_children:
         found = [top, *sorted(w for w in worktrees(here) if top in w.parents)]
     return found, rest
 

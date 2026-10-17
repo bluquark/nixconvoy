@@ -47,7 +47,7 @@ class Config:
     # A checkout owns "<prefix><leaf>", its subagent worktrees "<prefix><leaf>-<name>"
     # (the main checkout's "<prefix>main-<name>"); {machine} is this machine's hostname.
     branch_prefix: str = "work/{machine}/"
-    # Where `open <name>` puts a subagent worktree, relative to the checkout
+    # Where `open --child <name>` puts a subagent worktree, relative to the checkout
     # (gitignored: a nested worktree); any worktree nested in a checkout
     # is one of its subagent worktrees, wherever it was made.
     worktrees: str = "worktrees"

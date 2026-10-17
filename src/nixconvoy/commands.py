@@ -160,7 +160,7 @@ def land(message: str | None = None, not_yet_applied: bool = False) -> None:
     if gone:
         die(f"the tree pins {wb}'s rev of submodule {', '.join(gone)}, whose worktree is gone: "
             f"`nixconvoy open --submodule <input>` recreates it from origin's branch to land it, or "
-            f"`nixconvoy close --submodule <input> --force` after it drops it")
+            f"`nixconvoy close <input> --force` after it drops it")
     holds(wb, "HEAD", main, not_yet_applied)
     submodule.land_all(wb, msg)
     tree = tree_less_msg("HEAD")
@@ -313,19 +313,30 @@ def close_worktrees(names: list[str], *, force: bool = False) -> None:
             print(f"{label}: {verdict}", flush=True)
 
 
-def close_submodule(name: str, *, force: bool = False) -> None:
-    """`close --submodule <input>`: the submodule worktree removed with
-    its branch, unless that would lose work (`force`: removed anyway, the
-    pin put back to origin/main's when it named the branch's work, staged)."""
+def close_submodules(names: list[str], *, force: bool = False) -> None:
+    """`close <input> ...`: each submodule worktree removed with its
+    branch, unless that would lose work (`force`: removed anyway, the pin
+    put back to origin/main's when it named the branch's work, staged).
+    One kept or failing stops none of the others; the run then fails."""
     git(*fetch_args("--no-auto-gc"), check=False)
     top = Path.cwd()
-    sub = submodule.present_one(top, name)
-    why = submodule.keeps(sub, top)
-    if why is not None and not force:
-        die(f"submodule {name} is kept: {why} (--force removes it anyway)")
-    if work_branch_name() and submodule.off_default(sub, top):
-        submodule.restore(sub, top)
-    submodule.remove_one(sub)
+    failed = []
+    for name in names:
+        try:
+            sub = submodule.present_one(top, name)
+            why = submodule.keeps(sub, top)
+            if why is not None and not force:
+                die(f"submodule {name} is kept: {why} (--force removes it anyway)")
+            if work_branch_name() and submodule.off_default(sub, top):
+                submodule.restore(sub, top)
+            submodule.remove_one(sub)
+        except SystemExit:
+            if len(names) == 1:
+                raise
+            proc.DYING = False
+            failed.append(name)
+    if failed:
+        die(f"close failed for submodule {', '.join(failed)} (see above)")
 
 
 class Stop(NamedTuple):
@@ -949,7 +960,7 @@ def status() -> None:
 
 
 def open_worktree(name: str, lock_reason: str | None) -> Path:
-    """`nixconvoy open <name>`: the subagent worktree <root>/<worktrees>/<name>
+    """`nixconvoy open --child <name>`: the subagent worktree <root>/<worktrees>/<name>
     (nixconvoy.toml's `worktrees`; root: the checkout this one's subagent
     worktrees hang off) on the fresh branch worktree-<name> off origin's
     default branch - a worktree of that name is reused - owning <root's
@@ -961,6 +972,10 @@ def open_worktree(name: str, lock_reason: str | None) -> Path:
     if not re.fullmatch(r"[\w.-]+", name):
         die(f"{name}: a worktree name holds letters, digits, '.', '-' and '_' only")
     root = outermost(Path.cwd().resolve())
+    # close takes a declared submodule's name as the submodule, so a
+    # worktree of that name could never be closed by it.
+    if name in names.gitmodule_names(root):
+        die(f"{name} is a submodule of this checkout: a subagent worktree may not have its name")
     d = root / sub_dir() / name
     # A nested worktree not ignored is an untracked directory `git add -A`
     # would stage as a gitlink.
@@ -969,7 +984,7 @@ def open_worktree(name: str, lock_reason: str | None) -> Path:
             f"or point nixconvoy.toml's `worktrees` at a directory that is")
     branch = f"worktree-{name}"
     base = default_base(root)
-    reason = lock_reason or f"nixconvoy open {name} {SESSIONLESS}"
+    reason = lock_reason or f"nixconvoy open --child {name} {SESSIONLESS}"
     held = hold_lock(name_lock_path(d), wait=60)
     if held is None:
         die(f"{d} stayed locked for 60s by a close or another open; re-run")
@@ -1021,16 +1036,16 @@ def open_checkout(path: Path, branch: str | None) -> Path:
     d = path.expanduser().resolve()
     if d.exists():
         die(f"{d} exists already")
-    git(*fetch_args("--no-auto-gc"), check=False)
     mine = git_common(here)
     up = d.parent
     while up != up.parent:
         if (up / ".git").exists():
             if git_common(up) == mine:
-                die(f"{d} would be nested in the checkout {up}: `nixconvoy open <name>` makes a subagent "
+                die(f"{d} would be nested in the checkout {up}: `nixconvoy open --child <name>` makes a subagent "
                     f"worktree there; an agent checkout goes beside the checkouts")
             break
         up = up.parent
+    git(*fetch_args("--no-auto-gc"), check=False)
     pats = allowed_branches()
     tips = origin_tips()
     local = set(out(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/"]).split())
@@ -1121,8 +1136,8 @@ def close_checkout(path: Path, *, force: bool = False) -> None:
     print(f"checkout {d} removed, with {', '.join(sorted(names)) or 'no branch of its own'} here and on origin")
 
 
-def land_with_subagents(message: str | None = None, not_yet_applied: bool = False) -> None:
-    """`nixconvoy land --with-subagents`: this checkout and its subagent worktrees
+def land_with_children(message: str | None = None, not_yet_applied: bool = False) -> None:
+    """`nixconvoy land --with-children`: this checkout and its subagent worktrees
     landed as one commit on main - each sub's branch merged into this
     branch's tree (mergiraf on the conflicts, as a deploy's union) under
     this checkout's MSG_FILE (or `message`) with each sub's MSG_FILE
@@ -1133,8 +1148,8 @@ def land_with_subagents(message: str | None = None, not_yet_applied: bool = Fals
     pop_tmp_commits()
     here = Path.cwd().resolve()
     if sub_parent(here) is not None:
-        die("land --with-subagents runs from the checkout the worktrees hang off")
-    wb = require_work_branch("land --with-subagents")
+        die("land --with-children runs from the checkout the worktrees hang off")
+    wb = require_work_branch("land --with-children")
     if current_branch() != wb:
         die(f"land runs from the work branch ({wb}); currently on {current_branch() or '(detached HEAD)'}")
     if staged_differs():
@@ -1191,7 +1206,7 @@ def land_with_subagents(message: str | None = None, not_yet_applied: bool = Fals
             gone = submodule.orphaned(d)
             if gone:
                 die(f"the tree pins {b}'s rev of submodule {', '.join(gone)}, whose worktree is gone: "
-                    f"`nixconvoy open --submodule <input>` in {d.name} first (then `close --submodule <input> --force` drops it)")
+                    f"`nixconvoy open --submodule <input>` in {d.name} first (then `close <input> --force` drops it)")
         for d, b in [(here, wb), *parts]:
             holds(b, "HEAD" if d == here else f"refs/heads/{b}", main, not_yet_applied)
 
@@ -1274,12 +1289,12 @@ def land_with_subagents(message: str | None = None, not_yet_applied: bool = Fals
 
 __all__ = [
     "close_checkout",
-    "close_submodule",
+    "close_submodules",
     "close_worktrees",
     "enter_sub",
     "has_increments",
     "land",
-    "land_with_subagents",
+    "land_with_children",
     "open_checkout",
     "open_worktree",
     "pull",

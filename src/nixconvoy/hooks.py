@@ -84,7 +84,7 @@ def command_name(pid: int) -> str:
 
 
 def worktree_create(name: str, session: int | None) -> None:
-    """`open <name>` for the session's agent: the worktree locked for the
+    """`open --child <name>` for the session's agent: the worktree locked for the
     session's lifetime, its reason naming the pid and start time close and
     status read, then a token of this create, so a lock taken again (a
     reuse, a resume) never reads as one a close judged before.  With no

@@ -1579,7 +1579,7 @@ def submodule_cases(d: Path) -> None:
         assert ax.exists() and submodule.branch_at(ax) == wb
         assert sh(dep_seed, "ls-remote", str(dep_origin), f"refs/heads/{wb}").split()[0] == dep_main
         assert submodule.keeps(dep(), co) is None
-        # The removal (close --submodule): worktree and branch gone, here and
+        # The removal (close <input>): worktree and branch gone, here and
         # on the origin, the branch's last tip kept under PAST_REFS there;
         # the directory stays, empty, so the gitlink is not deleted.
         with contextlib.redirect_stdout(io.StringIO()):
@@ -1590,7 +1590,7 @@ def submodule_cases(d: Path) -> None:
         assert submodule.present(co) == []
         assert f"refs/heads/{wb}" not in sh(dep_repo, "for-each-ref", "--format=%(refname)")
 
-        # close --submodule --force's pieces: reset onto the submodule's main,
+        # close <input> --force's pieces: reset onto the submodule's main,
         # the deployed pin put back to origin/main's, staged; close refuses until then.
         sh(co, "push", "--quiet", "origin", f"HEAD:refs/heads/{wb}")
         with contextlib.redirect_stdout(io.StringIO()):
@@ -1746,11 +1746,11 @@ def submodule_cases(d: Path) -> None:
 
 
 def open_cases(d: Path) -> None:
-    """`nixconvoy open <name>`: the subagent worktree under the checkout, its
+    """`nixconvoy open --child <name>`: the subagent worktree under the checkout, its
     branch and lock, reused on a second open; a worktree nested anywhere
     in a checkout is its subagent's, another repository's is not.  `open
     <path>` / `close <path>`: an agent checkout beside the others on a
-    free listed work branch.  `land --with-subagents`: the checkout and its
+    free listed work branch.  `land --with-children`: the checkout and its
     subagent worktree landed as one commit."""
     scratch_env()
     origin, seed, co = d / "origin.git", d / "seed", d / "homelab9"
@@ -1789,7 +1789,7 @@ def open_cases(d: Path) -> None:
         assert review.targets(["task", "--stat"], co) == ([w], ["--stat"])
         assert review.targets(["ta"], co) == ([w], [])
         assert review.targets(["worktree-task", "a.txt"], co) == ([w], ["a.txt"])
-        assert review.targets(["--with-subagents", "--stat"], co) == ([co, w], ["--stat"])
+        assert review.targets(["--with-children", "--stat"], co) == ([co, w], ["--stat"])
         assert "no subagent worktree, submodule, branch or path named nope" in dies(lambda: review.targets(["nope"], co))
         assert "named foreign" in dies(lambda: review.targets(["foreign"], co))  # no configured submodule
         # The same names for land, unapply and close (names.worktree): a
@@ -1816,13 +1816,33 @@ def open_cases(d: Path) -> None:
         shutil.rmtree(d / "aclone")
         # close takes a branch with slashes as a branch, a path as a path;
         # a name is never a path, a directory of that name or not.
-        assert not cli.is_path("work/tester/9", "close") and cli.is_path("work/tester/9", "open")
-        assert cli.is_path("../homelab5", "close") and cli.is_path("worktrees/", "close") and cli.is_path("sub/new", "open")
-        assert not cli.is_path("worktrees", "close") and not cli.is_path("task", "open")
-        # A submodule's name is refused without --submodule (declared in
-        # .gitmodules, configured or not), whatever worktree it prefixes.
-        (co / ".gitmodules").write_text('[submodule "ta"]\n\tpath = deps/ta\n\turl = x\n')
-        assert "ta is a submodule of this checkout: `close --submodule ta`" in dies(lambda: names.worktree("ta", co, "close"))
+        assert not cli.is_path("work/tester/9") and cli.is_path("sub/new")
+        assert cli.is_path("../homelab5") and cli.is_path("worktrees/")
+        assert not cli.is_path("worktrees") and not cli.is_path("task")
+        # A submodule's name (declared in .gitmodules, configured or not)
+        # never names a worktree, whatever worktree it prefixes.
+        (co / ".gitmodules").write_text('[submodule "ta"]\n\tpath = deps/ta\n\turl = x\n'
+                                        '[submodule "tb"]\n\tpath = deps/tb\n\turl = x\n')
+        assert "ta is a submodule of this checkout: land acts on it" in dies(lambda: names.worktree("ta", co, "land"))
+        assert "ta is a submodule of this checkout: a subagent worktree may not" in dies(lambda: commands.open_worktree("ta", None))
+        # close: a declared submodule's name means the submodule, a path a
+        # checkout, anything else a subagent worktree - one kind per call;
+        # several submodules each get their say.
+        argv0, cwd0 = sys.argv, Path.cwd()
+        try:
+            os.chdir(co)
+            for argv, want in ((["close", "ta", "task"], "usage:"), (["close", "ta", "../x/"], "usage:"),
+                               (["close", "task", "../x/"], "usage:"),
+                               (["close", "ta"], "ta is not a configured submodule"),
+                               (["close", "ta", "tb"], "close failed for submodule ta, tb")):
+                sys.argv = ["nixconvoy", *argv]
+                assert want in dies(cli.main), argv
+                for held in proc.HELD:  # the checkout lock a close takes, until exit
+                    held.close()
+                proc.HELD.clear()
+        finally:
+            sys.argv = argv0
+            os.chdir(cwd0)
         (co / ".gitmodules").unlink()
         put(w, "COMMIT_MSG.md", "task done\n")
         put(w, "b.txt", "two\n")
@@ -1857,7 +1877,7 @@ def open_cases(d: Path) -> None:
         os.chdir(w)
         assert "primary worktree" in dies(lambda: commands.close_checkout(co))
         os.chdir(co)
-        # land --with-subagents: the parent's increment and the sub's, each deployed
+        # land --with-children: the parent's increment and the sub's, each deployed
         # (committed on its work branch and pushed), land as one commit
         # under the parent's COMMIT_MSG.md with the sub's appended; every
         # branch resets onto it.
@@ -1895,14 +1915,14 @@ def open_cases(d: Path) -> None:
         told = io.StringIO()
         try:
             memo.eval_toplevels = differs
-            assert "work/tester/9-task holds back b:" in dies(commands.land_with_subagents)
+            assert "work/tester/9-task holds back b:" in dies(commands.land_with_children)
             memo.eval_toplevels = never
             with contextlib.redirect_stdout(told):
                 commands.holds("work/tester/9-task", "refs/heads/work/tester/9-task", sh(co, "rev-parse", "origin/main"), True)
             assert "landing with b not yet applied:" in told.getvalue()
             memo.eval_toplevels = same
             with contextlib.redirect_stdout(told):
-                commands.land_with_subagents()
+                commands.land_with_children()
             assert "b: built the same at work/tester/9-task's tip as at main" in told.getvalue()
         finally:
             memo.eval_toplevels = real_eval
@@ -1916,7 +1936,7 @@ def open_cases(d: Path) -> None:
         assert sh(co, "rev-parse", "origin/work/tester/9") == main
         assert sh(co, "rev-parse", "origin/work/tester/9-task") == main
         assert not sh(co, "status", "--porcelain") and sh(w, "status", "--porcelain") == "?? n.txt"
-        assert f"has no {config.MSG_FILE}" in dies(commands.land_with_subagents)  # consumed by the landing
+        assert f"has no {config.MSG_FILE}" in dies(commands.land_with_children)  # consumed by the landing
         # land -m: a quick landing with no COMMIT_MSG.md, folded like one;
         # beside the file, committed or a draft on disk, it is refused.
         put(co, "q.txt", "quick\n", "quick increment")
@@ -1924,7 +1944,7 @@ def open_cases(d: Path) -> None:
         put(w, "s2.txt", "sub\n", "sub increment 2")
         sh(w, "push", "--quiet", "origin", "work/tester/9-task")
         with contextlib.redirect_stdout(io.StringIO()):
-            commands.land_with_subagents(message="quick land\n- by -m\n")
+            commands.land_with_children(message="quick land\n- by -m\n")
         main = sh(co, "rev-parse", "origin/main")
         assert sh(co, "log", "-1", "--format=%B", main).strip() == "quick land\n\n- by -m"
         landed = sh(co, "ls-tree", "--name-only", main).split()
@@ -1964,11 +1984,12 @@ def open_cases(d: Path) -> None:
         # never a flag's name.
         argv0 = sys.argv
         try:
-            for argv in (["unapply", "-m", "x"], ["unapply", "--submodule", "dep"],
+            for argv in (["unapply", "-m", "x"], ["unapply", "--submodule", "dep"], ["close", "--submodule", "dep"],
+                         ["open", "--child", "--branch", "b", "x"], ["open", "--child", "--submodule", "x"], ["open", "--child"],
                          ["close", "--after", "1"], ["close", "--stopped", "1"], ["open", "--lock", "x", "y"],
                          ["hook"], ["hook", "nope"], ["hook", "session-start", "x"],
-                         ["unapply", "--back-to"], ["unapply", "--back-to", "--with-subagents"], ["land", "--back-to", "x"],
-                         ["land", "-m", ""], ["land", "-m", " ", "--with-subagents"], ["land", "-m", "--with-subagents"],
+                         ["unapply", "--back-to"], ["unapply", "--back-to", "--with-children"], ["land", "--back-to", "x"],
+                         ["land", "-m", ""], ["land", "-m", " ", "--with-children"], ["land", "-m", "--with-children"],
                          ["land", "-m", "x", "a", "b"], ["land", "-m"]):
                 sys.argv = ["nixconvoy", *argv]
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
@@ -1990,7 +2011,7 @@ def open_cases(d: Path) -> None:
         assert checkout.worktree_lock(w) == "claude agent task (pid 1 start 2) 5.6"
         with contextlib.redirect_stdout(io.StringIO()):
             h = commands.open_worktree("hand", None)
-        assert checkout.worktree_lock(h) == f"nixconvoy open hand {checkout.SESSIONLESS}"
+        assert checkout.worktree_lock(h) == f"nixconvoy open --child hand {checkout.SESSIONLESS}"
         assert "letters, digits" in dies(lambda: commands.open_worktree("bad name", None))# The create hook: the worktree locked with the session's pid and
         # start time, then a token of the create; sessionless without one.
         with contextlib.redirect_stdout(io.StringIO()) as got:

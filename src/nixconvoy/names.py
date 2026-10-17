@@ -56,9 +56,8 @@ def worktree(name: str, here: Path, verb: str, *, subagent: bool = True) -> Path
     """The worktree `name` names, for `verb` to act in; `subagent`: a
     subagent worktree alone.  Anything else dies saying what `name` is."""
     if name in gitmodule_names(toplevel(here)):
-        die(f"{name} is a submodule of this checkout: `{verb} --submodule {name}`" if verb == "close" else
-            f"{name} is a submodule of this checkout: it lands with the checkout "
-            f"(`close --submodule {name} --force` discards it)")
+        die(f"{name} is a submodule of this checkout: {verb} acts on it with the checkout "
+            f"(`close {name} --force` discards it)")
     got = resolve(name, here, submodules=False)
     if isinstance(got, str):
         die(f"no worktree on this machine is on branch {name}: {verb} acts in a checkout of it")
