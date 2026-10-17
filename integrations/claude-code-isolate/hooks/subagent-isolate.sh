@@ -8,6 +8,9 @@
 # spawned after a cd into /tmp would otherwise get no worktree and make
 # one by hand, unlocked and outside what Claude Code manages).  Prints
 # nothing when the call stands as it is; without jq every call does.
+# Its own plugin (nixconvoy-isolate), apart from the worktree hooks: two
+# hooks rewriting one Agent call race, so a session with a rewriter of
+# its own leaves this one out and applies the rule itself.
 set -u
 command -v jq >/dev/null 2>&1 || exit 0
 INPUT=$(cat)

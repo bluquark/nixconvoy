@@ -108,8 +108,8 @@ class Checkout(NamedTuple):
 
 
 def sub_dir() -> Path:
-    """Where `open --child <name>` puts a subagent worktree, under the checkout."""
-    return Path(cfg().worktrees)
+    """Where `open --child <name>` puts a child worktree, under the checkout."""
+    return Path(cfg().child_worktrees)
 
 
 def git_common(d: Path) -> Path | None:

@@ -22,7 +22,9 @@ let
     cp ${../integrations/claude-code/bin}/* $out/bin/
     chmod +x $out/bin/*
     cp -r ${../integrations/claude-code} $out/share/nixconvoy/claude-code
-    chmod +x $out/share/nixconvoy/claude-code/hooks/*.sh $out/share/nixconvoy/claude-code/bin/*
+    cp -r ${../integrations/claude-code-isolate} $out/share/nixconvoy/claude-code-isolate
+    chmod +x $out/share/nixconvoy/claude-code/hooks/*.sh $out/share/nixconvoy/claude-code/bin/* \
+      $out/share/nixconvoy/claude-code-isolate/hooks/*.sh
   '';
 in
 pkgs.symlinkJoin {

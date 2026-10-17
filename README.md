@@ -174,7 +174,8 @@ ssh_address = "me@{target}.lan"   # ssh address template (default "{target}"); t
 branch_prefix = "work/{machine}/"    # {machine}: this machine's hostname: a checkout owns
                                      # "<prefix><N>", a subagent worktree "<checkout's branch>-<name>"
                                      # ("<prefix>main-<name>" under a plain checkout)
-worktrees = "worktrees"      # where `open --child <worktree>` puts a subagent worktree, under the checkout (gitignored)
+child_worktrees = ".claude/worktrees"   # where `open --child <worktree>` puts a child (subagent) worktree, under the
+                                        # checkout: Claude Code's own place by default (excluded through .git/info/exclude)
 
 [precheck]                   # a flake check proven before any build (a pass memoized on the union's tree)
 attr = "repo-lint"           # checks.<system>.<attr>
@@ -248,7 +249,7 @@ nixconvoy pull                 rebase every checkout on this machine onto origin
 nixconvoy status               every checkout on this machine, and origin's other branches
 nixconvoy hook <event>         the Claude Code plugin's hook of that event (session-start, subagent-stop, worktree-create), run by its hooks/<event>.sh with the hook's input on stdin
 nixconvoy open <path> [--branch <work-branch>]   an agent checkout at that path on a work branch of this machine's
-nixconvoy open --child <worktree>   a subagent worktree <checkout>/<worktrees>/<worktree> (what the plugin's create hook makes)
+nixconvoy open --child <worktree>   a child (subagent) worktree <checkout>/<child_worktrees>/<worktree> (what the plugin's create hook makes)
 nixconvoy open --submodule <input>   the flake input developed in place under this checkout (see Submodules)
 
 # Deploying and committing changes
@@ -268,12 +269,14 @@ name too.
 `nixconvoy --help` and the docstring of `src/nixconvoy/cli.py` describe each
 step of a deploy in full.
 
-## Worktrees
+## Child worktrees
 
-A git worktree nested in a checkout - `<checkout>/<worktrees>/<name>`,
-the directory nixconvoy.toml names (`worktrees/` by default, gitignored),
-where `nixconvoy open --child <worktree>` makes one and the create hook below runs
-it - is that checkout's subagent worktree: it owns `<checkout's
+A git worktree nested in a checkout - `<checkout>/<child_worktrees>/<name>`,
+the directory nixconvoy.toml names (`.claude/worktrees/` by default, where
+Claude Code puts its own; `open` writes it into `.git/info/exclude` unless
+it is ignored already), where `nixconvoy open --child <worktree>` makes one
+and the create hook below runs it - is that checkout's child, or subagent,
+worktree: it owns `<checkout's
 branch>-<name>` from its first deploy and deploys in parallel with its
 parent.  `land` and `unapply --back-to origin/main` leave it in place like any checkout, idle on
 its reset branch; `nixconvoy close <worktree>` removes it when it holds
@@ -289,31 +292,47 @@ under the parent's COMMIT_MSG.md with each sub's appended (`review
 further agent checkout beside the others instead - a worktree at that
 path on a listed work branch of this machine's, numbered after the path's
 name - and `close <path>` removes one holding nothing of its own.
-`integrations/claude-code/` is a Claude Code plugin holding
-the hooks that give every subagent spawned inside a repository such a
-worktree (`isolation: worktree` added to the Agent call unless it chose
-otherwise), create it under the spawning checkout, close it when its agent
-stops and recreate it for its resume, beside the `git review` command and
-a bash prompt segment:
+`integrations/claude-code/` is a Claude Code plugin holding the hooks
+that create an isolated subagent's worktree under the spawning checkout,
+close it when its agent stops and recreate it for its resume, beside the
+`git review` command and a bash prompt segment; `integrations/claude-code-isolate/`
+is a second plugin whose one hook gives every subagent spawned inside a
+repository such a worktree (`isolation: worktree` added to the Agent
+call unless it chose otherwise):
 
 ```
-/plugin install nixconvoy --marketplace bluquark/nixconvoy
+claude plugin marketplace add bluquark/nixconvoy
+claude plugin install nixconvoy@nixconvoy --scope project
+claude plugin install nixconvoy-isolate@nixconvoy --scope project
 ```
 
-The package also ships the plugin tree under `share/nixconvoy/claude-code/`
-for a repo that wires the hooks itself: a settings.json pointing at
-`hooks/worktree-create.sh`, `hooks/worktree-remove.sh`,
-`hooks/session-start.sh`, `hooks/subagent-stop.sh`,
-`hooks/subagent-isolate.sh` (PreToolUse, matcher `Agent|Task`) and
-`hooks/worktree-resume.sh` (PreToolUse, matcher `SendMessage`) there, as
-`hooks/hooks.json` does (such a repo should not also enable the plugin, or
-both would run).  A repo with a PreToolUse hook of its own on `Agent`
-that rewrites the call should run `subagent-isolate.sh` from inside it and
-continue from the `updatedInput` it prints, rather than wire both (a
-plugin install on top of such a hook does wire both): how Claude Code
-combines two hooks' `updatedInput` is not specified.  The hook returns
-the rewritten call as allowed, so an `ask` rule on Agent does not prompt
-for a spawn it isolated.
+The isolation is a plugin of its own because two hooks that each rewrite
+one Agent call race: Claude Code runs matching hooks in parallel and
+keeps one `updatedInput`, whichever lands last.  A PreToolUse hook of
+your own on `Agent` that rewrites the call (pinning a subagent's model,
+say) must be the one rewriter: leave `nixconvoy-isolate` uninstalled and
+add `isolation: "worktree"` from inside it (`subagent-isolate.sh` shows
+the rule: a call without `isolation`, spawned in a git repository - the
+session's project directory, not the shell's, which drifts).  Both hooks
+return the rewritten call as allowed, so an `ask` rule on Agent does not
+prompt for a spawn they isolated.
+
+`--scope project`, run in the repository, writes the enablement into its
+tracked `.claude/settings.json`: every worktree of it has it, and each
+collaborator runs the install once.  The hooks belong to a repository
+with `deploy-branches`: at user scope they run in every repository you
+open, where the create hook still makes a subagent's worktree (a plain
+`.claude/worktrees/<name>` on `worktree-<name>`) but the prunes, which
+read the work branches, leave it to `git worktree remove`.  `nixconvoy`
+must be on PATH where the hooks run.
+
+The package also ships both plugin trees under `share/nixconvoy/` for a
+repo that wires the hooks itself: a settings.json pointing at
+`claude-code/hooks/worktree-create.sh`, `worktree-remove.sh`,
+`session-start.sh`, `subagent-stop.sh`, `worktree-resume.sh` (PreToolUse,
+matcher `SendMessage`) and `claude-code-isolate/hooks/subagent-isolate.sh`
+(PreToolUse, matcher `Agent|Task`), as each `hooks/hooks.json` does (such
+a repo should not also enable the plugins, or both would run).
 
 ## Submodules
 

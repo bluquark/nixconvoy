@@ -960,8 +960,8 @@ def status() -> None:
 
 
 def open_worktree(name: str, lock_reason: str | None) -> Path:
-    """`nixconvoy open --child <name>`: the subagent worktree <root>/<worktrees>/<name>
-    (nixconvoy.toml's `worktrees`; root: the checkout this one's subagent
+    """`nixconvoy open --child <name>`: the child worktree <root>/<child_worktrees>/<name>
+    (nixconvoy.toml's `child_worktrees`; root: the checkout this one's subagent
     worktrees hang off) on the fresh branch worktree-<name> off origin's
     default branch - a worktree of that name is reused - owning <root's
     branch>-<name> from its first deploy.  Under the name lock prune holds
@@ -977,11 +977,7 @@ def open_worktree(name: str, lock_reason: str | None) -> Path:
     if name in names.gitmodule_names(root):
         die(f"{name} is a submodule of this checkout: a subagent worktree may not have its name")
     d = root / sub_dir() / name
-    # A nested worktree not ignored is an untracked directory `git add -A`
-    # would stage as a gitlink.
-    if not ok(["git", "check-ignore", "-q", "--no-index", str(d)], cwd=str(root)):
-        die(f"{sub_dir()}/ must be gitignored (a nested worktree): add it to .gitignore, "
-            f"or point nixconvoy.toml's `worktrees` at a directory that is")
+    ensure_excluded(root, d)
     branch = f"worktree-{name}"
     base = default_base(root)
     reason = lock_reason or f"nixconvoy open --child {name} {SESSIONLESS}"
@@ -1014,6 +1010,24 @@ def open_worktree(name: str, lock_reason: str | None) -> Path:
     finally:
         held.close()
     return die(f"could not create or reuse {d} (git's errors above)")
+
+
+def ensure_excluded(root: Path, d: Path) -> None:
+    """A nested worktree not ignored is an untracked directory `git add -A`
+    would stage as a gitlink: `d`'s directory is excluded through the
+    repository's .git/info/exclude (local to the clone, as Claude Code
+    excludes its own .claude/worktrees) unless something ignores it already."""
+    if ok(["git", "check-ignore", "-q", "--no-index", str(d)], cwd=str(root)):
+        return
+    exclude = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"],
+                       cwd=str(root)))
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    text = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    with exclude.open("a", encoding="utf-8") as f:
+        f.write(("" if not text or text.endswith("\n") else "\n") + f"/{sub_dir()}/\n")
+    if not ok(["git", "check-ignore", "-q", "--no-index", str(d)], cwd=str(root)):
+        die(f"{sub_dir()}/ must be ignored (a nested worktree) and {exclude} did not take: "
+            f"add it to .gitignore, or point nixconvoy.toml's `child_worktrees` at a directory that is")
 
 
 def default_base(root: Path) -> str:

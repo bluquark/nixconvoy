@@ -38,10 +38,11 @@ class Config:
     # A checkout owns "<prefix><leaf>", its subagent worktrees "<prefix><leaf>-<name>"
     # (the main checkout's "<prefix>main-<name>"); {machine} is this machine's hostname.
     branch_prefix: str = "work/{machine}/"
-    # Where `open --child <name>` puts a subagent worktree, relative to the checkout
-    # (gitignored: a nested worktree); any worktree nested in a checkout
-    # is one of its subagent worktrees, wherever it was made.
-    worktrees: str = "worktrees"
+    # Where `open --child <name>` puts a child (subagent) worktree, relative
+    # to the checkout: Claude Code's own place for one by default.  A nested
+    # worktree must be ignored (open writes it into .git/info/exclude); any
+    # worktree nested in a checkout is one of its children, wherever it was made.
+    child_worktrees: str = ".claude/worktrees"
     # A flake check (checks.<system>.<attr>) proven before any build.
     precheck_attr: str = ""
     # Determinate Nix's parallel evaluation (builtins.parallel, --eval-cores):
@@ -161,7 +162,7 @@ def parse(text: str) -> Config:
     version = doc.get("version", 1)
     if version != 1:
         raise ConfigError(f"{CONFIG_FILE}: version {version} is not supported (1 is)")
-    known = {"version", "flake", "hosts_dir", "system", "ssh_address", "branch_prefix", "worktrees",
+    known = {"version", "flake", "hosts_dir", "system", "ssh_address", "branch_prefix", "child_worktrees", "worktrees",
              "precheck", "eval", "build", "targets", "submodules"}
     if "memo" in doc:
         raise ConfigError(f"{CONFIG_FILE}: [memo] is gone: the eval memo needs no settings, it keys "
@@ -204,16 +205,20 @@ def parse(text: str) -> Config:
         if not repo:
             raise ConfigError(f"{CONFIG_FILE}: submodules.{name}.repo is required")
         submodules[name] = repo
-    worktrees = _str(doc, "worktrees", CONFIG_FILE, "worktrees").strip("/")
-    if not worktrees or ".." in worktrees.split("/"):
-        raise ConfigError(f"{CONFIG_FILE}: worktrees is a directory inside the checkout")
+    # `worktrees`, its former name, is still in trees older than the binary.
+    if "child_worktrees" in doc and "worktrees" in doc:
+        raise ConfigError(f"{CONFIG_FILE}: child_worktrees and worktrees (its former name) both given")
+    key = "worktrees" if "worktrees" in doc else "child_worktrees"
+    children = _str(doc, key, CONFIG_FILE, ".claude/worktrees").strip("/")
+    if not children or ".." in children.split("/"):
+        raise ConfigError(f"{CONFIG_FILE}: child_worktrees is a directory inside the checkout")
     return Config(
         flake=_str(doc, "flake", CONFIG_FILE, "."),
         hosts_dir=_str(doc, "hosts_dir", CONFIG_FILE),
         system=_str(doc, "system", CONFIG_FILE, "x86_64-linux"),
         ssh_template=_template(doc, "ssh_address", "{target}", "target"),
         branch_prefix=_template(doc, "branch_prefix", "work/{machine}/", "machine"),
-        worktrees=worktrees,
+        child_worktrees=children,
         precheck_attr=_str(pre, "attr", "precheck"),
         parallel_eval=_auto_bool(ev, "parallel", "eval"),
         builder=builder,

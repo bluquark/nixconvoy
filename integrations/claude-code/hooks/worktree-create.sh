@@ -4,7 +4,8 @@
 # take it for that checkout's own subagent.  This hands the creation to
 # `nixconvoy hook worktree-create` (nixconvoy --help: Hook) instead: the
 # worktree goes under the spawning checkout's own root
-# (<checkout>/<worktrees>/<name>, the directory nixconvoy.toml names,
+# (<checkout>/<child_worktrees>/<name>: .claude/worktrees, where Claude
+# Code would put it, unless nixconvoy.toml names another directory,
 # owning <checkout's branch>-<name>) on the fresh branch worktree-<name>
 # off origin's default branch, as Claude Code would (an existing worktree
 # of that name is reused, as `claude --worktree <name>` expects), locked
@@ -17,7 +18,8 @@
 # session's exit, and `nixconvoy close` the others (worktree-remove.sh
 # covers the removals Claude Code does make, a `claude --worktree`
 # session's).  hooks.json beside it wires the hooks up as the nixconvoy
-# plugin.  The nixconvoy is the package these hooks ship in, else the one
+# plugin (the isolation that sends a subagent here is the nixconvoy-isolate
+# plugin's).  The nixconvoy is the package these hooks ship in, else the one
 # on PATH; the hook's input passes through on stdin, the worktree's path
 # comes back on stdout.
 set -eu

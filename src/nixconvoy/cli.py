@@ -13,7 +13,7 @@ Model:
     main (or any other branch, another machine's work branch included) is a
     main checkout: it deploys main plus the pushed work branches and owns
     nothing.  A subagent worktree - one nested in a checkout,
-    <checkout>/<worktrees>/<name> by `open` - owns <parent's branch>-<name>
+    <checkout>/<child_worktrees>/<name> by `open` - owns <parent's branch>-<name>
     (<branch_prefix>main-<name> under a main checkout) from its first deploy.
     After a land, or an unapply back to origin/main, a checkout stays on
     its work branch, reset onto origin/main.
@@ -268,9 +268,11 @@ worktree never deployed has nothing to unapply: close --force discards it.
 
 Open (nixconvoy open <path> [--branch <work-branch>] | --child <worktree>
 | --submodule <input>): a worktree.  --child <worktree>: a subagent
-worktree of that name, <root>/worktrees/<worktree> (or under the directory
-nixconvoy.toml's `worktrees` names; either must be gitignored; root: the
-checkout this one's subagent worktrees hang off) on the fresh branch
+worktree of that name, <root>/.claude/worktrees/<worktree> (Claude Code's
+own place, or under the directory nixconvoy.toml's `child_worktrees`
+names; a nested worktree must be ignored, so the directory is written
+into .git/info/exclude unless it is already; root: the checkout this
+one's subagent worktrees hang off) on the fresh branch
 worktree-<worktree> off origin's default branch, owning <root's work
 branch>-<worktree> from its first deploy - what the Claude Code plugin's
 create hook makes for an isolated subagent (see Hook); one already opened

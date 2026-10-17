@@ -306,6 +306,7 @@ def target_cases() -> None:
                           ('target = "x@{host}"\n', "now ssh_address"),
                           ('[hosts.a]\n', "now targets"),
                           ('[build]\nhost = "b"\n', "now build.builder"),
+                          ('worktrees = "w"\nchild_worktrees = "w"\n', "both given"),
                           ('[targets.a]\ntarget = "x"\n', "now ssh_address"),
                           ('ssh_address = "x@{host}"\n', "over {target} alone"),
                           ('branch_prefix = "{host}-d"\n', "over {machine} alone")):
@@ -1801,7 +1802,6 @@ def open_cases(d: Path) -> None:
     sh(d, "init", "--quiet", "--bare", "-b", "main", str(origin))
     sh(d, "clone", "--quiet", str(origin), str(seed))
     put(seed, "deploy-branches", "work/tester/*\n")
-    put(seed, ".gitignore", "worktrees/\n")
     put(seed, "a.txt", "one\n", "seed")
     sh(seed, "push", "--quiet", "origin", "HEAD:main")
     sh(d, "clone", "--quiet", str(origin), str(co))
@@ -1811,7 +1811,10 @@ def open_cases(d: Path) -> None:
         with contextlib.redirect_stdout(io.StringIO()):
             checkout.ensure_on_work_branch("work/tester/9")
             w = commands.open_worktree("task", "claude agent task (pid 1 start 2) 3.4")
-        assert w == co / "worktrees/task" and checkout.branch_at(w) == "worktree-task"
+        assert w == co / ".claude/worktrees/task" and checkout.branch_at(w) == "worktree-task"
+        # Nothing ignored the directory: open excluded it for the clone.
+        assert "/.claude/worktrees/\n" in (co / ".git/info/exclude").read_text()
+        assert not sh(co, "status", "--porcelain")
         assert sh(w, "rev-parse", "HEAD") == sh(co, "rev-parse", "origin/main")
         assert checkout.worktree_lock(w) == "claude agent task (pid 1 start 2) 3.4"
         assert checkout.identity_of(w.resolve(), "worktree-task") == checkout.Checkout("sub", "work/tester/9-task")
@@ -1825,8 +1828,8 @@ def open_cases(d: Path) -> None:
         foreign = d / "foreign"
         sh(d, "init", "--quiet", "-b", "main", str(foreign))
         put(foreign, "f.txt", "f\n", "foreign")
-        sh(foreign, "worktree", "add", "--quiet", "--detach", str(co / "worktrees/foreign"))
-        assert checkout.sub_parent((co / "worktrees/foreign").resolve()) is None
+        sh(foreign, "worktree", "add", "--quiet", "--detach", str(co / ".claude/worktrees/foreign"))
+        assert checkout.sub_parent((co / ".claude/worktrees/foreign").resolve()) is None
         assert commands.subs_of(co.resolve()) == [w.resolve()]
         # review: a name is a subagent worktree (exact, or a unique prefix)
         # or a branch (the worktree on it), never a diff argument.
@@ -1850,9 +1853,9 @@ def open_cases(d: Path) -> None:
         # a branch is this repository's, never a sibling clone's.
         sh(co, "branch", "--quiet", "ta", "origin/main")
         assert names.resolve("ta", co) == "ta" and names.resolve("t", co) == w.resolve()
-        sh(co, "worktree", "add", "--quiet", "--detach", str(co / "worktrees/maintenance"), "origin/main")
-        assert names.resolve("main", co) == "main" and names.resolve("mai", co) == (co / "worktrees/maintenance").resolve()
-        sh(co, "worktree", "remove", "--force", str(co / "worktrees/maintenance"))
+        sh(co, "worktree", "add", "--quiet", "--detach", str(co / ".claude/worktrees/maintenance"), "origin/main")
+        assert names.resolve("main", co) == "main" and names.resolve("mai", co) == (co / ".claude/worktrees/maintenance").resolve()
+        sh(co, "worktree", "remove", "--force", str(co / ".claude/worktrees/maintenance"))
         sh(d, "clone", "--quiet", str(origin), str(d / "aclone"))
         sh(d / "aclone", "checkout", "--quiet", "-b", "work/tester/9", "origin/main")
         assert names.resolve("work/tester/9", co) == co.resolve()
@@ -1972,7 +1975,7 @@ def open_cases(d: Path) -> None:
             memo.eval_toplevels = real_eval
         assert not sh(co, "worktree", "list").count("deploy-wt")
         main = sh(co, "rev-parse", "origin/main")
-        assert sh(co, "ls-tree", "--name-only", main).split() == [".gitignore", "a.txt", "deploy-branches", "p.txt", "s.txt"]
+        assert sh(co, "ls-tree", "--name-only", main).split() == ["a.txt", "deploy-branches", "p.txt", "s.txt"]
         assert sh(co, "log", "-1", "--format=%B", main).strip() == (
             "the union\n\n- the sub's piece\n\nthe sub: s.txt\n- its detail")  # the sub's appended
         assert sh(co, "rev-parse", "HEAD") == main and checkout.branch_at(co) == "work/tester/9"
@@ -2060,8 +2063,8 @@ def open_cases(d: Path) -> None:
         # start time, then a token of the create; sessionless without one.
         with contextlib.redirect_stdout(io.StringIO()) as got:
             hooks.worktree_create("hooked", 1)
-        assert got.getvalue().strip() == str(co / "worktrees/hooked")
-        lock = checkout.worktree_lock(co / "worktrees/hooked") or ""
+        assert got.getvalue().strip() == str(co / ".claude/worktrees/hooked")
+        lock = checkout.worktree_lock(co / ".claude/worktrees/hooked") or ""
         assert lock.startswith("claude agent hooked (pid 1" + (" start " if Path("/proc/1/stat").exists() else ")")), lock
         assert checkout.lock_pid_alive(lock) is True
         stdin0, sys.stdin, sys.argv = sys.stdin, io.StringIO(json.dumps({"name": "viahook", "cwd": str(co)})), ["nixconvoy", "hook", "worktree-create"]
@@ -2073,8 +2076,8 @@ def open_cases(d: Path) -> None:
             sys.stdin, sys.argv = stdin0, argv0
             if project0 is not None:
                 os.environ["CLAUDE_PROJECT_DIR"] = project0
-        assert got.getvalue().strip() == str(co / "worktrees/viahook")
-        assert (checkout.worktree_lock(co / "worktrees/viahook") or "").startswith("claude agent viahook ")
+        assert got.getvalue().strip() == str(co / ".claude/worktrees/viahook")
+        assert (checkout.worktree_lock(co / ".claude/worktrees/viahook") or "").startswith("claude agent viahook ")
         # The session a hook acts for: the nearest ancestor named claude.
         if Path("/proc/self").exists():
             fake = d / "claude"

@@ -1,11 +1,18 @@
 {
   "name": "nixconvoy",
-  "owner": { "name": "bluquark" },
+  "owner": {
+    "name": "bluquark"
+  },
   "plugins": [
     {
       "name": "nixconvoy",
       "source": "./integrations/claude-code",
       "description": "Subagent worktrees under the spawning checkout, each owning a nixconvoy work branch"
+    },
+    {
+      "name": "nixconvoy-isolate",
+      "source": "./integrations/claude-code-isolate",
+      "description": "Every subagent given its own worktree (isolation: worktree) - separate, since a second hook rewriting the Agent call would race it"
     }
   ]
 }
