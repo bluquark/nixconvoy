@@ -176,9 +176,8 @@ branch_prefix = "work/{machine}/"    # {machine}: this machine's hostname: a che
                                      # ("<prefix>main-<name>" under a plain checkout)
 worktrees = "worktrees"      # where `open --child <worktree>` puts a subagent worktree, under the checkout (gitignored)
 
-[precheck]                   # a flake check proven before any build
+[precheck]                   # a flake check proven before any build (a pass memoized on the union's tree)
 attr = "repo-lint"           # checks.<system>.<attr>
-globs = ["nixos/*.nix", "*.py"]   # the files it reads: its memo keys on exactly these
 
 [memo]                       # an overlay whose attributes map 1:1 onto files
 overlay = "nixos/pkgs/default.nix"

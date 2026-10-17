@@ -100,8 +100,9 @@ Deploy (nixconvoy apply [<target> | @<tag> ...] [-m <msg>] [--evict]
      or the push of its branch that keeps it.  Work of a branch
      deploy-branches does not list stays refused until listed.  When the configuration
      names a precheck (a flake check), it runs on a thread beside the evals
-     unless a pass is already proven for exactly the files it reads, and a
-     failure stops the deploy the moment it is known.  A drifting candidate
+     unless a pass is already proven for the union's tree (nix rebuilds it
+     only when a file it reads changed), and a failure stops the deploy the
+     moment it is known.  A drifting candidate
      whose boot counting rejected its new toplevel stops the deploy before
      anything is built.  Each target to be switched gets its deploy record:
      a commit of the union's tree whose message carries the lineage below,
@@ -159,8 +160,9 @@ An increment that changes nothing any target's evaluation reads (the eval
 memo's read scan over the staged snapshot, no eval: docs, dotfiles, a
 COMMIT_MSG.md) is committed onto the work branch and pushed without a
 deploy - nothing probed, evaluated, built or switched, the commit's
-trailers Reaches: none and Applied: none - after the precheck when a
-staged file is one it reads.  Nothing need be reachable.  The targets' drift
+trailers Reaches: none and Applied: none - after the precheck unless
+its tree has a proven pass; the precheck needs the builder when one is
+set.  The targets' drift
 (another branch's work, main's) waits for the next deploy reaching one, or
 for an apply naming targets, which always deploys; an apply with nothing
 staged converges every target on the union.  The scan sees the staged

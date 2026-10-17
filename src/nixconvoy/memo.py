@@ -1,7 +1,8 @@
 """The eval memo: each target's toplevel (and the switch policy its
 configuration declares) keyed by exactly what its evaluation can read, so a
 change to a module one target imports re-evaluates that target alone and a
-no-op redeploy evaluates nothing; the precheck gate memoized the same way."""
+no-op redeploy evaluates nothing; the precheck's pass memoized on the
+union's tree."""
 
 from __future__ import annotations
 
@@ -12,9 +13,8 @@ import re
 import subprocess
 import sys
 import time
-from collections.abc import Collection, Iterable
+from collections.abc import Collection
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import NamedTuple
 
@@ -108,8 +108,8 @@ def memo_dir() -> Path:
 
 def memo_prune(d: Path) -> None:
     """Drop entries whose .drv was garbage-collected or older than
-    MEMO_MAX_AGE.  A precheck entry proves content, not a .drv
-    (precheck_memo_path), so only age applies to it."""
+    MEMO_MAX_AGE.  A precheck entry proves a tree, not a .drv, so only
+    age applies to it."""
     now = time.time()
     for path in d.iterdir():
         ent = memo_read(path)
@@ -537,36 +537,27 @@ def eval_toplevels(wt: str, union: str, targets: list[str],
     return tops
 
 
-def precheck_files(paths: Iterable[str]) -> list[str]:
-    """The paths among `paths` the precheck reads (precheck_globs)."""
-    globs = cfg().precheck_globs
-    return [q for q in paths if any(fnmatchcase(q, g) for g in globs)]
+def precheck_memo_path(rev: str) -> Path:
+    """The precheck memo entry for `rev`'s tree.  Keyed on the whole tree
+    (so nothing declares what the check reads; nix's own hash of the
+    check's inputs spares the build when a changed tree left those alone),
+    written only once the check passed, so presence is the proof."""
+    tree = out(["git", "rev-parse", rev + "^{tree}"])
+    return memo_dir() / f"check-{cfg().precheck_attr}-{tree}.json"
 
 
-def precheck_memo_path(objs: dict[str, tuple[str, str]]) -> Path:
-    """The precheck memo entry for a tree, keyed by the git object ids of
-    the files it reads.  precheck_gate writes it only once the check of
-    that exact content passed, so presence is the proof."""
-    read = set(precheck_files(objs))
-    parts = sorted(f"{oid} {q}" for q, (t, oid) in objs.items()
-                   if t == "blob" and q in read)
-    parts.append(f"attr {cfg().precheck_attr}")
-    key = hashlib.sha256("\n".join(parts).encode()).hexdigest()
-    return memo_dir() / f"check-{key}.json"
-
-
-def precheck_gate(wt: str, objs: dict[str, tuple[str, str]]) -> str | None:
-    """Prove the precheck (the flake's checks.<system>.<attr>) for the tree
-    in `wt`: the failure text, or None once it passes, from the memo or by
-    building it.  Its own build rather than an input of the toplevels', so
-    a violation is reported before any package build is scheduled and never
-    sways the toplevel build's sandbox decision.  Output is captured (-L:
-    the whole report, not nix's log tail) and the caller dies, since this
-    runs on a thread beside the target evals."""
+def precheck_gate(wt: str, rev: str) -> str | None:
+    """Prove the precheck (the flake's checks.<system>.<attr>) for `rev`,
+    checked out in `wt`: the failure text, or None once it passes, from the
+    memo or by building it.  Its own build rather than an input of the
+    toplevels', so a violation is reported before any package build is
+    scheduled and never sways the toplevel build's sandbox decision.
+    Output is captured (-L: the whole report, not nix's log tail) and the
+    caller dies, since this runs on a thread beside the target evals."""
     from .targets import build_drvs  # noqa: PLC0415 - targets imports this module
 
     c = cfg()
-    path = precheck_memo_path(objs)
+    path = precheck_memo_path(rev)
     if memo_read(path) is not None:
         return None
     flake = f"{wt}/{c.flake_path}" if c.flake_path != "." else wt
@@ -583,5 +574,5 @@ def precheck_gate(wt: str, objs: dict[str, tuple[str, str]]) -> str | None:
     return err
 
 
-def precheck_unproven(objs: dict[str, tuple[str, str]]) -> bool:
-    return bool(cfg().precheck_attr) and memo_read(precheck_memo_path(objs)) is None
+def precheck_unproven(rev: str) -> bool:
+    return bool(cfg().precheck_attr) and memo_read(precheck_memo_path(rev)) is None

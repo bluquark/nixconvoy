@@ -51,10 +51,8 @@ class Config:
     # (gitignored: a nested worktree); any worktree nested in a checkout
     # is one of its subagent worktrees, wherever it was made.
     worktrees: str = "worktrees"
-    # A flake check (checks.<system>.<attr>) proven before any build,
-    # memoized on the git object ids of the files matching `globs`.
+    # A flake check (checks.<system>.<attr>) proven before any build.
     precheck_attr: str = ""
-    precheck_globs: tuple[str, ...] = ()
     # The overlay whose attributes map one-to-one onto files, so a target's
     # eval memo keys only on the attribute files its modules name:
     # `<x> = ... ./<file>.nix` lines, named as pkgs.<namespace>.<x>.
@@ -227,7 +225,6 @@ def parse(text: str) -> Config:
         branch_prefix=_template(doc, "branch_prefix", "work/{machine}/", "machine"),
         worktrees=worktrees,
         precheck_attr=_str(pre, "attr", "precheck"),
-        precheck_globs=_strs(pre, "globs", "precheck"),
         overlay=overlay, overlay_namespace=namespace,
         parallel_eval=_auto_bool(ev, "parallel", "eval"),
         builder=builder,

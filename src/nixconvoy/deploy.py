@@ -101,22 +101,19 @@ def increment_reaches(snap: str, all_targets: list[str]) -> bool:
 
 def commit_unreached(wb: str, msg: str, snap: str) -> None:
     """The increment `snap`, reaching no target: committed onto `wb` and
-    pushed, after the precheck when a staged file is one it reads (no
-    build gates it), with nothing probed, evaluated, built or switched -
-    the targets have nothing to catch up on from it."""
-    paths = out(["git", "diff", "--name-only", "HEAD", snap]).splitlines()
-    if memo.precheck_files(paths):
-        objs = memo.union_objects(snap)
-        if memo.precheck_unproven(objs):
-            targets.check_builder()
-            wt = add_worktree(snap)
-            try:
-                print("running the precheck...")
-                err = memo.precheck_gate(wt, objs)
-            finally:
-                drop_worktree(wt)
-            if err:
-                die(f"{err}; nothing was committed")
+    pushed, after the precheck unless its tree has a proven pass (no build
+    gates it), with nothing probed, evaluated, built or switched - the
+    targets have nothing to catch up on from it."""
+    if memo.precheck_unproven(snap):
+        targets.check_builder()
+        wt = add_worktree(snap)
+        try:
+            print("running the precheck...")
+            err = memo.precheck_gate(wt, snap)
+        finally:
+            drop_worktree(wt)
+        if err:
+            die(f"{err}; nothing was committed")
     PERF.mark("commit-push")
     commit_deployed(wb, snap, f"{msg}\n\nReaches: none\nApplied: none")
     push_work_branch(wb)
@@ -427,14 +424,13 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                 f"committed:\n{ann.detail}")
         PERF.mark("eval")
         memo.memo_prune(memo.memo_dir())
-        objs = memo.union_objects(union)
         # The precheck gates the union, not the increment: a branch rebased
         # by pull/land, a skip-switch push or a merge of two passing
         # branches can each carry a violation no increment introduced.
         check: Future[str | None] | None = None
-        if memo.precheck_unproven(objs):
+        if memo.precheck_unproven(union):
             check_pool = ThreadPoolExecutor(1)
-            check = check_pool.submit(memo.precheck_gate, wt, objs)
+            check = check_pool.submit(memo.precheck_gate, wt, union)
             check_pool.shutdown(wait=False)
         print("evaluating targets..." if check is None else "evaluating targets, running the precheck...")
         tops = memo.eval_toplevels(wt, union, [h for h in all_targets if running.get(h) is not None],
