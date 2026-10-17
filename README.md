@@ -179,10 +179,6 @@ worktrees = "worktrees"      # where `open --child <worktree>` puts a subagent w
 [precheck]                   # a flake check proven before any build (a pass memoized on the union's tree)
 attr = "repo-lint"           # checks.<system>.<attr>
 
-[memo]                       # an overlay whose attributes map 1:1 onto files
-overlay = "nixos/pkgs/default.nix"
-namespace = "homelab"        # named as pkgs.homelab.<attr>
-
 [eval]
 parallel = true              # force Determinate Nix's parallel evaluation (default "auto": on when nix has it)
 
@@ -217,6 +213,31 @@ nixconvoy.switchLast = true;                # the router: switched alone, after 
 
 `nixconvoy.nixosModules.boot-assessment` adds `nixconvoy.bootAssessment.*`
 (requires lanzaboote).
+
+### The eval memo
+
+A deploy evaluates a target only when something its evaluation can read
+changed: each target is keyed on `flake.nix`, its `hosts/<name>/`,
+transitively every repo path a scanned `.nix` file names by path literal,
+and the lock entries of the flake inputs those files mention.  The scan is
+lexical, so the flake keeps two habits for the memo to hit:
+
+- **Import files, not directories.**  A directory named by a path
+  (`import ./pkgs`, a fileset rooted at `../.`, a `readDir`) counts whole,
+  and one that holds the flake directory - the repository root included -
+  keys the target on the whole tree; a deploy says so, with the file that
+  names it.  The precheck attribute's stanza in `flake.nix`
+  (`<attr> = import ./lint.nix { ... };`) is skipped: no target's
+  evaluation reads the check.
+- **Reach the repo's own packages by import at the use site**
+  (`import ../pkgs/foo.nix { inherit pkgs; }`), not through an overlay or
+  another attribute set: an attribute's laziness is invisible to the scan,
+  so an overlay applied to every host keys every host on every file it
+  names.
+
+`specialArgs` must be a flat `{ inherit a b; }` of inputs: `self` or
+`inputs` handed to the modules can reach anything, and keys every target
+on the whole tree.
 
 ## Commands
 

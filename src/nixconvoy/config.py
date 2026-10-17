@@ -44,11 +44,6 @@ class Config:
     worktrees: str = "worktrees"
     # A flake check (checks.<system>.<attr>) proven before any build.
     precheck_attr: str = ""
-    # The overlay whose attributes map one-to-one onto files, so a target's
-    # eval memo keys only on the attribute files its modules name:
-    # `<x> = ... ./<file>.nix` lines, named as pkgs.<namespace>.<x>.
-    overlay: str = ""
-    overlay_namespace: str = ""
     # Determinate Nix's parallel evaluation (builtins.parallel, --eval-cores):
     # None is "auto", on when the nix here knows the feature.
     parallel_eval: bool | None = None
@@ -167,12 +162,14 @@ def parse(text: str) -> Config:
     if version != 1:
         raise ConfigError(f"{CONFIG_FILE}: version {version} is not supported (1 is)")
     known = {"version", "flake", "hosts_dir", "system", "ssh_address", "branch_prefix", "worktrees",
-             "precheck", "memo", "eval", "build", "targets", "submodules"}
+             "precheck", "eval", "build", "targets", "submodules"}
+    if "memo" in doc:
+        raise ConfigError(f"{CONFIG_FILE}: [memo] is gone: the eval memo needs no settings, it keys "
+                          "each target on the files its configuration reaches by path literal")
     for k in doc:
         if k not in known:
             raise ConfigError(f"{CONFIG_FILE}: unknown key {k}{_renamed(k)}")
     pre = _table(doc.get("precheck", {}), "precheck")
-    memo = _table(doc.get("memo", {}), "memo")
     ev = _table(doc.get("eval", {}), "eval")
     build = _table(doc.get("build", {}), "build")
     for k in build:
@@ -207,10 +204,6 @@ def parse(text: str) -> Config:
         if not repo:
             raise ConfigError(f"{CONFIG_FILE}: submodules.{name}.repo is required")
         submodules[name] = repo
-    overlay = _str(memo, "overlay", "memo")
-    namespace = _str(memo, "namespace", "memo")
-    if bool(overlay) != bool(namespace):
-        raise ConfigError("memo.overlay and memo.namespace go together")
     worktrees = _str(doc, "worktrees", CONFIG_FILE, "worktrees").strip("/")
     if not worktrees or ".." in worktrees.split("/"):
         raise ConfigError(f"{CONFIG_FILE}: worktrees is a directory inside the checkout")
@@ -222,7 +215,6 @@ def parse(text: str) -> Config:
         branch_prefix=_template(doc, "branch_prefix", "work/{machine}/", "machine"),
         worktrees=worktrees,
         precheck_attr=_str(pre, "attr", "precheck"),
-        overlay=overlay, overlay_namespace=namespace,
         parallel_eval=_auto_bool(ev, "parallel", "eval"),
         builder=builder,
         build_unreachable_hint=_str(build, "unreachable_hint", "build"),

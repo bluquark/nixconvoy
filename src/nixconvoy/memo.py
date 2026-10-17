@@ -123,19 +123,9 @@ def memo_prune(d: Path) -> None:
 
 # A Nix path literal inside a .nix file: ./x, ../files/x.py, ../lib (a
 # directory).  The lookbehind keeps "foo/../bar" fragments inside strings from
-# matching; a stray shell "../" in a string merely widens the key.
+# matching; a stray shell "../" in a string widens the key, one climbing to
+# the repository root to the whole tree (said on stderr, naming the file).
 PATH_LITERAL = re.compile(r"(?<![\w/.\-])(\.\.?/[\w.+\-/]*)")
-# The configured overlay: its attributes are lazy, so a target reads only the
-# files behind the attributes its own modules name (`pkgs.<ns>.<x>`, a
-# python set's `ps.<x>`), each defined on one line as `<x> = ... ./<file>.nix`.
-# A name counts where Nix could resolve it to an attribute: after a dot, in
-# an inherit-from list, or anywhere in a file with a `with` scope; a file
-# whose code reaches the namespace some other way (as a value, by a `${}`
-# attribute) names every attribute.
-OVERLAY_ATTR = re.compile(r"^\s*([\w\-]+)\s*=.*?(\./[\w.+\-/]*\.nix)", re.MULTILINE)
-ATTR_NAME = re.compile(r'\."?([\w\-]+)|inherit\s*\([^)]*\)\s*([^;]*);')
-WITH_SCOPE = re.compile(r"\bwith\s+\(?[\w.\-/ ]+\)?\s*;")
-NIX_COMMENT = re.compile(r"/\*.*?\*/|#[^\n]*", re.DOTALL)
 WORD = re.compile(r"[A-Za-z][\w\-]*")
 # flake.nix's outputs argument list and mkHost's specialArgs literal name
 # every input; what remains of flake.nix names the inputs it uses itself.
@@ -156,25 +146,19 @@ def union_objects(union: str) -> dict[str, tuple[str, str]]:
 
 
 @functools.cache
-def eval_key_shape(wt: str) -> dict[str, str] | None:
-    """The overlay's attribute -> file map for target_eval_key (empty with no
-    overlay configured), or None when flake.nix's specialArgs is not
-    `{ inherit <names>; }` (said once, not per target): an alias would hand a
-    module an input under a name the scan cannot tie back to the lock,
-    `self` or `inputs` the whole tree."""
-    c = cfg()
-    flake = (Path(wt) / c.flake_file("flake.nix")).read_text()
+def scan_sound(wt: str) -> bool:
+    """Whether the read scan can be trusted: flake.nix's specialArgs is
+    `{ inherit <names>; }` (said once, not per target, when it is not): an
+    alias would hand a module an input under a name the scan cannot tie
+    back to the lock, `self` or `inputs` the whole tree."""
+    flake = (Path(wt) / cfg().flake_file("flake.nix")).read_text()
     for m in re.finditer(r"specialArgs\s*=\s*(\{[^{}]*\}|[^;]*);", flake):
         if not (re.fullmatch(r"\{\s*inherit(\s+[\w\-]+)+\s*;\s*\}", m.group(1))
                 and not re.search(r"\b(self|inputs)\b", m.group(1))):
             print("eval memo: flake.nix's specialArgs is not an inherit list; "
                   "keying every target on the whole tree", file=sys.stderr)
-            return None
-    if not c.overlay:
-        return {}
-    overlay = (Path(wt) / c.overlay).read_text()
-    return {a: os.path.normpath(Path(c.overlay).parent / f)
-            for a, f in OVERLAY_ATTR.findall(overlay)}
+            return False
+    return True
 
 
 def lock_part(lock: object, named: Collection[str]) -> str:
@@ -228,49 +212,47 @@ def lock_part(lock: object, named: Collection[str]) -> str:
 
 
 @functools.cache
-def overlay_regexes(ns: str) -> tuple[re.Pattern[str], re.Pattern[str]]:
-    """Any use of the overlay namespace `ns`, and its `inherit (pkgs.ns)`."""
-    return (re.compile(rf"pkgs\.{re.escape(ns)}(?![.\w\-])|{re.escape(ns)}\.\$\{{"),
-            re.compile(rf"inherit\s*\(\s*pkgs\.{re.escape(ns)}\s*\)"))
-
-
-@functools.cache
-def file_facts(wt: str, f: str) -> tuple[frozenset[str], tuple[str, ...], tuple[str, ...]]:
+def file_facts(wt: str, f: str) -> tuple[frozenset[str], tuple[str, ...]]:
     """What the .nix file `f` of the tree checked out in `wt` contributes to
-    target_eval_reads, the same whichever target asks: the words it names,
-    the repo paths its path literals name (a directory named counts whole;
-    the overlay file for the overlay's directory; outside the repo, `.` and
-    the overlay's own attribute files skipped) and the overlay attribute
-    files it uses.  Cached, since the targets' scans share most files."""
+    target_eval_reads, the same whichever target asks: the words it names
+    and the repo paths its path literals name (a directory named counts
+    whole, `.` being the repository; one outside it skipped, as is, in
+    flake.nix, the precheck attribute's `<attr> = import <path> { ... };`
+    stanza, which no target's evaluation reads).  Cached, since the
+    targets' scans share most files."""
     c = cfg()
-    flake_nix, overlay, ns = c.flake_file("flake.nix"), c.overlay, c.overlay_namespace
-    attr_files = eval_key_shape(wt) or {}
+    flake_nix = c.flake_file("flake.nix")
     text = (Path(wt) / f).read_text()
     # Comments left in: over-naming costs an eval, a `#` in a string
     # hiding a name would serve a stale toplevel.
+    skipped: set[str] = set()
+    scan = text
     if f == flake_nix:
         m = OUTPUTS_ARGS.search(text)
-        named = frozenset(WORD.findall(SPECIAL_ARGS.sub("", text[m.end():] if m else text)))
+        words = SPECIAL_ARGS.sub("", text[m.end():] if m else text)
+        if c.precheck_attr:
+            # `checks.<system>.<attr> = import <path> { ... };`, or a bare
+            # `<attr> = import <path>` binding when none is written so: the
+            # whole stanza is dropped where its braces are flat, else the
+            # import alone.
+            leaf = rf"{re.escape(c.precheck_attr)}\s*=\s*import\s+(\.\.?/[\w.+\-/]*)"
+            stanza = next((p for p in (rf"checks\.[^\s=]*\.{leaf}", rf"(?<![\w\-.]){leaf}")
+                           if re.search(p, text)), None)
+            if stanza:
+                for m in re.finditer(stanza, text):
+                    skipped.add(os.path.normpath(Path(f).parent / m.group(1)))
+                scan = re.sub(stanza + r"\s*\{[^{}]*\}\s*;", "", text)
+                words = re.sub(stanza + r"\s*\{[^{}]*\}\s*;", "", words)
+        named = frozenset(WORD.findall(words))
     else:
         named = frozenset(WORD.findall(text))
     refs: list[str] = []
-    for m in PATH_LITERAL.finditer(text):
+    for m in PATH_LITERAL.finditer(scan):
         ref = os.path.normpath(Path(f).parent / m.group(1))
-        if ref.startswith("..") or Path(ref).is_absolute() or ref == ".":
-            continue  # outside the repo: not readable by the flake
-        if overlay and f == overlay and ref in attr_files.values():
+        if ref.startswith("..") or Path(ref).is_absolute() or ref in skipped:
             continue
-        refs.append(overlay if overlay and ref == str(Path(overlay).parent) else ref)
-    uses: list[str] = []
-    if overlay and f != overlay and ns:
-        any_name, inherit_ns = overlay_regexes(ns)
-        code = inherit_ns.sub("", NIX_COMMENT.sub("", text))
-        names = (attr_files if any_name.search(code) else
-                 WORD.findall(text) if WITH_SCOPE.search(code) else
-                 [n for m in ATTR_NAME.finditer(text)
-                  for n in ([m.group(1)] if m.group(1) else WORD.findall(m.group(2)))])
-        uses = sorted(attr_files[n] for n in set(names) if n in attr_files)
-    return named, tuple(refs), tuple(uses)
+        refs.append(ref)
+    return named, tuple(refs)
 
 
 @functools.cache
@@ -283,10 +265,12 @@ def target_eval_reads(wt: str, union: str, target: str) -> tuple[frozenset[str],
     scan is lexical (PATH_LITERAL, file_facts), sound for a path built by
     concatenation as long as its directory is named literally.  No scan can
     follow a module reading another configuration through specialArgs
-    (`self`, or the whole `inputs`), so unless eval_key_shape rules that out
-    the answer is None: the whole tree.  The overlay's attribute files count
-    only when a scanned file names the attribute."""
-    if eval_key_shape(wt) is None:
+    (`self`, or the whole `inputs`), so unless scan_sound rules that out
+    the answer is None: the whole tree.  A directory holding the flake
+    itself among the reads (the repository root, `.`, included) is the
+    whole tree too, said on stderr with the file that names it, since the
+    memo then never hits."""
+    if not scan_sound(wt):
         return None
     c = cfg()
     flake_nix, hosts_dir = c.flake_file("flake.nix"), c.hosts_path
@@ -297,9 +281,14 @@ def target_eval_reads(wt: str, union: str, target: str) -> tuple[frozenset[str],
                           and q.startswith(hosts_dir + "/") and q != f"{hosts_dir}/{target}")
     seen: set[str] = set()
     todo = [flake_nix, f"{hosts_dir}/{target}"]
+    via: dict[str, str] = {}
     named: set[str] = set()
     while todo:
         path = todo.pop()
+        if path == ".":
+            print(f"eval memo: {target} keys on the whole repository: {via[path]} names its root "
+                  f"(a directory named by a path counts whole)", file=sys.stderr)
+            return None
         if path in seen or path not in objs:
             continue
         seen.add(path)
@@ -309,10 +298,18 @@ def target_eval_reads(wt: str, union: str, target: str) -> tuple[frozenset[str],
         for f in files:
             if not f.endswith(".nix"):
                 continue
-            words, refs, uses = file_facts(wt, f)
+            words, refs = file_facts(wt, f)
             named.update(words)
-            todo.extend(ref for ref in refs if not (f == flake_nix and ref.startswith(other_targets)))
-            todo.extend(uses)
+            for ref in refs:
+                if f == flake_nix and ref.startswith(other_targets):
+                    continue
+                via.setdefault(ref, f)
+                todo.append(ref)
+    flake_dir = str(Path(flake_nix).parent)
+    for q in sorted(seen):
+        if objs[q][0] == "tree" and (q == flake_dir or flake_dir.startswith(q + "/")):
+            print(f"eval memo: {target} keys on the whole {q}/ tree: {via[q]} names it "
+                  f"(a directory named by a path counts whole)", file=sys.stderr)
     # An input taken as a relative path is read from the tree: its
     # directory, or the gitlink of a submodule (a commit object in objs).
     seen.update(q for n, q in path_inputs(wt).items() if n in named and q in objs)

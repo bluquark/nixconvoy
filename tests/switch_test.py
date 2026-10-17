@@ -570,11 +570,11 @@ def scratch_env() -> None:
                        "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_NOSYSTEM": "1",
                        "GIT_CONFIG_GLOBAL": os.devnull})
     proc.this_machine = lambda: "tester"
-    # The scratch repos keep their flake under nixos/ with a pkgs overlay.
-    config.set_cfg(config.parse('flake = "nixos"\n[memo]\noverlay = "nixos/pkgs/default.nix"\n'
-                                'namespace = "homelab"\n'))
+    # The scratch repos keep their flake under nixos/, with a repo lint as
+    # the precheck.
+    config.set_cfg(config.parse('flake = "nixos"\n[precheck]\nattr = "lint"\n'))
     memo.union_objects.cache_clear()
-    memo.eval_key_shape.cache_clear()
+    memo.scan_sound.cache_clear()
     memo.target_eval_reads.cache_clear()
     memo.path_inputs.cache_clear()
     memo.file_facts.cache_clear()
@@ -590,18 +590,24 @@ def reach_cases(d: Path) -> None:
     sh(d, "init", "--quiet", "--bare", "-b", "main", str(origin))
     sh(d, "clone", "--quiet", str(origin), str(co))
     lock = {"version": 7, "root": "root", "nodes": {
-        "root": {"inputs": {"nixpkgs": "nixpkgs", "p": "p", "q": "q"}},
-        "nixpkgs": {"locked": {"rev": "n1"}}, "p": {"locked": {"rev": "p1"}}, "q": {"locked": {"rev": "q1"}}}}
-    put(co, "nixos/flake.nix", "{\n  outputs = { self, nixpkgs, p, q }: {\n"
+        "root": {"inputs": {"nixpkgs": "nixpkgs", "p": "p", "q": "q", "r": "r"}},
+        "nixpkgs": {"locked": {"rev": "n1"}}, "p": {"locked": {"rev": "p1"}}, "q": {"locked": {"rev": "q1"}},
+        "r": {"locked": {"rev": "r1"}}}}
+    put(co, "nixos/flake.nix", "{\n  outputs = { self, nixpkgs, p, q, r }: {\n"
         "    hosts = [ ./hosts/a/configuration.nix ./hosts/b/configuration.nix ];\n"
-        "    specialArgs = { inherit p q; };\n  };\n}\n")
+        "    specialArgs = { inherit p q; };\n"
+        "    checks.x86_64-linux.lint = import ./lint/check.nix {\n      inherit r;\n      root = ../.;\n    };\n"
+        "    lib.lint = import ./lib/lint.nix { };\n  };\n}\n")
     put(co, "nixos/flake.lock", proc.dump_json(lock))
-    put(co, "nixos/pkgs/default.nix", "final: prev: {\n  tool = import ./tool.nix;\n  other = import ./other.nix;\n}\n")
+    # The lint reads the whole flake directory; skipped as the precheck.
+    put(co, "nixos/lint/check.nix", "{ }: { src = ../.; }\n")
     put(co, "nixos/pkgs/tool.nix", "1\n")
     put(co, "nixos/pkgs/other.nix", "1\n")
+    # Named like the precheck attribute, but under `lib`: flake.nix reads it.
+    put(co, "nixos/lib/lint.nix", "1\n")
     put(co, "nixos/hosts/a/configuration.nix", "{ p, ... }: { imports = [ ../../modules/x.nix ]; }\n")
     put(co, "nixos/hosts/b/configuration.nix", "{ q, ... }: { imports = [ ../../modules/y.nix ]; }\n")
-    put(co, "nixos/modules/x.nix", "{ pkgs, ... }: { environment.systemPackages = [ pkgs.homelab.tool ]; }\n")
+    put(co, "nixos/modules/x.nix", "{ pkgs, ... }: { environment.systemPackages = [ (import ../pkgs/tool.nix) ]; }\n")
     put(co, "nixos/modules/y.nix", "{ ... }: { }\n")
     put(co, "deploy-branches", f"{wb}*\n")
     put(co, "README.md", "docs\n", "seed")
@@ -617,6 +623,7 @@ def reach_cases(d: Path) -> None:
             tip = sh(co, "rev-parse", "HEAD")
             memo.union_objects.cache_clear()
             memo.target_eval_reads.cache_clear()
+            memo.file_facts.cache_clear()
             memo.path_inputs.cache_clear()
             return memo.reached_targets(str(co), tip, targets, tip, lineages or {})
 
@@ -628,13 +635,45 @@ def reach_cases(d: Path) -> None:
         assert reached() == set()
         put(co, "README.md", "docs, more\n", "docs")
         assert reached() == set()
-        put(co, "nixos/modules/x.nix", "{ pkgs, ... }: { environment.systemPackages = [ pkgs.homelab.tool ]; x = 1; }\n", "x")
+        put(co, "nixos/modules/x.nix", "{ pkgs, ... }: { environment.systemPackages = [ (import ../pkgs/tool.nix) ]; x = 1; }\n", "x")
         c_x = sh(co, "rev-parse", "HEAD")
         assert reached() == {"a"}
-        # The overlay's attribute files count for the targets naming them.
+        # A package file counts for the targets importing it; one nothing
+        # imports reaches no target, though the precheck's lint names its
+        # whole directory.
         put(co, "nixos/pkgs/tool.nix", "2\n", "tool")
         put(co, "nixos/pkgs/other.nix", "2\n", "other")
         assert reached({"a": lineage(**{wb: c_x})}) == {"a"}
+        c_tool = sh(co, "rev-parse", "HEAD")
+        put(co, "nixos/pkgs/other.nix", "3\n", "other again")
+        assert reached({"a": lineage(**{wb: c_tool}), "b": lineage(**{wb: c_tool})}) == set()
+        c_tool = sh(co, "rev-parse", "HEAD")
+        put(co, "nixos/lib/lint.nix", "2\n", "lib lint")
+        assert reached({"a": lineage(**{wb: c_tool}), "b": lineage(**{wb: c_tool})}) == {"a", "b"}
+        c_tool = sh(co, "rev-parse", "HEAD")
+        # A module naming a directory that holds the flake keys its target
+        # on the whole tree, and the scan says so.
+        put(co, "nixos/modules/y.nix", "{ ... }: { all = ../.; }\n", "y whole")
+        c_whole = sh(co, "rev-parse", "HEAD")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            assert reached({"a": lineage(**{wb: c_tool}), "b": lineage(**{wb: c_tool})}) == {"b"}
+        assert "b keys on the whole nixos/ tree: nixos/modules/y.nix names it" in err.getvalue(), err.getvalue()
+        # ...so an edit nothing imports reaches it from then on.
+        put(co, "nixos/pkgs/other.nix", "4\n", "other under whole")
+        with contextlib.redirect_stderr(io.StringIO()):
+            assert reached({"a": lineage(**{wb: c_whole}), "b": lineage(**{wb: c_whole})}) == {"b"}
+        # The repository root likewise: the flake's source is the whole repo.
+        put(co, "nixos/modules/y.nix", "{ ... }: { all = ../..; }\n", "y root")
+        c_root = sh(co, "rev-parse", "HEAD")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            assert reached({"a": lineage(**{wb: c_whole}), "b": lineage(**{wb: c_whole})}) == {"b"}
+        assert "b keys on the whole repository: nixos/modules/y.nix names its root" in err.getvalue(), err.getvalue()
+        put(co, "README.md", "docs, under root\n", "docs under root")
+        with contextlib.redirect_stderr(io.StringIO()):
+            assert reached({"a": lineage(**{wb: c_root}), "b": lineage(**{wb: c_root})}) == {"b"}
+        put(co, "nixos/modules/y.nix", "{ ... }: { }\n", "y plain")
         c_tool = sh(co, "rev-parse", "HEAD")
         # A lock bump reaches the targets whose files name the input.
         lock["nodes"]["q"]["locked"]["rev"] = "q2"
@@ -642,6 +681,11 @@ def reach_cases(d: Path) -> None:
         c_q = sh(co, "rev-parse", "HEAD")
         assert reached() == {"a", "b"}
         assert reached({"a": lineage(**{wb: c_tool})}) == {"b"}
+        # An input only the precheck's stanza names reaches no target.
+        lock["nodes"]["r"]["locked"]["rev"] = "r2"
+        put(co, "nixos/flake.lock", proc.dump_json(lock), "bump r")
+        assert reached({"a": lineage(**{wb: c_q}), "b": lineage(**{wb: c_q})}) == set()
+        c_q = sh(co, "rev-parse", "HEAD")
         # What a target already runs of this branch is not new work for it:
         # a recorded tip between the merge base and HEAD narrows the delta,
         # one at HEAD empties it, an unknown or foreign one is ignored.
