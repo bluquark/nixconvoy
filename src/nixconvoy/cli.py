@@ -235,11 +235,11 @@ whether they are pushed, staged/unstaged/untracked counts, the
 COMMIT_MSG.md subject, a deploy or git operation in progress - then the
 work branches only origin holds (other machines' checkouts).
 
-Review (nixconvoy review [<worktree> | <branch> ... | --with-children] [<diff-arg> ...]):
-the review of
-the pending landing (review.py; `git review`, in the package's bin, is
-the same): COMMIT_MSG.md, then the diff against the merge-base with
-origin's default branch, then the submodules'.  A name is a subagent
+Review (nixconvoy review [<worktree> | <submodule> | <branch> ... | --with-children]
+[<diff-arg> ...]): the review of the pending landing (review.py; `git
+review`, in the package's bin, is the same): COMMIT_MSG.md, then the diff
+against the merge-base with origin's default branch, then the submodules'.
+A name is a subagent
 worktree's, a submodule's (that one alone) or a branch's (the worktree on
 it, else the branch against its merge-base, so a submodule branch reviews
 from its repository too); one that is none of these is an error;
@@ -425,7 +425,7 @@ hook <event> < <hook-input>
 = Deploying and committing changes
 apply [<target> | @<tag> ...] [-m <msg>] [--evict] [--allow <protection> ...] [--dry-activate]
 unapply [<worktree> ... | --with-children] [--back-to <rev>] [--allow <protection> ...]
-review [<worktree> | <branch> ... | --with-children] [<diff-arg> ...]
+review [<worktree> | <submodule> | <branch> ... | --with-children] [<diff-arg> ...]
 land [<worktree> ... | --with-children] [-m <msg>] [--not-yet-applied]
 """
 USAGE_NOTES = """\
@@ -447,9 +447,11 @@ to --back-to <rev> (HEAD^ by default: the latest one; origin/main: the whole
 branch): the work branch is reset onto <rev> (the reflog keeps the tip),
 then a deploy follows at once.  --with-children acts on this checkout and
 its subagent worktrees as one unit.  <worktree> is a subagent worktree's
-name (a unique prefix will do) or a branch a worktree here is on; a path
-(with a /, no branch here) names an agent checkout; review and close take
-a submodule's name too, review any branch.
+name (a unique prefix will do) or a branch a worktree on this machine is
+on: land and unapply act in that worktree, so a branch with none here is
+refused, while review, which only reads, takes any <branch> (against its
+merge-base) and a <submodule>'s name too.  A <path> (with a /, no branch
+here) is an agent checkout's.
 hook <event> (session-start, subagent-stop or worktree-create) is the
 plugin's hook of that event, which its hooks/<event>.sh runs with the
 hook's input on stdin - never typed by hand."""

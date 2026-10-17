@@ -238,13 +238,15 @@ nixconvoy open --submodule <input>   the flake input developed in place under th
 nixconvoy apply [<target> | @<tag> ...] [-m <msg>] [--evict] [--dry-activate]   deploy the staged increment (-m: its message, default "<checkout>: increment <n>"), or with nothing staged converge the targets on the union as it is; --dry-activate: build and copy, then only report what each switch would do
 nixconvoy unapply [<worktree> ... | --with-children] [--back-to <rev>]   undo the increments from HEAD back to <rev> (default HEAD^, the latest one; origin/main: the whole branch): the branch reset there, then a deploy reverting them on the targets (--with-children: every subagent worktree holding increments, then this checkout, one deploy)
 nixconvoy land [<worktree> ... | --with-children] [-m <msg>] [--not-yet-applied]   land the work branch on main (--with-children: this checkout and its subagent worktrees as one unit, one main commit with the subs' COMMIT_MSG.md appended; -m: under <msg>, for a branch without COMMIT_MSG.md; --not-yet-applied: targets its increments held back included)
-nixconvoy review [<worktree> | <branch> ... | --with-children] [<diff-arg> ...]   the pending landing: COMMIT_MSG.md, then the diff (--with-children: the checkout's and its subagent worktrees' together)
+nixconvoy review [<worktree> | <submodule> | <branch> ... | --with-children] [<diff-arg> ...]   the pending landing: COMMIT_MSG.md, then the diff (--with-children: the checkout's and its subagent worktrees' together)
 
 ```
 
 A `<worktree>` is a subagent worktree's name (a unique prefix will do) or
-a branch a worktree on this machine is on; review and close take a
-submodule's name too, review any branch.
+a branch a worktree on this machine is on: `land` and `unapply` act in that
+worktree, so a branch with none here is refused, while `review`, which only
+reads, takes any `<branch>` (against its merge-base) and a `<submodule>`'s
+name too.
 
 `nixconvoy --help` and the docstring of `src/nixconvoy/cli.py` describe each
 step of a deploy in full.
