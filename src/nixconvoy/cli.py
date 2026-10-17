@@ -407,7 +407,7 @@ from typing import IO, NoReturn
 from . import commands, hooks, names, proc, review, submodule
 from .checkout import lock_checkout, require_work_branch, sub_parent
 from .deploy import deploy
-from .proc import PERF, PERF_FILE, TOOL, die, git, ok, out, painter
+from .proc import PERF, TOOL, die, git, ok, out, painter
 from .targets import ALLOW_FLAG
 
 # The synopsis: one line per form under its section's heading (= ...).
@@ -530,7 +530,7 @@ def main() -> None:
         os.chdir(start)  # its paths are the caller's
         sys.exit(review.main(args))
     if subcmd not in ("status", "close", "open"):
-        atexit.register(PERF.write, Path.cwd() / PERF_FILE)
+        atexit.register(PERF.write, Path.cwd())
     msg: str | None = None
     evict = False
     allow: set[str] = set()

@@ -17,13 +17,24 @@ from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import IO, NoReturn
 
-PERF_FILE = "nixconvoy-perf.jsonl"
 TOOL = "nixconvoy"
+
+
+PERF_ROTATE_BYTES = 2 << 20
+
+
+def xdg_dir(var: str, default: str) -> Path:
+    """The XDG base directory `var` names; `default` under HOME when it is
+    unset or relative (the spec says to ignore a relative value)."""
+    v = os.environ.get(var)
+    return Path(v) if v and Path(v).is_absolute() else Path.home() / default
 
 
 class Perf:
     """Phase timings plus the slowest subprocess calls, appended as one JSON
-    line per run to PERF_FILE (via atexit, so failed runs log too)."""
+    line per run (via atexit, so failed runs log too) to one log per machine
+    under the XDG state dir, since timings compare across a host's checkouts;
+    the previous PERF_ROTATE_BYTES of it are kept as perf.jsonl.1."""
 
     def __init__(self) -> None:
         self.t0 = time.monotonic()
@@ -42,7 +53,7 @@ class Perf:
         if secs >= 0.2:
             self.calls.append((secs, self.phase, " ".join(cmd[:8])))
 
-    def write(self, path: Path) -> None:
+    def write(self, cwd: Path) -> None:
         self.mark("end")
         merged: dict[str, float] = {}
         for name, secs in self.phases:
@@ -50,6 +61,7 @@ class Perf:
         phases = {k: round(v, 2) for k, v in merged.items() if v >= 0.05}
         rec = {
             "ts": self.ts,
+            "cwd": str(cwd),
             "argv": sys.argv[1:],
             "total": round(time.monotonic() - self.t0, 2),
             "phases": phases,
@@ -57,13 +69,17 @@ class Perf:
                            for s, p, c in sorted(self.calls, reverse=True)[:15]],
         }
         try:
+            path = xdg_dir("XDG_STATE_HOME", ".local/state") / TOOL / "perf.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists() and path.stat().st_size >= PERF_ROTATE_BYTES:
+                path.replace(path.with_suffix(".jsonl.1"))
             with path.open("a") as f:
                 f.write(dump_json(rec) + "\n")
-        except OSError:
+        except (OSError, RuntimeError):  # RuntimeError: no resolvable HOME
             return
         summary = " ".join(f"{k} {v}s" for k, v in phases.items()
                            if k not in ("startup", "end"))
-        print(f"perf: total {rec['total']}s ({summary}) -> {PERF_FILE}")
+        print(f"perf: total {rec['total']}s ({summary}) -> {path}")
 
 
 PERF = Perf()

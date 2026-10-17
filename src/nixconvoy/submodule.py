@@ -345,7 +345,7 @@ def store(name: str, url: str) -> Path:
     repo = configured().get(name)
     if repo is not None and (repo / ".git").exists():
         return repo
-    cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "nixconvoy" / "submodules" / f"{name}.git"
+    cache = proc.xdg_dir("XDG_CACHE_HOME", ".cache") / "nixconvoy" / "submodules" / f"{name}.git"
     if not cache.is_dir():
         cache.parent.mkdir(parents=True, exist_ok=True)
         p = run(["git", "clone", "--quiet", "--bare", url, str(cache)], check=False, timeout=600)
