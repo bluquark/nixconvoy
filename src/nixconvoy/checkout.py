@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import IO, NamedTuple
@@ -403,11 +404,12 @@ def ensure_rebased() -> None:
     decide("rebase", mode="ensure_rebased")
 
 
-def sibling_checkouts() -> list[Path]:
-    """The other checkouts of this repo on this machine: its worktrees (not
-    a run's throwaway ones) and the clones beside it with the same origin."""
-    here = Path.cwd().resolve()
-    origin = out(["git", "remote", "get-url", "origin"])
+def sibling_checkouts(here: Path | None = None) -> list[Path]:
+    """The other checkouts of this repo on this machine (`here`'s, the
+    current directory's by default): its worktrees (not a run's throwaway
+    ones) and the clones beside it with the same origin."""
+    here = (here or Path.cwd()).resolve()
+    origin = out(["git", "remote", "get-url", "origin"], cwd=str(here))
     found: set[Path] = set()
 
     def worktrees(of: Path) -> None:
@@ -1076,9 +1078,8 @@ def lock_pid_alive(reason: str) -> bool | None:
     return True
 
 
-def ancestor_pids() -> set[int]:
-    """The pids of this process's ancestors (via /proc, else ps)."""
-    found: set[int] = set()
+def ancestors() -> Iterator[int]:
+    """This process's ancestors, nearest first (via /proc, else ps)."""
     pid = os.getpid()
     while pid > 1:
         stat = proc_stat(pid)
@@ -1087,11 +1088,14 @@ def ancestor_pids() -> set[int]:
         else:
             parent = run(["ps", "-o", "ppid=", "-p", str(pid)], check=False).stdout.strip()
             if not parent.isdigit():
-                break
+                return
             pid = int(parent)
         if pid > 1:
-            found.add(pid)
-    return found
+            yield pid
+
+
+def ancestor_pids() -> set[int]:
+    return set(ancestors())
 
 
 def lock_live(reason: str) -> bool:

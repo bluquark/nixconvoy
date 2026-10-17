@@ -6,13 +6,11 @@ its own (a submodule worktree reviewed from its repository), so it shows
 everything pending against main (COMMIT_MSG.md itself left out unless
 paths are given); then each submodule worktree under the checkout, from
 the merge-base with its origin's default branch.  Leading arguments name
-what to show instead of this checkout: a subagent worktree (nested in
-this checkout, else in any checkout of this repository; a unique prefix
-each), a submodule of this checkout (its worktree against its origin's
-default branch) or a
-branch (the worktree checked out on it, else the branch's tip against
-its merge-base, the message from its tree); one that is none of these,
-nor a path here, is an error, never a diff argument.  --with-subagents shows this
+what to show instead of this checkout (names.resolve): a subagent
+worktree, a submodule of this checkout (its worktree against its origin's
+default branch) or a branch (the worktree checked out on it, else the
+branch's tip against its merge-base, the message from its tree); one that
+is none of these, nor a path here, is an error, never a diff argument.  --with-subagents shows this
 checkout and then each subagent worktree nested in it.  The rest goes to
 git diff.  One pager stream on a terminal keeps the messages visible on
 long diffs; colors are per-line, since less -R drops attributes at line
@@ -27,10 +25,11 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import IO
 
-from . import submodule
+from . import names, submodule
 from .checkout import sub_parent
 from .config import BRANCHES_FILE, MSG_FILE
 from .proc import die, painter, run
+from .submodule import Sub
 
 EXCLUDE_MSG = f":(top,exclude){MSG_FILE}"
 
@@ -60,38 +59,12 @@ def default_of(d: Path) -> str:
     return head or "origin/main"
 
 
-def resolve(name: str, here: Path, top: Path, all_wts: dict[Path, str | None]) -> Path | str | None:
-    """What `name` shows: a subagent worktree (its exact name anywhere,
-    else a unique prefix - this checkout's first), else this checkout's
-    submodule `name`, else the worktree on the branch `name`, else that
-    branch itself; None when nothing."""
-    subs = [w for w in all_wts if sub_parent(w) is not None]
-    for sub in submodule.present(top):
-        if sub.name == name:
-            return sub.dir
-    for w in subs:
-        if w.name == name:
-            return w
-    for pool in ([w for w in all_wts if top in w.parents], subs):
-        hits = [w for w in pool if w.name.startswith(name)]
-        if len(hits) == 1:
-            return hits[0]
-        if len(hits) > 1:
-            die(f"review: {name} is ambiguous among the subagent worktrees {', '.join(w.name for w in hits)}")
-    if run(["git", "rev-parse", "-q", "--verify", f"refs/heads/{name}"], cwd=str(here), check=False).returncode == 0:
-        for w, b in all_wts.items():
-            if b == name:
-                return w
-        return name
-    return None
-
-
-def targets(args: list[str], here: Path) -> tuple[list[Path | str], list[str]]:
-    """The leading names resolved (--with-subagents: this checkout and its subagent
-    worktrees), and the arguments left for git diff."""
+def targets(args: list[str], here: Path) -> tuple[list[Path | Sub | str], list[str]]:
+    """The leading names resolved (names.resolve; --with-subagents: this
+    checkout and its subagent worktrees), and the arguments left for git
+    diff."""
     top = toplevel(here)
-    all_wts = worktrees(here)
-    found: list[Path | str] = []
+    found: list[Path | Sub | str] = []
     with_subs = False
     rest = list(args)
     while rest:
@@ -102,13 +75,13 @@ def targets(args: list[str], here: Path) -> tuple[list[Path | str], list[str]]:
             continue
         if a.startswith("-") or (here / a).exists():
             break
-        got = resolve(a, here, top, all_wts)
+        got = names.resolve(a, here)
         if got is None:
             die(f"review: no subagent worktree, submodule, branch or path named {a}")
         found.append(got)
         rest.pop(0)
     if with_subs:
-        found = [top, *sorted(w for w in all_wts if top in w.parents)]
+        found = [top, *sorted(w for w in worktrees(here) if top in w.parents)]
     return found, rest
 
 
@@ -225,9 +198,9 @@ def main(args: list[str]) -> int:
             if isinstance(t, str):
                 o.line(f"══ branch {t} ══", "heading")
                 show_branch(o, here, t, rest)
-            elif (named := [s.name for s in submodule.present(toplevel(here)) if s.dir == t]):
-                o.line(f"══ submodule {named[0]} ══", "heading")
-                show(o, t, rest, all_wts)
+            elif isinstance(t, Sub):
+                o.line(f"══ submodule {t.name} ══", "heading")
+                show(o, t.dir, rest, all_wts)
             else:
                 parent = sub_parent(t)
                 o.line(f"══ {parent.name + '/' if parent else ''}{t.name} ══", "heading")

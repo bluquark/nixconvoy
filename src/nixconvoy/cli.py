@@ -184,7 +184,7 @@ branch, so it switches the target to this checkout's view alone, without
 the held work, the hold standing.  `status` shows what each checkout holds
 back.
 
-Land (nixconvoy land [<name> ... | --with-subagents] [-m <msg>] [--not-yet-applied]):
+Land (nixconvoy land [<worktree> ... | --with-subagents] [-m <msg>] [--not-yet-applied]):
 commit the work branch's tree minus COMMIT_MSG.md onto origin/main with
 COMMIT_MSG.md as the message (or -m <msg>, for a branch without the file:
 both at once is refused), push
@@ -193,8 +193,9 @@ checkout staying on it.  Every other checkout on this machine is then
 brought onto the new main (see Pull); checkouts on other machines rebase
 at their next deploy.  A subagent worktree stays too, idle on its reset branch:
 `close` removes it (the session-exit sweep does, once its agent is done).
-Run from any checkout with the worktrees' <name>s (a unique prefix will do),
-land and unapply act on each in turn.  A branch holding a target back (see
+Run from any checkout with <worktree>s - each a subagent worktree's name
+(a unique prefix will do) or a branch a worktree here is on - land and
+unapply act on each in turn.  A branch holding a target back (see
 Apply) is refused unless --not-yet-applied: the landed work then rolls out
 there with the next deploy from anywhere.  The checkout's submodules land first
 (see Open).
@@ -245,7 +246,7 @@ from its repository too); one that is none of these is an error;
 --with-subagents reviews this checkout and then each subagent worktree; the
 rest are git diff arguments.
 
-Unapply (nixconvoy unapply [<name> ... | --with-subagents] [--back-to <rev>]
+Unapply (nixconvoy unapply [<worktree> ... | --with-subagents] [--back-to <rev>]
 [--allow <protection> ...]): undo this checkout's increments on the
 targets, from HEAD back to <rev> (HEAD^ by default: the latest one;
 origin/main, or anything older: the whole branch) - each a deploy's
@@ -258,22 +259,24 @@ follows at once, from the checkout unapply ran in, whose verdict names
 what it reverts ("will switch (catch-up: ...; reverting <branch>'s
 abandoned increment <sha>)"); it takes --allow.  The old tip remains
 reachable via the reflog; untracked files survive; a subagent worktree
-stays (close removes it).  <name>s: the subagent worktrees to do it in,
-each in turn; --with-subagents: every subagent worktree holding
+stays (close removes it).  <worktree>s: the subagent worktrees to do it
+in (as for land), each in turn; --with-subagents: every subagent worktree holding
 increments, then this checkout - one deploy for all, run here.  A
 worktree never deployed has nothing to unapply: close --force discards it.
 
-Open (nixconvoy open [--lock <reason>] <name> | [--branch <work-branch>] <path> |
---submodule <input>): a worktree.  <name> (no / in it): a subagent worktree,
-<root>/<worktrees>/<name> (nixconvoy.toml's `worktrees`, `worktrees/` by
-default, which must be gitignored; root: the checkout this one's subagent
-worktrees hang off) on the fresh branch worktree-<name> off origin's
-default branch, owning <root's work branch>-<name> from its first deploy
-- what Claude Code's worktree isolation makes through the plugin's
-WorktreeCreate hook, which runs this with --lock naming its session; a
-name already opened is reused.  A worktree nested in a checkout is its
-subagent worktree wherever it was made.  <path> (with a /): an agent
-checkout beside the others - a worktree of this repository at that path,
+Open (nixconvoy open <worktree> | [--branch <work-branch>] <path> |
+--submodule <input>): a worktree.  <worktree> (no / in it): a subagent
+worktree of that name, <root>/worktrees/<worktree> (or under the directory
+nixconvoy.toml's `worktrees` names; either must be gitignored; root: the
+checkout this one's subagent worktrees hang off) on the fresh branch
+worktree-<worktree> off origin's default branch, owning <root's work
+branch>-<worktree> from its first deploy - what the Claude Code plugin's
+create hook makes for an isolated subagent (see Hook); one already opened
+is reused.  Opened by hand, it is locked as sessionless: the sweeps keep it
+until `close <worktree>` names it.  A worktree nested in a checkout is its
+subagent worktree wherever it was made.  <path> (with a /; close takes
+one that is a branch here as the branch): an agent checkout beside the
+others - a worktree of this repository at that path,
 outside every checkout, on a work branch of this machine's: --branch, else
 <branch_prefix><N> for the digits the path's name ends with (homelab5 ->
 work/<machine>/5) when that is listed and free, else the first listed free
@@ -312,43 +315,56 @@ is never deployed from: status flags edits there, and nixconvoy leaves a
 `nixconvoy-submodule` marker in its git dir for a pre-commit hook to
 refuse an agent's commit on its default branch there.
 
-Close (nixconvoy close [--force] [<name> ...] | [--force] <path> ... | --submodule <input> |
---after PID | --stopped PID): remove a worktree.  The named subagent
-worktrees when they hold nothing of their own - never deployed, no staged,
-unstaged or untracked change, HEAD and its work branch on origin, no
-submodule holding anything -
-with their fresh branch, as nixconvoy-plan's prune core decides (a named
-one's lock counts its session as ended for it); --force removes a named
-one whatever it holds, with its branches and submodules, here and on origin.
-With no name, every one under this checkout (a sweep), where one whose
-spawning claude session still runs is kept, whichever session asks: the
-session may resume its agent, which needs the worktree.  So is one at
-work (a nixconvoy, git operation or push running in it), on a work branch
-(land or unapply decides it), locked by hand (or, in a sweep, unlocked) or
-holding anything; each kept one is said so, as is one a process works in.
-It all happens under a lock on the worktree's name, which open takes too,
-and the removal claims the lock it judged and leaves git to refuse a
-worktree locked meanwhile.  --submodule <input>: that submodule's
-worktree with its branch, here and on its origin (the last tip kept under
-refs/nixconvoy/past/<branch>/<sha> there while a pushed branch or deploy
-record pins it), unless that would lose work - edits, commits not on the default branch, a pin still off it
-- which --force overrides, the pin then put back to origin/main's,
-staged; the directory stays, empty, as an unpopulated submodule.  <path>:
-an agent checkout (never the primary worktree), with its work branch here
-and on origin, when it holds nothing of its own - no edits, nothing beyond
-origin/main, no submodule holding anything - or --force.  `--after
-PID` detaches, sweeps what dead sessions left, waits for the claude session
-PID to exit and sweeps again (one waiter per session, logged to
-nixconvoy-prune.log in the common git dir): the Claude Code plugin's
-SessionStart hook starts it, so a subagent's worktree with nothing of its
-own goes when its session ends.  `--stopped PID`, the SubagentStop hook's,
-takes that hook's input on stdin and, detached, removes the stopped
-agent's worktree sooner, at its stop, when it holds nothing of its own, no
-process or other running agent works in it and, a few seconds on, the
-agent has not run again (a message or Claude Code's own follow-up turn)
-and no resume relocked it, whether session PID runs or not: resuming the
-agent recreates it (the PreToolUse hook on SendMessage).  It keeps a
-worktree whose lock names no session.
+Close (nixconvoy close [<worktree> ...] [--force] | <path> ... [--force] |
+--submodule <input> [--force]): remove a worktree.  The named subagent
+worktrees (<worktree>: as for land) when they hold nothing of their own -
+never deployed, no staged, unstaged or untracked change, HEAD and its
+work branch on origin, no submodule holding anything - with their fresh
+branch, as nixconvoy-plan's prune core decides (a named one's lock counts
+its session as ended for it); --force removes a named one whatever it
+holds, with its branches and submodules, here and on origin.  With no
+name, every one under this checkout (a sweep), where one whose spawning
+claude session still runs is kept, whichever session asks: the session
+may resume its agent, which needs the worktree.  So is one at work (a
+nixconvoy, git operation or push running in it), on a work branch (land
+or unapply decides it), locked by hand (or, in a sweep, unlocked) or
+holding anything; each kept one is said so, as is one a process works
+in.  It all happens under a lock on the worktree's name, which open takes
+too, and the removal claims the lock it judged and leaves git to refuse a
+worktree locked meanwhile.  The plugin's hooks run these removals on
+their own as agents stop and sessions exit (see Hook).  --submodule
+<input>: that submodule's worktree with its branch, here and on its
+origin (the last tip kept under refs/nixconvoy/past/<branch>/<sha> there
+while a pushed branch or deploy record pins it), unless that would lose
+work - edits, commits not on the default branch, a pin still off it -
+which --force overrides, the pin then put back to origin/main's, staged;
+the directory stays, empty, as an unpopulated submodule.  <path>: an
+agent checkout (never the primary worktree), with its work branch here
+and on origin, when it holds nothing of its own - no edits, nothing
+beyond origin/main, no submodule holding anything - or --force.
+
+Hook (nixconvoy hook <event>): the Claude Code plugin's hook of that
+event - session-start, subagent-stop or worktree-create - run by
+integrations/claude-code/hooks/<event>.sh with the hook's JSON input on
+stdin, never by hand.  Each acts for the claude session it runs under
+(the nearest claude ancestor of its process) in the repository Claude
+Code runs it for (CLAUDE_PROJECT_DIR, else the input's cwd); the two
+prunes do nothing outside a nixconvoy repository.  worktree-create:
+`open <name>` for the input's name under the session's checkout, the
+worktree locked with the session's pid and start time (how status and
+close tell whether the session that may resume the agent still runs)
+plus a token of this create, so a lock taken again - a reuse, a resume -
+never reads as one a close judged before; with no session found it is
+locked as sessionless; prints the path.  subagent-stop: detached, the
+stopped agent's worktree (where its transcript starts) removed when it
+holds nothing of its own, no process or other running agent of the
+session works in it and, a few seconds on, the agent has not run again
+(a message, or Claude Code's own follow-up turn) and no resume relocked
+it - whether its session still runs or not: a resume recreates it (the
+plugin's PreToolUse hook on SendMessage).  session-start: detached, a
+sweep of what dead sessions left, then, once this session exits, a sweep
+of what its agents' stops kept (one waiter per session).  Both log to
+nixconvoy-prune.log in the common git dir.
 
 --evict evicts every other work branch from the targets it switches: they
 run this checkout's view alone, the other branches left out of the union
@@ -382,14 +398,13 @@ nixconvoy-switch (the nix package sets it)."""
 from __future__ import annotations
 
 import atexit
-import json
 import os
 import re
 import sys
 from pathlib import Path
 from typing import IO, NoReturn
 
-from . import commands, proc, review, submodule
+from . import commands, hooks, names, proc, review, submodule
 from .checkout import lock_checkout, require_work_branch, sub_parent
 from .deploy import deploy
 from .proc import PERF, PERF_FILE, TOOL, die, git, ok, out, painter
@@ -400,15 +415,14 @@ from .targets import ALLOW_FLAG
 # follows it under --help only.
 SYNOPSIS = """\
 = Managing worktrees
-open <name> [--lock <reason>]
+open <worktree>
 open <path> [--branch <work-branch>]
 open --submodule <input>
 close [<worktree> ... | <path> ...] [--force]
 close --submodule <input> [--force]
-close --after <pid>
-close --stopped <pid> < <hook-input>
 pull
 status
+hook <event> < <hook-input>
 = Deploying and committing changes
 apply [<target> | @<tag> ...] [-m <msg>] [--evict] [--allow <protection> ...] [--dry-activate]
 unapply [<worktree> ... | --with-subagents] [--back-to <rev>] [--allow <protection> ...]
@@ -433,8 +447,13 @@ unapply reverts this checkout's increments on the targets, from HEAD back
 to --back-to <rev> (HEAD^ by default: the latest one; origin/main: the whole
 branch): the work branch is reset onto <rev> (the reflog keeps the tip),
 then a deploy follows at once.  --with-subagents acts on this checkout and
-its subagent worktrees as one unit; a path (with a /) names an agent
-checkout."""
+its subagent worktrees as one unit.  <worktree> is a subagent worktree's
+name (a unique prefix will do) or a branch a worktree here is on; a path
+(with a /, no branch here) names an agent checkout; review takes a
+submodule's name and any branch too.
+hook <event> (session-start, subagent-stop or worktree-create) is the
+plugin's hook of that event, which its hooks/<event>.sh runs with the
+hook's input on stdin - never typed by hand."""
 
 
 def usage(stream: IO[str] | None = None) -> str:
@@ -493,9 +512,15 @@ def main() -> None:
         print(usage())
         print(USAGE_NOTES)
         return
-    if args[0] not in ("apply", "land", "unapply", "close", "pull", "status", "review", "open"):
+    if args[0] not in ("apply", "land", "unapply", "close", "pull", "status", "review", "open", "hook"):
         bad_usage()
     subcmd = args.pop(0)
+    if subcmd == "hook":
+        # Where Claude Code runs it, which need not be a repository.
+        if len(args) != 1 or args[0] not in hooks.EVENTS:
+            bad_usage()
+        hooks.run_hook(args[0])
+        return
     start = Path.cwd()
     os.chdir(out(["git", "rev-parse", "--show-toplevel"]))
     # A dead run's leftovers, seen from every worktree; the age spares a
@@ -511,12 +536,9 @@ def main() -> None:
     allow: set[str] = set()
     dry = False
     back_to: str | None = None
-    names: list[str] = []
-    after = ""
-    stopped = ""
+    given: list[str] = []
     sub_name: str | None = None
     sub_flag = False
-    lock_reason: str | None = None
     branch: str | None = None
     force = False
     with_subs = False
@@ -529,8 +551,6 @@ def main() -> None:
             sub_flag = True
         elif a == "--submodule" and subcmd == "close" and args:
             sub_name = args.pop(0)
-        elif a == "--lock" and subcmd == "open" and args:
-            lock_reason = args.pop(0)
         elif a == "--branch" and subcmd == "open" and args:
             branch = args.pop(0)
         elif a == "--with-subagents" and subcmd in ("land", "unapply"):
@@ -539,10 +559,6 @@ def main() -> None:
             not_yet_applied = True
         elif a == "--force" and subcmd == "close":
             force = True
-        elif a == "--after" and subcmd == "close" and args and args[0].isdigit():
-            after = args.pop(0)
-        elif a == "--stopped" and subcmd == "close" and args and args[0].isdigit():
-            stopped = args.pop(0)
         elif a == "--evict":
             evict = True
         elif a == ALLOW_FLAG and args and not args[0].startswith("-"):
@@ -556,63 +572,56 @@ def main() -> None:
             print(USAGE_NOTES)
             return
         elif not a.startswith("-"):
-            names.append(a)
+            if a not in given:
+                given.append(a)
         else:
             bad_usage()
 
     if subcmd == "pull":
-        if msg or evict or allow or dry or names:
+        if msg or evict or allow or dry or given:
             bad_usage()
         commands.pull()  # takes each checkout's lock itself, this one included
         return
     if subcmd == "status":
-        if msg or evict or allow or dry or names:
+        if msg or evict or allow or dry or given:
             bad_usage()
         commands.status()
         return
     if subcmd == "open":
-        if msg or evict or allow or dry or len(names) != 1 or (branch and (sub_flag or lock_reason)) \
-                or (sub_flag and lock_reason):
+        if msg or evict or allow or dry or len(given) != 1 or (branch and sub_flag):
             bad_usage()
         if sub_flag:
-            submodule.create(names[0], require_work_branch("open --submodule"))
-        elif is_path(names[0]):
-            if lock_reason:
-                bad_usage()
-            commands.open_checkout(start / Path(names[0]).expanduser(), branch)
+            submodule.create(given[0], require_work_branch("open --submodule"))
+        elif is_path(given[0], "open"):
+            commands.open_checkout(start / Path(given[0]).expanduser(), branch)
         elif branch:
             bad_usage()
         else:
-            commands.open_worktree(names[0], lock_reason)
+            commands.open_worktree(given[0], None)
         return
     if sub_name is not None:
-        if names or back_to or evict or dry or allow or after or stopped or with_subs or not_yet_applied or msg is not None:
+        if given or back_to or evict or dry or allow or with_subs or not_yet_applied or msg is not None:
             bad_usage()
         take_lock()
         commands.close_submodule(sub_name, force=force)
         return
     if subcmd == "close":
-        if msg or evict or allow or dry or ((after or stopped) and (names or force)) or (after and stopped):
+        if msg or evict or allow or dry:
             bad_usage()
-        if stopped:
-            stop = json.loads(sys.stdin.read() or "{}")
-            commands.prune_stopped(int(stopped), stop if isinstance(stop, dict) else {})
-        elif after:
-            commands.prune_after(int(after))
-        elif any(is_path(n) for n in names):
-            if not all(is_path(n) for n in names):
+        if any(is_path(n, "close") for n in given):
+            if not all(is_path(n, "close") for n in given):
                 bad_usage()
             take_lock()
-            for n in names:
+            for n in given:
                 commands.close_checkout(start / Path(n).expanduser(), force=force)
         else:
-            commands.close_worktrees(names, force=force)
+            commands.close_worktrees(given, force=force)
         return
     top = Path.cwd()
     here = top.resolve()
     if subcmd in ("land", "unapply"):
-        if evict or dry or (allow and subcmd != "unapply") or (with_subs and names) \
-                or (msg is not None and (subcmd != "land" or not msg.strip() or len(names) > 1)):
+        if evict or dry or (allow and subcmd != "unapply") or (with_subs and given) \
+                or (msg is not None and (subcmd != "land" or not msg.strip() or len(given) > 1)):
             bad_usage()
         if with_subs and subcmd == "land":
             take_lock()
@@ -623,15 +632,19 @@ def main() -> None:
             # Each sub holding increments, then this checkout.
             if sub_parent(here) is not None:
                 die("unapply --with-subagents runs from the checkout the worktrees hang off")
-            names = [str(d) for d in commands.subs_of(here) if commands.has_increments(d)]
+            given = [str(d) for d in commands.subs_of(here) if commands.has_increments(d)]
             parent_too = commands.has_increments(here)
-            if not names and not parent_too:
+            if not given and not parent_too:
                 die("nothing to unapply here or in any subagent worktree")
-        named = [Path(n) if with_subs else commands.find_sub(n) for n in names]
+        # Each worktree once, however many of its names were given.
+        each: dict[Path, str] = {}
+        for n in given:
+            each.setdefault(Path(n) if with_subs else names.worktree(n, here, subcmd, subagent=False), n)
+        given, named = list(each.values()), list(each.keys())
         deploys_from = here
         # The deploy runs from a checkout the unapply does not reset, whose
         # staged changes it would have to carry without a message.
-        if (subcmd == "unapply" and names and here not in named and not parent_too
+        if (subcmd == "unapply" and given and here not in named and not parent_too
                 and not ok(["git", "diff", "--cached", "--quiet"], cwd=str(deploys_from))):
             die(f"{deploys_from} has staged changes, which unapply's deploy "
                 "would carry: deploy or unstage them first")
@@ -639,8 +652,8 @@ def main() -> None:
         # own checkout's lock.  An unapply that fails in one stops none of
         # the others, and what the rest undid is deployed all the same.
         due, failed = False, []
-        for name, d in zip(names, named, strict=True):
-            if len(names) > 1 or parent_too:
+        for name, d in zip(given, named, strict=True):
+            if len(given) > 1 or parent_too:
                 print(f"== {d.name}")
             os.chdir(d)
             lock = lock_checkout()
@@ -655,7 +668,7 @@ def main() -> None:
                     proc.DYING = False
                     failed.append(d.name)
             lock.close()
-        if names or with_subs:
+        if given or with_subs:
             if subcmd == "unapply":
                 os.chdir(deploys_from)
                 take_lock()
@@ -681,13 +694,17 @@ def main() -> None:
         if dry and msg is not None:
             # Accepted so a deploy's command line reruns with the flag added.
             print(f"note: -m does nothing with {DRY_FLAG}: nothing is committed", file=sys.stderr)
-        deploy(names, msg, evict, frozenset(allow), dry)
+        deploy(given, msg, evict, frozenset(allow), dry)
 
 
-def is_path(arg: str) -> bool:
+def is_path(arg: str, verb: str) -> bool:
     """An open/close argument naming an agent checkout by its path rather
-    than a subagent worktree by its name."""
-    return "/" in arg or arg.startswith("~")
+    than a subagent worktree by its name (no / in one) or, for close, a
+    branch (work/<machine>/N has slashes too): one written as a path, or
+    with a / in it when it is no branch of this repository."""
+    if arg.startswith(("/", "~", "./", "../")) or arg.endswith("/"):
+        return True
+    return "/" in arg and (verb == "open" or not ok(["git", "rev-parse", "-q", "--verify", f"refs/heads/{arg}"]))
 
 
 def take_lock() -> None:

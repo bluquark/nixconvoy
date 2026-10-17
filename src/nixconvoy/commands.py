@@ -13,7 +13,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import IO, NamedTuple
 
-from . import memo, proc, submodule
+from . import memo, names, proc, submodule
 from .checkout import (
     MACHINE_ENV,
     PAST_REFS,
@@ -65,6 +65,7 @@ from .checkout import (
 )
 from .config import MSG_FILE
 from .guard import binary, decide
+from .names import label as sub_label
 from .proc import die, git, is_ancestor, ok, out, painter, rev, run, solve_with_mergiraf
 
 
@@ -604,85 +605,11 @@ class PruneQueries(GitQueries):
         return super().__call__(ask)
 
 
-def prune_after(pid: int) -> None:
-    """`prune --after PID`: detach, prune what dead sessions left, wait for
-    the claude session PID to exit, then prune again - its own agents'
-    worktrees among them.  It runs from the checkout the session's agents
-    hang off (a `claude --worktree` session's own root goes at its exit).
-    One waiter per session (a lock file named after it in the common git
-    dir); the output goes to nixconvoy-prune.log there, which starts over
-    past 1 MiB."""
-    stat = proc_stat(pid)
-    session = f"pid {pid}" + (f" start {stat.split()[19]}" if stat else "")  # as a lock names it
-    top = outermost(Path.cwd().resolve())
-    common = Path(out(["git", "rev-parse", "--git-common-dir"])).resolve()
-    if not detached(top):
-        return
-    waiter = common / f"nixconvoy-prune-after.{pid}"
-    held = waiter.open("w")
-    try:
-        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os._exit(0)
-    log_to(common)
-
-    def sweep(what: str) -> None:
-        print(f"{time.strftime('%F %T')} claude session {pid} {what} ({top})", flush=True)
-        try:
-            close_worktrees([])
-        except (Exception, SystemExit) as e:  # noqa: BLE001 - the waiter outlives a failed sweep
-            proc.DYING = False
-            print(f"prune failed: {e!r}", flush=True)
-
-    try:
-        sweep("started: pruning dead sessions'")
-        while lock_pid_alive(session) is not False:
-            time.sleep(5)
-        sweep("exited: pruning its own")
-    finally:
-        waiter.unlink(missing_ok=True)
-        sys.stdout.flush()
-    os._exit(0)
-
-
 def outermost(d: Path) -> Path:
     """The checkout `d`'s subagent worktrees hang off, `d` if it is none."""
     while (up := sub_parent(d)) is not None:
         d = up
     return d
-
-
-def detached(top: Path) -> bool:
-    """Fork a process of its own session in `top`, stdio on /dev/null:
-    True in it, False in the caller."""
-    if os.fork():
-        return False
-    os.setsid()
-    if os.fork():
-        os._exit(0)
-    os.chdir(top)
-    devnull = os.open(os.devnull, os.O_RDWR)
-    for fd in (0, 1, 2):
-        os.dup2(devnull, fd)
-    return True
-
-
-def log_to(common: Path) -> None:
-    """stdout and stderr onto nixconvoy-prune.log in the common git dir,
-    started over past 1 MiB."""
-    logf = common / "nixconvoy-prune.log"
-    with contextlib.suppress(OSError):
-        if logf.stat().st_size > 1 << 20:
-            logf.replace(logf.with_suffix(".log.old"))
-    log = logf.open("a")
-    os.dup2(log.fileno(), 1)
-    os.dup2(log.fileno(), 2)
-
-
-# How long after an agent's stop what continues it past the resume hook
-# (a message sent it before then, Claude Code's own follow-up turn) has it
-# take a turn.
-STOP_GRACE = 10
 
 
 def transcript_turns(path: Path) -> tuple[int, bool] | None:
@@ -736,67 +663,6 @@ def transcript_cwd(path: Path, *, last: bool = False) -> Path | None:
     except OSError:
         return None
     return Path(found).resolve() if found else None
-
-
-def prune_stopped(session: int, stop: dict[str, object]) -> None:
-    """`prune --stopped PID`: claude session PID's subagent stopped, its
-    SubagentStop hook input `stop`.  Detached, logged as --after logs, the
-    agent's worktree (where its transcript starts) goes when it holds
-    nothing of its own, the session counted as ended for it while the
-    worktree's lock is still the one it had at the stop: a resume relocks or
-    recreates it first (worktree-resume.sh).  Kept while a process, a
-    background task the agent started (which wakes it, bypassing that hook),
-    or another running agent of the session (a skill forked there) works in
-    it, or once its transcript records a turn since the stop or a prompt
-    awaiting one (it runs again); the agent stops again once that work has
-    woken it, and is judged again."""
-
-    agent = str(stop.get("agent_id") or "")
-    transcript = Path(str(stop.get("agent_transcript_path") or ""))
-    d = transcript_cwd(transcript)
-    if not agent or d is None or d.name != f"agent-{agent}" or not d.is_dir() or sub_parent(d) is None:
-        return
-    counted = transcript_turns(transcript)
-    turns = None if counted is None else counted[0]
-
-    tasks = stop.get("background_tasks")
-    running = [t for t in tasks if isinstance(t, dict) and t.get("status") == "running"
-               and t.get("id") != agent] if isinstance(tasks, list) else []
-    top = outermost(d)
-    os.chdir(top)
-    common = Path(out(["git", "rev-parse", "--git-common-dir"])).resolve()
-    locked = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path", "locked"], cwd=str(d)))
-    stop_lock = PruneQueries.current_lock(locked)
-    if not detached(top):
-        return
-    log_to(common)
-    try:
-        try:
-            told = transcript.read_bytes()
-        except OSError:
-            told = b""
-        started = [str(t.get("id")) for t in running if str(t.get("id")).encode() in told]
-        forked = [str(t.get("id")) for t in running if t.get("type") == "subagent"
-                  and (cwd := transcript_cwd(transcript.with_name(f"agent-{t.get('id')}.jsonl"), last=True))
-                  and (cwd == d or d in cwd.parents)]
-        if started:
-            verdict = f"kept, its background task {started[0]} still runs"
-        elif forked:
-            verdict = f"kept, agent {forked[0]} works in it"
-        else:
-            # What continues it at once, past the resume hook (a message
-            # sent it after its last tool round, which relocked it before
-            # the stop): the core then keeps it, a turn recorded since.
-            time.sleep(STOP_GRACE)
-            with (common / "nixconvoy-prune.lock").open("w") as serial:
-                fcntl.flock(serial, fcntl.LOCK_EX)
-                gone = not d.is_dir()
-                why = None if gone else prune_one(d, named=True, stopped=Stop(session, stop_lock, transcript, turns))
-            verdict = "removed meanwhile" if gone else "empty, removed" if why is None else f"kept, {why}"
-    except (Exception, SystemExit) as e:  # noqa: BLE001 - reported in the log
-        verdict = f"kept, its check failed: {e!r}"
-    print(f"{time.strftime('%F %T')} agent {agent} stopped: {sub_label(d)}: {verdict}", flush=True)
-    os._exit(0)
 
 
 def finish(wb: str, onto: str = "origin/main") -> None:
@@ -895,11 +761,6 @@ def drop_branches(names: list[str]) -> list[str]:
     return failed
 
 
-def sub_label(d: Path) -> str:
-    parent = sub_parent(d)
-    return f"{parent.name}/{d.name}" if parent is not None else str(d)
-
-
 def subs_of(top: Path) -> list[Path]:
     """The subagent worktrees nested in the checkout `top`."""
     return sorted(d for d in sibling_checkouts() if sub_parent(d) == top)
@@ -913,27 +774,14 @@ def has_increments(d: Path) -> bool:
 
 
 def enter_sub(name: str) -> None:
-    """Act in the subagent worktree `name` - or the one whose name `name`
-    is a unique prefix of - of any checkout on this machine (land/unapply
-    run from elsewhere, as status suggests)."""
+    """Act in the subagent worktree `name` names (names.worktree) of any
+    checkout on this machine (land/unapply run from elsewhere, as status
+    suggests)."""
     os.chdir(find_sub(name))
 
 
-def find_sub(name: str) -> Path:
-    here = Path.cwd().resolve()
-    subs = sorted((d for d in [here, *sibling_checkouts()] if sub_parent(d) is not None),
-                  key=lambda d: (d.name, str(d)))
-    own = [d for d in subs if sub_parent(d) == here]
-    # The exact name anywhere, else a prefix: this checkout's first.
-    found = ([d for d in subs if d.name == name]
-             or [d for d in own if d.name.startswith(name)]
-             or [d for d in subs if d.name.startswith(name)])
-    if not found:
-        die(f"no subagent worktree {name}* in any checkout here" + (
-            f"; there are: {', '.join(map(sub_label, subs))}" if subs else ""))
-    if len(found) > 1:
-        die(f"{name} is ambiguous among the subagent worktrees {', '.join(map(sub_label, found))}")
-    return found[0]
+def find_sub(name: str, verb: str = "close") -> Path:
+    return names.worktree(name, Path.cwd().resolve(), verb)
 
 
 def status() -> None:
@@ -1434,7 +1282,6 @@ __all__ = [
     "land_with_subagents",
     "open_checkout",
     "open_worktree",
-    "prune_after",
     "pull",
     "status",
     "subs_of",

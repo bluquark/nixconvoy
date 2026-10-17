@@ -33,7 +33,7 @@ pub struct Params {
     /// The session running this may judge its own agents' worktrees dead
     /// (a named close); prune never does, the session may yet resume them.
     pub own_session_ends: bool,
-    /// A stop's (`prune --stopped`).
+    /// A stop's (`hook subagent-stop`).
     pub stopped: Option<Stopped>,
 }
 

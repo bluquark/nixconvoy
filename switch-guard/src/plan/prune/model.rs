@@ -1,13 +1,13 @@
 //! The prune core against the world it runs in: two claude sessions, each with
-//! its waiter (`prune --after`: a sweep at start, another once the session
+//! its waiter (`hook session-start`: a sweep at start, another once the session
 //! exits), spawning a subagent into a fresh worktree or, through `claude
 //! --worktree <name>`, reusing a dead session's (relocking it, by a lock naming
 //! no session when no claude ancestor is found) or recreating it, each under
 //! the create hook's name lock; the subagent dirtying, committing, deploying (a
 //! background push that may fail) and leaving its work branch, a few times,
-//! stopping (`prune --stopped`), resumed (the create hook again, relocking or
+//! stopping (`hook subagent-stop`), resumed (the create hook again, relocking or
 //! recreating it) or woken past the resume hook: by a background task it
-//! started, whose end may come at any time (prune --stopped keeps it outright
+//! started, whose end may come at any time (the stop's prune keeps it outright
 //! while one runs), or by a message sent it after its last tool round or Claude
 //! Code's own follow-up turn, whose prompts are recorded at once, within the
 //! stop's grace, so before its prune runs; a process working in it without its

@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -23,7 +24,21 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from pathlib import Path
 
-from nixconvoy import checkout, cli, commands, config, deploy, guard, memo, proc, review, switch, targets
+from nixconvoy import (
+    checkout,
+    cli,
+    commands,
+    config,
+    deploy,
+    guard,
+    hooks,
+    memo,
+    names,
+    proc,
+    review,
+    switch,
+    targets,
+)
 from nixconvoy.union import UnionQueries
 
 REAL_GUARD = switch.switch_guard_cmd
@@ -1777,6 +1792,38 @@ def open_cases(d: Path) -> None:
         assert review.targets(["--with-subagents", "--stat"], co) == ([co, w], ["--stat"])
         assert "no subagent worktree, submodule, branch or path named nope" in dies(lambda: review.targets(["nope"], co))
         assert "named foreign" in dies(lambda: review.targets(["foreign"], co))  # no configured submodule
+        # The same names for land, unapply and close (names.worktree): a
+        # branch stands for the worktree on it, which land and unapply
+        # take whatever checkout it is, close only as a subagent worktree.
+        assert names.resolve("work/tester/9", co) == co.resolve() and names.resolve("main", co) == "main"  # seed is a clone
+        assert names.resolve("origin/main", co) == "origin/main"  # a remote branch no checkout is on
+        assert names.worktree("ta", co, "land", subagent=False) == w.resolve()
+        assert names.worktree("work/tester/9", co, "land", subagent=False) == co.resolve()
+        assert "not a subagent worktree" in dies(lambda: names.worktree("work/tester/9", co, "close"))
+        assert "no worktree on this machine is on branch origin/main" in dies(lambda: names.worktree("origin/main", co, "land", subagent=False))
+        assert "no subagent worktree or branch named nope; the subagent worktrees here: homelab9/task" in dies(lambda: names.worktree("nope", co, "close"))
+        # An exact worktree name beats a branch, a branch beats a prefix;
+        # a branch is this repository's, never a sibling clone's.
+        sh(co, "branch", "--quiet", "ta", "origin/main")
+        assert names.resolve("ta", co) == "ta" and names.resolve("t", co) == w.resolve()
+        sh(co, "worktree", "add", "--quiet", "--detach", str(co / "worktrees/maintenance"), "origin/main")
+        assert names.resolve("main", co) == "main" and names.resolve("mai", co) == (co / "worktrees/maintenance").resolve()
+        sh(co, "worktree", "remove", "--force", str(co / "worktrees/maintenance"))
+        sh(d, "clone", "--quiet", str(origin), str(d / "aclone"))
+        sh(d / "aclone", "checkout", "--quiet", "-b", "work/tester/9", "origin/main")
+        assert names.resolve("work/tester/9", co) == co.resolve()
+        sh(co, "branch", "-D", "ta")
+        shutil.rmtree(d / "aclone")
+        # close takes a branch with slashes as a branch, a path as a path;
+        # a name is never a path, a directory of that name or not.
+        assert not cli.is_path("work/tester/9", "close") and cli.is_path("work/tester/9", "open")
+        assert cli.is_path("../homelab5", "close") and cli.is_path("worktrees/", "close") and cli.is_path("sub/new", "open")
+        assert not cli.is_path("worktrees", "close") and not cli.is_path("task", "open")
+        # A submodule's name is refused without --submodule (declared in
+        # .gitmodules, configured or not), whatever worktree it prefixes.
+        (co / ".gitmodules").write_text('[submodule "ta"]\n\tpath = deps/ta\n\turl = x\n')
+        assert "ta is a submodule of this checkout: `close --submodule ta`" in dies(lambda: names.worktree("ta", co, "close"))
+        (co / ".gitmodules").unlink()
         put(w, "COMMIT_MSG.md", "task done\n")
         put(w, "b.txt", "two\n")
         with (d / "review.out").open("w") as f, contextlib.redirect_stdout(f):
@@ -1918,6 +1965,8 @@ def open_cases(d: Path) -> None:
         argv0 = sys.argv
         try:
             for argv in (["unapply", "-m", "x"], ["unapply", "--submodule", "dep"],
+                         ["close", "--after", "1"], ["close", "--stopped", "1"], ["open", "--lock", "x", "y"],
+                         ["hook"], ["hook", "nope"], ["hook", "session-start", "x"],
                          ["unapply", "--back-to"], ["unapply", "--back-to", "--with-subagents"], ["land", "--back-to", "x"],
                          ["land", "-m", ""], ["land", "-m", " ", "--with-subagents"], ["land", "-m", "--with-subagents"],
                          ["land", "-m", "x", "a", "b"], ["land", "-m"]):
@@ -1942,10 +1991,66 @@ def open_cases(d: Path) -> None:
         with contextlib.redirect_stdout(io.StringIO()):
             h = commands.open_worktree("hand", None)
         assert checkout.worktree_lock(h) == f"nixconvoy open hand {checkout.SESSIONLESS}"
-        assert "letters, digits" in dies(lambda: commands.open_worktree("bad name", None))
+        assert "letters, digits" in dies(lambda: commands.open_worktree("bad name", None))# The create hook: the worktree locked with the session's pid and
+        # start time, then a token of the create; sessionless without one.
+        with contextlib.redirect_stdout(io.StringIO()) as got:
+            hooks.worktree_create("hooked", 1)
+        assert got.getvalue().strip() == str(co / "worktrees/hooked")
+        lock = checkout.worktree_lock(co / "worktrees/hooked") or ""
+        assert lock.startswith("claude agent hooked (pid 1" + (" start " if Path("/proc/1/stat").exists() else ")")), lock
+        assert checkout.lock_pid_alive(lock) is True
+        stdin0, sys.stdin, sys.argv = sys.stdin, io.StringIO(json.dumps({"name": "viahook", "cwd": str(co)})), ["nixconvoy", "hook", "worktree-create"]
+        project0 = os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as got:
+                cli.main()
+        finally:
+            sys.stdin, sys.argv = stdin0, argv0
+            if project0 is not None:
+                os.environ["CLAUDE_PROJECT_DIR"] = project0
+        assert got.getvalue().strip() == str(co / "worktrees/viahook")
+        assert (checkout.worktree_lock(co / "worktrees/viahook") or "").startswith("claude agent viahook ")
+        # The session a hook acts for: the nearest ancestor named claude.
+        if Path("/proc/self").exists():
+            fake = d / "claude"
+            fake.symlink_to(sh_path := subprocess.run(["sh", "-c", "command -v sh"], capture_output=True, text=True, check=True).stdout.strip())
+            assert sh_path
+            env = {**os.environ, "PYTHONPATH": str(Path(hooks.__file__).parent.parent)}
+            # The no-op after python keeps the shell from exec'ing it in place.
+            told = subprocess.run([str(fake), "-c", f'echo $$; {sys.executable} -c "from nixconvoy import hooks; print(hooks.claude_session())"; :'],
+                                  capture_output=True, text=True, check=True, env=env).stdout.split()
+            assert len(told) == 2 and told[0] == told[1], told
+            assert hooks.claude_session() is None or hooks.claude_session() in checkout.ancestor_pids()
     finally:
         os.chdir(prev)
     print("open: ok")
+
+
+def require_guard_of_this_tree() -> None:
+    """Die unless $NIXCONVOY_GUARD_DIR holds nix/switch-guard.nix's build of
+    this tree's switch-guard/ ($NIXCONVOY_GUARD_SRC where the lint copies
+    it apart), by its source-hash: a build of another tree fails cases on
+    wording or protocol in ways that look like bugs."""
+    crate = Path(os.environ.get("NIXCONVOY_GUARD_SRC") or Path(__file__).resolve().parent.parent / "switch-guard")
+    tracked = subprocess.run(["git", "-C", str(crate), "ls-files", "-z", "--", "Cargo.toml", "Cargo.lock", "src"],
+                             capture_output=True, check=False)
+    if tracked.returncode == 0:  # a checkout: what a flake build copies, no stray file
+        files = [Path(f.decode()) for f in tracked.stdout.split(b"\0") if f]
+    else:  # the build's source as nix copied it
+        files = [p.relative_to(crate) for p in [crate / "Cargo.toml", crate / "Cargo.lock", *(crate / "src").rglob("*")]]
+    files = sorted(f"./{f}" for f in files if (crate / f).is_file() and not (crate / f).is_symlink())
+    listing = "".join(f"{hashlib.sha256((crate / f).read_bytes()).hexdigest()}  {f}\n" for f in files)
+    expected = hashlib.sha256(listing.encode()).hexdigest()
+    where = os.environ.get("NIXCONVOY_GUARD_DIR")
+    if not where:
+        sys.exit("switch_test: set NIXCONVOY_GUARD_DIR to `nix build .#switch-guard`'s bin/ for this tree")
+    try:
+        built = (Path(where).parent / "source-hash").read_text().strip()
+    except OSError:
+        built = None
+    if built != expected:
+        sys.exit(f"switch_test: NIXCONVOY_GUARD_DIR ({where}) is {'no nix build of switch-guard' if built is None else 'a build of another tree'}: "
+                 f"point it at `nix build .#switch-guard`'s bin/ for this tree")
 
 
 if __name__ == "__main__":
@@ -1953,6 +2058,7 @@ if __name__ == "__main__":
         sys.exit(fake_target(sys.argv[2:]))
     if sys.argv[1:2] == ["--fake-guard"]:
         sys.exit(fake_guard(sys.argv[2], sys.argv[3]))
+    require_guard_of_this_tree()
     config.set_cfg(config.Config())
     with tempfile.TemporaryDirectory() as d:
         os.environ["FAKE_TARGET_STATE"] = str(Path(d) / "target.json")

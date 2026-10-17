@@ -1,7 +1,7 @@
 #!/bin/bash
 # PreToolUse hook on SendMessage: resuming a subagent needs the worktree its
-# transcript started in, which `nixconvoy close --stopped` removes when the
-# agent stops holding nothing of its own.  worktree-create.sh, beside this,
+# transcript started in, which `nixconvoy hook subagent-stop` removes when
+# the agent stops holding nothing of its own.  worktree-create.sh, beside this,
 # recreates it under its name (on a fresh branch off origin's default
 # branch) before the resume, or relocks it when it is still there, so a
 # close judging the stop afterwards sees a lock taken since and keeps it.
