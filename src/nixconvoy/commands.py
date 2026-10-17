@@ -13,7 +13,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import IO, NamedTuple
 
-from . import proc, submodule
+from . import memo, proc, submodule
 from .checkout import (
     MACHINE_ENV,
     PAST_REFS,
@@ -69,19 +69,52 @@ from .guard import binary, decide
 from .proc import die, git, is_ancestor, ok, out, painter, rev, run, solve_with_mergiraf
 
 
-def holds(wb: str, tip: str, main: str, release: bool, cwd: str | None = None) -> None:
+def unchanged_at(tip: str, main: str, held: list[str]) -> set[str]:
+    """Among `held`, the targets `tip` builds identically to its base on
+    `main` (the tree that lands: without MSG_FILE).  A hold is read off
+    Reaches:, the scan of what each evaluation reads, so an increment
+    touching a file every target reads (a shared lib) holds targets whose
+    toplevel it leaves as it was.  One commit after the other: a deploy's
+    worth of evals at a time."""
+    print(f"evaluating {', '.join(held)} at the branch's tip and at main (land --release skips this)...")
+    base = out(["git", "merge-base", main, tip])
+    landing = out(["git", "commit-tree", tree_less_msg(tip), "-p", rev(tip) or tip, "-m", "landing"],
+                  env=MACHINE_ENV)
+    tops: list[dict[str, memo.Top]] = []
+    wts: list[str] = []
+    try:
+        for ref in (landing, base):
+            wts.append(add_worktree(ref))
+            tops.append(memo.eval_toplevels(wts[-1], ref, held, None))
+    finally:
+        for wt in wts:
+            drop_worktree(wt)
+    at_tip, at_base = tops
+    return {h for h in held if at_tip[h].out == at_base[h].out}
+
+
+def holds(wb: str, tip: str, main: str, release: bool) -> None:
     """The targets `wb`'s increments (`main..tip`) hold back: a landing is
     refused on them unless `release`, which tells where the landed work
-    rolls out from."""
-    held = sorted(held_targets(f"{main}..{tip}", cwd))
+    rolls out from - or unless the branch builds them as main does, which
+    releases them on its own."""
+    held = sorted(held_targets(f"{main}..{tip}"))
     if not held:
         return
+    if not release:
+        same = unchanged_at(tip, main, held)
+        if same:
+            print(f"{', '.join(sorted(same))}: built the same at {wb}'s tip as at main, "
+                  f"so nothing is held back there")
+        held = [h for h in held if h not in same]
+        if not held:
+            return
     them = ", ".join(held)
     if not release:
         die(f"{wb} holds back {them}: increments of it reach {'it' if len(held) == 1 else 'them'} "
-            f"but were deployed to other targets alone.  `nixconvoy apply {' '.join(held)}` from its "
-            f"checkout deploys them there first; `land --release` lands them as they are, for the "
-            f"next deploy anywhere to roll out")
+            f"(built differently from main's) but were deployed to other targets alone.  "
+            f"`nixconvoy apply {' '.join(held)}` from its checkout deploys them there first; "
+            f"`land --release` lands them as they are, for the next deploy anywhere to roll out")
     print(f"releasing {them}: the next deploy anywhere rolls the landed work out there")
 
 
@@ -122,13 +155,13 @@ def land(release: bool = False, message: str | None = None) -> None:
     if carried:
         die(f"{wb} contains the unlanded increments of {', '.join(carried)}; land "
             "that branch first, then re-run")
-    holds(wb, "HEAD", main, release)
     # The submodules first: main must never pin a branch about to go.
     gone = submodule.orphaned(Path.cwd())
     if gone:
         die(f"the tree pins {wb}'s rev of submodule {', '.join(gone)}, whose worktree is gone: "
             f"`nixconvoy open --submodule <input>` recreates it from origin's branch to land it, or "
             f"`nixconvoy abandon --submodule <input>` drops it")
+    holds(wb, "HEAD", main, release)
     submodule.land_all(wb, msg)
     tree = tree_less_msg("HEAD")
 

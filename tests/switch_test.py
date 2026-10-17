@@ -1738,9 +1738,40 @@ def open_cases(d: Path) -> None:
         sh(w, "reset", "--quiet", "n.txt")
         # The sub holds b back: its increment reached b, deployed to a alone.
         assert checkout.held_targets("origin/main..HEAD", str(w)) == {"b"}
-        assert "work/tester/9-task holds back b:" in dies(commands.land_union)
-        with contextlib.redirect_stdout(io.StringIO()):
-            commands.land_union(release=True)
+        # A held target is evaluated at the branch's tip (the landing tree,
+        # without COMMIT_MSG.md) and at its base on main: built differently
+        # it refuses the landing, built the same it is released; --release
+        # evaluates nothing.
+        real_eval = memo.eval_toplevels
+
+        def differs(wt: str, union: str, targets: list[str], check: Future[str | None] | None) -> dict[str, memo.Top]:
+            assert check is None and union and not (Path(wt) / "COMMIT_MSG.md").exists()
+            tip = (Path(wt) / "s.txt").exists()
+            return {h: memo.Top(f"/nix/store/{h}-{'tip' if tip and h == 'b' else 'main'}", "d", (), False, False)
+                    for h in targets}
+
+        def same(wt: str, union: str, targets: list[str], check: Future[str | None] | None) -> dict[str, memo.Top]:
+            assert check is None and union and wt
+            return {h: memo.Top(f"/nix/store/{h}", "d", (), False, False) for h in targets}
+
+        def never(wt: str, union: str, targets: list[str], check: Future[str | None] | None) -> dict[str, memo.Top]:
+            raise AssertionError(f"evaluated {targets} in {wt} at {union} ({check})")
+
+        told = io.StringIO()
+        try:
+            memo.eval_toplevels = differs
+            assert "work/tester/9-task holds back b:" in dies(commands.land_union)
+            memo.eval_toplevels = never
+            with contextlib.redirect_stdout(told):
+                commands.holds("work/tester/9-task", "refs/heads/work/tester/9-task", sh(co, "rev-parse", "origin/main"), True)
+            assert "releasing b:" in told.getvalue()
+            memo.eval_toplevels = same
+            with contextlib.redirect_stdout(told):
+                commands.land_union()
+            assert "b: built the same at work/tester/9-task's tip as at main" in told.getvalue()
+        finally:
+            memo.eval_toplevels = real_eval
+        assert not sh(co, "worktree", "list").count("deploy-wt")
         main = sh(co, "rev-parse", "origin/main")
         assert sh(co, "ls-tree", "--name-only", main).split() == [".gitignore", "a.txt", "deploy-branches", "p.txt", "s.txt"]
         assert sh(co, "log", "-1", "--format=%B", main).strip() == (

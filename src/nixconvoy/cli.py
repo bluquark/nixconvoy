@@ -176,7 +176,9 @@ deploys the target (nixconvoy apply <target> there, or an apply naming no
 target) or lands with --release, a deploy from any other work branch leaves
 the target alone - or is refused when its own work reaches it, as for an
 in-flight increment - a main checkout's deploy (the nightly's) leaves it
-behind on main's advance, and `land` refuses.  --reset unions no other
+behind on main's advance, and `land` refuses - unless the branch builds the
+target as main does (land evaluates the held targets at its tip and at
+main), which releases it.  --reset unions no other
 branch, so it switches the target to this checkout's view alone, without
 the held work, the hold standing.  `status` shows what each checkout holds
 back.
@@ -420,7 +422,8 @@ of a group the target's configuration protects (nixconvoy.protected.<name>).
 --dry-activate stops before any switch, printing what each would do.
 land --release lands work a target is held back from (increments that reach
 it, deployed to other targets alone), for the next deploy anywhere to roll
-out there.
+out there; held targets the branch builds as main does (land evaluates them
+at its tip and at main) are released without it.
 abandon --apply-now deploys at once, so the targets drop the abandoned work
 now rather than at the next deploy.  --union acts on this checkout and its
 subagent worktrees as one unit; a path (with a /) names an agent checkout."""

@@ -487,14 +487,16 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         # switch: the lineage the targets get names the commit origin will
         # hold, and the records reach origin before anything runs them.
         # The commit's trailers: Reaches, the targets the increment reaches
-        # among those deployable from here; Deployed, the candidates running
-        # the branch's tip once this deploy is over (switched now, or up to
-        # date already) - a target in the first and not the second is held
-        # back (held_targets) until a deploy here switches it.
+        # among those deployable from here; Deployed, the probed targets
+        # running the branch's tip once this deploy is over (switched now,
+        # or up to date with the union already, a non-candidate too: every
+        # reachable target was evaluated) - a target in the first and not
+        # the second is held back (held_targets) until a deploy here
+        # switches it.
         committed = ""
         subject = "main" + "".join(f" + {n}" for n, _ in branches)
         fmt = ", ".join
-        deployed = sorted(h for h in candidates if h in plan or h not in affected)
+        deployed = sorted(h for h in tops if h in plan or h not in affected)
         if snap and not dry:
             assert wb is not None  # a snapshot needs the work branch (deploy)
             reaches = sorted(memo.reached_between(wt, union, [h for h in all_targets if not remote_only(h)],

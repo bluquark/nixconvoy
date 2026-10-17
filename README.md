@@ -78,7 +78,9 @@ no work.
   target alone, or is refused when its own work reaches it; a main
   checkout's deploy (a nightly's) leaves it behind rather than fail; and
   `land` refuses until `--release` - no restricted apply rolls out
-  elsewhere by accident.
+  elsewhere by accident - unless the branch builds the target just as
+  main does (`land` evaluates the held targets at its tip and at main),
+  which releases it on its own.
 - **Deploy records.**  Before a target is switched, its deploy record - a
   commit of the exact tree it will run, on its previous record, main, the
   unioned branches and the increment - is pushed to origin, so no target
