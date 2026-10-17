@@ -975,7 +975,7 @@ def increment_fate(branch: str, tip: str, union: str, checkout: str | None) -> s
     it: origin's branch still carries it, or origin has no such branch yet
     while the deploying checkout has it checked out (its first push on
     its way - the commit reaches the branch only after every switch - or
-    that first switch failed and the increment stays staged there; abandon
+    that first switch failed and the increment stays staged there; close
     removes a subagent's worktree, and an agent checkout's branch is reset
     on origin, not absent), or merging it into the union changes nothing but MSG_FILE
     (rebased, redeployed after a failed switch, landed intact).  Otherwise
@@ -1092,7 +1092,7 @@ def lock_live(reason: str) -> bool:
 
 
 # The create hook's lock when it found no claude session to name: no
-# session's exit lifts it, so land and abandon do.
+# session's exit lifts it, so land and unapply do.
 SESSIONLESS = "(no claude session found)"
 
 

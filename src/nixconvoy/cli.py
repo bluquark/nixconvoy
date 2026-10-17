@@ -15,8 +15,8 @@ Model:
     nothing.  A subagent worktree - one nested in a checkout,
     <checkout>/<worktrees>/<name> by `open` - owns <parent's branch>-<name>
     (<branch_prefix>main-<name> under a main checkout) from its first deploy.
-    After a land or abandon a checkout stays on its work branch, reset onto
-    origin/main.
+    After a land, or an unapply back to origin/main, a checkout stays on
+    its work branch, reset onto origin/main.
   - COMMIT_MSG.md at a work branch's root describes the branch's work since
     its last landing.  It never reaches main's tree: `land` consumes it as
     the commit message (`land -m <msg>`, for a branch without one, lands
@@ -183,20 +183,20 @@ branch, so it switches the target to this checkout's view alone, without
 the held work, the hold standing.  `status` shows what each checkout holds
 back.
 
-Land (nixconvoy land [<name> ... | --with-subagents] [-m <msg>] | --submodule <input>):
+Land (nixconvoy land [<name> ... | --with-subagents] [-m <msg>] [--release]):
 commit the work branch's tree minus COMMIT_MSG.md onto origin/main with
 COMMIT_MSG.md as the message (or -m <msg>, for a branch without the file:
-both at once is refused; with --submodule, the submodule's file), push
+both at once is refused), push
 main, reset this branch (and its origin copy) onto the new main, the
 checkout staying on it.  Every other checkout on this machine is then
 brought onto the new main (see Pull); checkouts on other machines rebase
 at their next deploy.  A subagent worktree stays too, idle on its reset branch:
 `close` removes it (the session-exit sweep does, once its agent is done).
 Run from any checkout with the worktrees' <name>s (a unique prefix will do),
-land and abandon act on each in turn.  A branch holding a target back (see
+land and unapply act on each in turn.  A branch holding a target back (see
 Apply) is refused unless --release: the landed work then rolls out there with
 the next deploy from anywhere.  The checkout's submodules land first
-(see Open); --submodule <input> lands that one submodule alone.
+(see Open).
 --with-subagents lands this checkout and its subagent worktrees as one unit
 - for subagents that each did a piece of this checkout's task: every sub's
 branch (one on its work branch with work beyond main; a sub holding
@@ -244,19 +244,23 @@ from its repository too); one that is none of these is an error;
 --with-subagents reviews this checkout and then each subagent worktree; the
 rest are git diff arguments.
 
-Abandon (nixconvoy abandon [<name> ... | --with-subagents] [--apply-now] | --submodule <input>):
-discard this checkout's work instead of landing it: hard-reset the checkout
-and reset the work branch (local and origin) onto origin/main, staying on
-it; a subagent worktree stays too (close removes it); its submodules are
-reset onto their default branch likewise.  Untracked files survive; the
-old tip remains reachable via the reflog.
-No target is touched: the ones running its increments (named from their
-Deployed: trailers) keep running them until the next deploy by
-anyone, whose verdict names what it reverts ("will switch (catch-up: ...;
-reverting <branch>'s abandoned increment <sha>)").  --apply-now runs that
-deploy at once, so the targets drop the work now, from the checkout abandon
-ran in; it takes --allow.  --with-subagents abandons each
-subagent worktree holding anything, then this checkout.
+Unapply (nixconvoy unapply [<name> ... | --with-subagents] [--back-to <rev>]
+[--allow <protection> ...]): undo this checkout's increments on the
+targets, from HEAD back to <rev> (HEAD^ by default: the latest one;
+origin/main, or anything older: the whole branch) - each a deploy's
+increment, else refused: the work branch is reset onto <rev> (git reset
+--keep: unstaged edits stay, unless they touch a file the undone
+increments changed; staged changes are refused first), here and on
+origin, each submodule whose pin they moved is reset onto <rev>'s pin
+likewise (onto its default branch when that pin is landed), and a deploy
+follows at once, from the checkout unapply ran in, whose verdict names
+what it reverts ("will switch (catch-up: ...; reverting <branch>'s
+abandoned increment <sha>)"); it takes --allow.  The old tip remains
+reachable via the reflog; untracked files survive; a subagent worktree
+stays (close removes it).  <name>s: the subagent worktrees to do it in,
+each in turn; --with-subagents: every subagent worktree holding
+increments, then this checkout - one deploy for all, run here.  A
+worktree never deployed has nothing to unapply: close --force discards it.
 
 Open (nixconvoy open [--lock <reason>] <name> | [--branch <work-branch>] <path> |
 --submodule <input>): a worktree.  <name> (no / in it): a subagent worktree,
@@ -296,13 +300,12 @@ brings the checkout onto main (see Pull).  A deploy refuses a submodule
 still behind that branch, and a worktree reset below the work the tree
 deploys (nothing of its own left: a hand reset; a rebase or amend keeps
 work of its own and passes, the deployed commits it leaves behind named):
-put it back, or `abandon --submodule` drops it deliberately.  land lands
+put it back, or `close --submodule --force` drops it deliberately.  land lands
 each submodule first - its tip squashed onto the default branch as one
 commit (the COMMIT_MSG.md in the worktree, tracked or not, else the
 checkout's) - and pins that commit on the work branch, then lands main;
-`land --submodule <input>` does one ahead of the checkout, `abandon
---submodule <input>` resets one onto the default branch with the pin put
-back to origin/main's, staged for the next deploy to revert it.  status
+`close --submodule <input> --force` drops one, the pin put back to
+origin/main's and staged for the next deploy to revert it.  status
 lists the configured submodules.  A submodule repository's own checkout
 is never deployed from: status flags edits there, and nixconvoy leaves a
 `nixconvoy-submodule` marker in its git dir for a pre-commit hook to
@@ -320,7 +323,7 @@ With no name, every one under this checkout (a sweep), where one whose
 spawning claude session still runs is kept, whichever session asks: the
 session may resume its agent, which needs the worktree.  So is one at
 work (a nixconvoy, git operation or push running in it), on a work branch
-(land or abandon decides it), locked by hand (or, in a sweep, unlocked) or
+(land or unapply decides it), locked by hand (or, in a sweep, unlocked) or
 holding anything; each kept one is said so, as is one a process works in.
 It all happens under a lock on the worktree's name, which open takes too,
 and the removal claims the lock it judged and leaves git to refuse a
@@ -407,11 +410,9 @@ pull
 status
 = Deploying and committing changes
 apply [<target> | @<tag> ...] [-m <msg>] [--reset] [--allow <protection> ...] [--dry-activate]
+unapply [<worktree> ... | --with-subagents] [--back-to <rev>] [--allow <protection> ...]
 review [<worktree> | <branch> ... | --with-subagents] [<diff-arg> ...]
 land [<worktree> ... | --with-subagents] [-m <msg>] [--release]
-land --submodule <input> [-m <msg>]
-abandon [<worktree> ... | --with-subagents] [--apply-now [--allow <protection> ...]]
-abandon --submodule <input>
 """
 USAGE_NOTES = """\
 -m describes the staged increment a deploy commits once its targets are
@@ -427,9 +428,12 @@ land --release lands work a target is held back from (increments that reach
 it, deployed to other targets alone), for the next deploy anywhere to roll
 out there; held targets the branch builds as main does (land evaluates them
 at its tip and at main) are released without it.
-abandon --apply-now deploys at once, so the targets drop the abandoned work
-now rather than at the next deploy.  --with-subagents acts on this checkout and its
-subagent worktrees as one unit; a path (with a /) names an agent checkout."""
+unapply reverts this checkout's increments on the targets, from HEAD back
+to --back-to <rev> (HEAD^ by default: the latest one; origin/main: the whole
+branch): the work branch is reset onto <rev> (the reflog keeps the tip),
+then a deploy follows at once.  --with-subagents acts on this checkout and
+its subagent worktrees as one unit; a path (with a /) names an agent
+checkout."""
 
 
 def usage(stream: IO[str] | None = None) -> str:
@@ -475,7 +479,7 @@ def bad_usage() -> NoReturn:
 
 
 DRY_FLAG = "--dry-activate"
-APPLY_NOW_FLAG = "--apply-now"
+BACK_TO_FLAG = "--back-to"
 
 
 def main() -> None:
@@ -488,7 +492,7 @@ def main() -> None:
         print(usage())
         print(USAGE_NOTES)
         return
-    if args[0] not in ("apply", "land", "abandon", "close", "pull", "status", "review", "open"):
+    if args[0] not in ("apply", "land", "unapply", "close", "pull", "status", "review", "open"):
         bad_usage()
     subcmd = args.pop(0)
     start = Path.cwd()
@@ -505,7 +509,7 @@ def main() -> None:
     reset = False
     allow: set[str] = set()
     dry = False
-    apply_now = False
+    back_to: str | None = None
     names: list[str] = []
     after = ""
     stopped = ""
@@ -522,13 +526,13 @@ def main() -> None:
             msg = args.pop(0)
         elif a == "--submodule" and subcmd == "open":
             sub_flag = True
-        elif a == "--submodule" and subcmd in ("land", "abandon", "close") and args:
+        elif a == "--submodule" and subcmd == "close" and args:
             sub_name = args.pop(0)
         elif a == "--lock" and subcmd == "open" and args:
             lock_reason = args.pop(0)
         elif a == "--branch" and subcmd == "open" and args:
             branch = args.pop(0)
-        elif a in ("--with-subagents", "--union") and subcmd in ("land", "abandon"):
+        elif a in ("--with-subagents", "--union") and subcmd in ("land", "unapply"):
             with_subs = True
         elif a == "--release" and subcmd == "land":
             release = True
@@ -544,8 +548,8 @@ def main() -> None:
             allow.add(args.pop(0))
         elif a == DRY_FLAG:
             dry = True
-        elif a == APPLY_NOW_FLAG and subcmd == "abandon":
-            apply_now = True
+        elif a == BACK_TO_FLAG and subcmd == "unapply" and args and not args[0].startswith("-"):
+            back_to = args.pop(0)
         elif a in ("-h", "--help"):
             print(usage())
             print(USAGE_NOTES)
@@ -581,16 +585,10 @@ def main() -> None:
             commands.open_worktree(names[0], lock_reason)
         return
     if sub_name is not None:
-        if names or apply_now or reset or dry or allow or after or stopped or with_subs or release \
-                or (msg is not None and (subcmd != "land" or not msg.strip())):
+        if names or back_to or reset or dry or allow or after or stopped or with_subs or release or msg is not None:
             bad_usage()
         take_lock()
-        if subcmd == "land":
-            commands.land_submodule(sub_name, msg)
-        elif subcmd == "abandon":
-            commands.abandon_submodule(sub_name)
-        else:
-            commands.close_submodule(sub_name, force=force)
+        commands.close_submodule(sub_name, force=force)
         return
     if subcmd == "close":
         if msg or reset or allow or dry or ((after or stopped) and (names or force)) or (after and stopped):
@@ -611,8 +609,8 @@ def main() -> None:
         return
     top = Path.cwd()
     here = top.resolve()
-    if subcmd in ("land", "abandon"):
-        if reset or dry or (allow and not apply_now) or (with_subs and names) \
+    if subcmd in ("land", "unapply"):
+        if reset or dry or (allow and subcmd != "unapply") or (with_subs and names) \
                 or (msg is not None and (subcmd != "land" or not msg.strip() or len(names) > 1)):
             bad_usage()
         if with_subs and subcmd == "land":
@@ -621,23 +619,25 @@ def main() -> None:
             return
         parent_too = False
         if with_subs:
-            # Each sub holding anything, then this checkout.
+            # Each sub holding increments, then this checkout.
             if sub_parent(here) is not None:
-                die("abandon --with-subagents runs from the checkout the worktrees hang off")
-            names = [str(d) for d in commands.subs_of(here) if commands.holds_work(d)]
-            parent_too = commands.holds_work(here)
+                die("unapply --with-subagents runs from the checkout the worktrees hang off")
+            names = [str(d) for d in commands.subs_of(here) if commands.has_increments(d)]
+            parent_too = commands.has_increments(here)
             if not names and not parent_too:
-                die("nothing to abandon here or in any subagent worktree")
+                die("nothing to unapply here or in any subagent worktree")
         named = [Path(n) if with_subs else commands.find_sub(n) for n in names]
         deploys_from = here
-        # The deploy runs from a checkout the abandon does not reset, whose
+        # The deploy runs from a checkout the unapply does not reset, whose
         # staged changes it would have to carry without a message.
-        if (apply_now and names and here not in named and not parent_too
+        if (subcmd == "unapply" and names and here not in named and not parent_too
                 and not ok(["git", "diff", "--cached", "--quiet"], cwd=str(deploys_from))):
-            die(f"{deploys_from} has staged changes, which the deploy of {APPLY_NOW_FLAG} "
+            die(f"{deploys_from} has staged changes, which unapply's deploy "
                 "would carry: deploy or unstage them first")
         # Several subagent worktrees, one after the other, each under its
-        # own checkout's lock.
+        # own checkout's lock.  An unapply that fails in one stops none of
+        # the others, and what the rest undid is deployed all the same.
+        due, failed = False, []
         for name, d in zip(names, named, strict=True):
             if len(names) > 1 or parent_too:
                 print(f"== {d.name}")
@@ -648,24 +648,33 @@ def main() -> None:
             if subcmd == "land":
                 commands.land(release, msg)
             else:
-                commands.abandon(apply_now)
+                try:
+                    due |= commands.unapply(back_to or "HEAD^")
+                except SystemExit:
+                    proc.DYING = False
+                    failed.append(d.name)
             lock.close()
         if names or with_subs:
-            if parent_too or apply_now:
+            if subcmd == "unapply":
                 os.chdir(deploys_from)
                 take_lock()
-            if parent_too:
-                print(f"== {here.name}")
-                commands.abandon(apply_now)
-            if apply_now:
-                deploy([], None, False, frozenset(allow))
+                if parent_too:
+                    print(f"== {here.name}")
+                    try:
+                        due |= commands.unapply(back_to or "HEAD^")
+                    except SystemExit:
+                        proc.DYING = False
+                        failed.append(here.name)
+                if due:
+                    deploy([], None, False, frozenset(allow))
+                if failed:
+                    die(f"unapply failed in {', '.join(failed)} (see above)")
             return
     take_lock()
     if subcmd == "land":
         commands.land(release, msg)
-    elif subcmd == "abandon":
-        commands.abandon(apply_now)
-        if apply_now:
+    elif subcmd == "unapply":
+        if commands.unapply(back_to or "HEAD^"):
             deploy([], None, False, frozenset(allow))
     else:  # apply
         if dry and msg is not None:

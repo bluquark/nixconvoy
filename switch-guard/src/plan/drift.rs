@@ -31,7 +31,8 @@
 //! holds it and, when not, what became of it - abandoned (reset or
 //! dropped, landed nowhere) or landed and since undone - and the target's
 //! verdict line names each abandoned increment the switch reverts:
-//! abandon itself touches no target, so this is where the revert shows.  A
+//! unapply runs that switch itself; a branch reset by hand waits for the
+//! next deploy by anyone, and this is where the revert shows.  A
 //! subagent's branch, pushed by its first deploy and deleted with its
 //! worktree, leaves targets whose lineage holds a pending increment of a
 //! branch origin never had as far as this run can see: the same query

@@ -31,7 +31,7 @@ pub struct Params {
     /// Named on the command line, rather than found by a sweep.
     pub named: bool,
     /// The session running this may judge its own agents' worktrees dead
-    /// (abandon); prune never does, the session may yet resume them.
+    /// (a named close); prune never does, the session may yet resume them.
     pub own_session_ends: bool,
     /// A stop's (`prune --stopped`).
     pub stopped: Option<Stopped>,
@@ -111,12 +111,12 @@ fn holder(s: &mut Script, p: &Params) -> Run<Result<Option<String>, Outcome>> {
     match lock.as_deref() {
         None if !p.named => return kept(format!("unlocked: no session to outlive; `nixconvoy prune {}` judges it", p.name)),
         None => {}
-        // Abandon ends the session that would have unlocked it.
+        // Unapply ends the session that would have unlocked it.
         Some(reason) if p.own_session_ends && reason.ends_with(SESSIONLESS) => {}
         Some(reason) => match session(reason) {
             None if reason.ends_with(SESSIONLESS) => {
                 return kept(format!(
-                    "its create found no claude session to outlive: `nixconvoy abandon {}`, or `git worktree unlock` it to let prune judge it",
+                    "its create found no claude session to outlive: `nixconvoy close {}` removes it (unapply --back-to origin/main first when it holds increments), or `git worktree unlock` it to let prune judge it",
                     p.name
                 ));
             }
@@ -157,7 +157,7 @@ fn judge(s: &mut Script, p: &Params) -> Run<Result<Judged, Outcome>> {
         return kept("it owns no work branch");
     };
     // On its own work branch it is judged like any checkout: idle once the
-    // branch is reset onto main (a land or abandon), holding work before.
+    // branch is reset onto main (a land, or an unapply back to it), holding work before.
     let on_wb = cur.as_deref() == Some(wb.as_str());
     if on_wb && !wb.ends_with(&format!("-{}", p.name)) {
         return kept(format!("it has {wb}, another checkout's work branch, checked out"));
@@ -165,7 +165,7 @@ fn judge(s: &mut Script, p: &Params) -> Run<Result<Judged, Outcome>> {
     if let Some(tip) = s.text(Query::Rev { name: format!("refs/remotes/origin/{wb}") })? {
         if !s.flag(Query::Contains { a: tip, b: MAIN.into() })? {
             return kept(if on_wb {
-                format!("its work branch {wb} carries pushed increments: land or abandon decides it")
+                format!("its work branch {wb} carries pushed increments: land or unapply decides it")
             } else {
                 format!("it is not on {wb}, which carries pushed increments; `git switch {wb}` there to discard them")
             });
@@ -174,7 +174,7 @@ fn judge(s: &mut Script, p: &Params) -> Run<Result<Judged, Outcome>> {
     if let Some(local) = s.text(Query::Rev { name: format!("refs/heads/{wb}") })? {
         if s.flag(Query::Unpushed { sha: local })? {
             return kept(format!(
-                "it owns {wb}, which carries commits not on origin (a deploy whose push failed?); push it or `git switch {wb}` there and abandon"
+                "it owns {wb}, which carries commits not on origin (a deploy whose push failed?); push it or `git switch {wb}` there and unapply --back-to origin/main"
             ));
         }
     }

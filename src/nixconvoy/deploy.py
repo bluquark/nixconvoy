@@ -197,6 +197,10 @@ def deploy(filter_targets: list[str], msg: str | None, reset: bool,
     PERF.mark("submodules")
     for told in submodule.sync(wb, msg, dry=dry):
         print(told)
+    if msg is None and wb is not None and not dry and staged_differs():
+        # A pin the submodule step staged on its own (a catch-up) is an
+        # increment too.
+        msg = f"{Path.cwd().name}: increment {int(out(['git', 'rev-list', '--count', 'refs/remotes/origin/main..HEAD'])) + 1}"
     PERF.mark("snapshot")
     if staged_differs():
         if wb is None:

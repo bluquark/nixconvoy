@@ -296,7 +296,7 @@ enum Act {
     Commit,
     Deploy,
     Detach,
-    /// A land or abandon: the work branch reset onto main, pushed so; the
+    /// A land, or an unapply back to main: the work branch reset onto main, pushed so; the
     /// worktree stays on it, idle.
     Land,
     /// Its run ends, maybe with a wake bypassing the resume hook pending

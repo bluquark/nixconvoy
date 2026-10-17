@@ -1,4 +1,4 @@
-"""The verbs beside deploy: commit, land, pull, abandon, open, close and status."""
+"""The verbs beside deploy: commit, land, pull, unapply, open, close and status."""
 
 from __future__ import annotations
 
@@ -50,7 +50,6 @@ from .checkout import (
     pop_tmp_commits,
     proc_stat,
     push_state,
-    push_work_branch,
     ran,
     require_work_branch,
     sibling_checkouts,
@@ -160,7 +159,7 @@ def land(release: bool = False, message: str | None = None) -> None:
     if gone:
         die(f"the tree pins {wb}'s rev of submodule {', '.join(gone)}, whose worktree is gone: "
             f"`nixconvoy open --submodule <input>` recreates it from origin's branch to land it, or "
-            f"`nixconvoy abandon --submodule <input>` drops it")
+            f"`nixconvoy close --submodule <input> --force` after it drops it")
     holds(wb, "HEAD", main, release)
     submodule.land_all(wb, msg)
     tree = tree_less_msg("HEAD")
@@ -200,60 +199,84 @@ def deployed_targets(commits: str) -> list[str]:
     return sorted(names)
 
 
-def abandon(apply_now: bool = False) -> None:
-    """Discard the work branch (cli docstring: Abandon).  The targets keep
-    running its increments until a deploy reverts them: `apply_now` when
-    the caller deploys right after, for the message."""
+def unapply(back_to: str = "HEAD^") -> bool:
+    """Undo the work branch's increments from HEAD back to `back_to` (cli
+    docstring: Unapply) ahead of the deploy the caller runs at once, which
+    reverts them on the targets: whether any target runs what was undone,
+    so that deploy is due."""
     await_background_push()
     git(*fetch_args())
     pop_tmp_commits()
     ident = checkout_identity()
     here = Path.cwd().resolve()
     if ident.kind == "sub" and ident.wb and current_branch() != ident.wb and sub_parent(here):
-        # Never deployed: still on its fresh branch, reset onto origin/main
-        # (untracked files survive); close removes the worktree.
-        main = rev("refs/remotes/origin/main")
-        if main is None:
-            die("origin/main not found")
-        prev = rev("HEAD") or ""
-        submodule.reset_all(here, ident.wb)
-        git("reset", "--quiet", "--hard", main)
-        Path(MSG_FILE).unlink(missing_ok=True)
-        print(f"nothing deployed from {sub_label(here)}; reset onto origin/main (was {prev[:12]}, "
-              f"see reflog); `nixconvoy close {here.name}` removes the worktree")
-        return
-    wb = require_work_branch("abandon")
+        die(f"{sub_label(here)} is not on its work branch {ident.wb} (nothing deployed from it yet): "
+            f"nothing to unapply; `nixconvoy close {here.name} --force` discards it")
+    wb = require_work_branch("unapply")
     if current_branch() != wb:
-        die(f"abandon runs from the work branch ({wb}); currently on "
+        die(f"unapply runs from the work branch ({wb}); currently on "
             f"{current_branch() or '(detached HEAD)'}")
     main = rev("refs/remotes/origin/main")
     if main is None:
         die("origin/main not found")
     prev = rev("HEAD") or ""
-    if prev == main and ok(["git", "diff", "--quiet", "HEAD"]) and checkout_identity().kind != "sub":
-        die("nothing to abandon")
-
-    deployed = deployed_targets(f"{main}..{prev}")
-    submodule.reset_all(here, wb)
-    git("reset", "--quiet", "--hard", main)
-    Path(MSG_FILE).unlink(missing_ok=True)  # an uncommitted copy survives the hard reset
-    git("branch", "-f", "main", main, check=False)
-    print(f"abandoned {wb} (was {prev[:12]}, see reflog): {summarize(main)}")
+    base = out(["git", "merge-base", "HEAD", main])  # the branch's increments start here
+    target = rev(f"{back_to}^{{commit}}")
+    if target is None:
+        die(f"--back-to {back_to}: no such commit")
+    if is_ancestor(target, base):
+        target = base  # origin/main, or older: the whole branch
+    elif not is_ancestor(target, "HEAD"):
+        die(f"--back-to {back_to} ({target[:12]}) is not on {wb}")
+    if target == prev:
+        die("nothing to unapply" + (": no increment beyond origin/main" if target == base else f": HEAD is {back_to}"))
+    if staged_differs():
+        die("staged but undeployed changes present, which the deploy would carry; "
+            "deploy or unstage them first")
+    # A deploy's increment carries its trailers; a hand commit, or a pin
+    # commit a failed landing left, is not one and is not crossed.
+    undone = out(["git", "log", "--format=%H%x09%(trailers:key=Deployed,valueonly,separator=%x2C)",
+                  f"{target}..HEAD"]).splitlines()
+    for ln in undone:
+        sha, _, trailer = ln.partition("\t")
+        if not trailer.strip():
+            die(f"{summarize(sha)} is not a deploy's increment; unapply does not cross it: reset by hand")
+    deployed = deployed_targets(f"{target}..{prev}")
+    # Every check before anything moves: the checkout's reset would lose
+    # an unstaged edit to a file the increments changed (git reset --keep
+    # refuses it), and so would a submodule's.
+    edited = lost_edits(target, prev)
+    if edited:
+        die("the increments' files have unstaged edits, which the reset would lose; "
+            f"stash or discard them first: {', '.join(edited)}")
+    moved = submodule.moved_pins(here, wb, prev, target)
+    p = git("reset", "--quiet", "--keep", target, check=False)
+    if p.returncode != 0:
+        die(f"the reset onto {target[:12]} failed; nothing moved:\n{(p.stderr or '').strip()}")
+    submodule.unapply_pins(moved, wb)
+    print(f"unapplied {wb}'s {len(undone)} increment(s) (see reflog):\n  "
+          + "\n  ".join(summarize(ln.partition("\t")[0]) for ln in undone))
     if deployed:
-        where = ", ".join(deployed)
-        if apply_now:
-            print(f"deployed to {where}: deploying now to revert it")
-        else:
-            print(f"deployed to {where}; whichever targets run it keep it until the next deploy "
-                  f"reverts it (`nixconvoy apply`, or `abandon --apply-now` for both at once)")
-    finish(wb)
+        print(f"deployed to {', '.join(deployed)}: deploying now to revert it")
+    else:
+        print("it reached no target: nothing to deploy")
+    finish(wb, "origin/main" if target == main else target[:12])
+    return bool(deployed)
+
+
+def lost_edits(a: str, b: str, cwd: Path | None = None) -> list[str]:
+    """The files with unstaged edits in `cwd` that `a` and `b` differ in:
+    what `git reset --keep` from one to the other refuses to lose."""
+    where = None if cwd is None else str(cwd)
+    changed = set(out(["git", "diff", "--name-only", a, b], cwd=where).split("\n"))
+    return sorted(changed & set(out(["git", "diff", "--name-only"], cwd=where).split("\n")) - {""})
 
 
 def close_worktrees(names: list[str], *, force: bool = False) -> None:
     """Remove the subagent worktrees that hold nothing of their own (cli
     docstring: Close), as nixconvoy-plan's prune core decides: the named
-    ones (their lock's session counted as ended for them, as abandon from
-    inside counts it), or every one under this checkout.  `force` removes
+    ones (their lock's session counted as ended for them), or every one
+    under this checkout.  `force` removes
     the named ones whatever they hold, with their branches.  Runs are
     serialised per repository."""
     here = Path.cwd().resolve()
@@ -325,7 +348,7 @@ def prune_one(d: Path, *, named: bool, own_session_ends: bool = False,
     fetched); `deploy_held`: the caller holds its deploy lock already;
     `dropped_failed` collects the origin branch deletions that failed.
     `own_session_ends`: the session the lock names ends for it - this
-    one's, abandon from inside it (the invoking command no occupant).
+    one's, a named close (the invoking command no occupant).
     `stopped`: a stop's prune.  A worktree named waits for its name lock, a
     sweep does not."""
     os.chdir(d)
@@ -377,7 +400,7 @@ def occupied(d: Path, *, invoker: bool = False) -> bool:
     """Whether a process other than this one or its children has its
     working directory in `d` (via /proc, else lsof).  `invoker`: nor its
     ancestors, nor the process groups of those working in `d` - the session
-    abandoning its own worktree, its shell and pipeline there with it
+    closing its own worktree by name, its shell and pipeline there with it
     (`timeout` gives its command a group of its own)."""
     me = os.getpid()
     mine = {me, *ancestor_pids()} if invoker else {me}
@@ -425,7 +448,7 @@ class PruneQueries(GitQueries):
     (the create hook's too) and deploy lock held until close(), its lock
     file claimed by renaming it aside (git refuses to remove a locked
     worktree, so a lock renamed in meanwhile keeps it); `fetched` shares one
-    fetch across a run; `invoker`: the invoking command is abandon's, its
+    fetch across a run; `invoker`: the invoking command is a named close's, its
     processes in `d` no occupants; `stop`: a stop's prune, its agent's
     ignored files counted as its own, its transcript telling whether it ran
     again."""
@@ -776,17 +799,17 @@ def prune_stopped(session: int, stop: dict[str, object]) -> None:
     os._exit(0)
 
 
-def finish(wb: str) -> None:
-    """The checked-out work branch after a land or abandon, now at
-    origin/main's commit, moved there on origin too.  A subagent worktree
-    stays, idle: `close` removes it (the session-exit sweep does so on its
-    own)."""
+def finish(wb: str, onto: str = "origin/main") -> None:
+    """The checked-out work branch after a land or unapply, now at `onto`
+    (origin/main's commit, or an earlier increment), moved there on origin
+    too.  A subagent worktree left with nothing stays, idle: `close`
+    removes it (the session-exit sweep does so on its own)."""
     old = rev(f"refs/remotes/origin/{wb}") or ""
     git("push", "--quiet", "origin", f"{wb}:refs/heads/{wb}",
         f"--force-with-lease=refs/heads/{wb}:{old}")
-    print(f"{wb} reset onto origin/main, here and on origin")
+    print(f"{wb} reset onto {onto}, here and on origin")
     here = Path.cwd().resolve()
-    if sub_parent(here) is not None:
+    if sub_parent(here) is not None and rev("HEAD") == rev("refs/remotes/origin/main"):
         print(f"the worktree stays; `nixconvoy close {here.name}` removes it")
 
 
@@ -840,7 +863,7 @@ def drop_branches(names: list[str]) -> list[str]:
     on_origin = {b: old for b, old in gone.items() if old}
     for b, old in on_origin.items():
         # Every tip the remote-tracking ref's reflog remembers (a branch
-        # reset onto main by a land or abandon before this), oldest first,
+        # reset onto main by a land or unapply before this), oldest first,
         # so the deletion of that ref with its reflog forgets none.
         past = out(["git", "log", "-g", "--format=%H", f"refs/remotes/origin/{b}"]).split()[::-1] or [old]
         git("update-ref", "--create-reflog", f"{PAST_REFS}/{b}", past[0], check=False)
@@ -882,17 +905,16 @@ def subs_of(top: Path) -> list[Path]:
     return sorted(d for d in sibling_checkouts() if sub_parent(d) == top)
 
 
-def holds_work(d: Path) -> bool:
-    """Whether the checkout `d` has anything an abandon would discard:
-    commits beyond origin/main, or staged or unstaged edits."""
+def has_increments(d: Path) -> bool:
+    """Whether the checkout `d` has commits beyond origin/main: what an
+    unapply back to origin/main undoes."""
     head = run(["git", "rev-parse", "HEAD"], cwd=str(d), check=False).stdout.strip()
-    return bool(head and not is_ancestor(head, "refs/remotes/origin/main")) \
-        or bool(run(["git", "status", "--porcelain", "-uno"], cwd=str(d), check=False).stdout)
+    return bool(head and not is_ancestor(head, "refs/remotes/origin/main"))
 
 
 def enter_sub(name: str) -> None:
     """Act in the subagent worktree `name` - or the one whose name `name`
-    is a unique prefix of - of any checkout on this machine (land/abandon
+    is a unique prefix of - of any checkout on this machine (land/unapply
     run from elsewhere, as status suggests)."""
     os.chdir(find_sub(name))
 
@@ -1087,7 +1109,7 @@ def open_worktree(name: str, lock_reason: str | None) -> Path:
     while judging a worktree of the name.  `lock_reason` is the worktree
     lock Claude Code's create hook names its session with (replacing a
     reused one's); without it a hand-opened worktree is locked as
-    sessionless, which prune keeps and land or abandon lift."""
+    sessionless, which prune keeps and land or unapply lift."""
     if not re.fullmatch(r"[\w.-]+", name):
         die(f"{name}: a worktree name holds letters, digits, '.', '-' and '_' only")
     root = outermost(Path.cwd().resolve())
@@ -1238,7 +1260,7 @@ def close_checkout(path: Path, *, force: bool = False) -> None:
             if tip and not is_ancestor(tip, "refs/remotes/origin/main")
             else "a submodule holding something" if submodule.own(d) else None)
     if kept and not force:
-        die(f"{d} holds {kept}: land or abandon it first (--force removes it anyway)")
+        die(f"{d} holds {kept}: land or unapply it first (--force removes it anyway)")
     if worktree_lock(d) is not None:
         git("worktree", "unlock", str(d), check=False)
     submodule.remove_all(d)
@@ -1291,7 +1313,7 @@ def land_with_subagents(release: bool = False, message: str | None = None) -> No
                 continue
             if cur != ident.wb or not ident.wb:
                 die(f"{label} holds commits on {cur or 'a detached HEAD'} that were never deployed: "
-                    f"deploy or abandon them first")
+                    f"deploy or unapply them first")
             if git_op_in_progress(d):
                 die(f"{label} has a {git_op_in_progress(d)} in progress")
             os.chdir(d)
@@ -1321,7 +1343,7 @@ def land_with_subagents(release: bool = False, message: str | None = None) -> No
             gone = submodule.orphaned(d)
             if gone:
                 die(f"the tree pins {b}'s rev of submodule {', '.join(gone)}, whose worktree is gone: "
-                    f"`nixconvoy open --submodule <input>` or `abandon --submodule <input>` in {d.name} first")
+                    f"`nixconvoy open --submodule <input>` in {d.name} first (then `close --submodule <input> --force` drops it)")
         for d, b in [(here, wb), *parts]:
             holds(b, "HEAD" if d == here else f"refs/heads/{b}", main, release)
 
@@ -1402,55 +1424,13 @@ def land_with_subagents(release: bool = False, message: str | None = None) -> No
             "fix them and `nixconvoy pull`")
 
 
-def land_submodule(name: str, message: str | None = None) -> None:
-    """`land --submodule <name>`: the one submodule landed on its
-    repository's default branch and pinned there as a commit on the work
-    branch, pushed; its worktree stays, and the submodule repositories'
-    own checkouts follow (submodule.catch_up_repos).  The checkout's own
-    landing is untouched."""
-    await_background_push()
-    git(*fetch_args())
-    pop_tmp_commits()
-    wb = require_work_branch("land --submodule")
-    if current_branch() != wb:
-        die(f"land runs from the work branch ({wb}); currently on {current_branch() or '(detached HEAD)'}")
-    if staged_differs():
-        die("staged but undeployed changes present; deploy or unstage them first")
-    ensure_rebased()
-    sub = submodule.present_one(Path.cwd(), name)
-    on_file = out(["git", "show", f"HEAD:{MSG_FILE}"]) if rev(f"HEAD:{MSG_FILE}") else ""
-    submodule.land_one(sub, wb, on_file.partition("\n")[0] or f"{name} landed", message)
-    push_work_branch(wb)
-    if not submodule.catch_up_repos():
-        sys.exit(1)
-
-
-def abandon_submodule(name: str) -> None:
-    """`abandon --submodule <name>`: the one submodule reset onto its
-    repository's default branch, the pin restored to origin/main's and
-    staged for the next deploy; its worktree stays."""
-    await_background_push()
-    git(*fetch_args())
-    pop_tmp_commits()
-    wb = require_work_branch("abandon --submodule")
-    top = Path.cwd()
-    sub = submodule.present_one(top, name)
-    submodule.main_pin(sub, top)  # nothing reset for a restore that cannot follow
-    submodule.reset_one(sub, wb)
-    if not submodule.restore(sub, top):
-        print(f"submodule {name}: the tree still pins what origin/main pins; nothing to revert")
-
-
 __all__ = [
-    "abandon",
-    "abandon_submodule",
     "close_checkout",
     "close_submodule",
     "close_worktrees",
     "enter_sub",
-    "holds_work",
+    "has_increments",
     "land",
-    "land_submodule",
     "land_with_subagents",
     "open_checkout",
     "open_worktree",
@@ -1458,5 +1438,6 @@ __all__ = [
     "pull",
     "status",
     "subs_of",
+    "unapply",
     "work_branch_name",
 ]

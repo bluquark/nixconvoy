@@ -425,9 +425,9 @@ def refusals_message(refusals: list[str | Refusal]) -> str:
 def allowing_command(names: list[str]) -> str:
     """The command admitting `names`: this invocation with `--allow <name>`
     for each after its subcommand - as an apply from the same directory
-    for an abandon --apply-now, whose abandon is over."""
+    for an unapply, whose reset is over."""
     argv = sys.argv[1:]
     flags = [a for n in names for a in (ALLOW_FLAG, n)]
-    if argv[:1] == ["abandon"]:
+    if argv[:1] == ["unapply"]:
         return shlex.join(["nixconvoy", "apply", *flags])
     return shlex.join(["nixconvoy", *argv[:1], *flags, *argv[1:]])

@@ -13,11 +13,12 @@ state onto that branch, pushes it and stages the gitlink on the pushed
 rev, so the increment carries the submodule as a tree change, which the
 union, the eval memo and the lineage handle like any other.  `land` lands
 the branch on the repository's default branch first and pins the
-gitlink there; `abandon` discards it, the gitlink restored to
-origin/main's.  The worktree stays either way, its branch reset onto the
-default branch like an agent checkout's; `land --submodule` and `abandon
---submodule` do it for one ahead of the checkout's own landing, and
-`close --submodule` removes the worktree with its branch.  Two checkouts
+gitlink there; `unapply` resets it onto the pin of the rev the checkout
+goes back to (`--back-to origin/main`: the gitlink restored to
+origin/main's).  The worktree stays either way, its
+branch reset onto the default branch like an agent checkout's, and
+`close --submodule` removes the worktree with its branch (`--force`: with
+whatever it holds, the pin put back).  Two checkouts
 pinning the same submodule on different branches meet in the deploy's
 union as a gitlink conflict (solve_union): the branches are merged in the
 repository, the merge pushed to the origin's refs/nixconvoy/union/<input>/<sha>
@@ -616,7 +617,7 @@ def dropped_message(sub: Sub, wb: str, pinned: str, gone: list[str]) -> str:
     return (f"submodule {sub.name}'s worktree ({sub.dir}) was reset below the work the tree deploys on {wb}; "
             f"{len(gone)} commit(s) would leave the pin and the targets:\n  " + "\n  ".join(gone)
             + f"\nput them back (git -C {sub.dir} reset --keep {pinned[:12]}), or drop them deliberately: "
-            f"nixconvoy abandon --submodule {sub.name}")
+            f"nixconvoy close --submodule {sub.name} --force")
 
 
 def left_behind(sub: Sub, pinned: str | None) -> list[str]:
@@ -831,12 +832,10 @@ def land_all(wb: str, fallback_msg: str) -> None:
         land_one(sub, wb, fallback_msg)
 
 
-def land_one(sub: Sub, wb: str, fallback_msg: str, given: str | None = None) -> None:
+def land_one(sub: Sub, wb: str, fallback_msg: str) -> None:
     """The submodule landed on its repository's default branch as one
-    commit (`given`, land --submodule's -m, for a worktree without a
-    MSG_FILE; else the MSG_FILE in its worktree - tracked or not, it is
-    read here alone - else `fallback_msg`) and pinned there, as a commit
-    on `wb`."""
+    commit (the MSG_FILE in its worktree - tracked or not, it is read here
+    alone - else `fallback_msg`) and pinned there, as a commit on `wb`."""
     top = Path.cwd()
     cur = branch_at(sub.dir)
     if cur != wb:
@@ -882,7 +881,7 @@ def land_one(sub: Sub, wb: str, fallback_msg: str, given: str | None = None) -> 
             on_file = (sub.dir / MSG_FILE).read_text(encoding="utf-8")
         except OSError:
             on_file = ""
-        msg = landing_message(given, on_file, "", f"submodule {sub.name}") or fold_subject(fallback_msg)
+        msg = landing_message(None, on_file, "", f"submodule {sub.name}") or fold_subject(fallback_msg)
         if tree == out(["git", "rev-parse", f"{main}^{{tree}}"], cwd=str(sub.dir)):
             landed = main
         else:
@@ -920,15 +919,9 @@ def push_branch(sub: Sub, wb: str) -> None:
             f"its only writer.  Investigate:\n{(p.stderr or '').strip()}")
 
 
-def reset_all(top: Path, wb: str) -> None:
-    """An abandon's submodules: each hard-reset onto its repository's
-    default branch (untracked files survive), the branch pushed so; the
-    checkout's own reset restores their pins."""
-    for sub in present(top):
-        reset_one(sub, wb)
-
-
 def reset_one(sub: Sub, wb: str) -> None:
+    """The submodule worktree hard-reset onto its repository's default
+    branch (untracked files survive), the branch pushed so."""
     cur = branch_at(sub.dir)
     if cur != wb:
         die(f"submodule {sub.name} ({sub.dir}) is on {cur or 'a detached HEAD'}, not {wb}")
@@ -943,6 +936,59 @@ def reset_one(sub: Sub, wb: str) -> None:
         push_branch(sub, wb)
     print(f"submodule {sub.name}: {wb} reset onto origin/{default}" + (
         f" (was {prev[:12]}, see its reflog)" if prev != main else ""))
+
+
+def moved_pins(top: Path, wb: str, tip: str, parent: str) -> list[tuple[Sub, str]]:
+    """The submodules present under `top` whose pin the increments from
+    `parent` to `tip` moved, each with the rev to put the worktree back on
+    - `parent`'s pin, or the default branch's tip when that pin is landed
+    (nothing of the branch's own is left then) - checked ahead of the
+    checkout's own reset: each on `wb`, nothing staged in it, the rev at
+    hand, no unstaged edit the reset would lose."""
+    from .commands import lost_edits  # noqa: PLC0415 - commands imports this module
+
+    moved = []
+    for sub in present(top):
+        was, now = pin_at(parent, sub.path, top), pin_at(tip, sub.path, top)
+        if was == now:
+            continue
+        if was is None:
+            die(f"the increment added submodule {sub.name}, whose worktree and branch would stay behind: "
+                f"`nixconvoy close --submodule {sub.name} --force` first")
+        cur = branch_at(sub.dir)
+        if cur != wb:
+            die(f"submodule {sub.name} ({sub.dir}) is on {cur or 'a detached HEAD'}, not {wb}")
+        if staged(sub.dir):
+            die(f"submodule {sub.name} has staged changes, which the deploy would carry; "
+                f"deploy or unstage them first")
+        fetch_once(sub.name, sub.repo)
+        if rev_in(sub.dir, f"{was}^{{commit}}") is None:
+            die(f"submodule {sub.name}: the pin to put back, {was[:12]}, is not in {sub.repo}")
+        default = f"refs/remotes/origin/{default_branch(sub.repo)}"
+        if is_ancestor(was, default, cwd=str(sub.dir)):
+            was = rev_in(sub.dir, default) or was
+        edited = lost_edits(was, "HEAD", sub.dir)
+        if edited:
+            die(f"submodule {sub.name}: the increments' files have unstaged edits, which the reset "
+                f"would lose; stash or discard them in {sub.dir} first: {', '.join(edited)}")
+        moved.append((sub, was))
+    return moved
+
+
+def unapply_pins(moved: list[tuple[Sub, str]], wb: str) -> None:
+    """Each worktree of `moved` (moved_pins) reset onto the pin put back,
+    its unstaged edits kept (an edit the reset would lose stops it), the
+    branch pushed so: the deploy's sync then finds its HEAD pinned."""
+    for sub, was in moved:
+        prev = rev_in(sub.dir, "HEAD") or ""
+        p = git("reset", "--quiet", "--keep", was, cwd=str(sub.dir), check=False)
+        if p.returncode != 0:
+            die(f"submodule {sub.name}: the reset onto {was[:12]} failed (the checkout is reset below "
+                f"the increment already): `git -C {sub.dir} reset --keep {was[:12]}`, then deploy:\n"
+                f"{(p.stderr or '').strip()}")
+        if rev_in(sub.dir, f"refs/remotes/origin/{wb}") is not None:
+            push_branch(sub, wb)
+        print(f"submodule {sub.name}: {wb} reset onto {was[:12]} (was {prev[:12]}, see its reflog)")
 
 
 def remove_all(top: Path) -> None:
@@ -960,9 +1006,9 @@ def keeps(sub: Sub, top: Path) -> str | None:
     if default is None:
         return "its repository's origin has no default branch to judge it against"
     if has_own(sub, default):
-        return f"it carries commits not on origin/{default}; land or abandon it (--submodule {sub.name})"
+        return f"it carries commits not on origin/{default}; land or unapply it (--submodule {sub.name})"
     if off_default(sub, top):
-        return f"the tree still pins a rev not on origin/{default}; land or abandon it (--submodule {sub.name})"
+        return f"the tree still pins a rev not on origin/{default}; land or unapply it (--submodule {sub.name})"
     return None
 
 

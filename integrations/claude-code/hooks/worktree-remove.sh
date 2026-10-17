@@ -5,7 +5,7 @@
 # `nixconvoy close` removes when it stops or its session exits - and without it the
 # worktree's branch would stay behind.  A worktree with changes, or commits not on
 # origin/main (a work branch deployed but not landed: nixconvoy's land
-# or abandon is its way out), is kept (exit 1 leaves it on disk, as
+# or unapply is its way out), is kept (exit 1 leaves it on disk, as
 # documented), as is one another live claude session has taken over, or
 # one holding a submodule worktree (a gitlink whose directory nixconvoy
 # planted a worktree in: its close judges that and removes both in order).
