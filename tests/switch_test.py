@@ -1207,8 +1207,8 @@ def announce_cases(d: Path) -> None:
         committed = checkout.deployed_commit(snap, "two\n\nReaches: a\nApplied: a")
         main = proc.rev("refs/remotes/origin/main")
         assert main is not None
-        # Holds replay oldest first: reached and not deployed holds, a later
-        # deploy of the target releases, a commit without trailers is
+        # Holds replay oldest first: reached and not applied holds, a later
+        # deploy of the target ends the hold, a commit without trailers is
         # nothing, and so is one from before Reaches: (Affected:).
         chain = checkout.deployed_commit(snap, "h0\n\nAffected: a, b, c, d\nApplied: a")
         chain = out_at(co, chain, "h1\n\nReaches: a, b, c\nApplied: a")
@@ -1775,7 +1775,6 @@ def open_cases(d: Path) -> None:
         assert review.targets(["ta"], co) == ([w], [])
         assert review.targets(["worktree-task", "a.txt"], co) == ([w], ["a.txt"])
         assert review.targets(["--with-subagents", "--stat"], co) == ([co, w], ["--stat"])
-        assert review.targets(["--union", "--stat"], co) == ([co, w], ["--stat"])  # the old name, an alias
         assert "no subagent worktree, submodule, branch or path named nope" in dies(lambda: review.targets(["nope"], co))
         assert "named foreign" in dies(lambda: review.targets(["foreign"], co))  # no configured submodule
         put(w, "COMMIT_MSG.md", "task done\n")

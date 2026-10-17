@@ -79,7 +79,7 @@ no work.
   union carries the work, so every other work branch's deploy leaves a held
   target alone, or is refused when its own work reaches it; a main
   checkout's deploy (a nightly's) leaves it behind rather than fail; and
-  `land` refuses until `--not-yet-applied` - no restricted apply rolls
+  `land` refuses without `--not-yet-applied` - no restricted apply rolls
   out elsewhere by accident - unless the branch builds the target just as
   main does (`land` evaluates the held targets at its tip and at main),
   so nothing is held there.

@@ -94,9 +94,9 @@ def unchanged_at(tip: str, main: str, held: list[str]) -> set[str]:
 
 def holds(wb: str, tip: str, main: str, not_yet_applied: bool = False) -> None:
     """The targets `wb`'s increments (`main..tip`) hold back: a landing is
-    refused on them unless `not_yet_applied`, which tells where the landed
-    work rolls out from - or unless the branch builds them as main does,
-    which holds nothing."""
+    refused on them unless `not_yet_applied` (the landed work then rolls out
+    there from the next deploy anywhere) - or unless the branch builds them
+    as main does, which holds nothing; evaluated without the flag alone."""
     held = sorted(held_targets(f"{main}..{tip}"))
     if not held:
         return

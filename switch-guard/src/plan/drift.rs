@@ -48,8 +48,8 @@
 //! to: a held target is left alone, or the deploy refused when this
 //! checkout's own work reaches it (Params::held), as for an in-flight
 //! increment - until the holding checkout deploys the target or lands with
-//! --not-yet-applied.  A main checkout's own work is main's advance, which a hold
-//! must not stop fleet-wide (the nightly's lock): it is left behind on
+//! --not-yet-applied.  A main checkout's own work is main's advance, which
+//! a hold must not stop fleet-wide (the nightly's lock): it is left behind on
 //! the held target instead (Params::work_branch).  A --evict unions no
 //! other branch, so nothing is held under it: the target gets this
 //! checkout's view alone, the hold standing.

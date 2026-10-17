@@ -96,7 +96,7 @@ def targets(args: list[str], here: Path) -> tuple[list[Path | str], list[str]]:
     rest = list(args)
     while rest:
         a = rest[0]
-        if a in ("--with-subagents", "--union"):
+        if a == "--with-subagents":
             with_subs = True
             rest.pop(0)
             continue

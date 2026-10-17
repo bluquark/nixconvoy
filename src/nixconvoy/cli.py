@@ -173,12 +173,13 @@ later increment's deploy on the branch switching it since (a deploy with
 nothing staged that switches it commits an empty increment saying so).  The
 union every deploy builds carries that work, so until the holding checkout
 deploys the target (nixconvoy apply <target> there, or an apply naming no
-target) or lands with --not-yet-applied, a deploy from any other work branch leaves
-the target alone - or is refused when its own work reaches it, as for an
-in-flight increment - a main checkout's deploy (the nightly's) leaves it
-behind on main's advance, and `land` refuses without --not-yet-applied -
-unless the branch builds the target as main does (land evaluates the held
-targets at its tip and at main), so nothing is held there.  --evict unions no other
+target) or lands with --not-yet-applied, a deploy from any other work
+branch leaves the target alone - or is refused when its own work reaches
+it, as for an in-flight increment - a main checkout's deploy (the
+nightly's) leaves it behind on main's advance, and `land` refuses without
+--not-yet-applied - unless the branch builds the target as main does (land
+evaluates the held targets at its tip and at main), so nothing is held
+there.  --evict unions no other
 branch, so it switches the target to this checkout's view alone, without
 the held work, the hold standing.  `status` shows what each checkout holds
 back.
@@ -426,8 +427,8 @@ of a group the target's configuration protects (nixconvoy.protected.<name>).
 --dry-activate stops before any switch, printing what each would do.
 land --not-yet-applied lands work a target is held back from (increments
 that reach it, applied to other targets alone), for the next deploy anywhere
-to roll out there; held targets the branch builds as main does (land
-evaluates them at its tip and at main) are not held, with or without it.
+to roll out there.  Without it, land evaluates the held targets at its tip
+and at main: one the branch builds as main does is not held, the rest refuse.
 unapply reverts this checkout's increments on the targets, from HEAD back
 to --back-to <rev> (HEAD^ by default: the latest one; origin/main: the whole
 branch): the work branch is reset onto <rev> (the reflog keeps the tip),
@@ -532,7 +533,7 @@ def main() -> None:
             lock_reason = args.pop(0)
         elif a == "--branch" and subcmd == "open" and args:
             branch = args.pop(0)
-        elif a in ("--with-subagents", "--union") and subcmd in ("land", "unapply"):
+        elif a == "--with-subagents" and subcmd in ("land", "unapply"):
             with_subs = True
         elif a == "--not-yet-applied" and subcmd == "land":
             not_yet_applied = True
