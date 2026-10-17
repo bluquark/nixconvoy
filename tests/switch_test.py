@@ -306,7 +306,8 @@ def target_cases() -> None:
                           ('target = "x@{host}"\n', "now ssh_address"),
                           ('[hosts.a]\n', "now targets"),
                           ('[build]\nhost = "b"\n', "now build.builder"),
-                          ('worktrees = "w"\nchild_worktrees = "w"\n', "both given"),
+                          ('worktrees = "w"\n', "now child_worktrees"),
+                          ('[precheck]\nattr = "lint"\n', "now precheck.check"),
                           ('[targets.a]\ntarget = "x"\n', "now ssh_address"),
                           ('ssh_address = "x@{host}"\n', "over {target} alone"),
                           ('branch_prefix = "{host}-d"\n', "over {machine} alone")):
@@ -573,7 +574,7 @@ def scratch_env() -> None:
     proc.this_machine = lambda: "tester"
     # The scratch repos keep their flake under nixos/, with a repo lint as
     # the precheck.
-    config.set_cfg(config.parse('flake = "nixos"\n[precheck]\nattr = "lint"\n'))
+    config.set_cfg(config.parse('flake = "nixos"\n[precheck]\ncheck = "lint"\n'))
     memo.union_objects.cache_clear()
     memo.scan_sound.cache_clear()
     memo.target_eval_reads.cache_clear()

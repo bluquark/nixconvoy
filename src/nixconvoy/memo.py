@@ -217,7 +217,7 @@ def file_facts(wt: str, f: str) -> tuple[frozenset[str], tuple[str, ...]]:
     target_eval_reads, the same whichever target asks: the words it names
     and the repo paths its path literals name (a directory named counts
     whole, `.` being the repository; one outside it skipped, as is, in
-    flake.nix, the precheck attribute's `<attr> = import <path> { ... };`
+    flake.nix, the precheck's `<check> = import <path> { ... };`
     stanza, which no target's evaluation reads).  Cached, since the
     targets' scans share most files."""
     c = cfg()
@@ -230,12 +230,12 @@ def file_facts(wt: str, f: str) -> tuple[frozenset[str], tuple[str, ...]]:
     if f == flake_nix:
         m = OUTPUTS_ARGS.search(text)
         words = SPECIAL_ARGS.sub("", text[m.end():] if m else text)
-        if c.precheck_attr:
-            # `checks.<system>.<attr> = import <path> { ... };`, or a bare
-            # `<attr> = import <path>` binding when none is written so: the
+        if c.precheck:
+            # `checks.<system>.<check> = import <path> { ... };`, or a bare
+            # `<check> = import <path>` binding when none is written so: the
             # whole stanza is dropped where its braces are flat, else the
             # import alone.
-            leaf = rf"{re.escape(c.precheck_attr)}\s*=\s*import\s+(\.\.?/[\w.+\-/]*)"
+            leaf = rf"{re.escape(c.precheck)}\s*=\s*import\s+(\.\.?/[\w.+\-/]*)"
             stanza = next((p for p in (rf"checks\.[^\s=]*\.{leaf}", rf"(?<![\w\-.]){leaf}")
                            if re.search(p, text)), None)
             if stanza:
@@ -540,11 +540,11 @@ def precheck_memo_path(rev: str) -> Path:
     check's inputs spares the build when a changed tree left those alone),
     written only once the check passed, so presence is the proof."""
     tree = out(["git", "rev-parse", rev + "^{tree}"])
-    return memo_dir() / f"check-{cfg().precheck_attr}-{tree}.json"
+    return memo_dir() / f"check-{cfg().precheck}-{tree}.json"
 
 
 def precheck_gate(wt: str, rev: str) -> str | None:
-    """Prove the precheck (the flake's checks.<system>.<attr>) for `rev`,
+    """Prove the precheck (the flake's checks.<system>.<check>) for `rev`,
     checked out in `wt`: the failure text, or None once it passes, from the
     memo or by building it.  Its own build rather than an input of the
     toplevels', so a violation is reported before any package build is
@@ -558,18 +558,18 @@ def precheck_gate(wt: str, rev: str) -> str | None:
     if memo_read(path) is not None:
         return None
     flake = f"{wt}/{c.flake_path}" if c.flake_path != "." else wt
-    p = run(["nix", "eval", "--json", f"{flake}#checks.{c.system}.{c.precheck_attr}",
+    p = run(["nix", "eval", "--json", f"{flake}#checks.{c.system}.{c.precheck}",
              "--apply", "c: { out = c.outPath; drv = c.drvPath; }"], check=False)
     if p.returncode != 0:
         return f"evaluating the precheck failed:\n{p.stderr.strip()}"
     ent = memo_entry(load_json(p.stdout))
     if ent is None:
         return f"nix eval returned no derivation for the precheck:\n{p.stdout[:500]}"
-    err = build_drvs([ent.drv], f"precheck {c.precheck_attr}", ("-L",), capture=True)
+    err = build_drvs([ent.drv], f"precheck {c.precheck}", ("-L",), capture=True)
     if err is None:
         memo_write(path, ent)
     return err
 
 
 def precheck_unproven(rev: str) -> bool:
-    return bool(cfg().precheck_attr) and memo_read(precheck_memo_path(rev)) is None
+    return bool(cfg().precheck) and memo_read(precheck_memo_path(rev)) is None

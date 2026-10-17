@@ -43,8 +43,8 @@ class Config:
     # worktree must be ignored (open writes it into .git/info/exclude); any
     # worktree nested in a checkout is one of its children, wherever it was made.
     child_worktrees: str = ".claude/worktrees"
-    # A flake check (checks.<system>.<attr>) proven before any build.
-    precheck_attr: str = ""
+    # A flake check (checks.<system>.<check>) proven before any build.
+    precheck: str = ""
     # Determinate Nix's parallel evaluation (builtins.parallel, --eval-cores):
     # None is "auto", on when the nix here knows the feature.
     parallel_eval: bool | None = None
@@ -133,6 +133,7 @@ def _bare_url(u: str) -> str:
 # The keys the target/builder/machine vocabulary renamed, for the error a
 # config still using one gets.
 _RENAMED = {"target": "ssh_address (over {target}, not {host})", "hosts": "targets",
+            "worktrees": "child_worktrees", "precheck.attr": "precheck.check",
             "build.host": "build.builder",
             "build.caches": "build.skip_substituters: the builder's nix.conf lists the caches",
             "build.public_substituters": "build.skip_substituters: the builder's nix.conf lists the caches"}
@@ -162,7 +163,7 @@ def parse(text: str) -> Config:
     version = doc.get("version", 1)
     if version != 1:
         raise ConfigError(f"{CONFIG_FILE}: version {version} is not supported (1 is)")
-    known = {"version", "flake", "hosts_dir", "system", "ssh_address", "branch_prefix", "child_worktrees", "worktrees",
+    known = {"version", "flake", "hosts_dir", "system", "ssh_address", "branch_prefix", "child_worktrees",
              "precheck", "eval", "build", "targets", "submodules"}
     if "memo" in doc:
         raise ConfigError(f"{CONFIG_FILE}: [memo] is gone: the eval memo needs no settings, it keys "
@@ -171,6 +172,9 @@ def parse(text: str) -> Config:
         if k not in known:
             raise ConfigError(f"{CONFIG_FILE}: unknown key {k}{_renamed(k)}")
     pre = _table(doc.get("precheck", {}), "precheck")
+    for k in pre:
+        if k != "check":
+            raise ConfigError(f"{CONFIG_FILE}: unknown key precheck.{k}{_renamed(f'precheck.{k}')}")
     ev = _table(doc.get("eval", {}), "eval")
     build = _table(doc.get("build", {}), "build")
     for k in build:
@@ -205,11 +209,7 @@ def parse(text: str) -> Config:
         if not repo:
             raise ConfigError(f"{CONFIG_FILE}: submodules.{name}.repo is required")
         submodules[name] = repo
-    # `worktrees`, its former name, is still in trees older than the binary.
-    if "child_worktrees" in doc and "worktrees" in doc:
-        raise ConfigError(f"{CONFIG_FILE}: child_worktrees and worktrees (its former name) both given")
-    key = "worktrees" if "worktrees" in doc else "child_worktrees"
-    children = _str(doc, key, CONFIG_FILE, ".claude/worktrees").strip("/")
+    children = _str(doc, "child_worktrees", CONFIG_FILE, ".claude/worktrees").strip("/")
     if not children or ".." in children.split("/"):
         raise ConfigError(f"{CONFIG_FILE}: child_worktrees is a directory inside the checkout")
     return Config(
@@ -219,7 +219,7 @@ def parse(text: str) -> Config:
         ssh_template=_template(doc, "ssh_address", "{target}", "target"),
         branch_prefix=_template(doc, "branch_prefix", "work/{machine}/", "machine"),
         child_worktrees=children,
-        precheck_attr=_str(pre, "attr", "precheck"),
+        precheck=_str(pre, "check", "precheck"),
         parallel_eval=_auto_bool(ev, "parallel", "eval"),
         builder=builder,
         build_unreachable_hint=_str(build, "unreachable_hint", "build"),

@@ -178,7 +178,7 @@ child_worktrees = ".claude/worktrees"   # where `open --child <worktree>` puts a
                                         # checkout: Claude Code's own place by default (excluded through .git/info/exclude)
 
 [precheck]                   # a flake check proven before any build (a pass memoized on the union's tree)
-attr = "repo-lint"           # checks.<system>.<attr>
+check = "repo-lint"          # checks.<system>.<check>
 
 [eval]
 parallel = true              # force Determinate Nix's parallel evaluation (default "auto": on when nix has it)
@@ -227,8 +227,8 @@ lexical, so the flake keeps two habits for the memo to hit:
   (`import ./pkgs`, a fileset rooted at `../.`, a `readDir`) counts whole,
   and one that holds the flake directory - the repository root included -
   keys the target on the whole tree; a deploy says so, with the file that
-  names it.  The precheck attribute's stanza in `flake.nix`
-  (`<attr> = import ./lint.nix { ... };`) is skipped: no target's
+  names it.  The precheck's stanza in `flake.nix`
+  (`<check> = import ./lint.nix { ... };`) is skipped: no target's
   evaluation reads the check.
 - **Reach the repo's own packages by import at the use site**
   (`import ../pkgs/foo.nix { inherit pkgs; }`), not through an overlay or
