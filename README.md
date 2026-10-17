@@ -185,7 +185,7 @@ overlay = "nixos/pkgs/default.nix"
 namespace = "homelab"        # named as pkgs.homelab.<attr>
 
 [eval]
-parallel = true              # Determinate Nix's parallel evaluation
+parallel = true              # force Determinate Nix's parallel evaluation (default "auto": on when nix has it)
 
 [build]
 builder = { darwin = "builder" }     # realise closures there (per platform)

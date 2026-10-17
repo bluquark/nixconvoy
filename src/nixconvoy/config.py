@@ -60,8 +60,9 @@ class Config:
     # `<x> = ... ./<file>.nix` lines, named as pkgs.<namespace>.<x>.
     overlay: str = ""
     overlay_namespace: str = ""
-    # Determinate Nix's parallel evaluation (builtins.parallel, --eval-cores).
-    parallel_eval: bool = False
+    # Determinate Nix's parallel evaluation (builtins.parallel, --eval-cores):
+    # None is "auto", on when the nix here knows the feature.
+    parallel_eval: bool | None = None
     # The builder the closures are realised on, by sys.platform ("darwin",
     # "linux"); absent means here.
     builder: dict[str, str] = field(default_factory=dict)
@@ -120,6 +121,15 @@ def _bool(t: dict[str, object], k: str, where: str, default: bool = False) -> bo
     v = t.get(k, default)
     if not isinstance(v, bool):
         raise ConfigError(f"{where}.{k} must be true or false")
+    return v
+
+
+def _auto_bool(t: dict[str, object], k: str, where: str) -> bool | None:
+    v = t.get(k, "auto")
+    if v == "auto":
+        return None
+    if not isinstance(v, bool):
+        raise ConfigError(f'{where}.{k} must be true, false or "auto"')
     return v
 
 
@@ -219,7 +229,7 @@ def parse(text: str) -> Config:
         precheck_attr=_str(pre, "attr", "precheck"),
         precheck_globs=_strs(pre, "globs", "precheck"),
         overlay=overlay, overlay_namespace=namespace,
-        parallel_eval=_bool(ev, "parallel", "eval"),
+        parallel_eval=_auto_bool(ev, "parallel", "eval"),
         builder=builder,
         build_unreachable_hint=_str(build, "unreachable_hint", "build"),
         caches=tuple(caches),

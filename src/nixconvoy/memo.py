@@ -456,16 +456,29 @@ def eval_expr(target: str, parallel: bool) -> str:
     that path string) and the switch policy the nixconvoy module declares.
     With parallel evaluation the nspawn containers' toplevels (nested NixOS
     evaluations, about a second each) are forced beside the target's - the
-    only parallelism one configuration offers."""
+    only parallelism one configuration offers.  tryEval passes over a
+    container declared by `path` alone, whose `config` is unset."""
     head = (f'cs: let c = cs."{target}".config; top = c.system.build.toplevel; '
             'ncv = c.nixconvoy or {}; '
             'policy = { out = top.outPath; drv = top.drvPath; protected = ncv.protected or {}; '
             'last = ncv.switchLast or false; assessed = (ncv.bootAssessment or {}).enable or false; }; ')
     if not parallel:
         return head + "in policy"
-    return (head + "containers = map (x: x.config.system.build.toplevel.outPath) "
+    return (head + "containers = map (x: (builtins.tryEval x.config.system.build.toplevel.outPath).value) "
             "(builtins.attrValues c.containers); in "
             "builtins.parallel (containers ++ [ top.outPath ]) policy")
+
+
+@functools.cache
+def parallel_eval_known() -> bool:
+    """Whether the nix here has the parallel-eval feature (Determinate Nix):
+    whether builtins.parallel appears once the feature is named, since
+    upstream only warns about an unknown feature and goes on."""
+    p = run(["nix", "eval", "--extra-experimental-features", "parallel-eval",
+             "--expr", "builtins ? parallel"], check=False, timeout=10)
+    if p.returncode != 0:
+        die(f"probing nix for parallel evaluation failed:\n{p.stderr.strip()}")
+    return p.stdout.strip() == "true"
 
 
 def eval_toplevels(wt: str, union: str, targets: list[str],
@@ -494,12 +507,13 @@ def eval_toplevels(wt: str, union: str, targets: list[str],
         print(f"  (memoized: {', '.join(h for h in targets if h not in stale)})")
     c = cfg()
     flake = f"{wt}/{c.flake_path}" if c.flake_path != "." else wt
+    parallel = parallel_eval_known() if c.parallel_eval is None else c.parallel_eval
 
     def eval_target(h: str) -> subprocess.CompletedProcess[str]:
         par = (["--eval-cores", str(min(8, os.cpu_count() or 1)),
-                "--extra-experimental-features", "parallel-eval"] if c.parallel_eval else [])
+                "--extra-experimental-features", "parallel-eval"] if parallel else [])
         return run(["nix", "eval", "--json", *par, f"{flake}#nixosConfigurations",
-                    "--apply", eval_expr(h, c.parallel_eval)], check=False)
+                    "--apply", eval_expr(h, parallel)], check=False)
 
     with ThreadPoolExecutor(len(stale)) as pool:
         evals = {h: pool.submit(eval_target, h) for h in stale}
