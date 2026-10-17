@@ -1617,6 +1617,16 @@ def submodule_cases(d: Path) -> None:
         sh(ax8, "push", "--quiet", "--force", "origin", wb8)
         submodule.set_pin(dep(co8), t2, co8)  # ...its pin staged, as that deploy's sync left it
         sh(co8, "fetch", "--quiet")
+        # The submodule's worktree cannot follow (edits): the rebase's
+        # failure says why git could not do it alone and what to do.
+        (ax8 / "tool2.py").write_text("b, edited\n")
+        err = dies(checkout.ensure_rebased)
+        assert f"rebasing {wb8} onto origin/main is not clean, left as it was: origin/main and {wb8} both moved " \
+            f"submodule dep's pin (a landing there), which git cannot merge itself: nixconvoy rebases the " \
+            f"submodule's branch onto the landed one instead, but its worktree ({ax8}) has edits, which that " \
+            f"rebase cannot keep: stash or commit them; then `nixconvoy pull`" in err and "Could not read" not in err, err
+        assert sh(ax8, "rev-parse", "HEAD") == t2 and pinned(co8) == t2
+        sh(ax8, "checkout", "--", "tool2.py")
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):
             checkout.ensure_rebased()

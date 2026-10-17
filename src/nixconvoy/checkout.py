@@ -288,6 +288,7 @@ class GitQueries:
 
     def __init__(self) -> None:
         self.aside = ""
+        self.aside_branch = ""
 
     def where(self, ask: dict[str, object]) -> str | None:
         return self.aside if ask.get("aside") else None
@@ -319,10 +320,15 @@ class GitQueries:
 
             empty = "--empty=keep" if ask.get("keep_empty") else "--empty=drop"
             where = self.where(ask)
-            p = git("rebase", "--quiet", empty, arg("upstream"), cwd=where, check=False)
+            upstream = arg("upstream")
+            p = git("rebase", "--quiet", empty, upstream, cwd=where, check=False)
             # Stopped on gitlinks alone, where main pins a submodule this
             # branch pinned too (its landing elsewhere): the submodule follows.
-            while p.returncode != 0 and submodule.solve_rebase(Path(where or Path.cwd()).resolve(), Path.cwd().resolve()):
+            why = ""
+            while p.returncode != 0:
+                why = submodule.solve_rebase(Path(where or Path.cwd()).resolve(), Path.cwd().resolve(), upstream)
+                if why is not None:
+                    break
                 if ok(["git", "diff", "--cached", "--quiet"], cwd=where):
                     # Resolved to what HEAD has already (a later pin of
                     # the same submodule): kept as an empty commit where the
@@ -336,9 +342,15 @@ class GitQueries:
                 p = git("rebase", "--continue", cwd=where, env={"GIT_EDITOR": "true"}, check=False)
             if p.returncode == 0:
                 submodule.push_pending()
-            else:
-                submodule.undo_pending()
-            return ran(p)
+                return ran(p)
+            submodule.undo_pending()
+            if why:  # a gitlink the submodule could not follow: the failure explained, git's noise dropped
+                noise = ("error: Could not read ", "error: could not apply ", "Could not apply ")
+                rest = "\n".join(ln for ln in (p.stderr or "").splitlines()
+                                 if ln.strip() and not ln.startswith(noise) and not ln.startswith("hint:"))
+                return {"ran": False, "detail": why + (f"\n{rest}" if rest else "")}
+            there = f"git rebase {upstream.removeprefix('refs/remotes/')}" + (f" {self.aside_branch}" if where else "")
+            return {"ran": False, "detail": f"run `{there}` there, resolve, then re-run:\n{(p.stderr or '').strip()}"}
         if kind == "rebase_abort":
             return ran(git("rebase", "--abort", cwd=self.where(ask), check=False))
         if kind == "rev":
@@ -349,6 +361,7 @@ class GitQueries:
             return ran(git(*push_cmd(arg("branch")), check=False))
         if kind == "add_worktree":
             self.aside = tempfile.mkdtemp(prefix=f"{TMP_PREFIX}rebase-wt.", dir="/tmp")
+            self.aside_branch = arg("branch")
             return ran(git("worktree", "add", "--quiet", self.aside, arg("branch"), check=False))
         if kind == "drop_worktree":
             if self.aside:

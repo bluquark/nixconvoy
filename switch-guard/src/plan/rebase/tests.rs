@@ -541,7 +541,7 @@ proptest! {
             }
             None => {
                 let e = out.unwrap_err();
-                prop_assert!(e.contains(&format!("`git rebase origin/main {WB}`")), "{}", e);
+                prop_assert!(e.starts_with(&format!("rebasing {WB} onto origin/main is not clean, left as it was: ")), "{}", e);
                 prop_assert_eq!(&r.branches[WB], mine);
                 prop_assert_eq!(&r.origin.get(WB), &before.origin.get(WB));
                 return Ok(());
@@ -737,7 +737,7 @@ fn onto_brings_a_submodule_onto_its_default_branch() {
     let before = r.clone();
     let (_, _, out) = run(&mut r, Params::Onto { upstream: dev.into() }, 100);
     let msg = out.unwrap().unwrap().unwrap_err();
-    assert!(msg.starts_with(&format!("rebasing {WB} onto origin/dev is not clean, left as it was; run `git rebase origin/dev`")), "{msg}");
+    assert!(msg.starts_with(&format!("rebasing {WB} onto origin/dev is not clean, left as it was: ")), "{msg}");
     r.next_id = before.next_id; // the tmp commit's id, spent
     assert_eq!(r, before);
 }

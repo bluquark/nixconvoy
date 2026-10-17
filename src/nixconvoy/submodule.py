@@ -402,20 +402,23 @@ def solve_union(wt: Path, path: str) -> bool:
     return True
 
 
-def solve_rebase(wt: Path, checkout: Path) -> bool:
-    """A rebase of `checkout`'s work branch onto origin/main stopped on
+def solve_rebase(wt: Path, checkout: Path, upstream: str) -> str | None:
+    """A rebase of `checkout`'s work branch onto `upstream` stopped on
     gitlinks alone (in `wt`: the checkout itself, or the throwaway
-    worktree a branch not checked out is rebased in) because main pins a
-    submodule elsewhere (its landing) that a replayed commit pinned on
-    this branch: the worktree here is rebased onto the default branch
+    worktree a branch not checked out is rebased in) because `upstream`
+    pins a submodule elsewhere (its landing) that a replayed commit pinned
+    on this branch: the worktree here is rebased onto the default branch
     (once per run: every later replayed commit pins the same tip) and
     pinned on its tip, staged for `git rebase --continue`; the push waits
-    for the rebase's end (push_pending, else undo_pending).  Whether it
-    resolved."""
+    for the rebase's end (push_pending, else undo_pending).  None once
+    resolved; "" when the stop is not on gitlinks alone (nothing here to
+    solve); else why the submodule could not follow, as the rebase's
+    failure text - git merges no gitlink itself (the submodule's commits
+    are not in this repository), so that is the one way through."""
     files = out(["git", "diff", "--name-only", "--diff-filter=U"], cwd=str(wt)).splitlines()
     subs = {f: at_path(wt, f) for f in files}
     if not subs or any(s is None for s in subs.values()):
-        return False
+        return ""
     # HEAD is detached mid-rebase: the branch is in the rebase's state.
     try:
         head_name = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path", "rebase-merge/head-name"],
@@ -423,56 +426,58 @@ def solve_rebase(wt: Path, checkout: Path) -> bool:
     except OSError:
         head_name = ""
     wb = head_name.removeprefix("refs/heads/") or branch_at(checkout) or ""
+    upstream = upstream.removeprefix("refs/remotes/")
     for f, sub in subs.items():
         assert sub is not None
         stages = gitlink_stages(wt, f)
+        why = (f"{upstream} and {wb} both moved submodule {sub.name}'s pin (a landing there), which git "
+               f"cannot merge itself: nixconvoy rebases the submodule's branch onto the landed one instead, but ")
         if 3 not in stages:  # mine (stage 3) is the replayed commit's pin
-            return False
+            return why + f"one side deleted the pin: resolve the rebase by hand (`git rebase {upstream}` there)"
         pending = PENDING.get((sub.name, wb))
-        head = pending.head if pending is not None else rebase_sub(sub, wb, stages[3], wt, checkout)
-        if head is None:
-            return False
+        if pending is not None:
+            head = pending.head
+        else:
+            head, problem = rebase_sub(sub, wb, stages[3], wt, checkout)
+            if head is None:
+                return why + f"{problem}; then `nixconvoy pull`"
         set_pin(sub, head, wt)
-    return True
+    return None
 
 
-def rebase_sub(sub: Sub, wb: str, mine: str, wt: Path, checkout: Path) -> str | None:
+def rebase_sub(sub: Sub, wb: str, mine: str, wt: Path, checkout: Path) -> tuple[str | None, str]:
     """solve_rebase for one submodule: its worktree under `checkout` on
     `wb` rebased onto the default branch as fetched (the push pending),
-    its new tip; None when it cannot be (said)."""
+    its new tip - or None and why it cannot be, with what to do."""
     found = [s for s in present(checkout) if s.name == sub.name]
     if not found or branch_at(found[0].dir) != wb:
-        print(f"note: submodule {sub.name}: no worktree on {wb} under {checkout} to rebase it in", file=sys.stderr)
-        return None
+        return None, (f"no worktree of it on {wb} is under {checkout} to rebase: "
+                      f"`nixconvoy open --submodule {sub.name}` there")
     here = found[0]
     if out(["git", "status", "--porcelain", "-uno"], cwd=str(here.dir)):
-        print(f"note: submodule {sub.name} has edits, which its rebase onto the landed branch cannot keep",
-              file=sys.stderr)
-        return None
+        return None, f"its worktree ({here.dir}) has edits, which that rebase cannot keep: stash or commit them"
     tip_pinned = tip_pin(wt, sub.path) or mine
     gone = reset_below_deployed(here, tip_pinned)
     if gone:  # a hand reset: pinning HEAD would drop them in silence
-        print(f"note: {dropped_message(here, wb, tip_pinned, gone)}", file=sys.stderr)
-        return None
+        return None, dropped_message(here, wb, tip_pinned, gone)
     behind = left_behind(here, tip_pinned)
     if behind:
         print(f"note: submodule {sub.name}: pinning its worktree leaves {len(behind)} deployed commit(s) "
               f"behind as such (rebased, amended or dropped):\n  " + "\n  ".join(behind), file=sys.stderr)
     if not fetch_once(sub.name, here.repo):
-        return None
+        return None, "its origin could not be fetched (above)"
     was = rev_in(here.dir, "HEAD")
     default = default_branch(here.repo)
     p = git("rebase", "--quiet", f"refs/remotes/origin/{default}", cwd=str(here.dir), check=False)
     if p.returncode != 0:
         git("rebase", "--abort", cwd=str(here.dir), check=False)
-        print(f"note: rebasing submodule {sub.name}'s {wb} onto origin/{default} is not clean; "
-              f"resolve it in {here.dir}", file=sys.stderr)
-        return None
+        return None, (f"its {wb} does not rebase cleanly onto origin/{default}: "
+                      f"`git -C {here.dir} rebase origin/{default}`, resolve")
     head = rev_in(here.dir, "HEAD")
     assert head is not None and was is not None
     PENDING[sub.name, wb] = Pending(here, wb, was, head)
     print(f"submodule {sub.name}: {wb} rebased onto origin/{default} ({head[:12]})")
-    return head
+    return head, ""
 
 
 def push_pending() -> None:
