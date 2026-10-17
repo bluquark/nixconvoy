@@ -189,10 +189,7 @@ parallel = true              # force Determinate Nix's parallel evaluation (defa
 [build]
 builder = { darwin = "builder" }     # realise closures there (per platform)
 unreachable_hint = "asleep? wake it first"
-public_substituters = "https://cache.nixos.org"
-[[build.caches]]             # your own caches, asked first
-url = "http://builder.lan:5000"
-served_by = "builder"        # skipped when building on that builder
+skip_substituters = ["https://slow.cachix.org"]   # left out of deploy builds; the caches are the builder's nix.conf's
 
 [targets.laptop]
 local_only = true            # deployable only from itself

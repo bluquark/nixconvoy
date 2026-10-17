@@ -218,6 +218,27 @@ def sandbox_opts(dry_run: list[str], drvs: list[str]) -> tuple[str, ...]:
     return UNSANDBOXED
 
 
+def build_cmd(opts: tuple[str, ...]) -> list[str]:
+    """The `nix build` prefix the .drvs follow, local or as one ssh word.
+    With skip_substituters set it runs through sh, which reads the
+    builder's own substituter list there (`nix config show`, 20 ms; its
+    failure is the build's) less those: the caches stay the builder's
+    nix.conf's business, this only trims the probes a deploy makes.  A URL
+    matches without its query and trailing slashes (config._bare_url), and
+    a cache listed twice, which nix would ask twice per path, is kept once."""
+    nix = ["nix", "build", "--no-link", *BUILD_OPTS, *opts]
+    skip = cfg().skip_substituters
+    if not skip:
+        return nix
+    keep = ('BEGIN{n=split(skip,s," ");for(i=1;i<=n;i++)k[s[i]]=1}'
+            '{for(i=1;i<=NF;i++){u=$i;sub(/\\?.*$/,"",u);sub(/\\/+$/,"",u);'
+            'if(!(u in k)&&!seen[u]++)printf "%s ",$i}}')
+    subs = f"awk -v skip={shlex.quote(' '.join(skip))} {shlex.quote(keep)}"
+    script = ("s=$(nix config show substituters) || exit\n"
+              f"exec {shlex.join(nix)} --option substituters \"$(printf '%s\\n' \"$s\" | {subs})\" \"$@\"")
+    return ["sh", "-c", script, "nix"]
+
+
 def build_on(builder: str, drvs: list[str], what: str,
              opts: tuple[str, ...], capture: bool) -> str | None:
     """Realise `drvs` on `builder`.  A .drv closure is self-authenticating,
@@ -228,9 +249,7 @@ def build_on(builder: str, drvs: list[str], what: str,
             env={"NIX_SSHOPTS": sshopts}, check=False, capture=capture, merged=True)
     if p.returncode != 0:
         return f"copying derivations to {builder} failed" + (f":\n{p.stdout}" if capture else "")
-    build = ["ssh", "-o", "BatchMode=yes", *control_opts(), tgt,
-             "nix", "build", "--no-link", *BUILD_OPTS, *opts,
-             "--option", "substituters", f"'{cfg().build_substituters(builder)}'"]
+    build = ["ssh", "-o", "BatchMode=yes", *control_opts(), tgt, shlex.join(build_cmd(opts))]
     p = run([*build, *sandbox_opts(build, drvs), *(f"{d}^out" for d in drvs)],
             check=False, capture=capture, merged=True)
     if p.returncode != 0:
@@ -247,8 +266,7 @@ def build_drvs(drvs: list[str], what: str, opts: tuple[str, ...] = (),
     b = builder()
     if b:
         return build_on(b, drvs, what, opts, capture)
-    build = ["nix", "build", "--no-link", *BUILD_OPTS, *opts,
-             "--option", "substituters", cfg().build_substituters(proc.this_machine())]
+    build = build_cmd(opts)
     p = run([*build, *sandbox_opts(build, drvs), *(f"{d}^out" for d in drvs)],
             check=False, capture=capture, merged=True)
     if p.returncode != 0:

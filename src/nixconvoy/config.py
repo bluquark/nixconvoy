@@ -16,15 +16,6 @@ BRANCHES_FILE = "deploy-branches"
 
 
 @dataclass(frozen=True)
-class Cache:
-    """A binary cache of the fleet's own builds, asked before the public
-    substituters - except when building on `served_by`, the builder whose store
-    it serves (there its name may not even resolve to the cache)."""
-    url: str
-    served_by: str = ""
-
-
-@dataclass(frozen=True)
 class TargetConfig:
     # Deployable only from itself: never probed or named from elsewhere.
     local_only: bool = False
@@ -65,8 +56,10 @@ class Config:
     # "linux"); absent means here.
     builder: dict[str, str] = field(default_factory=dict)
     build_unreachable_hint: str = ""
-    caches: tuple[Cache, ...] = ()
-    public_substituters: str = "https://cache.nixos.org"
+    # Substituters a deploy build leaves out of the builder's own configured
+    # list (targets.build_cmd): the caches themselves are each builder's
+    # nix.conf's business.
+    skip_substituters: tuple[str, ...] = ()
     targets: dict[str, TargetConfig] = field(default_factory=dict)
     # The flake inputs developed in place (submodule.py): input name -> the
     # repository's checkout on this machine, whose origin nix fetches.
@@ -92,10 +85,7 @@ class Config:
     def flake_file(self, name: str) -> str:
         """A repo path inside the flake directory (flake.nix, flake.lock)."""
         return os.path.normpath(f"{self.flake}/{name}")
-
-    def build_substituters(self, builder: str) -> str:
-        own = [c.url for c in self.caches if c.served_by != builder]
-        return " ".join([*own, self.public_substituters])
+    
 
 
 class ConfigError(Exception):
@@ -138,10 +128,18 @@ def _strs(t: dict[str, object], k: str, where: str) -> tuple[str, ...]:
     return tuple(v)
 
 
+def _bare_url(u: str) -> str:
+    """A substituter URL as nix.conf's spellings of it compare: without its
+    query (?priority=...) and trailing slashes."""
+    return u.split("?")[0].rstrip("/")
+
+
 # The keys the target/builder/machine vocabulary renamed, for the error a
 # config still using one gets.
 _RENAMED = {"target": "ssh_address (over {target}, not {host})", "hosts": "targets",
-            "build.host": "build.builder"}
+            "build.host": "build.builder",
+            "build.caches": "build.skip_substituters: the builder's nix.conf lists the caches",
+            "build.public_substituters": "build.skip_substituters: the builder's nix.conf lists the caches"}
 
 
 def _renamed(k: str) -> str:
@@ -177,20 +175,19 @@ def parse(text: str) -> Config:
     memo = _table(doc.get("memo", {}), "memo")
     ev = _table(doc.get("eval", {}), "eval")
     build = _table(doc.get("build", {}), "build")
-    if "host" in build:
-        raise ConfigError(f"{CONFIG_FILE}: unknown key build.host{_renamed('build.host')}")
+    for k in build:
+        if k not in ("builder", "unreachable_hint", "skip_substituters"):
+            raise ConfigError(f"{CONFIG_FILE}: unknown key build.{k}{_renamed(f'build.{k}')}")
     raw_builder = build.get("builder", {})
     if isinstance(raw_builder, str):
         builder = {"linux": raw_builder, "darwin": raw_builder}
     else:
         builder = {k: v for k, v in _table(raw_builder, "build.builder").items() if isinstance(v, str)}
-    caches = []
-    raw_caches = build.get("caches", [])
-    if not isinstance(raw_caches, list):
-        raise ConfigError("build.caches must be an array of tables")
-    for i, c in enumerate(raw_caches):
-        t = _table(c, f"build.caches[{i}]")
-        caches.append(Cache(_str(t, "url", "build.caches"), _str(t, "served_by", "build.caches")))
+    skip = []
+    for s in _strs(build, "skip_substituters", "build"):
+        if s.split() != [s]:
+            raise ConfigError(f"{CONFIG_FILE}: build.skip_substituters entry {s!r} is not a substituter URL")
+        skip.append(_bare_url(s))
     targets: dict[str, TargetConfig] = {}
     for name, h in _table(doc.get("targets", {}), "targets").items():
         t = _table(h, f"targets.{name}")
@@ -229,8 +226,7 @@ def parse(text: str) -> Config:
         parallel_eval=_auto_bool(ev, "parallel", "eval"),
         builder=builder,
         build_unreachable_hint=_str(build, "unreachable_hint", "build"),
-        caches=tuple(caches),
-        public_substituters=_str(build, "public_substituters", "build", "https://cache.nixos.org"),
+        skip_substituters=tuple(skip),
         targets=targets,
         submodules=submodules,
     )
