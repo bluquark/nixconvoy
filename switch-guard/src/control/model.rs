@@ -9,7 +9,8 @@
 use super::{Guard, Machine as Control, Next as CNext, Params, Query as CQuery, Reply as CReply};
 use crate::record::{Phase, Record};
 use crate::switch::core::{Action, Effect as HEffect, Machine as Helper, Next as HNext, Query as HQuery, Reply as HReply, Verb};
-use stateright::{Checker, Model, Property};
+use crate::switch::fake::{self, Outcome, World as _, OUTCOMES};
+use stateright::{Model, Property};
 
 const DEADLINE: u64 = 10;
 const HORIZON: u64 = 40;
@@ -67,11 +68,7 @@ enum Status {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct World {
     clock: u64,
-    running: Sys,
-    gens: Vec<Option<Sys>>,
-    current: usize,
-    record: Option<Record<Sys>>,
-    lock: bool,
+    target: fake::Target<Sys>,
     timer_due: Option<u64>,
     runs: Vec<Run>,
     deploys: [Status; 2],
@@ -90,12 +87,26 @@ struct World {
 }
 
 impl World {
-    fn profile(&self) -> Sys {
-        self.gens[self.current].expect("current generation")
-    }
-
     fn quiescent(&self) -> bool {
         self.timer_due.is_none() && self.runs.is_empty() && self.deploys.iter().all(|d| !matches!(d, Status::Active { .. }))
+    }
+}
+
+impl fake::World<Sys> for World {
+    fn target(&mut self) -> &mut fake::Target<Sys> {
+        &mut self.target
+    }
+
+    fn timer_pending(&self) -> bool {
+        self.timer_due.is_some()
+    }
+
+    fn rollback_running(&self) -> bool {
+        self.runs.iter().any(|r| r.owner == Owner::Timer)
+    }
+
+    fn start_timer(&mut self) {
+        self.timer_due = Some(self.clock + DEADLINE);
     }
 
     fn fault(&mut self) -> bool {
@@ -119,7 +130,7 @@ enum Act {
     Lose(usize),
     CrashDeploy(usize),
     CrashTarget,
-    Step(usize, u8),
+    Step(usize, Outcome),
     Fire,
     Tick,
 }
@@ -150,7 +161,7 @@ fn advance(w: &mut World, d: usize, reply: CReply) {
         CNext::Done => finish(w, d, true),
         CNext::Die(msg) => {
             if let Some(t) = msg.split("rolled back to ").nth(1).and_then(|r| r.split(".  ").next()) {
-                if t != SYS[w.running] {
+                if t != SYS[w.target.running] {
                     w.wrong_rollback = true;
                 }
             }
@@ -185,7 +196,7 @@ fn finish(w: &mut World, d: usize, success: bool) {
     }
     if success {
         w.success[d] = true;
-        if w.running != TOPLEVEL[d] || w.profile() != TOPLEVEL[d] {
+        if w.target.running != TOPLEVEL[d] || w.target.profile() != TOPLEVEL[d] {
             w.false_success = true;
         }
     }
@@ -194,16 +205,16 @@ fn finish(w: &mut World, d: usize, success: bool) {
 fn end_run(w: &mut World, i: usize, code: i32) {
     let run = w.runs.remove(i);
     if run.locked {
-        w.lock = false;
+        w.target.lock = false;
     }
     if let Verb::Confirm { reboot_pending: true, .. } = run.m.verb() {
         if code == 0 {
-            w.staged = Some(w.current);
+            w.staged = Some(w.target.current);
         }
     }
     if let Owner::Deploy(d) = run.owner {
         // What the helper prints: an arm's record, the system a rollback goes to.
-        let reply = match (run.m.verb(), &w.record) {
+        let reply = match (run.m.verb(), &w.target.record) {
             (Verb::Arm | Verb::Rollback, Some(Record { previous, phase: Phase::Armed | Phase::RolledBack })) if code == 0 => {
                 CReply::Said { code, to: Some(SYS[*previous].into()) }
             }
@@ -213,87 +224,26 @@ fn end_run(w: &mut World, i: usize, code: i32) {
     }
 }
 
-/// The target's answer to run `i`'s query under outcome `o` (0: normal, 1-3:
-/// the failures that query admits), or None when `o` is not possible.
-fn target_answer(w: &mut World, i: usize, o: u8) -> Option<HReply<Sys>> {
+/// The fake target's answer to run `i`'s query under `o`, or None when `o`
+/// is not possible.
+fn target_answer(w: &mut World, i: usize, o: Outcome) -> Option<HReply<Sys>> {
     let activation = matches!(w.runs[i].m.verb(), Verb::Activate(_));
     let q = w.runs[i].q.clone();
-    Some(match (q, o) {
-        (HQuery::Lock, 0) => {
-            if w.lock {
-                return None;
-            }
-            w.lock = true;
-            w.runs[i].locked = true;
-            if w.runs[i].owner == Owner::Timer && w.confirm_sent.is_some() {
-                w.lost_race = true;
-            }
-            if w.runs[i].confirm {
-                w.confirm_sent = None;
-            }
-            HReply::Locked(w.record.clone())
+    let lock = q == HQuery::Lock;
+    let r = fake::answer(w, q, o, activation)?;
+    if lock {
+        w.runs[i].locked = true;
+        if w.runs[i].owner == Owner::Timer && w.confirm_sent.is_some() {
+            w.lost_race = true;
         }
-        (HQuery::RollbackActive, 0) => HReply::Flag(w.runs.iter().any(|r| r.owner == Owner::Timer)),
-        (HQuery::TimerLive, 0) => HReply::Flag(w.timer_due.is_some() || w.runs.iter().any(|r| r.owner == Owner::Timer)),
-        (HQuery::ProfileSystem, 0) => HReply::Running(Some(w.profile())),
-        (HQuery::Running, 0) => HReply::Running(Some(w.running)),
-        (HQuery::StartTimer, 0) => {
-            if w.timer_due.is_some() || w.runs.iter().any(|r| r.owner == Owner::Timer) {
-                HReply::Flag(false)
-            } else {
-                w.timer_due = Some(w.clock + DEADLINE);
-                HReply::Flag(true)
-            }
+        if w.runs[i].confirm {
+            w.confirm_sent = None;
         }
-        (HQuery::StartTimer, 1) if w.fault() => HReply::Flag(false),
-        (HQuery::Generation, 0) => HReply::Generation(Some(w.current as u64)),
-        (HQuery::SetProfile(s), 0) => {
-            w.gens.push(Some(s));
-            w.current = w.gens.len() - 1;
-            HReply::Flag(true)
-        }
-        (HQuery::Switch(s, Action::Test), o) => {
-            if !activation && o != 0 && !w.fault() {
-                return None;
-            }
-            match o {
-                0 => {
-                    w.running = s;
-                    HReply::Code(0)
-                }
-                1 => {
-                    w.running = s;
-                    HReply::Code(4)
-                }
-                2 => HReply::Code(1),
-                3 if activation => HReply::Code(100),
-                _ => return None,
-            }
-        }
-        (HQuery::Switch(_, Action::Boot), 0) => HReply::Code(0),
-        (HQuery::Switch(_, Action::Boot), 1) => HReply::Code(1),
-        (HQuery::WaitSwitchLock | HQuery::Sleep(_), 0) => HReply::Done,
-        (HQuery::SwitchGeneration(g), 0) => {
-            let g = g as usize;
-            let ok = w.gens.get(g).copied().flatten().is_some();
-            if ok {
-                w.current = g;
-            }
-            HReply::Flag(ok)
-        }
-        (HQuery::DeleteGeneration(g), 0) => {
-            let g = g as usize;
-            let ok = g != w.current && g < w.gens.len();
-            if ok {
-                w.gens[g] = None;
-            }
-            HReply::Flag(ok)
-        }
-        _ => return None,
-    })
+    }
+    Some(r)
 }
 
-fn target_step(w: &mut World, i: usize, o: u8) -> bool {
+fn target_step(w: &mut World, i: usize, o: Outcome) -> bool {
     let mut probe = w.clone();
     let Some(reply) = target_answer(&mut probe, i, o) else { return false };
     *w = probe;
@@ -302,12 +252,12 @@ fn target_step(w: &mut World, i: usize, o: u8) -> bool {
         match e {
             HEffect::StopTimer => w.timer_due = None,
             HEffect::Persist(r) => {
-                if matches!(r, Some(Record { phase: Phase::Armed, .. })) {
+                if r.phase == Phase::Armed {
                     if let Owner::Deploy(d) = w.runs[i].owner {
                         w.last_arm = Some(d);
                     }
                 }
-                w.record = r;
+                w.target.record = Some(r);
             }
             _ => {}
         }
@@ -355,11 +305,7 @@ impl Model for Composed {
     fn init_states(&self) -> Vec<World> {
         vec![World {
             clock: 0,
-            running: 0,
-            gens: vec![Some(0)],
-            current: 0,
-            record: None,
-            lock: false,
+            target: fake::Target::new(0),
             timer_due: None,
             runs: vec![],
             deploys: [Status::Idle, Status::Idle],
@@ -402,7 +348,7 @@ impl Model for Composed {
             }
         }
         for i in 0..w.runs.len() {
-            for o in 0..4 {
+            for o in OUTCOMES {
                 acts.push(Act::Step(i, o));
             }
         }
@@ -434,7 +380,7 @@ impl Model for Composed {
                 let p = Params {
                     target: "choko".into(),
                     toplevel: SYS[TOPLEVEL[d]].into(),
-                    expected: SYS[w.running].into(),
+                    expected: SYS[w.target.running].into(),
                     place: "local".into(),
                     quiet: false,
                     router: true,
@@ -460,8 +406,8 @@ impl Model for Composed {
                         if w.guard.is_some() {
                             return None;
                         }
-                        if w.running != expected {
-                            CReply::Guard(Guard::Moved(SYS[w.running].into()))
+                        if w.target.running != expected {
+                            CReply::Guard(Guard::Moved(SYS[w.target.running].into()))
                         } else {
                             w.guard = Some(d);
                             CReply::Guard(Guard::Locked)
@@ -471,7 +417,7 @@ impl Model for Composed {
                     (CQuery::ProbeHelper, true) if w.fault() => CReply::Code(255),
                     (CQuery::Deadline, false) => CReply::Text(DEADLINE.to_string()),
                     (CQuery::Now, false) => CReply::Now(w.clock * 1000),
-                    (CQuery::Running { .. }, false) => CReply::Running(Some(SYS[w.running].into())),
+                    (CQuery::Running { .. }, false) => CReply::Running(Some(SYS[w.target.running].into())),
                     (CQuery::Running { timeout_ms }, true) if timeout_ms.is_none_or(timed_out) => CReply::Running(None),
                     // The target's own checks pass or not, at any moment.
                     (CQuery::Check { .. }, false) => CReply::Check { code: 0, last: None },
@@ -525,9 +471,9 @@ impl Model for Composed {
                 }
                 // A reboot boots the profile; /run is gone, with the record,
                 // the lock, the timer and every run, and the ssh sessions.
-                w.running = w.profile();
-                w.record = None;
-                w.lock = false;
+                w.target.running = w.target.profile();
+                w.target.record = None;
+                w.target.lock = false;
                 w.timer_due = None;
                 w.guard = None;
                 let waiting: Vec<usize> =
@@ -560,78 +506,59 @@ impl Model for Composed {
     fn properties(&self) -> Vec<Property<Self>> {
         vec![
             Property::always("quiescent: runs the confirmed toplevel or previous", |_, w: &World| {
+                let t = &w.target;
                 !w.quiescent()
-                    || match &w.record {
-                        None => w.running == w.profile(),
-                        Some(Record { previous, phase: Phase::Confirmed(t) }) => w.running == *t || w.running == *previous,
-                        Some(Record { previous, .. }) => w.running == *previous,
+                    || match &t.record {
+                        None => t.running == t.profile(),
+                        Some(Record { previous, phase: Phase::Confirmed(c) }) => t.running == *c || t.running == *previous,
+                        Some(Record { previous, .. }) => t.running == *previous,
                     }
             }),
             Property::always("quiescent: profile matches running unless reboot-pending", |_, w: &World| {
-                !w.quiescent() || w.profile() == w.running || w.staged == Some(w.current)
+                !w.quiescent() || w.target.profile() == w.target.running || w.staged == Some(w.target.current)
             }),
             Property::always("nixconvoy reports success only when the target runs and boots its toplevel", |_, w: &World| !w.false_success),
             Property::always("a reported rollback names the system the target runs", |_, w: &World| !w.wrong_rollback),
             Property::always("a reported success is never rolled back", |_, w: &World| {
                 !w.quiescent()
-                    || (0..2).all(|d| !w.success[d] || w.last_arm != Some(d) || (w.running == TOPLEVEL[d] && w.profile() == TOPLEVEL[d]))
+                    || (0..2).all(|d| {
+                        !w.success[d] || w.last_arm != Some(d) || (w.target.running == TOPLEVEL[d] && w.target.profile() == TOPLEVEL[d])
+                    })
             }),
             Property::always("a timely confirm after verification never races the timer", |_, w: &World| !(w.timely && w.lost_race)),
             Property::sometimes("a deploy succeeds after a dead one", |_, w: &World| w.success[1] && w.deploys[0] == Status::Dead),
             Property::sometimes("a failed verification rolls back", |_, w: &World| {
-                w.quiescent() && matches!(w.record, Some(Record { phase: Phase::RolledBack, .. })) && w.faults == 1
+                w.quiescent() && matches!(w.target.record, Some(Record { phase: Phase::RolledBack, .. })) && w.faults == 1
             }),
             Property::sometimes("the target crashed mid-switch", |_, w: &World| {
-                w.quiescent() && w.faults == 0 && w.record.is_none() && w.last_arm.is_some()
+                w.quiescent() && w.faults == 0 && w.target.record.is_none() && w.last_arm.is_some()
             }),
         ]
     }
 }
 
-fn check(model: Composed) {
-    let props = model.properties();
-    let checker = model
-        .checker()
-        .threads(std::thread::available_parallelism().map_or(1, |n| n.get()).min(4))
-        .target_state_count(MAX_STATES)
-        .target_max_depth(MAX_DEPTH)
-        .spawn_bfs()
-        .join();
-    eprintln!("composed model: {} states ({} unique), depth {}", checker.state_count(), checker.unique_state_count(), checker.max_depth());
-    for p in props {
-        if let (stateright::Expectation::Always, Some(path)) = (&p.expectation, checker.discovery(p.name)) {
-            eprintln!("counterexample to {:?}:", p.name);
-            for (s, a) in path.into_vec() {
-                let deploys: Vec<String> = s
-                    .deploys
-                    .iter()
-                    .map(|d| match d {
-                        Status::Active { wait, .. } => format!("waiting {wait:?}"),
-                        other => format!("{other:?}"),
-                    })
-                    .collect();
-                eprintln!(
-                    "  t={} running {} profile {} record {:?} timer {:?} runs {:?} deploys {:?}",
-                    s.clock,
-                    SYS[s.running],
-                    SYS[s.profile()],
-                    s.record,
-                    s.timer_due,
-                    s.runs.iter().map(|r| (r.owner.clone(), r.m.verb().clone(), r.q.clone())).collect::<Vec<_>>(),
-                    deploys
-                );
-                if let Some(a) = a {
-                    eprintln!("-> {a:?}");
-                }
-            }
-        }
-    }
-    assert!(checker.state_count() < MAX_STATES, "the state space outgrew MAX_STATES");
-    assert!(checker.max_depth() < MAX_DEPTH, "the model ran deeper than MAX_DEPTH");
-    checker.assert_properties();
+fn show(s: &World) -> String {
+    let deploys: Vec<String> = s
+        .deploys
+        .iter()
+        .map(|d| match d {
+            Status::Active { wait, .. } => format!("waiting {wait:?}"),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    format!(
+        "t={} running {} profile {} record {:?} timer {:?} runs {:?} deploys {:?}",
+        s.clock,
+        SYS[s.target.running],
+        SYS[s.target.profile()],
+        s.target.record,
+        s.timer_due,
+        s.runs.iter().map(|r| (r.owner.clone(), r.m.verb().clone(), r.q.clone())).collect::<Vec<_>>(),
+        deploys
+    )
 }
 
 #[test]
 fn composed_model_checks() {
-    check(Composed { second: true, faults: 1 });
+    fake::check(Composed { second: true, faults: 1 }, "composed model", MAX_STATES, MAX_DEPTH, show);
 }

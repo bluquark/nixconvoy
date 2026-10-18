@@ -1,6 +1,6 @@
-//! Performs a Machine's effects: `Host` is the I/O boundary, `System` the
-//! real one (systemd, nix-env, switch-to-configuration), and `drive` the
-//! loop that feeds replies back.
+//! Performs a Machine's effects: `System` is the I/O boundary (systemd,
+//! nix-env, switch-to-configuration), and `drive` the loop that feeds
+//! replies back.
 use super::core::{Action, Effect, Machine, Next, Query, Reply, Verb};
 use crate::config::Config;
 use crate::proc;
@@ -14,32 +14,8 @@ pub const PROFILE: &str = "/nix/var/nix/profiles/system";
 const SWITCH_LOCK: &str = "/run/nixos/switch-to-configuration.lock";
 const SWITCH_LOCK_WAIT: Duration = Duration::from_secs(600);
 
-pub trait Host {
-    fn rollback_active(&mut self) -> bool;
-    fn timer_live(&mut self) -> bool;
-    fn profile_system(&mut self) -> Option<String>;
-    /// Held until the run ends.
-    fn lock(&mut self) -> Result<Option<Record<String>>, String>;
-    fn running(&mut self) -> Option<String>;
-    fn start_timer(&mut self) -> bool;
-    fn stop_timer(&mut self);
-    fn reset_failed(&mut self);
-    fn generation(&mut self) -> Option<u64>;
-    fn set_profile(&mut self, system: &str) -> bool;
-    fn switch(&mut self, system: &str, action: Action) -> i32;
-    fn wait_switch_lock(&mut self);
-    fn sleep(&mut self, secs: u64);
-    fn switch_generation(&mut self, g: u64) -> bool;
-    fn delete_generation(&mut self, g: u64) -> bool;
-    fn persist(&mut self, rec: Option<&Record<String>>) -> Result<(), String>;
-    fn say(&mut self, msg: &str);
-    fn warn(&mut self, msg: &str);
-    fn log(&mut self, msg: &str);
-    fn state_file(&self) -> PathBuf;
-}
-
 /// Runs `m` to completion against `host`: its exit code.
-pub fn drive(host: &mut impl Host, mut m: Machine<String>) -> i32 {
+pub fn drive(host: &mut System<'_>, mut m: Machine<String>) -> i32 {
     let mut reply = Reply::Start;
     loop {
         let step = m.decide(reply);
@@ -51,7 +27,7 @@ pub fn drive(host: &mut impl Host, mut m: Machine<String>) -> i32 {
                 Effect::StopTimer => host.stop_timer(),
                 Effect::ResetFailedRollback => host.reset_failed(),
                 Effect::Persist(r) => {
-                    if let Err(e) = host.persist(r.as_ref()) {
+                    if let Err(e) = host.persist(&r) {
                         host.warn(&format!("confirmed-switch: cannot record the state: {e}"));
                         return 1;
                     }
@@ -141,7 +117,7 @@ pub fn link_generation(name: &str) -> Option<u64> {
     name.strip_prefix("system-")?.strip_suffix("-link")?.parse().ok()
 }
 
-impl Host for System<'_> {
+impl System<'_> {
     fn rollback_active(&mut self) -> bool {
         proc::quiet(&self.s.systemctl, &["is-active", "--quiet", &format!("{UNIT}.service")]) == 0
     }
@@ -154,6 +130,7 @@ impl Host for System<'_> {
         std::fs::canonicalize(PROFILE).ok().map(|p| p.to_string_lossy().into_owned())
     }
 
+    /// Held until the run ends.
     fn lock(&mut self) -> Result<Option<Record<String>>, String> {
         let dir = &self.s.state_dir;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -235,7 +212,7 @@ impl Host for System<'_> {
         proc::run(&self.s.nix_env, &["-p", PROFILE, "--delete-generations", &g.to_string()]) == 0
     }
 
-    fn persist(&mut self, rec: Option<&Record<String>>) -> Result<(), String> {
+    fn persist(&mut self, rec: &Record<String>) -> Result<(), String> {
         Record::store(&self.s.state_dir, rec).map_err(|e| e.to_string())
     }
 

@@ -63,8 +63,8 @@ pub enum Query {
     ProbeHelper,
     /// nix-env --set of the toplevel -> Code.
     SetProfile,
-    /// switch-to-configuration <action>, detached -> Code.
-    Activate(&'static str),
+    /// switch-to-configuration switch, detached -> Code.
+    Activate,
     /// The helper's `deadline` -> Text.
     Deadline,
     /// The helper's `arm` over the session -> Said (Code when its output
@@ -264,7 +264,7 @@ impl Machine {
                 if rc != 0 {
                     return Next::Die(self.failed());
                 }
-                self.ask(Pc::Switching, Query::Activate("switch"))
+                self.ask(Pc::Switching, Query::Activate)
             }
             (Pc::Switching, Reply::Code(rc)) => {
                 if rc != 0 {

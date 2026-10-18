@@ -36,23 +36,23 @@ impl FakeEsp {
         self.files.iter().find(|(x, _)| *x == p).map(|(_, f)| f.clone()).unwrap_or_default()
     }
 
-    fn bytes(&self, gens: &[Gen]) -> u128 {
+    fn bytes(&self, gens: &[Gen]) -> u64 {
         let mut seen: Vec<F> = Vec::new();
         let mut t = 0;
         for g in gens {
             for f in self.files_for(*g) {
                 if !seen.contains(&f.id) {
                     seen.push(f.id);
-                    t += f.size as u128;
+                    t += f.size;
                 }
             }
         }
         t
     }
 
-    fn used(&self) -> u128 {
+    fn used(&self) -> u64 {
         let gens: Vec<Gen> = self.stubs.iter().map(|s| s.gen).collect();
-        self.base as u128 + self.bytes(&gens)
+        self.base + self.bytes(&gens)
     }
 }
 
@@ -78,7 +78,7 @@ impl Esp for FakeEsp {
     }
 
     fn install(&mut self, gens: &[Gen]) -> i32 {
-        if self.base as u128 + self.bytes(gens) > self.size as u128 {
+        if self.base + self.bytes(gens) > self.size {
             return 1;
         }
         let old = std::mem::take(&mut self.stubs);
@@ -90,7 +90,7 @@ impl Esp for FakeEsp {
     }
 
     fn usage(&mut self) -> (u64, u64) {
-        (self.size, u64::try_from(self.used()).unwrap_or(u64::MAX))
+        (self.size, self.used())
     }
 
     fn say(&mut self, _msg: &str) {}
@@ -114,43 +114,20 @@ const DAY: i64 = 86400;
 
 type Who = (usize, Option<usize>, Option<usize>, Option<usize>);
 
-/// Small sizes, or (`big`) sizes near u64::MAX, where every sum the
-/// planner takes can overflow.
 fn case() -> impl Strategy<Value = Case> {
-    prop_oneof![3 => case_with(false), 1 => case_with(true)]
-}
-
-fn case_with(big: bool) -> impl Strategy<Value = Case> {
-    let file_size: BoxedStrategy<u64> =
-        if big { prop_oneof![1u64..40, u64::MAX / 4..=u64::MAX / 2, u64::MAX - 64..=u64::MAX].boxed() } else { (1u64..40).boxed() };
-    let esp: BoxedStrategy<(u64, u64, u64)> = if big {
-        (
-            prop_oneof![Just(u64::MAX), u64::MAX - 4096..=u64::MAX, u64::MAX / 2..=u64::MAX / 2 + 4096],
-            prop_oneof![0u64..40, u64::MAX / 4..=u64::MAX / 4 + 64],
-            prop_oneof![0u64..20, u64::MAX / 2..=u64::MAX / 2 + 64, u64::MAX - 64..=u64::MAX],
-        )
-            .boxed()
-    } else {
-        (0u64..400, 0u64..40, 0u64..20).boxed()
-    };
     (1usize..14)
-        .prop_flat_map(move |n| {
+        .prop_flat_map(|n| {
             let paths = proptest::collection::vec(0u8..12, n);
             let ages = proptest::collection::vec(0i64..40, n);
             let tries = prop_oneof![Just(None), (0u32..3).prop_map(Some)];
             let stubs = proptest::collection::vec((0usize..n, tries), 0..n + 2);
             let boots = proptest::collection::vec((0i64..45, proptest::option::of(0usize..n + 2)), 0..10);
-            let files = (proptest::collection::vec((0u8..6, 0u8..6), 12), proptest::collection::vec(file_size.clone(), 12));
+            let files = (proptest::collection::vec((0u8..6, 0u8..6), 12), proptest::collection::vec(1u64..40, 12));
             let who = (0usize..n, proptest::option::of(0usize..n), proptest::option::of(0usize..n), proptest::option::of(0usize..n));
-            (Just(n), paths, ages, stubs, boots, files, who, esp.clone())
+            (Just(n), paths, ages, stubs, boots, files, who, (0u64..400, 0u64..40, 0u64..20))
         })
-        .prop_map(move |(n, paths, ages, stubs, boots, files, who, (size, base, reserve))| {
-            let mut c = build(n, paths, ages, stubs, boots, files, who, size, base, reserve);
-            // A real ESP never holds more than its size.
-            while big && c.esp.used() > c.esp.size as u128 {
-                c.esp.stubs.pop();
-            }
-            c
+        .prop_map(|(n, paths, ages, stubs, boots, files, who, (size, base, reserve))| {
+            build(n, paths, ages, stubs, boots, files, who, size, base, reserve)
         })
 }
 
@@ -260,8 +237,8 @@ proptest! {
             .map(|f| f.id)
             .collect();
         let files: Files<F> = sel.chosen.iter().map(|g| (*g, esp.files_for(*g))).collect();
-        let total = c.esp.base as u128 + esp.bytes(&sel.chosen);
-        if total + c.reserve as u128 > c.esp.size as u128 {
+        let total = c.esp.base + esp.bytes(&sel.chosen);
+        if total + c.reserve > c.esp.size {
             prop_assert_eq!(shed(sel, &files, &on_esp), None);
             prop_assert!(out.code == 0 || out.shortfall.is_some_and(|b| b > 0), "no shortfall reported: {:?}", out.shortfall);
         } else {
@@ -272,7 +249,7 @@ proptest! {
             let mut chosen = sel.chosen.clone();
             chosen.sort();
             prop_assert_eq!(stubbed, chosen);
-            prop_assert!(esp.used() + c.reserve as u128 <= c.esp.size as u128);
+            prop_assert!(esp.used() + c.reserve <= c.esp.size);
         }
     }
 
@@ -342,27 +319,4 @@ fn sheds_the_fill_first_then_the_youngest_anchor() {
     sel.remove(2);
     assert_eq!(sel, Selection { chosen: vec![9, 8, 3], must: 2, fixed: 2 });
     assert_eq!(shed(&sel, &files, &[]), None);
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig { cases: 20000, failure_persistence: None, ..ProptestConfig::default() })]
-
-    /// An overflowing sum never counts as fitting, however large the ESP.
-    #[test]
-    fn fits_never_overflows(
-        size in prop_oneof![Just(u64::MAX), u64::MAX - 4096..=u64::MAX],
-        used in prop_oneof![0..=u64::MAX, u64::MAX - 4096..=u64::MAX, u64::MAX / 2 - 2048..=u64::MAX / 2 + 2048],
-        new in prop_oneof![0..=u64::MAX, u64::MAX - 4096..=u64::MAX, u64::MAX / 2 - 2048..=u64::MAX / 2 + 2048],
-        reserve in prop_oneof![0..=4096u64, u64::MAX - 4096..=u64::MAX, u64::MAX / 2 - 2048..=u64::MAX / 2 + 2048],
-    ) {
-        let total = used as u128 + new as u128 + reserve as u128;
-        prop_assert_eq!(fits(size, used, new, reserve), total <= size as u128);
-    }
-}
-
-#[test]
-fn new_bytes_overflow_is_none() {
-    let files: Files<F> = vec![(1, vec![File { id: 1, size: u64::MAX }, File { id: 2, size: 1 }])];
-    assert_eq!(new_bytes(&[1], &files, &[]), None);
-    assert_eq!(new_bytes(&[1], &files, &[2]), Some(u64::MAX));
 }

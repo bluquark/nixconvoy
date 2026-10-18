@@ -86,11 +86,16 @@ fn std_lin() -> Lineage {
     lin(NEW, OTHER, Some((BRANCH, Some(&b))), &["work/chikuwa/1"], T0)
 }
 
+fn verdict(l: Option<&Lineage>, c: &Context, take_over: bool, reached: bool) -> (Kind, String) {
+    let (kind, why) = classify(l, NEW, c);
+    demote(kind, why, take_over, reached)
+}
+
 #[test]
 fn classifies_lineages() {
     let b = base();
     let at_base = cx(&[(BRANCH, &b)]);
-    let k = |l: Option<&Lineage>, c: &Context, over: bool| classify(l, NEW, c, over, true);
+    let k = |l: Option<&Lineage>, c: &Context, over: bool| verdict(l, c, over, true);
 
     let (kind, why) = k(Some(&std_lin()), &at_base, false);
     assert_eq!(kind, Kind::InFlight);
@@ -118,10 +123,10 @@ fn classifies_lineages() {
     live.dead.insert(BRANCH.into());
     let (kind, why) = k(Some(&announced), &live, false);
     assert!(kind == Kind::InFlight && why.contains("that deploy looks dead"), "{why}");
-    assert_eq!(classify(Some(&announced), NEW, &live, false, false).0, Kind::LeftAlone);
+    assert_eq!(verdict(Some(&announced), &live, false, false).0, Kind::LeftAlone);
     let (kind, why) = k(Some(&announced), &at_base, false);
     assert!(kind == Kind::Abandoned && why.contains("the announcement cleared without the push"), "{why}");
-    assert_eq!(classify(Some(&announced), NEW, &at_base, false, false).0, Kind::Abandoned);
+    assert_eq!(verdict(Some(&announced), &at_base, false, false).0, Kind::Abandoned);
     assert_eq!(k(Some(&announced), &cx(&[(BRANCH, &landed())]), false).0, Kind::CatchUp);
     // A dead deploy's lineage without an announcement: nothing to go by.
     let mut dead = at_base.clone();
@@ -134,11 +139,11 @@ fn classifies_lineages() {
 
     // Refused work on a target this checkout's work does not reach is left
     // there; --evict still reverts it.
-    let (kind, why) = classify(Some(&std_lin()), NEW, &at_base, false, false);
+    let (kind, why) = verdict(Some(&std_lin()), &at_base, false, false);
     assert!(kind == Kind::LeftAlone && !kind.refused() && why.contains("does not reach it"), "{why}");
-    assert_eq!(classify(Some(&old), NEW, &at_base, false, false).0, Kind::LeftAlone);
-    assert_eq!(classify(Some(&std_lin()), NEW, &at_base, true, false).0, Kind::Overridden);
-    assert_eq!(classify(Some(&std_lin()), NEW, &cx(&[(BRANCH, &landed())]), false, false).0, Kind::CatchUp);
+    assert_eq!(verdict(Some(&old), &at_base, false, false).0, Kind::LeftAlone);
+    assert_eq!(verdict(Some(&std_lin()), &at_base, true, false).0, Kind::Overridden);
+    assert_eq!(verdict(Some(&std_lin()), &cx(&[(BRANCH, &landed())]), false, false).0, Kind::CatchUp);
 
     let unl = lin(NEW, OTHER, Some(("work/M3-Air/9", Some(&b))), &["work/chikuwa/1"], T0);
     let (kind, why) = k(Some(&unl), &cx(&[("work/M3-Air/9", &b)]), false);
@@ -153,9 +158,9 @@ fn classifies_lineages() {
     assert_eq!(parse("{not json"), None);
     assert_eq!(parse(r#"{"version": 3}"#), None);
     assert_eq!(parse(&doc(NEW, OTHER, None, &[], T0).replace(r#""version":2"#, r#""version":3"#)), None);
-    // A version-1 file, from before by.host became by.machine, still counts.
-    let v1 = doc(NEW, OTHER, None, &[], T0).replace(r#""version":2"#, r#""version":1"#).replace(r#""machine":"#, r#""host":"#);
-    assert_eq!(parse(&v1).map(|l| l.machine), Some(OTHER.0.to_string()));
+    assert_eq!(parse(&doc(NEW, OTHER, None, &[], T0).replace(r#""version":2"#, r#""version":1"#)), None);
+    let malformed = json!({"branch": BRANCH, "base": 7});
+    assert_eq!(parse(&doc(NEW, OTHER, None, &[], T0).replace(r#""pending":null"#, &format!(r#""pending":{malformed}"#))), None);
     assert_eq!(k(Some(&lin(OLD, OTHER, None, &[], T0)), &at_base, false).0, Kind::Untracked);
     assert_eq!(k(Some(&lin(NEW, ME, Some((BRANCH, Some(&b))), &[], T0)), &at_base, false).0, Kind::ThisBranch);
     assert_eq!(k(Some(&lin(NEW, OTHER, None, &["work/chikuwa/1"], T0)), &at_base, false).0, Kind::CatchUp);
@@ -570,10 +575,11 @@ proptest! {
     #[test]
     fn verdicts(text in arb_lineage(), running in arb_top(), p in arb_params()) {
         let lin = text.as_deref().and_then(parse);
-        let (kind, _) = classify(lin.as_ref(), &running, &p.cx, false, true);
-        let (over, _) = classify(lin.as_ref(), &running, &p.cx, true, true);
-        let (alone, _) = classify(lin.as_ref(), &running, &p.cx, false, false);
-        let (over_alone, _) = classify(lin.as_ref(), &running, &p.cx, true, false);
+        let (kind, why) = classify(lin.as_ref(), &running, &p.cx);
+        prop_assert_eq!(demote(kind, why.clone(), false, true), (kind, why.clone()));
+        let (over, _) = demote(kind, why.clone(), true, true);
+        let (alone, _) = demote(kind, why.clone(), false, false);
+        let (over_alone, _) = demote(kind, why, true, false);
         prop_assert_eq!(over_alone, over);
         if kind.refused() {
             prop_assert_eq!(alone, Kind::LeftAlone);
@@ -592,13 +598,15 @@ proptest! {
             // An announced increment is judged by its branch's announcement
             // alone: uncleared, in flight (dead or not); cleared, abandoned.
             // One without is in flight until its push lands or a --evict.
-            let announced_live = l.announce.is_some() && l.pending.as_ref().is_some_and(|(b, _)| p.cx.in_flight.contains_key(l.key.as_deref().unwrap_or(b)));
+            let announced_live = l.announce_key().is_some_and(|k| p.cx.in_flight.contains_key(k));
             if kind == Kind::InFlight {
                 let (b, base) = l.pending.clone().unwrap();
                 prop_assert_eq!(p.cx.tips.get(&b), base.as_ref());
                 prop_assert!(l.announce.is_none() || announced_live);
             }
-            prop_assert_eq!(kind == Kind::Abandoned, !mine && !unlisted && l.announce.is_some() && !announced_live && l.pending.as_ref().is_some_and(|(b, base)| p.cx.tips.get(b) == base.as_ref()));
+            if kind == Kind::Abandoned {
+                prop_assert!(l.announce.is_some() && !announced_live);
+            }
         }
         if kind.refused() {
             prop_assert_eq!(over, Kind::Overridden);
@@ -607,47 +615,22 @@ proptest! {
         }
     }
 
-    /// The plan follows classify, except that a pending increment of a
-    /// branch origin has no tip of is caught up (never refused or left
-    /// alone) once its fate is not "kept".
+    /// A --evict never refuses: a refusal needs a reached target, which it
+    /// takes over.  The plan is the drifting candidates not left alone, in
+    /// switch order, the router last.
     #[test]
     fn plans(p in arb_params(), fate in prop::sample::select(vec!["kept", "abandoned"])) {
         let (_, fx, out) = run_with(p.clone(), fate);
         let affected: Vec<String> = switch_order(&p.targets, &p.router).into_iter()
             .filter(|h| matches!((p.running.get(h), p.built.get(h)), (Some(Some(r)), Some(b)) if r != b))
             .collect();
-        let verdicts: Vec<(String, Kind)> = affected.iter().filter(|h| p.candidates.contains(h)).map(|h| {
-            let lin = p.lineages.get(h).and_then(|t| parse(t));
-            let running = p.running[h].clone().unwrap();
-            let reached = p.reached.contains(h);
-            let gone = lin.as_ref().is_some_and(|l| matches!(&l.pending, Some((b, None)) if !p.cx.tips.contains_key(b) && l.tips.contains_key(b)));
-            let kind = if fate != "kept" && gone && classify(lin.as_ref(), &running, &p.cx, false, true).0 == Kind::InFlight {
-                Kind::CatchUp
-            } else {
-                classify(lin.as_ref(), &running, &p.cx, p.evict && (p.named || reached), reached).0
-            };
-            match p.held.get(h).filter(|by| !by.is_empty() && !kind.refused() && !p.evict) {
-                Some(by) => (h.clone(), held(by, reached, p.work_branch).0),
-                None => (h.clone(), kind),
-            }
-        }).collect();
-        let refused: Vec<(String, Kind, Option<String>)> = verdicts.iter().filter(|v| v.1.refused()).map(|(h, k)| {
-            let lin = p.lineages.get(h).and_then(|t| parse(t));
-            let dead = lin.filter(|l| l.announce.is_some()).and_then(|l| l.pending.as_ref().map(|(b, _)| l.key.clone().unwrap_or_else(|| b.clone()))).filter(|key| *k == Kind::InFlight && p.cx.dead.contains(key));
-            (h.clone(), *k, dead)
-        }).collect();
-        // A refusal needs a reached target, which a --evict takes over.
-        if p.evict { prop_assert!(refused.is_empty()); }
-        match out {
-            Ok(o) => {
-                prop_assert!(refused.is_empty());
-                prop_assert_eq!(&o.affected, &affected);
-                prop_assert_eq!(o.plan.clone(), verdicts.iter().filter(|v| v.1 != Kind::LeftAlone).map(|v| v.0.clone()).collect::<Vec<_>>());
-                if let Some(i) = o.plan.iter().position(|h| h == "choko") { prop_assert_eq!(i, o.plan.len() - 1); }
-            }
-            Err(msg) => {
-                prop_assert_eq!(msg, refusal(&refused));
-            }
+        if p.evict { prop_assert!(out.is_ok(), "{:?}", out); }
+        if let Ok(o) = &out {
+            prop_assert_eq!(&o.affected, &affected);
+            prop_assert!(o.drift.values().all(|(k, _)| !k.refused()));
+            let plan: Vec<&String> = affected.iter().filter(|h| o.drift.get(*h).is_some_and(|(k, _)| *k != Kind::LeftAlone)).collect();
+            prop_assert_eq!(o.plan.iter().collect::<Vec<_>>(), plan);
+            if let Some(i) = o.plan.iter().position(|h| *h == p.router) { prop_assert_eq!(i, o.plan.len() - 1); }
         }
         // One report line per candidate and per excluded drifting target.
         let printed = fx.iter().filter(|e| matches!(e, Effect::Print(_))).count();

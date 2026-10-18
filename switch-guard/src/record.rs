@@ -73,14 +73,8 @@ impl Record<String> {
 
     /// A rename, so a reader (or a helper killed mid-write) sees the old
     /// record or the new one, never a torn one.
-    pub fn store(dir: &Path, rec: Option<&Self>) -> std::io::Result<()> {
+    pub fn store(dir: &Path, rec: &Self) -> std::io::Result<()> {
         let path = dir.join(FILE);
-        let Some(rec) = rec else {
-            return match std::fs::remove_file(&path) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-                _ => Ok(()),
-            };
-        };
         let tmp = dir.join(format!("{FILE}.tmp"));
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(rec.render().as_bytes())?;
@@ -109,11 +103,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(Record::load(&dir).unwrap(), None);
         let r = Record { previous: "/p".to_string(), phase: Phase::Armed };
-        Record::store(&dir, Some(&r)).unwrap();
+        Record::store(&dir, &r).unwrap();
         assert_eq!(Record::load(&dir).unwrap(), Some(r));
         assert!(!dir.join("state.tmp").exists());
-        Record::store(&dir, None).unwrap();
-        assert_eq!(Record::load(&dir).unwrap(), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

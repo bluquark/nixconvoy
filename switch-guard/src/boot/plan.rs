@@ -240,20 +240,19 @@ fn files_of<F>(files: &Files<F>, g: Gen) -> &[File<F>] {
     files.iter().find(|(x, _)| *x == g).map_or(&[], |(_, f)| f.as_slice())
 }
 
-/// Bytes `gens` would add to the ESP: their files not already there.  None
-/// past u64, which no ESP holds.
-pub fn new_bytes<F: Eq>(gens: &[Gen], files: &Files<F>, on_esp: &[F]) -> Option<u64> {
+/// Bytes `gens` would add to the ESP: their files not already there.
+pub fn new_bytes<F: Eq>(gens: &[Gen], files: &Files<F>, on_esp: &[F]) -> u64 {
     let mut seen: Vec<&F> = Vec::new();
     let mut total = 0u64;
     for g in gens {
         for f in files_of(files, *g) {
             if !on_esp.contains(&f.id) && !seen.contains(&&f.id) {
                 seen.push(&f.id);
-                total = total.checked_add(f.size)?;
+                total += f.size;
             }
         }
     }
-    Some(total)
+    total
 }
 
 fn unshared<F: Eq>(sel: &Selection, i: usize, files: &Files<F>) -> bool {
@@ -273,7 +272,7 @@ pub fn shed<F: Eq>(sel: &Selection, files: &Files<F>, on_esp: &[F]) -> Option<us
 }
 
 pub fn fits(size: u64, used: u64, new: u64, reserve: u64) -> bool {
-    used.checked_add(new).and_then(|t| t.checked_add(reserve)).is_some_and(|t| t <= size)
+    used.saturating_add(new).saturating_add(reserve) <= size
 }
 
 /// The prune's victims: generations older than `days`, except the anchors,
@@ -318,7 +317,7 @@ pub struct Installed {
     pub selection: Selection,
     /// Bytes the never-shed part of the set lacks on the ESP, when even it
     /// does not fit.
-    pub shortfall: Option<u128>,
+    pub shortfall: Option<u64>,
 }
 
 /// Runs in place of lanzaboote's installer.  lzbt writes a generation's
@@ -369,12 +368,11 @@ pub fn install<E: Esp>(esp: &mut E, boots: &[Boot], ctx: &Ctx<E::P>, policy: &Po
         }
         let (size, used) = esp.usage();
         let new = new_bytes(&sel.chosen, &files, &on_esp);
-        if new.is_some_and(|n| fits(size, used, n, policy.reserve)) {
+        if fits(size, used, new, policy.reserve) {
             break;
         }
         let Some(i) = shed(&sel, &files, &on_esp) else {
-            let need = used as u128 + new.map_or(u64::MAX as u128 + 1, u128::from) + policy.reserve as u128;
-            shortfall = Some(need.saturating_sub(size as u128));
+            shortfall = Some(used.saturating_add(new).saturating_add(policy.reserve).saturating_sub(size));
             break;
         };
         let g = sel.remove(i);

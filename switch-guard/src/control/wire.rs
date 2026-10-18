@@ -95,8 +95,8 @@ fn next(n: &Next) -> Value {
                 Query::Guard => "guard",
                 Query::ProbeHelper => "probe_helper",
                 Query::SetProfile => "set_profile",
-                Query::Activate(a) => {
-                    o.insert("action".into(), json!(a));
+                Query::Activate => {
+                    o.insert("action".into(), json!("switch"));
                     "activate"
                 }
                 Query::Deadline => "deadline",

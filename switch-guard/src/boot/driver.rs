@@ -224,7 +224,7 @@ fn install(s: &Settings, target: &str) -> i32 {
 /// do not fit (lanzaboote's install then fails at every switch until space
 /// is made), cleared by the next install that fits.  The marker beside the
 /// boot log keeps a fitting install from paying a notice call.
-fn esp_notice(s: &Settings, shortfall: Option<u128>) {
+fn esp_notice(s: &Settings, shortfall: Option<u64>) {
     let marker = s.boot_log.with_file_name("esp-full");
     match shortfall {
         Some(bytes) => {

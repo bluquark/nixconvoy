@@ -54,8 +54,8 @@ pub enum Effect<S> {
     Log(String),
     StopTimer,
     ResetFailedRollback,
-    /// None removes the record.  A failure to persist ends the run (exit 1).
-    Persist(Option<Record<S>>),
+    /// A failure to persist ends the run (exit 1).
+    Persist(Record<S>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -211,10 +211,6 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
         &self.verb
     }
 
-    pub fn finished(&self) -> bool {
-        self.pc == Pc::Finished
-    }
-
     /// The machine's transition: `reply` answers the query the previous
     /// step asked (Reply::Start for the first step).
     pub fn decide(&mut self, reply: Reply<S>) -> Step<S> {
@@ -285,7 +281,7 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
                     fx.push(Effect::Warn(format!("{P}: could not start the rollback timer")));
                     return self.rollback(previous, Then::Fail);
                 }
-                fx.push(Effect::Persist(Some(Record { previous: previous.clone(), phase: Phase::Armed })));
+                fx.push(Effect::Persist(Record { previous: previous.clone(), phase: Phase::Armed }));
                 fx.push(Effect::Say(format!("{P}: armed, rolling back to {previous} in {}s unless confirmed", self.deadline)));
                 Next::Exit(0)
             }
@@ -345,7 +341,7 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
             (ConfBoot { previous, before }, Reply::Code(c)) => {
                 if c == 0 {
                     let new = self.target().clone();
-                    fx.push(Effect::Persist(Some(Record { previous, phase: Phase::Confirmed(new.clone()) })));
+                    fx.push(Effect::Persist(Record { previous, phase: Phase::Confirmed(new.clone()) }));
                     fx.push(Effect::StopTimer);
                     fx.push(Effect::Say(format!("{P}: confirmed {new}")));
                     return Next::Exit(0);
@@ -444,7 +440,7 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
     /// Recorded, and the timer stopped, only once the target demonstrably runs
     /// the previous system again, so a still-pending timer gets its retry.
     fn rolled_back(&mut self, previous: S, then: Then, fx: &mut Vec<Effect<S>>) -> Next<S> {
-        fx.push(Effect::Persist(Some(Record { previous: previous.clone(), phase: Phase::RolledBack })));
+        fx.push(Effect::Persist(Record { previous: previous.clone(), phase: Phase::RolledBack }));
         fx.push(Effect::StopTimer);
         fx.push(Effect::Log(format!("rolled back to {previous}")));
         fx.push(Effect::Say(format!("{P}: rolled back to {previous}")));

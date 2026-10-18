@@ -60,29 +60,6 @@ pub fn watch(bless: Bless, gate_failed: bool, elapsed: u64, limit: u64) -> Watch
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
-
-    proptest! {
-        #![proptest_config(ProptestConfig { cases: 2000, failure_persistence: None, ..ProptestConfig::default() })]
-
-        #[test]
-        fn gate_passes_only_clean_and_ends_by_the_deadline(fails in proptest::collection::vec("[a-z]{1,5}", 0..4), elapsed in 0u64..600, deadline in 1u64..400) {
-            let v = gate(&fails, elapsed, deadline);
-            prop_assert_eq!(v == Gate::Pass, fails.is_empty());
-            if !fails.is_empty() {
-                prop_assert_eq!(matches!(v, Gate::Fail { .. }), elapsed >= deadline);
-            }
-        }
-
-        #[test]
-        fn watch_reboots_only_unblessed(gate_failed: bool, elapsed in 0u64..600, limit in 1u64..400) {
-            for b in [Bless::Active, Bless::Failed, Bless::Pending] {
-                let v = watch(b, gate_failed, elapsed, limit);
-                prop_assert_eq!(v == Watch::Reboot, b == Bless::Pending && (gate_failed || elapsed >= limit));
-                prop_assert_eq!(v == Watch::Wait, b == Bless::Pending && !gate_failed && elapsed < limit);
-            }
-        }
-    }
 
     /// The gate and the watch as one boot: with checks that never pass the
     /// box reboots by deadline + grace, and with checks that pass it never

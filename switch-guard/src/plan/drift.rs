@@ -85,14 +85,30 @@ pub struct Lineage {
     pub pid: i64,
 }
 
+impl Lineage {
+    /// The ref of the pending increment's announcement, when it has one.
+    pub fn announce_key(&self) -> Option<&str> {
+        self.announce.as_ref()?;
+        let (branch, _) = self.pending.as_ref()?;
+        Some(self.key.as_deref().unwrap_or(branch))
+    }
+}
+
+/// An optional string field: None when it is neither absent, null nor a
+/// string.
+fn opt_str(o: &serde_json::Map<String, Value>, key: &str) -> Option<Option<String>> {
+    match o.get(key) {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::String(s)) => Some(Some(s.clone())),
+        Some(_) => None,
+    }
+}
+
 /// A lineage file's contents, or None when absent or malformed.
 pub fn parse(text: &str) -> Option<Lineage> {
     let v: Value = serde_json::from_str(text).ok()?;
     let o = v.as_object()?;
-    // Version 1 names the machine `by.host`; pending.announce is optional
-    // in version 2.
-    let version = o.get("version").and_then(Value::as_i64)?;
-    if !(1..=2).contains(&version) {
+    if o.get("version").and_then(Value::as_i64)? != 2 {
         return None;
     }
     let s = |v: Option<&Value>| v.and_then(Value::as_str).map(str::to_string);
@@ -102,21 +118,9 @@ pub fn parse(text: &str) -> Option<Lineage> {
     let pending = match o.get("pending") {
         None | Some(Value::Null) => None,
         Some(Value::Object(p)) => {
-            let base = match p.get("base") {
-                None | Some(Value::Null) => None,
-                Some(Value::String(b)) => Some(b.clone()),
-                Some(_) => return None,
-            };
-            announce = match p.get("announce") {
-                None | Some(Value::Null) => None,
-                Some(Value::String(a)) => Some(a.clone()),
-                Some(_) => return None,
-            };
-            key = match p.get("key") {
-                None | Some(Value::Null) => None,
-                Some(Value::String(k)) => Some(k.clone()),
-                Some(_) => return None,
-            };
+            let base = opt_str(p, "base")?;
+            announce = opt_str(p, "announce")?;
+            key = opt_str(p, "key")?;
             Some((s(p.get("branch"))?, base))
         }
         Some(_) => return None,
@@ -134,7 +138,7 @@ pub fn parse(text: &str) -> Option<Lineage> {
         announce,
         key,
         at: o.get("at")?.as_f64()?,
-        machine: s(by.get("machine")).or_else(|| s(by.get("host")))?,
+        machine: s(by.get("machine"))?,
         checkout: s(by.get("checkout"))?,
         pid: by.get("pid").and_then(Value::as_i64).unwrap_or(0),
     })
@@ -211,10 +215,8 @@ fn clock(at: f64, tz_offset: i64) -> String {
 }
 
 /// Whose work a drifting target runs, relative to this deploy's union, and
-/// why; `take_over` when a --evict names the target or reaches it, `reached`
-/// when this checkout's own work changes something the target's configuration
-/// reads.
-pub fn classify(lin: Option<&Lineage>, running: &str, cx: &Context, take_over: bool, reached: bool) -> (Kind, String) {
+/// why, before `demote`.
+pub fn classify(lin: Option<&Lineage>, running: &str, cx: &Context) -> (Kind, String) {
     let Some(lin) = lin.filter(|l| l.toplevel == running) else {
         return (Kind::Untracked, String::new());
     };
@@ -224,37 +226,45 @@ pub fn classify(lin: Option<&Lineage>, running: &str, cx: &Context, take_over: b
     }
     let who = format!("{}:{} (pid {}) at {when}", lin.machine, lin.checkout, lin.pid);
     let unknown: Vec<&str> = lin.branches.iter().filter(|b| !listed(cx.listed.iter().map(String::as_str), b)).map(String::as_str).collect();
-    let (kind, why) = if !unknown.is_empty() {
-        (
+    if !unknown.is_empty() {
+        return (
             Kind::Unlisted,
             format!(
                 "runs work of {} deployed by {who}, which {BRANCHES_FILE} here does not list, so no union here contains it",
                 unknown.join(", ")
             ),
-        )
-    } else if let Some((branch, base)) = &lin.pending {
-        if cx.tips.get(branch) != base.as_ref() {
-            return (Kind::CatchUp, format!("runs {branch}'s increment deployed by {who}, pushed since"));
-        }
-        let at: String = base.as_deref().unwrap_or("nothing").chars().take(12).collect();
-        let mut why =
-            format!("runs an increment of {branch} deployed by {who} whose push has not landed (origin/{branch} is still at {at})");
-        if lin.announce.is_some() {
-            let key = lin.key.as_deref().unwrap_or(branch);
-            if !cx.in_flight.contains_key(key) {
-                return (
-                    Kind::Abandoned,
-                    format!("{why}; its deploy is over, the announcement cleared without the push, so taken as abandoned"),
-                );
-            }
-            if cx.dead.contains(key) {
-                why = format!("{why}; that deploy looks dead, its announcement no longer renewed");
-            }
-        }
-        (Kind::InFlight, why)
-    } else {
+        );
+    }
+    let Some((branch, base)) = &lin.pending else {
         return (Kind::CatchUp, format!("runs pushed work deployed by {who}"));
     };
+    if cx.tips.get(branch) != base.as_ref() {
+        return (Kind::CatchUp, format!("runs {branch}'s increment deployed by {who}, pushed since"));
+    }
+    let at: String = base.as_deref().unwrap_or("nothing").chars().take(12).collect();
+    let mut why = format!("runs an increment of {branch} deployed by {who} whose push has not landed (origin/{branch} is still at {at})");
+    if let Some(key) = lin.announce_key() {
+        if !cx.in_flight.contains_key(key) {
+            return (
+                Kind::Abandoned,
+                format!("{why}; its deploy is over, the announcement cleared without the push, so taken as abandoned"),
+            );
+        }
+        if cx.dead.contains(key) {
+            why = format!("{why}; that deploy looks dead, its announcement no longer renewed");
+        }
+    }
+    (Kind::InFlight, why)
+}
+
+/// `classify`'s verdict for this deploy: a refusal is taken over when
+/// `take_over` (a --evict names the target or reaches it), else left alone
+/// unless `reached` (this checkout's own work changes something the
+/// target's configuration reads).
+pub fn demote(kind: Kind, why: String, take_over: bool, reached: bool) -> (Kind, String) {
+    if !kind.refused() {
+        return (kind, why);
+    }
     if take_over {
         return (Kind::Overridden, format!("{why}; taken over by {EVICT_FLAG}"));
     }
@@ -429,12 +439,13 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         let running = p.running.get(h).cloned().flatten().unwrap_or_default();
         let reached = p.reached.contains(h);
         let take_over = p.evict && (p.named || reached);
-        let (mut kind, mut why) = classify(lin.as_ref(), &running, &p.cx, take_over, reached);
+        let (base, why) = classify(lin.as_ref(), &running, &p.cx);
+        let (mut kind, mut why) = demote(base, why, take_over, reached);
         // The pending increment of a branch origin has no tip of: its
         // first push on its way (in flight), or the branch deleted since
         // with its subagent worktree - then whatever the union lacks of
         // it is abandoned, and the target catches up.
-        let in_flight = classify(lin.as_ref(), &running, &p.cx, false, true).0 == Kind::InFlight;
+        let in_flight = base == Kind::InFlight;
         if let Some(lin) = lin.as_ref().filter(|_| in_flight) {
             if let Some((b, None)) = &lin.pending {
                 if !p.cx.tips.contains_key(b) {
@@ -456,9 +467,9 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         if kind.refused() {
             let dead = lin
                 .as_ref()
-                .filter(|l| l.announce.is_some())
-                .and_then(|l| l.pending.as_ref().map(|(b, _)| l.key.clone().unwrap_or_else(|| b.clone())))
-                .filter(|k| kind == Kind::InFlight && p.cx.dead.contains(k));
+                .and_then(Lineage::announce_key)
+                .filter(|k| kind == Kind::InFlight && p.cx.dead.contains(*k))
+                .map(str::to_string);
             refused.push((h.clone(), kind, dead));
         } else if kind != Kind::LeftAlone {
             plan.push(h.clone());
