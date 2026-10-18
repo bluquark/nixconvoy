@@ -135,11 +135,18 @@ target-side helper are pinned together by your `flake.lock`:
 }
 ```
 
-Then run it from the repo root:
+Then, from the repo root, write its settings and deploy:
 
 ```sh
+nix run .#nixconvoy -- init
 nix run .#nixconvoy -- apply -m "describe this increment"
 ```
+
+`init` detects what it can (the flake directory, the hosts directory, the
+targets' system) and writes `nixconvoy.toml` - its optional sections as
+commented examples, the branch prefix `nixconvoy/{machine}/` - and a
+missing `deploy-branches`; the ssh address template starts as
+`<you>@{target}`, for you to edit.
 
 On a NixOS machine you deploy from, the package in
 `environment.systemPackages` puts `nixconvoy` (and `git review`) on PATH.
@@ -156,7 +163,7 @@ nixosConfiguration named after its directory under `hosts/`.
 
 ```
 deploy-branches     patterns of the work branches (one per line, `*` the wildcard)
-nixconvoy.toml      optional settings (below)
+nixconvoy.toml      the settings (below), written by `nixconvoy init`
 COMMIT_MSG.md       on a work branch: the pending landing's commit message
 <flake>/flake.nix
 <flake>/hosts/<name>/   one directory per nixosConfiguration
@@ -164,32 +171,34 @@ COMMIT_MSG.md       on a work branch: the pending landing's commit message
 
 ### nixconvoy.toml
 
-Every key is optional.
+`nixconvoy init [<flake-dir>]` writes it (and a missing `deploy-branches`),
+refusing to overwrite one.  The keys up to `[eval]` are required and have
+no defaults - init detects each, the ssh address template starting as
+`<you>@{target}`.  The sections after are optional: absent means none.
 
 ```toml
-flake = "nixos"              # directory holding flake.nix (default ".")
-hosts_dir = "nixos/hosts"    # default "<flake>/hosts"
-system = "x86_64-linux"
-ssh_address = "me@{target}.lan"   # ssh address template (default "{target}"); the builder's too
-branch_prefix = "work/{machine}/"    # {machine}: this machine's hostname: a checkout owns
+config_version = 1
+flake_dir = "nixos"               # directory holding flake.nix
+targets_dir = "nixos/hosts"       # one directory per nixosConfiguration: the targets
+targets_arch = "x86_64-linux"     # the targets' system
+ssh_address_template = "me@{target}.lan"   # a target's ssh address; the builder's too
+branch_prefix = "nixconvoy/{machine}/"   # {machine}: this machine's hostname: a checkout owns
                                      # "<prefix><N>", a subagent worktree "<checkout's branch>-<name>"
                                      # ("<prefix>main-<name>" under a plain checkout)
 child_worktrees = ".claude/worktrees"   # where `open --child <worktree>` puts a child (subagent) worktree, under the
-                                        # checkout: Claude Code's own place by default (excluded through .git/info/exclude)
-
-[precheck]                   # a flake check proven before any build (a pass memoized on the union's tree)
-check = "repo-lint"          # checks.<system>.<check>
+                                        # checkout (Claude Code's own place; excluded through .git/info/exclude)
 
 [eval]
-parallel = true              # force Determinate Nix's parallel evaluation (default "auto": on when nix has it)
+parallel = "auto"            # Determinate Nix's parallel evaluation: true, false, or "auto" (on when nix has it)
+precheck = "repo-lint"       # optional: checks.<targets_arch>.<name>, a flake check proven before any build
+                             # (a pass memoized on the union's tree)
 
 [build]
-builder = { darwin = "builder" }     # realise closures there (per platform)
-unreachable_hint = "asleep? wake it first"
+builder = { "*" = "bigbox", laptop = "laptop" }   # realise closures there, by the hostname nixconvoy runs on
+                                     # ("*": any other); a machine mapped to itself builds locally
 skip_substituters = ["https://slow.cachix.org"]   # left out of deploy builds; the caches are the builder's nix.conf's
 
 [targets.laptop]
-local_only = true            # deployable only from itself
 ssh_address = "root@10.0.0.9"   # overrides the template
 tags = ["portable"]          # `@portable` on the command line names every target tagged so
 
@@ -243,6 +252,9 @@ on the whole tree.
 ## Commands
 
 ```
+# Setting up a repository
+nixconvoy init [<flake-dir>]   write nixconvoy.toml (and a missing deploy-branches) for a fresh install: the flake, hosts directory and system detected, the ssh address template as this user
+
 # Managing worktrees
 nixconvoy close [<path> ... | <worktree> ... | <submodule> ...] [--force]   remove agent checkouts by path (with their work branch), subagent worktrees, or submodule worktrees (with their branch), holding nothing of their own (--force: whatever they hold)
 nixconvoy pull                 rebase every checkout on this machine onto origin/main
@@ -272,8 +284,8 @@ step of a deploy in full.
 ## Child worktrees
 
 A git worktree nested in a checkout - `<checkout>/<child_worktrees>/<name>`,
-the directory nixconvoy.toml names (`.claude/worktrees/` by default, where
-Claude Code puts its own; `open` writes it into `.git/info/exclude` unless
+the directory nixconvoy.toml names (`.claude/worktrees/`, where Claude
+Code puts its own, in a repository that is no nixconvoy repository; `open` writes it into `.git/info/exclude` unless
 it is ignored already), where `nixconvoy open --child <worktree>` makes one
 and the create hook below runs it - is that checkout's child, or subagent,
 worktree: it owns `<checkout's

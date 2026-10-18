@@ -37,9 +37,8 @@ Deploy (nixconvoy apply [<target> | @<tag> ...] [-m <msg>] [--evict]
   checkout's, deploy).
   1. start fetching origin; enumerate the targets from the hosts directory
   2. probe every target's running system and its lineage
-     (/var/lib/nixconvoy/lineage.json, in the same round trip; a local_only
-     target participates only when the checkout is on it), concurrently with
-     steps 3-4.  Candidates default to all targets; naming targets (or @tag, every
+     (/var/lib/nixconvoy/lineage.json, in the same round trip), concurrently
+     with steps 3-4.  Candidates default to all targets; naming targets (or @tag, every
      target nixconvoy.toml gives that tag) restricts switching to (at most)
      those.  An unreachable candidate fails the deploy before anything is
      evaluated
@@ -110,11 +109,11 @@ Deploy (nixconvoy apply [<target> | @<tag> ...] [-m <msg>] [--evict]
      history), origin/main, each unioned branch's tip and the increment's
      commit, which is made now with its -m message and its trailers:
      Reaches:, the targets the increment reaches (a changed file their
-     evaluation reads, or a lock entry it names) among those deployable
-     from here; Applied:, the candidates running the branch's tip once the
+     evaluation reads, or a lock entry it names); Applied:, the candidates running the branch's tip once the
      deploy is over
   6. build the drifting candidates' closures straight from the evaluated
-     .drvs (no re-eval), on the configured builder if any, unsandboxed
+     .drvs (no re-eval), on the configured builder if any (build.builder,
+     by the machine deploying), unsandboxed
      when a dry-run shows only trivial builders left.  Nothing drifting and
      no precheck to run means no build
   7. copy the closures over, concurrently, while re-fetching to check that
@@ -268,11 +267,12 @@ worktree never deployed has nothing to unapply: close --force discards it.
 
 Open (nixconvoy open <path> [--branch <work-branch>] | --child <worktree>
 | --submodule <input>): a worktree.  --child <worktree>: a subagent
-worktree of that name, <root>/.claude/worktrees/<worktree> (Claude Code's
-own place, or under the directory nixconvoy.toml's `child_worktrees`
-names; a nested worktree must be ignored, so the directory is written
-into .git/info/exclude unless it is already; root: the checkout this
-one's subagent worktrees hang off) on the fresh branch
+worktree of that name, <root>/<child_worktrees>/<worktree> (the directory
+nixconvoy.toml's `child_worktrees` names; .claude/worktrees, Claude
+Code's own place, in a repository without nixconvoy.toml or
+deploy-branches; a nested worktree must be ignored, so the directory is
+written into .git/info/exclude unless it is already; root: the checkout
+this one's subagent worktrees hang off) on the fresh branch
 worktree-<worktree> off origin's default branch, owning <root's work
 branch>-<worktree> from its first deploy - what the Claude Code plugin's
 create hook makes for an isolated subagent (see Hook); one already opened
@@ -283,7 +283,7 @@ one or with a / in it and no branch here): an agent checkout beside the
 others - a worktree of this repository at that path,
 outside every checkout, on a work branch of this machine's: --branch, else
 <branch_prefix><N> for the digits the path's name ends with (homelab5 ->
-work/<machine>/5) when that is listed and free, else the first listed free
+nixconvoy/<machine>/5) when that is listed and free, else the first listed free
 number; origin's copy of the branch when it has one (a checkout removed
 before), else new off origin's default branch.  --submodule:
 the flake input <input> developed in place - a git submodule of this
@@ -347,6 +347,24 @@ agent checkout (never the primary worktree), with its work branch here
 and on origin, when it holds nothing of its own - no edits, nothing
 beyond origin/main, no submodule holding anything - or --force.
 
+Init (nixconvoy init [<flake-dir>]): nixconvoy.toml for a fresh install,
+at the repository's root, refused when one is there.  Its required keys
+are detected: flake_dir, the
+directory holding flake.nix (<flake-dir>, the root, else the one no
+deeper than any other); targets_dir, the directory whose subdirectories
+best match the nixosConfigurations' names (`nix eval`, best effort within
+60 s; without it the one holding the most configuration.nix); targets_arch,
+the one system literal the hosts' .nix files agree on, else the first
+target's evaluated hostPlatform, else this machine's architecture as a
+guess the file says to verify; ssh_address_template, "<this
+user>@{target}", to edit; branch_prefix nixconvoy/{machine}/ - and
+deploy-branches itself, this machine's line, when the file is missing;
+child_worktrees
+.claude/worktrees; eval.parallel "auto".  The optional sections follow as
+commented examples filled with what was found: the flake's checks for
+eval.precheck, the targets' names.  git is only read: what it wrote is
+left for you to stage.
+
 Hook (nixconvoy hook <event>): the Claude Code plugin's hook of that
 event - session-start, subagent-stop or worktree-create - run by
 integrations/claude-code/hooks/<event>.sh with the hook's JSON input on
@@ -408,16 +426,18 @@ import sys
 from pathlib import Path
 from typing import IO, NoReturn
 
-from . import commands, hooks, names, proc, review, submodule
+from . import commands, hooks, init, names, proc, review, submodule
 from .checkout import lock_checkout, require_work_branch, sub_parent
 from .deploy import deploy
-from .proc import PERF, TOOL, die, git, ok, out, painter
+from .proc import PERF, TOOL, die, ok, out, painter
 from .targets import ALLOW_FLAG
 
 # The synopsis: one line per form under its section's heading (= ...).
 # <x> a value, [x] optional, (a | b) one of, ... repeated.  USAGE_NOTES
 # follows it under --help only.
 SYNOPSIS = """\
+= Setting up a repository
+init [<flake-dir>]
 = Managing worktrees
 open <path> [--branch <work-branch>]
 open --child <worktree>
@@ -458,7 +478,10 @@ merge-base) and a <submodule>'s name too.  A <path> (with a /, no branch
 here) is an agent checkout's.
 hook <event> (session-start, subagent-stop or worktree-create) is the
 plugin's hook of that event, which its hooks/<event>.sh runs with the
-hook's input on stdin - never typed by hand."""
+hook's input on stdin - never typed by hand.
+init writes nixconvoy.toml (and a missing deploy-branches) for a fresh
+install, every required key detected (the ssh address template as this
+user, to edit)."""
 
 
 def usage(stream: IO[str] | None = None) -> str:
@@ -516,7 +539,7 @@ def main() -> None:
         print(usage())
         print(USAGE_NOTES)
         return
-    if args[0] not in ("apply", "land", "unapply", "close", "pull", "status", "review", "open", "hook"):
+    if args[0] not in ("apply", "land", "unapply", "close", "pull", "status", "review", "open", "hook", "init"):
         bad_usage()
     subcmd = args.pop(0)
     if subcmd == "hook":
@@ -527,9 +550,10 @@ def main() -> None:
         return
     start = Path.cwd()
     os.chdir(out(["git", "rev-parse", "--show-toplevel"]))
-    # A dead run's leftovers, seen from every worktree; the age spares a
-    # live run's throwaway worktree in a private /tmp this process cannot see.
-    git("worktree", "prune", "--expire", "1.day.ago", check=False)
+    if subcmd == "init":
+        # Before anything reads nixconvoy.toml, which it writes.
+        init_args(args, start)
+        return
     if subcmd == "review":
         os.chdir(start)  # its paths are the caller's
         sys.exit(review.main(args))
@@ -698,6 +722,22 @@ def main() -> None:
             # Accepted so a deploy's command line reruns with the flag added.
             print(f"note: -m does nothing with {DRY_FLAG}: nothing is committed", file=sys.stderr)
         deploy(given, msg, evict, frozenset(allow), dry)
+
+
+def init_args(args: list[str], start: Path) -> None:
+    """init's command line: at most one <flake-dir>, relative to where
+    nixconvoy was run."""
+    flake: str | None = None
+    while args:
+        a = args.pop(0)
+        if a in ("-h", "--help"):
+            print(usage())
+            print(USAGE_NOTES)
+            return
+        if a.startswith("-") or flake is not None:
+            bad_usage()
+        flake = a
+    init.main(flake, start)
 
 
 def is_path(arg: str) -> bool:

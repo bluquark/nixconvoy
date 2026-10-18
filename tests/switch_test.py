@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import getpass
 import hashlib
 import io
 import json
@@ -281,19 +282,40 @@ def report(text: str, *, tips: dict[str, str] | None = None,
 
 
 def target_cases() -> None:
-    """expand_targets: names and @tags from nixconvoy.toml, once each, a
-    remote-only target dropped from a tag but not from a name."""
+    """expand_targets: names and @tags from nixconvoy.toml, once each; the
+    builder by the machine nixconvoy runs on."""
     proc.this_machine = lambda: "tester"
-    config.set_cfg(config.parse(
+    config.set_cfg(config.parse(toml(
         '[targets.a]\ntags = ["vps"]\n[targets.b]\ntags = ["vps", "lab"]\n'
-        '[targets.c]\nlocal_only = true\ntags = ["lab"]\n'))
+        '[targets.c]\ntags = ["lab"]\n')))
     inv = ["a", "b", "c"]
     assert targets.expand_targets([], inv) == []
     assert targets.expand_targets(["@vps"], inv) == ["a", "b"]
     assert targets.expand_targets(["b", "@vps"], inv) == ["b", "a"]
     assert targets.expand_targets(["@lab", "c"], inv) == ["b", "c"]
-    assert targets.remote_only("c") and not targets.remote_only("a")
-    config.set_cfg(config.parse('[targets.a]\ntags = ["vps"]\n[targets.zz]\ntags = ["vps"]\n'))
+    env_builder = os.environ.pop("NIXCONVOY_BUILDER", None)
+    try:
+        for build, want in (('[build]\nbuilder = "big"\n', "big"),
+                            ('[build]\nbuilder = "tester"\n', ""),
+                            ('[build]\nbuilder = ""\n', ""),
+                            ('[build]\nbuilder = { }\n', ""),
+                            ("", ""),
+                            ('[build]\nbuilder = { "*" = "big" }\n', "big"),
+                            ('[build]\nbuilder = { "*" = "big", tester = "tester" }\n', ""),
+                            ('[build]\nbuilder = { "*" = "big", tester = "other" }\n', "other"),
+                            ('[build]\nbuilder = { other = "big" }\n', "")):
+            config.set_cfg(config.parse(toml(build)))
+            assert config.builder() == want, (build, config.builder())
+        config.set_cfg(config.parse(toml('[build]\nbuilder = { "*" = "big" }\n')))
+        os.environ["NIXCONVOY_BUILDER"] = ""
+        assert config.builder() == ""
+        os.environ["NIXCONVOY_BUILDER"] = "env"
+        assert config.builder() == "env"
+    finally:
+        os.environ.pop("NIXCONVOY_BUILDER", None)
+        if env_builder is not None:
+            os.environ["NIXCONVOY_BUILDER"] = env_builder
+    config.set_cfg(config.parse(toml('[targets.a]\ntags = ["vps"]\n[targets.zz]\ntags = ["vps"]\n')))
     for bad in (["@nope"], ["zz"], ["@vps"]):
         try:
             with contextlib.redirect_stderr(io.StringIO()):
@@ -302,21 +324,51 @@ def target_cases() -> None:
             pass
         else:
             raise AssertionError(bad)
-    for bad_cfg, hint in (('[targets.a]\ntag = ["vps"]\n', "unknown key targets.a.tag"),
-                          ('target = "x@{host}"\n', "now ssh_address"),
-                          ('[hosts.a]\n', "now targets"),
-                          ('[build]\nhost = "b"\n', "now build.builder"),
-                          ('worktrees = "w"\n', "now child_worktrees"),
-                          ('[precheck]\nattr = "lint"\n', "now precheck.check"),
-                          ('[targets.a]\ntarget = "x"\n', "now ssh_address"),
-                          ('ssh_address = "x@{host}"\n', "over {target} alone"),
-                          ('branch_prefix = "{host}-d"\n', "over {machine} alone")):
+    for bad_cfg, hint in ((toml('[targets.a]\ntag = ["vps"]\n'), "unknown key targets.a.tag"),
+                          (toml('target = "x@{host}"\n'), "now ssh_address"),
+                          (toml('[hosts.a]\n'), "now targets"),
+                          (toml('[build]\nhost = "b"\n'), "now build.builder"),
+                          (toml('[build]\nbuilder = { darwin = "b" }\n'), "not by platform"),
+                          (toml('[build]\nbuilder = { linux = "b" }\n'), "not by platform"),
+                          (toml('[build]\nbuilder = { big = 3 }\n'), "build.builder.big must be a string"),
+                          (toml('[build]\nbuilder = 3\n'), "build.builder is a machine name"),
+                          (toml().replace("config_version = 1", "config_version = true"), "not supported"),
+                          (toml('[build]\nunreachable_hint = "zzz"\n'), "unknown key build.unreachable_hint"),
+                          (toml('[targets.a]\nlocal_only = true\n'), "unknown key targets.a.local_only"),
+                          (toml('worktrees = "w"\n'), "now child_worktrees"),
+                          (toml('[precheck]\ncheck = "lint"\n'), "now eval.precheck"),
+                          (toml('[targets.a]\ntarget = "x"\n'), "now ssh_address"),
+                          (toml(ssh_address_template="x@{host}"), "over {target} alone"),
+                          (toml('ssh_address = "x@{target}"\n'), "now ssh_address_template"),
+                          (toml(branch_prefix="{host}-d"), "over {machine} alone"),
+                          # No defaults: every scalar key is required.
+                          ("", "config_version is required"),
+                          (toml().replace('flake_dir = "."\n', ""), "flake_dir is required"),
+                          (toml('flake = "."\n'), "now flake_dir"),
+                          (toml().replace('targets_dir = "hosts"\n', ""), "targets_dir is required"),
+                          (toml().replace('targets_arch = "x86_64-linux"\n', ""), "targets_arch is required"),
+                          (toml('hosts_dir = "h"\n'), "now targets_dir"),
+                          (toml('system = "x"\n'), "now targets_arch"),
+                          (toml('version = 1\n'), "now config_version"),
+                          (toml().replace('ssh_address_template = "{target}"\n', ""), "ssh_address_template is required"),
+                          (toml().replace('branch_prefix = "work/{machine}/"\n', ""), "branch_prefix is required"),
+                          (toml().replace('child_worktrees = ".claude/worktrees"\n', ""), "child_worktrees is required"),
+                          (toml().replace('[eval]\nparallel = "auto"\n', ""), "eval is required"),
+                          (toml().replace('parallel = "auto"\n', ""), "eval.parallel is required"),
+                          (toml().replace('parallel = "auto"\n', 'parallel = "auto"\ncores = 2\n'), "unknown key eval.cores")):
         try:
             config.parse(bad_cfg)
         except config.ConfigError as e:
             assert hint in str(e), (bad_cfg, e)
         else:
             raise AssertionError(f"accepted: {bad_cfg!r}")
+    with tempfile.TemporaryDirectory() as empty:
+        try:
+            config.load(Path(empty))
+        except config.ConfigError as e:
+            assert "nixconvoy init" in str(e), e
+        else:
+            raise AssertionError("loaded without a file")
     print("targets: ok")
 
 
@@ -554,6 +606,16 @@ def guard_cases(d: Path) -> None:
     print("switch guard: ok")
 
 
+def toml(extra: str = "", precheck: str = "", **over: str) -> str:
+    """A nixconvoy.toml with every required key (the defaults the scratch
+    repos use, `over` overriding), `extra` appended before the [eval] table
+    and `precheck` in it."""
+    keys = {"flake_dir": ".", "targets_dir": "hosts", "targets_arch": "x86_64-linux", "ssh_address_template": "{target}",
+            "branch_prefix": "work/{machine}/", "child_worktrees": ".claude/worktrees", **over}
+    return ("config_version = 1\n" + "".join(f'{k} = "{v}"\n' for k, v in keys.items())
+            + extra + '[eval]\nparallel = "auto"\n' + (f'precheck = "{precheck}"\n' if precheck else ""))
+
+
 def sh(cwd: Path, *args: str) -> str:
     return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *args], cwd=cwd, check=True,
                           capture_output=True, text=True).stdout.strip()
@@ -574,7 +636,7 @@ def scratch_env() -> None:
     proc.this_machine = lambda: "tester"
     # The scratch repos keep their flake under nixos/, with a repo lint as
     # the precheck.
-    config.set_cfg(config.parse('flake = "nixos"\n[precheck]\ncheck = "lint"\n'))
+    config.set_cfg(config.parse(toml(precheck="lint", flake_dir="nixos", targets_dir="nixos/hosts")))
     memo.union_objects.cache_clear()
     memo.scan_sound.cache_clear()
     memo.target_eval_reads.cache_clear()
@@ -1379,7 +1441,7 @@ def submodule_cases(d: Path) -> None:
     sh(dep_seed, "push", "--quiet", "origin", "HEAD:main")
     dep_repo = d / "dep"  # the repository's checkout here, never deployed from
     sh(d, "clone", "--quiet", str(dep_origin), str(dep_repo))
-    config.set_cfg(config.parse(f'flake = "nixos"\n[submodules.dep]\nrepo = "{dep_repo}"\n'))
+    config.set_cfg(config.parse(toml(f'[submodules.dep]\nrepo = "{dep_repo}"\n', flake_dir="nixos", targets_dir="nixos/hosts")))
 
     origin, seed, co = d / "origin.git", d / "seed", d / "homelab9"
     wb = "work/tester/9"
@@ -2047,7 +2109,7 @@ def open_cases(d: Path) -> None:
                         assert e.code == 1, (argv, e.code)
                     else:
                         raise AssertionError(argv)
-                assert err.getvalue().startswith("usage:\n\nManaging worktrees:\n  nixconvoy open "), (argv, err.getvalue())
+                assert err.getvalue().startswith("usage:\n\nSetting up a repository:\n  nixconvoy init "), (argv, err.getvalue())
         finally:
             sys.argv = argv0
             atexit.unregister(proc.PERF.write)
@@ -2122,13 +2184,81 @@ def require_guard_of_this_tree() -> None:
                  f"point it at `nix build .#switch-guard`'s bin/ for this tree")
 
 
+def init_cases(d: Path) -> None:
+    """`nixconvoy init`: nixconvoy.toml detected from the repository (the
+    flake under nixos/, its hosts directory, the one system literal), the
+    ssh address template as this user, deploy-branches written when
+    missing, nothing staged; a second init refused."""
+    scratch_env()
+
+    repo = d / "repo"
+
+    def run_cli(argv: list[str]) -> None:
+        os.chdir(repo / "nixos" / "hosts")  # main chdirs to the root and stays
+        sys.argv = ["nixconvoy", *argv]
+        cli.main()
+
+    sh(d, "init", "--quiet", "-b", "main", str(repo))
+    put(repo, "nixos/flake.nix", "{ outputs = _: { }; }\n")
+    put(repo, "nixos/hosts/a/configuration.nix", "{ }\n")
+    put(repo, "nixos/hosts/b/configuration.nix", '{ nixpkgs.hostPlatform = "aarch64-linux"; }\n')
+    put(repo, "nixos/hosts/b/emu.nix", '{ boot.binfmt.emulatedSystems = [ "riscv64-linux" ]; }\n')  # not a platform
+    put(repo, "nixos/modules/m.nix", '{ x = "x86_64-darwin"; }\n')  # outside the hosts directory
+    put(repo, "nixos/submodules/dep/.keep", "")
+    put(repo, "nixos/pkgs/p1/default.nix", "{ }\n")  # packages, not hosts
+    put(repo, "nixos/pkgs/p2/default.nix", "{ }\n")
+    put(repo, "nixos/pkgs/p3/default.nix", "{ }\n")
+    put(repo, "deploy-branches", "# comment\nwork/other/*\ntester-lab/tester/*\n")
+    prev = Path.cwd()
+    me = getpass.getuser()
+    try:
+        assert "usage:" in dies(lambda: run_cli(["init", "--ssh-domain", "lan"]))
+        assert not (repo / "nixconvoy.toml").exists()
+        with contextlib.redirect_stdout(io.StringIO()):
+            run_cli(["init"])
+        c = config.load(repo)
+        assert (c.flake_dir, c.targets_dir, c.targets_arch) == ("nixos", "nixos/hosts", "aarch64-linux"), c
+        assert c.ssh_template == me + "@{target}" and c.branch_prefix == "nixconvoy/{machine}/", c
+        assert c.child_worktrees == ".claude/worktrees" and c.parallel_eval is None and not c.precheck
+        assert not c.submodules and not c.targets
+        text = (repo / "nixconvoy.toml").read_text()
+        assert "# [targets.a]" in text and "# precheck = " in text and "# [submodules.<input>]" in text, text
+        assert "?? nixconvoy.toml" in sh(repo, "status", "--porcelain")  # written, not staged
+        assert "already there" in dies(lambda: run_cli(["init"]))
+        (repo / "nixconvoy.toml").unlink()
+        (repo / "deploy-branches").unlink()
+        # The flake named, relative to where init runs; the branches file
+        # written for this machine.
+        with contextlib.redirect_stdout(io.StringIO()):
+            run_cli(["init", ".."])
+        c = config.load(repo)
+        assert (c.flake_dir, c.branch_prefix) == ("nixos", "nixconvoy/{machine}/"), c
+        assert (repo / "deploy-branches").read_text() == "nixconvoy/tester/*\n"
+    finally:
+        os.chdir(prev)
+    # A flake at the root with no hosts directory yet.
+    bare = d / "bare"
+    sh(d, "init", "--quiet", "-b", "main", str(bare))
+    put(bare, "flake.nix", "{ outputs = _: { }; }\n")
+    os.chdir(bare)
+    try:
+        sys.argv = ["nixconvoy", "init"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.main()
+        c = config.load(bare)
+        assert (c.flake_dir, c.targets_dir, c.ssh_template) == (".", "hosts", me + "@{target}"), c
+    finally:
+        os.chdir(prev)
+    print("init: ok")
+
+
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--fake-target"]:
         sys.exit(fake_target(sys.argv[2:]))
     if sys.argv[1:2] == ["--fake-guard"]:
         sys.exit(fake_guard(sys.argv[2], sys.argv[3]))
     require_guard_of_this_tree()
-    config.set_cfg(config.Config())
+    config.set_cfg(config.parse(toml()))
     with tempfile.TemporaryDirectory() as d:
         os.environ["FAKE_TARGET_STATE"] = str(Path(d) / "target.json")
         main()
@@ -2147,3 +2277,5 @@ if __name__ == "__main__":
         submodule_cases(Path(d))
     with tempfile.TemporaryDirectory() as d:
         open_cases(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        init_cases(Path(d))

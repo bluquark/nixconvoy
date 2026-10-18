@@ -47,7 +47,7 @@ from .guard import binary, decide
 from .memo import Top
 from .proc import PERF, die, dump_json, git, is_ancestor, load_json, out, rev
 from .switch import lineage_record, switch
-from .targets import Probe, expand_targets, flake_target_names, remote_only
+from .targets import Probe, expand_targets, flake_target_names
 from .union import UnionQueries
 
 # Seconds between the looks at origin while waiting for a deploy under way.
@@ -139,16 +139,13 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool,
     filter_targets = expand_targets(filter_targets, all_targets)
     me = proc.this_machine()
 
-    for h in filter_targets:
-        if remote_only(h):
-            die(f"{h} is deployable only from itself (nixconvoy.toml: local_only); run nixconvoy there")
-    candidates = filter_targets or [h for h in all_targets if not remote_only(h)]
+    candidates = filter_targets or list(all_targets)
 
     await_background_push()
     main0 = rev("refs/remotes/origin/main")
     # Non-candidates are probed best-effort: the verdict reports their
     # drift, and a hold on one is read off its lineage.
-    probe_names: list[str] = [] if skip else [n for n in all_targets if not remote_only(n)]
+    probe_names: list[str] = [] if skip else list(all_targets)
     pool = ThreadPoolExecutor(1 + len(probe_names) + len(submodule.present(Path.cwd())))
     fetch = pool.submit(git, *fetch_args("--no-auto-gc"))
     carrying = submodule.carries(Path.cwd())  # read before the prefetch moves the refs it reads
@@ -499,7 +496,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         deployed = sorted(h for h in tops if h in plan or h not in affected)
         if snap and not dry:
             assert wb is not None  # a snapshot needs the work branch (deploy)
-            reaches = sorted(memo.reached_between(wt, union, [h for h in all_targets if not remote_only(h)],
+            reaches = sorted(memo.reached_between(wt, union, all_targets,
                                                   "HEAD", snap))
             full = (f"{msg}\n\nReaches: {fmt(reaches) or 'none'}"
                     f"\nApplied: {fmt(deployed) or 'none'}")

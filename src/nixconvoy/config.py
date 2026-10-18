@@ -1,6 +1,7 @@
 """nixconvoy.toml at the repo root: the fleet-level settings the git-side
 verbs need before any Nix runs, and the per-target facts a deploy needs before
-probing.  Every key is optional; a missing file is the defaults."""
+probing.  The scalar keys are required - `nixconvoy init` writes them,
+detected - and the sections are optional: absent means none."""
 
 from __future__ import annotations
 
@@ -10,15 +11,19 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import proc
+
 CONFIG_FILE = "nixconvoy.toml"
 MSG_FILE = "COMMIT_MSG.md"
 BRANCHES_FILE = "deploy-branches"
+# Where Claude Code puts a subagent worktree: the one place a repository
+# without nixconvoy.toml has for one (the plugin's create hook runs in every
+# repository).
+CLAUDE_WORKTREES = ".claude/worktrees"
 
 
 @dataclass(frozen=True)
 class TargetConfig:
-    # Deployable only from itself: never probed or named from elsewhere.
-    local_only: bool = False
     # ssh address, overriding Config.ssh_address's template.
     ssh_address: str = ""
     # `@tag` on the command line names every target carrying it.
@@ -28,30 +33,33 @@ class TargetConfig:
 @dataclass(frozen=True)
 class Config:
     # The directory holding flake.nix, relative to the repo root.
-    flake: str = "."
-    # The directory whose subdirectories name the nixosConfigurations.
-    hosts_dir: str = ""
-    system: str = "x86_64-linux"
-    # A target's ssh address (user@name): nixconvoy.toml's ssh_address, a
-    # template over {target}; the builder is addressed through it too.
-    ssh_template: str = "{target}"
+    flake_dir: str
+    # The directory whose subdirectories name the nixosConfigurations,
+    # relative to the repo root.
+    targets_dir: str
+    # The targets' system (checks.<targets_arch>.<precheck> is the precheck).
+    targets_arch: str
+    # A target's ssh address (user@name): nixconvoy.toml's
+    # ssh_address_template, over {target}; the builder is addressed through it too.
+    ssh_template: str
     # A checkout owns "<prefix><leaf>", its subagent worktrees "<prefix><leaf>-<name>"
     # (the main checkout's "<prefix>main-<name>"); {machine} is this machine's hostname.
-    branch_prefix: str = "work/{machine}/"
+    branch_prefix: str
     # Where `open --child <name>` puts a child (subagent) worktree, relative
-    # to the checkout: Claude Code's own place for one by default.  A nested
-    # worktree must be ignored (open writes it into .git/info/exclude); any
-    # worktree nested in a checkout is one of its children, wherever it was made.
-    child_worktrees: str = ".claude/worktrees"
-    # A flake check (checks.<system>.<check>) proven before any build.
-    precheck: str = ""
+    # to the checkout.  A nested worktree must be ignored (open writes it
+    # into .git/info/exclude); any worktree nested in a checkout is one of
+    # its children, wherever it was made.
+    child_worktrees: str
     # Determinate Nix's parallel evaluation (builtins.parallel, --eval-cores):
     # None is "auto", on when the nix here knows the feature.
-    parallel_eval: bool | None = None
-    # The builder the closures are realised on, by sys.platform ("darwin",
-    # "linux"); absent means here.
+    parallel_eval: bool | None
+    # eval.precheck: a flake check (checks.<targets_arch>.<precheck>) proven
+    # before any build; empty is none.
+    precheck: str = ""
+    # The builder the closures are realised on, by the hostname nixconvoy
+    # runs on ("*": any other); a machine mapped to itself, or to nothing,
+    # builds here.  The builder is addressed as a target (ssh_address).
     builder: dict[str, str] = field(default_factory=dict)
-    build_unreachable_hint: str = ""
     # Substituters a deploy build leaves out of the builder's own configured
     # list (targets.build_cmd): the caches themselves are each builder's
     # nix.conf's business.
@@ -71,17 +79,16 @@ class Config:
         return [n for n, h in self.targets.items() if tag in h.tags]
 
     @property
-    def hosts_path(self) -> str:
-        return self.hosts_dir or os.path.normpath(f"{self.flake}/hosts")
+    def targets_path(self) -> str:
+        return os.path.normpath(self.targets_dir)
 
     @property
     def flake_path(self) -> str:
-        return os.path.normpath(self.flake)
+        return os.path.normpath(self.flake_dir)
 
     def flake_file(self, name: str) -> str:
         """A repo path inside the flake directory (flake.nix, flake.lock)."""
-        return os.path.normpath(f"{self.flake}/{name}")
-    
+        return os.path.normpath(f"{self.flake_dir}/{name}")
 
 
 class ConfigError(Exception):
@@ -94,22 +101,23 @@ def _table(v: object, where: str) -> dict[str, object]:
     return v
 
 
-def _str(t: dict[str, object], k: str, where: str, default: str = "") -> str:
-    v = t.get(k, default)
+def _required(t: dict[str, object], k: str, where: str) -> object:
+    if k not in t:
+        key = k if where == CONFIG_FILE else f"{where}.{k}"
+        raise ConfigError(f"{CONFIG_FILE}: {key} is required (`nixconvoy init` writes a complete file)")
+    return t[k]
+
+
+def _str(t: dict[str, object], k: str, where: str, default: str | None = "") -> str:
+    """A string key; default None makes it required."""
+    v = _required(t, k, where) if default is None else t.get(k, default)
     if not isinstance(v, str):
         raise ConfigError(f"{where}.{k} must be a string")
     return v
 
 
-def _bool(t: dict[str, object], k: str, where: str, default: bool = False) -> bool:
-    v = t.get(k, default)
-    if not isinstance(v, bool):
-        raise ConfigError(f"{where}.{k} must be true or false")
-    return v
-
-
 def _auto_bool(t: dict[str, object], k: str, where: str) -> bool | None:
-    v = t.get(k, "auto")
+    v = _required(t, k, where)
     if v == "auto":
         return None
     if not isinstance(v, bool):
@@ -132,8 +140,10 @@ def _bare_url(u: str) -> str:
 
 # The keys the target/builder/machine vocabulary renamed, for the error a
 # config still using one gets.
-_RENAMED = {"target": "ssh_address (over {target}, not {host})", "hosts": "targets",
-            "worktrees": "child_worktrees", "precheck.attr": "precheck.check",
+_RENAMED = {"target": "ssh_address_template (over {target}, not {host})", "hosts": "targets",
+            "ssh_address": "ssh_address_template (per target, targets.<name>.ssh_address stays)",
+            "version": "config_version", "hosts_dir": "targets_dir", "system": "targets_arch", "flake": "flake_dir",
+            "worktrees": "child_worktrees", "precheck": "eval.precheck",
             "build.host": "build.builder",
             "build.caches": "build.skip_substituters: the builder's nix.conf lists the caches",
             "build.public_substituters": "build.skip_substituters: the builder's nix.conf lists the caches"}
@@ -144,10 +154,11 @@ def _renamed(k: str) -> str:
     return f" (now {new})" if new else ""
 
 
-def _template(t: dict[str, object], k: str, default: str, placeholder: str) -> str:
-    """A template setting, proven here to format with `placeholder` alone,
-    so a stale placeholder fails as a ConfigError rather than in a probe."""
-    v = _str(t, k, CONFIG_FILE, default)
+def _template(t: dict[str, object], k: str, placeholder: str) -> str:
+    """A required template setting, proven here to format with
+    `placeholder` alone, so a stale placeholder fails as a ConfigError
+    rather than in a probe."""
+    v = _str(t, k, CONFIG_FILE, None)
     try:
         v.format(**{placeholder: "x"})
     except (KeyError, IndexError, ValueError) as e:
@@ -160,31 +171,54 @@ def parse(text: str) -> Config:
         doc = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{CONFIG_FILE}: {e}") from e
-    version = doc.get("version", 1)
-    if version != 1:
-        raise ConfigError(f"{CONFIG_FILE}: version {version} is not supported (1 is)")
-    known = {"version", "flake", "hosts_dir", "system", "ssh_address", "branch_prefix", "child_worktrees",
-             "precheck", "eval", "build", "targets", "submodules"}
+    for k in doc:
+        if k in _RENAMED:
+            raise ConfigError(f"{CONFIG_FILE}: unknown key {k}{_renamed(k)}")
+    version = _required(doc, "config_version", CONFIG_FILE)
+    if isinstance(version, bool) or version != 1:
+        raise ConfigError(f"{CONFIG_FILE}: config_version {version} is not supported (1 is)")
+    known = {"config_version", "flake_dir", "targets_dir", "targets_arch", "ssh_address_template", "branch_prefix",
+             "child_worktrees",
+             "eval", "build", "targets", "submodules"}
     if "memo" in doc:
         raise ConfigError(f"{CONFIG_FILE}: [memo] is gone: the eval memo needs no settings, it keys "
                           "each target on the files its configuration reaches by path literal")
     for k in doc:
         if k not in known:
-            raise ConfigError(f"{CONFIG_FILE}: unknown key {k}{_renamed(k)}")
-    pre = _table(doc.get("precheck", {}), "precheck")
-    for k in pre:
-        if k != "check":
-            raise ConfigError(f"{CONFIG_FILE}: unknown key precheck.{k}{_renamed(f'precheck.{k}')}")
-    ev = _table(doc.get("eval", {}), "eval")
+            raise ConfigError(f"{CONFIG_FILE}: unknown key {k}")
+    # The required keys in the file's order, so a hand-written file is
+    # told of its first gap first.
+    flake_dir = _str(doc, "flake_dir", CONFIG_FILE, None)
+    targets_dir = _str(doc, "targets_dir", CONFIG_FILE, None)
+    targets_arch = _str(doc, "targets_arch", CONFIG_FILE, None)
+    ssh_template = _template(doc, "ssh_address_template", "target")
+    branch_prefix = _template(doc, "branch_prefix", "machine")
+    children = _str(doc, "child_worktrees", CONFIG_FILE, None).strip("/")
+    if not children or ".." in children.split("/"):
+        raise ConfigError(f"{CONFIG_FILE}: child_worktrees is a directory inside the checkout")
+    ev = _table(_required(doc, "eval", CONFIG_FILE), "eval")
+    for k in ev:
+        if k not in ("parallel", "precheck"):
+            raise ConfigError(f"{CONFIG_FILE}: unknown key eval.{k}")
     build = _table(doc.get("build", {}), "build")
     for k in build:
-        if k not in ("builder", "unreachable_hint", "skip_substituters"):
+        if k not in ("builder", "skip_substituters"):
             raise ConfigError(f"{CONFIG_FILE}: unknown key build.{k}{_renamed(f'build.{k}')}")
     raw_builder = build.get("builder", {})
     if isinstance(raw_builder, str):
-        builder = {"linux": raw_builder, "darwin": raw_builder}
+        builder = {"*": raw_builder}
+    elif not isinstance(raw_builder, dict):
+        raise ConfigError(f"{CONFIG_FILE}: build.builder is a machine name, or a table of them keyed by "
+                          "the hostname nixconvoy runs on")
     else:
-        builder = {k: v for k, v in _table(raw_builder, "build.builder").items() if isinstance(v, str)}
+        builder = {}
+        for k, v in raw_builder.items():
+            if k in ("linux", "darwin"):
+                raise ConfigError(f"{CONFIG_FILE}: build.builder is keyed by the hostname nixconvoy runs on "
+                                  f"(\"*\" for any other), not by platform: {k}")
+            if not isinstance(v, str):
+                raise ConfigError(f"{CONFIG_FILE}: build.builder.{k} must be a string")
+            builder[k] = v
     skip = []
     for s in _strs(build, "skip_substituters", "build"):
         if s.split() != [s]:
@@ -194,10 +228,9 @@ def parse(text: str) -> Config:
     for name, h in _table(doc.get("targets", {}), "targets").items():
         t = _table(h, f"targets.{name}")
         for k in t:
-            if k not in ("local_only", "ssh_address", "tags"):
-                raise ConfigError(f"{CONFIG_FILE}: unknown key targets.{name}.{k}{_renamed(k)}")
-        targets[name] = TargetConfig(local_only=_bool(t, "local_only", f"targets.{name}"),
-                                     ssh_address=_str(t, "ssh_address", f"targets.{name}"),
+            if k not in ("ssh_address", "tags"):
+                raise ConfigError(f"{CONFIG_FILE}: unknown key targets.{name}.{k}")
+        targets[name] = TargetConfig(ssh_address=_str(t, "ssh_address", f"targets.{name}"),
                                      tags=_strs(t, "tags", f"targets.{name}"))
     submodules: dict[str, str] = {}
     for name, a in _table(doc.get("submodules", {}), "submodules").items():
@@ -209,20 +242,16 @@ def parse(text: str) -> Config:
         if not repo:
             raise ConfigError(f"{CONFIG_FILE}: submodules.{name}.repo is required")
         submodules[name] = repo
-    children = _str(doc, "child_worktrees", CONFIG_FILE, ".claude/worktrees").strip("/")
-    if not children or ".." in children.split("/"):
-        raise ConfigError(f"{CONFIG_FILE}: child_worktrees is a directory inside the checkout")
     return Config(
-        flake=_str(doc, "flake", CONFIG_FILE, "."),
-        hosts_dir=_str(doc, "hosts_dir", CONFIG_FILE),
-        system=_str(doc, "system", CONFIG_FILE, "x86_64-linux"),
-        ssh_template=_template(doc, "ssh_address", "{target}", "target"),
-        branch_prefix=_template(doc, "branch_prefix", "work/{machine}/", "machine"),
+        flake_dir=flake_dir,
+        targets_dir=targets_dir,
+        targets_arch=targets_arch,
+        ssh_template=ssh_template,
+        branch_prefix=branch_prefix,
         child_worktrees=children,
-        precheck=_str(pre, "check", "precheck"),
+        precheck=_str(ev, "precheck", "eval"),
         parallel_eval=_auto_bool(ev, "parallel", "eval"),
         builder=builder,
-        build_unreachable_hint=_str(build, "unreachable_hint", "build"),
         skip_substituters=tuple(skip),
         targets=targets,
         submodules=submodules,
@@ -233,7 +262,7 @@ def load(root: Path) -> Config:
     try:
         text = (root / CONFIG_FILE).read_text(encoding="utf-8")
     except FileNotFoundError:
-        return Config()
+        raise ConfigError(f"no {CONFIG_FILE} at {root}: `nixconvoy init` writes one") from None
     return parse(text)
 
 
@@ -260,8 +289,10 @@ def set_cfg(c: Config) -> None:
 
 def builder() -> str:
     """Where the closures are realised: NIXCONVOY_BUILDER, else the config's
-    entry for this platform; empty means here."""
+    entry for this machine; empty means here."""
     env = os.environ.get("NIXCONVOY_BUILDER")
     if env is not None:
         return env
-    return cfg().builder.get("darwin" if sys.platform == "darwin" else "linux", "")
+    me = proc.this_machine()
+    b = cfg().builder.get(me, cfg().builder.get("*", ""))
+    return "" if b == me else b

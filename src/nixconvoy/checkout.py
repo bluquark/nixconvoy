@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import IO, NamedTuple
 
 from . import proc
-from .config import BRANCHES_FILE, MSG_FILE, cfg
+from .config import BRANCHES_FILE, CLAUDE_WORKTREES, CONFIG_FILE, MSG_FILE, cfg
 from .guard import decide
 from .proc import die, git, is_ancestor, ok, out, rev, run
 
@@ -108,7 +108,12 @@ class Checkout(NamedTuple):
 
 
 def sub_dir() -> Path:
-    """Where `open --child <name>` puts a child worktree, under the checkout."""
+    """Where `open --child <name>` puts a child worktree, under the
+    checkout: nixconvoy.toml's child_worktrees, or Claude Code's own place
+    in a repository nixconvoy does not configure (the plugin's create hook
+    runs in every repository)."""
+    if not Path(CONFIG_FILE).is_file() and not Path(BRANCHES_FILE).is_file():
+        return Path(CLAUDE_WORKTREES)
     return Path(cfg().child_worktrees)
 
 

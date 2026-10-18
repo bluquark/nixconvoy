@@ -4,9 +4,10 @@
 # take it for that checkout's own subagent.  This hands the creation to
 # `nixconvoy hook worktree-create` (nixconvoy --help: Hook) instead: the
 # worktree goes under the spawning checkout's own root
-# (<checkout>/<child_worktrees>/<name>: .claude/worktrees, where Claude
-# Code would put it, unless nixconvoy.toml names another directory,
-# owning <checkout's branch>-<name>) on the fresh branch worktree-<name>
+# (<checkout>/<child_worktrees>/<name>, the directory nixconvoy.toml
+# names - .claude/worktrees, where Claude Code would put it, in a
+# repository that is no nixconvoy repository - owning <checkout's
+# branch>-<name>) on the fresh branch worktree-<name>
 # off origin's default branch, as Claude Code would (an existing worktree
 # of that name is reused, as `claude --worktree <name>` expects), locked
 # the way Claude Code locks one (the spawning claude process's pid and

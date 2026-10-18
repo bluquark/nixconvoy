@@ -50,8 +50,8 @@ DRY_ACTIVATE_TIMEOUT = 120
 
 
 def flake_target_names() -> list[str]:
-    """The deployable targets: <hosts_dir>/<name>/ maps 1:1 to nixosConfigurations."""
-    d = cfg().hosts_path
+    """The deployable targets: <targets_dir>/<name>/ maps 1:1 to nixosConfigurations."""
+    d = cfg().targets_path
     try:
         names = sorted(e.name for e in Path(d).iterdir() if e.is_dir())
     except OSError as error:
@@ -61,27 +61,15 @@ def flake_target_names() -> list[str]:
     return names
 
 
-def local_only(name: str) -> bool:
-    return cfg().target(name).local_only
-
-
-def remote_only(name: str) -> bool:
-    """Deployable (and addressed) only from itself, and this is not it."""
-    return local_only(name) and name != proc.this_machine()
-
-
 def expand_targets(names: list[str], all_targets: list[str]) -> list[str]:
     """The targets `names` designate, in order and once each: a target by name,
-    or `@tag` for every target nixconvoy.toml tags so (a remote-only one is
-    dropped from a tag, as from the default of every target, since it cannot
-    be addressed from here; named outright it is reported by the caller)."""
+    or `@tag` for every target nixconvoy.toml tags so."""
     found: list[str] = []
     for n in names:
         if n.startswith("@"):
-            tagged = [h for h in cfg().tagged(n[1:]) if not remote_only(h)]
+            tagged = cfg().tagged(n[1:])
             if not tagged:
-                die(f"no target reachable from here carries the tag {n[1:]} (nixconvoy.toml: "
-                    f"targets.<name>.tags)")
+                die(f"no target carries the tag {n[1:]} (nixconvoy.toml: targets.<name>.tags)")
             phantom = [h for h in tagged if h not in all_targets]
             if phantom:
                 die(f"nixconvoy.toml tags {', '.join(phantom)} as {n[1:]}, but the inventory "
@@ -157,8 +145,6 @@ def probe(name: str) -> Probe:
         except (OSError, UnicodeDecodeError):
             text = ""
         return Probe(cur, text, lineage_digest(text))
-    if local_only(name):
-        return Probe(None, "", "")
     script = f"readlink {CURRENT_SYSTEM} && {{ cat {LINEAGE_FILE} 2>/dev/null || true; }}"
     p = run(target_cmd(name, ["sh", "-c", script]), check=False, timeout=PROBE_TIMEOUT)
     if p.returncode != 0:
@@ -175,8 +161,6 @@ def running_system(name: str, cleanup: bool = False,
             return str(Path(CURRENT_SYSTEM).readlink())
         except OSError:
             return None
-    if local_only(name):
-        return None
     p = run(target_cmd(name, ["readlink", CURRENT_SYSTEM], fresh=fresh),
             check=False, timeout=timeout, cleanup=cleanup)
     if p.returncode != 0:
@@ -290,7 +274,21 @@ def copy_closure(target: str, toplevel: str, quiet: bool = False) -> None:
     """Copy `toplevel`'s closure to `target`, outside the switch lock (a union
     rebuilt after it merely leaves a few extra paths there).  `quiet` keeps
     nix's progress output for the failure message."""
+    b = builder()
+    sshopts = " ".join(["-o", "BatchMode=yes", *control_opts()])
+    if target == b:
+        return  # built there
     if target == proc.this_machine():
+        if not b:
+            return
+        # The outputs live on the builder: fetched for the local switch.
+        print(f"fetching the closure from {b}...")
+        p = run(["nix", "copy", "--no-check-sigs", "--from", f"ssh://{ssh_address(b)}", toplevel],
+                env={"NIX_SSHOPTS": sshopts}, check=False, capture=quiet, merged=True)
+        if p.returncode != 0:
+            die(f"fetching the closure from {b} failed; nothing was committed "
+                f"or pushed - the changes are still staged"
+                + (f"\n{p.stdout.strip()}" if p.stdout else ""))
         return
     tgt = ssh_address(target)
     print(f"copying closure to {target}...")
@@ -298,8 +296,6 @@ def copy_closure(target: str, toplevel: str, quiet: bool = False) -> None:
     # themselves, so only custom-built paths cross the slow uplink; on a
     # LAN a straight copy beats any download and per-path probe.
     subst = ["-s"] if off_lan(tgt) else []
-    sshopts = " ".join(["-o", "BatchMode=yes", *control_opts()])
-    b = builder()
     if b:
         # The outputs live on the builder, not here.
         p = run(["ssh", "-o", "BatchMode=yes", *control_opts(), ssh_address(b),
@@ -317,13 +313,11 @@ def copy_closure(target: str, toplevel: str, quiet: bool = False) -> None:
 
 def check_builder() -> None:
     """Fail before any nix work when a builder is set but unreachable,
-    rather than on ssh's own timeout without the configured hint."""
+    rather than on ssh's own timeout deep in a build."""
     b = builder()
     if b and not ok(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
                       *control_opts(), ssh_address(b), "true"]):
-        hint = cfg().build_unreachable_hint
-        die(f"builder {b} unreachable" + (f" ({hint})" if hint else "")
-            + " - nothing was committed")
+        die(f"builder {b} unreachable - nothing was committed")
 
 
 def rejected_generation(target: str, toplevel: str) -> str | None:

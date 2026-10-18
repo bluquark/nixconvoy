@@ -273,7 +273,7 @@ def target_eval_reads(wt: str, union: str, target: str) -> tuple[frozenset[str],
     if not scan_sound(wt):
         return None
     c = cfg()
-    flake_nix, hosts_dir = c.flake_file("flake.nix"), c.hosts_path
+    flake_nix, hosts_dir = c.flake_file("flake.nix"), c.targets_path
     objs = union_objects(union)
     depth = hosts_dir.count("/") + 1
     other_targets = tuple(q for q, (t, _) in objs.items()
@@ -558,7 +558,7 @@ def precheck_gate(wt: str, rev: str) -> str | None:
     if memo_read(path) is not None:
         return None
     flake = f"{wt}/{c.flake_path}" if c.flake_path != "." else wt
-    p = run(["nix", "eval", "--json", f"{flake}#checks.{c.system}.{c.precheck}",
+    p = run(["nix", "eval", "--json", f"{flake}#checks.{c.targets_arch}.{c.precheck}",
              "--apply", "c: { out = c.outPath; drv = c.drvPath; }"], check=False)
     if p.returncode != 0:
         return f"evaluating the precheck failed:\n{p.stderr.strip()}"
