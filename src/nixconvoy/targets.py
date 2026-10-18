@@ -3,6 +3,7 @@ activation gate over a target's protected units."""
 
 from __future__ import annotations
 
+import functools
 import http.client
 import ipaddress
 import re
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from . import proc
-from .config import builder, cfg
+from .config import _bare_url, builder, cfg
 from .memo import Protection
 from .proc import NOTHING_DONE, die, load_json, ok, run
 
@@ -47,6 +48,9 @@ ALLOW_FLAG = "--allow"
 # Seconds a dry-activate may take: it only computes the unit diff, so a
 # longer wait means a stalled connection, not work.
 DRY_ACTIVATE_TIMEOUT = 120
+# Seconds `nix config show` may take on the builder (well under 0.1 s): a
+# longer wait means a stuck daemon or connection.
+SUBSTITUTERS_TIMEOUT = 10
 
 
 def flake_target_names() -> list[str]:
@@ -201,25 +205,48 @@ def sandbox_opts(dry_run: list[str], drvs: list[str]) -> tuple[str, ...]:
     return UNSANDBOXED
 
 
-def build_cmd(opts: tuple[str, ...]) -> list[str]:
-    """The `nix build` prefix the .drvs follow, local or as one ssh word.
-    With skip_substituters set it runs through sh, which reads the
-    builder's own substituter list there (`nix config show`, 20 ms; its
-    failure is the build's) less those: the caches stay the builder's
-    nix.conf's business, this only trims the probes a deploy makes.  A URL
-    matches without its query and trailing slashes (config._bare_url), and
-    a cache listed twice, which nix would ask twice per path, is kept once."""
+def kept_substituters(shown: str, skip: tuple[str, ...]) -> str:
+    """`nix config show substituters`' list less `skip` (bare URLs), each
+    cache once: a URL compares without its query and trailing slashes."""
+    seen: set[str] = set()
+    kept = []
+    for url in shown.split():
+        bare = _bare_url(url)
+        if bare not in skip and bare not in seen:
+            seen.add(bare)
+            kept.append(url)
+    return " ".join(kept)
+
+
+@functools.cache
+def builder_substituters(via: tuple[str, ...]) -> tuple[bool, str]:
+    """The substituter list `nix config show` prints through `via`, or
+    False and the failure text; once per builder for the run (the precheck
+    and the build both ask)."""
+    cmd = [*via, "nix", "config", "show", "substituters"]
+    p = run(cmd, check=False, timeout=SUBSTITUTERS_TIMEOUT)
+    if p.returncode == -signal.SIGKILL:
+        return False, f"`nix config show substituters` timed out after {SUBSTITUTERS_TIMEOUT} s"
+    if p.returncode != 0:
+        return False, f"reading the substituters failed:\n{p.stderr.strip()}"
+    return True, p.stdout
+
+
+def build_cmd(opts: tuple[str, ...], via: list[str]) -> list[str] | str:
+    """The `nix build` prefix the .drvs follow, run through `via` (the ssh
+    prefix reaching the builder, empty here), or the failure text.  With
+    skip_substituters set it passes the builder's own substituter list
+    (builder_substituters; its failure is the build's) less
+    those: the caches stay the builder's nix.conf's business, this only
+    trims the probes a deploy makes."""
     nix = ["nix", "build", "--no-link", *BUILD_OPTS, *opts]
     skip = cfg().skip_substituters
     if not skip:
         return nix
-    keep = ('BEGIN{n=split(skip,s," ");for(i=1;i<=n;i++)k[s[i]]=1}'
-            '{for(i=1;i<=NF;i++){u=$i;sub(/\\?.*$/,"",u);sub(/\\/+$/,"",u);'
-            'if(!(u in k)&&!seen[u]++)printf "%s ",$i}}')
-    subs = f"awk -v skip={shlex.quote(' '.join(skip))} {shlex.quote(keep)}"
-    script = ("s=$(nix config show substituters) || exit\n"
-              f"exec {shlex.join(nix)} --option substituters \"$(printf '%s\\n' \"$s\" | {subs})\" \"$@\"")
-    return ["sh", "-c", script, "nix"]
+    good, shown = builder_substituters(tuple(via))
+    if not good:
+        return shown
+    return [*nix, "--option", "substituters", kept_substituters(shown, skip)]
 
 
 def build_on(builder: str, drvs: list[str], what: str,
@@ -232,7 +259,11 @@ def build_on(builder: str, drvs: list[str], what: str,
             env={"NIX_SSHOPTS": sshopts}, check=False, capture=capture, merged=True)
     if p.returncode != 0:
         return f"copying derivations to {builder} failed" + (f":\n{p.stdout}" if capture else "")
-    build = ["ssh", "-o", "BatchMode=yes", *control_opts(), tgt, shlex.join(build_cmd(opts))]
+    via = ["ssh", "-o", "BatchMode=yes", *control_opts(), tgt]
+    cmd = build_cmd(opts, via)
+    if isinstance(cmd, str):
+        return f"{what} failed on {builder}: {cmd}"
+    build = [*via, shlex.join(cmd)]
     p = run([*build, *sandbox_opts(build, drvs), *(f"{d}^out" for d in drvs)],
             check=False, capture=capture, merged=True)
     if p.returncode != 0:
@@ -249,7 +280,9 @@ def build_drvs(drvs: list[str], what: str, opts: tuple[str, ...] = (),
     b = builder()
     if b:
         return build_on(b, drvs, what, opts, capture)
-    build = build_cmd(opts)
+    build = build_cmd(opts, [])
+    if isinstance(build, str):
+        return f"{what} failed: {build}"
     p = run([*build, *sandbox_opts(build, drvs), *(f"{d}^out" for d in drvs)],
             check=False, capture=capture, merged=True)
     if p.returncode != 0:

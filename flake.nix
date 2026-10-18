@@ -14,13 +14,6 @@
       default = nixconvoy;
     });
 
-    apps = forAll (pkgs: {
-      default = {
-        type = "app";
-        program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.nixconvoy}/bin/nixconvoy";
-      };
-    });
-
     checks = forAll (pkgs: {
       lint = import ./nix/lint.nix {
         inherit pkgs;

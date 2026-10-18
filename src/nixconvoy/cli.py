@@ -544,6 +544,18 @@ def bad_usage() -> NoReturn:
 
 DRY_FLAG = "--dry-activate"
 BACK_TO_FLAG = "--back-to"
+# Each subcommand's flags, True for one taking a value (never one starting
+# with -), and whether it takes positionals.  A value flag given twice: the
+# last counts, every one for --allow.
+FLAGS: dict[str, tuple[dict[str, bool], bool]] = {
+    "apply": ({"-m": True, "--evict": False, ALLOW_FLAG: True, DRY_FLAG: False}, True),
+    "land": ({"-m": True, "--with-children": False, "--not-yet-applied": False}, True),
+    "unapply": ({ALLOW_FLAG: True, "--with-children": False, BACK_TO_FLAG: True}, True),
+    "close": ({"--force": False}, True),
+    "open": ({"--submodule": False, "--child": False, "--branch": True}, True),
+    "pull": ({}, False),
+    "status": ({}, False),
+}
 
 
 def main() -> None:
@@ -583,64 +595,42 @@ def dispatch() -> None:
         sys.exit(review.main(args))
     if subcmd not in ("status", "close", "open"):
         atexit.register(PERF.write, Path.cwd())
-    msg: str | None = None
-    evict = False
-    allow: set[str] = set()
-    dry = False
-    back_to: str | None = None
+    takes, positionals = FLAGS[subcmd]
+    flags: dict[str, list[str]] = {}
     given: list[str] = []
-    sub_flag = False
-    child = False
-    branch: str | None = None
-    force = False
-    with_children = False
-    not_yet_applied = False
     while args:
         a = args.pop(0)
-        if a == "-m" and args and not args[0].startswith("-"):
-            msg = args.pop(0)
-        elif a == "--submodule" and subcmd == "open":
-            sub_flag = True
-        elif a == "--child" and subcmd == "open":
-            child = True
-        elif a == "--branch" and subcmd == "open" and args:
-            branch = args.pop(0)
-        elif a == "--with-children" and subcmd in ("land", "unapply"):
-            with_children = True
-        elif a == "--not-yet-applied" and subcmd == "land":
-            not_yet_applied = True
-        elif a == "--force" and subcmd == "close":
-            force = True
-        elif a == "--evict":
-            evict = True
-        elif a == ALLOW_FLAG and args and not args[0].startswith("-"):
-            allow.add(args.pop(0))
-        elif a == DRY_FLAG:
-            dry = True
-        elif a == BACK_TO_FLAG and subcmd == "unapply" and args and not args[0].startswith("-"):
-            back_to = args.pop(0)
-        elif a in ("-h", "--help"):
+        if a in ("-h", "--help"):
             print(usage())
             print(USAGE_NOTES)
             return
-        elif not a.startswith("-"):
+        if a in takes:
+            values = flags.setdefault(a, [])
+            if takes[a]:
+                if not args or args[0].startswith("-"):
+                    bad_usage()
+                values.append(args.pop(0))
+        elif positionals and not a.startswith("-"):
             if a not in given:
                 given.append(a)
         else:
             bad_usage()
+    msg = flags["-m"][-1] if "-m" in flags else None
+    back_to = flags[BACK_TO_FLAG][-1] if BACK_TO_FLAG in flags else None
+    allow = frozenset(flags.get(ALLOW_FLAG, ()))
+    with_children = "--with-children" in flags
+    not_yet_applied = "--not-yet-applied" in flags
 
     if subcmd == "pull":
-        if msg or evict or allow or dry or given:
-            bad_usage()
         commands.pull()  # takes each checkout's lock itself, this one included
         return
     if subcmd == "status":
-        if msg or evict or allow or dry or given:
-            bad_usage()
         commands.status()
         return
     if subcmd == "open":
-        if msg or evict or allow or dry or len(given) != 1 or child + bool(branch) + sub_flag > 1:
+        branch = flags["--branch"][-1] if "--branch" in flags else None
+        sub_flag, child = "--submodule" in flags, "--child" in flags
+        if len(given) != 1 or child + bool(branch) + sub_flag > 1:
             bad_usage()
         if sub_flag:
             submodule.create(given[0], require_work_branch("open --submodule"))
@@ -650,8 +640,7 @@ def dispatch() -> None:
             commands.open_checkout(start / Path(given[0]).expanduser(), branch)
         return
     if subcmd == "close":
-        if msg is not None or evict or allow or dry:
-            bad_usage()
+        force = "--force" in flags
         # One kind of name per call: a submodule's (declared, configured or
         # not: never a worktree's), a path's, else a subagent worktree's.
         declared = names.gitmodule_names(Path.cwd())
@@ -671,8 +660,7 @@ def dispatch() -> None:
     top = Path.cwd()
     here = top.resolve()
     if subcmd in ("land", "unapply"):
-        if evict or dry or (allow and subcmd != "unapply") or (with_children and given) \
-                or (msg is not None and (subcmd != "land" or not msg.strip() or len(given) > 1)):
+        if (with_children and given) or (msg is not None and (not msg.strip() or len(given) > 1)):
             bad_usage()
         if with_children and subcmd == "land":
             take_lock()
@@ -729,7 +717,7 @@ def dispatch() -> None:
                     except Fail:
                         failed.append(here.name)
                 if due:
-                    deploy([], None, False, frozenset(allow))
+                    deploy([], None, False, allow)
                 if failed:
                     die(f"unapply failed in {', '.join(failed)} (see above)")
             return
@@ -738,12 +726,13 @@ def dispatch() -> None:
         commands.land(msg, not_yet_applied)
     elif subcmd == "unapply":
         if commands.unapply(back_to or "HEAD^"):
-            deploy([], None, False, frozenset(allow))
+            deploy([], None, False, allow)
     else:  # apply
+        dry = DRY_FLAG in flags
         if dry and msg is not None:
             # Accepted so a deploy's command line reruns with the flag added.
             print(f"note: -m does nothing with {DRY_FLAG}: nothing is committed", file=sys.stderr)
-        deploy(given, msg, evict, frozenset(allow), dry)
+        deploy(given, msg, "--evict" in flags, allow, dry)
 
 
 def init_args(args: list[str], start: Path) -> None:

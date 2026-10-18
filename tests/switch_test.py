@@ -398,6 +398,10 @@ def target_cases() -> None:
             assert "nixconvoy init" in str(e), e
         else:
             raise AssertionError("loaded without a file")
+    # The builder's substituters less the skipped ones, each cache once.
+    assert targets.kept_substituters(
+        "https://a/ https://slow.cachix.org/?priority=40 https://a?priority=1 https://b\n",
+        ("https://slow.cachix.org",)) == "https://a/ https://b"
     print("targets: ok")
 
 

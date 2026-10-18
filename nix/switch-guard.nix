@@ -6,18 +6,20 @@
 let
   inherit (pkgs) lib stdenv;
   fs = lib.fileset;
+  fileset = fs.unions [
+    ../switch-guard/Cargo.toml
+    ../switch-guard/Cargo.lock
+    ../switch-guard/src
+  ];
 in
 pkgs.rustPlatform.buildRustPackage {
   pname = "switch-guard";
   version = "0.1.0";
   src = fs.toSource {
     root = ../switch-guard;
-    fileset = fs.unions [
-      ../switch-guard/Cargo.toml
-      ../switch-guard/Cargo.lock
-      ../switch-guard/src
-    ];
+    inherit fileset;
   };
+  passthru = { inherit fileset; };
   cargoLock.lockFile = ../switch-guard/Cargo.lock;
   # Bounded so a runaway model or allocation fails this build instead of
   # exhausting the builder: every later phase and child inherits RLIMIT_AS

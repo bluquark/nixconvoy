@@ -1,8 +1,7 @@
-{ config, options, lib, pkgs, ... }:
+{ config, lib, pkgs, ... }:
 let
   cfg = config.nixconvoy.bootAssessment;
   cs = config.nixconvoy.confirmedSwitch;
-  hostname = config.networking.hostName;
   # The judge raises a notice on a boot it is about to reboot out of, where
   # a publisher's network timeouts would keep the box down that much
   # longer.  A backstop over ntfy_notice.py's own 3 s per server.
@@ -13,16 +12,12 @@ let
   # for the units here and for systemd-bless-boot's own generator.
   countPath = "/sys/firmware/efi/efivars/LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
   initialTries = 2;
-  sshPort = lib.head (config.services.openssh.ports or [ 22 ]);
-  noNotice = pkgs.writeShellScriptBin "boot-assessment-no-notice" "exit 0";
-  statusFile = "/run/boot-assessment/status";
-  profileDir = "/nix/var/nix/profiles";
-
-  # What a switch must prove, a boot must too: the very program the
-  # confirmed-switch helper's `check` verb runs, reporting its last stderr
-  # line.
-  confirmed = options ? nixconvoy.confirmedSwitch && cs.enable;
-  switchChecks = lib.optionalString confirmed cs.checks;
+  sshPort = lib.head config.services.openssh.ports;
+  panicSec = 30;
+  bootable = 15;
+  tiers = [ 1 7 30 ];
+  bootLog = "/var/lib/boot-assessment/boots";
+  reported = "/run/boot-assessment/reported";
 
   # The gate's poll: the box's own reachability and the target's own checks, one
   # failure per line on stdout (everything else they print goes to stderr).
@@ -58,15 +53,27 @@ let
   # newest blessed stubs up to `bootable`; never-proven and rejected counted
   # stubs dropped; the ESP fit keeping `reserve` free), src/boot/gate.rs the
   # counted boot's judgement.
+  # - reserve: kept free on the ESP by the fit check: systemd-boot, the
+  #   stubs, slack.
+  # - prune_days: a time-based nix.gc would drop the blessed fallback once
+  #   it is old, whatever the newer generations' state: the prune spares
+  #   the anchors and what the failover needs instead.
+  # - deadline: seconds since stage 2 began: an initrd that waited for a
+  #   manual LUKS unlock (or a slow fsck) must not eat into it.
+  # - grace: the watch reboots on the gate's verdict; its own deadline,
+  #   this much later, only covers a gate that never ran.
+  # - switch_check: what a switch must prove, a boot must too: the very
+  #   program the confirmed-switch helper's `check` verb runs, reporting its
+  #   last stderr line.
   conf = pkgs.writeText "boot-assessment.conf" ''
     esp = ${esp}
-    profile_dir = ${profileDir}
+    profile_dir = /nix/var/nix/profiles
     boot_log = ${bootLog}
-    state_dir = ${lib.optionalString confirmed cs.stateDir}
+    state_dir = ${lib.optionalString cs.enable cs.stateDir}
     bootable = ${toString bootable}
     tiers = ${toString tiers}
-    reserve = ${toString espReserve}
-    prune_days = ${toString pruneDays}
+    reserve = ${toString (32 * 1024 * 1024)}
+    prune_days = ${toString (lib.last tiers)}
     lzbt = ${lib.getExe lzbt}
     nix_env = ${config.nix.package}/bin/nix-env
     systemctl = ${config.systemd.package}/bin/systemctl
@@ -74,38 +81,19 @@ let
     date = ${pkgs.coreutils}/bin/date
     notice = ${lib.getExe cfg.notice}
     notice_timeout = ${toString noticeTimeout}
-    hostname = ${hostname}
-    deadline = ${toString deadline}
-    grace = ${toString grace}
-    runtime_watchdog = ${toString runtimeWatchdogSec}
+    hostname = ${config.networking.hostName}
+    deadline = 300
+    grace = 60
+    runtime_watchdog = 60
     panic = ${toString panicSec}
-    status_file = ${statusFile}
+    status_file = /run/boot-assessment/status
     count_path = ${countPath}
     checks = ${lib.getExe ownChecks}
-    switch_check = ${lib.optionalString (switchChecks != "") (lib.getExe cs.checksCommand)}
+    switch_check = ${lib.optionalString (cs.enable && cs.checks != "") (lib.getExe cs.checksCommand)}
     initial_tries = ${toString initialTries}
     reported = ${reported}
   '';
   run = verb: "${config.nixconvoy.switchGuardPackage}/bin/nixconvoy-boot-assessment --config ${conf} ${verb}";
-
-  # Seconds since stage 2 began: an initrd that waited for a manual LUKS
-  # unlock (or a slow fsck) must not eat into a counted boot's deadline.
-  deadline = 300;
-  # The watch reboots on the gate's verdict; its own deadline, this much
-  # later, only covers a gate that never ran.
-  grace = 60;
-  runtimeWatchdogSec = 60;
-  panicSec = 30;
-  bootable = 15;
-  tiers = [ 1 7 30 ];
-  bootLog = "/var/lib/boot-assessment/boots";
-  # Kept free on the ESP by the fit check: systemd-boot, the stubs, slack.
-  espReserve = 32 * 1024 * 1024;
-  # A time-based nix.gc would drop the blessed fallback once it is old,
-  # whatever the newer generations' state: the prune spares the anchors and
-  # what the failover needs instead.
-  pruneDays = lib.last tiers;
-  reported = "/run/boot-assessment/reported";
 
   # Runs in place of lanzaboote's installer, for the toplevel
   # switch-to-configuration boot (or a confirmed switch's confirm) installs.
@@ -137,7 +125,7 @@ in
     };
     notice = lib.mkOption {
       type = lib.types.package;
-      default = noNotice;
+      default = pkgs.writeShellScriptBin "boot-assessment-no-notice" "exit 0";
       defaultText = lib.literalExpression "a no-op";
       description = "The command the judge and the report raise the boot-assessment, boot-failover and esp-full notices through, under a ${toString noticeTimeout} s timeout: `set <name>` with the body on stdin, `clear <name>`.  The default discards them; point it at whatever reaches you (an ntfy push, a login banner).";
     };
@@ -148,7 +136,7 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable (lib.mkMerge [ {
+  config = lib.mkIf cfg.enable {
     # systemd-boot's automatic boot assessment as a failover to the last proven
     # generation (systemd.io/AUTOMATIC_BOOT_ASSESSMENT).  Once a stub's tries
     # suffix hits 0, systemd-boot skips it when resolving its "nixos-*"
@@ -158,16 +146,12 @@ in
     # generation that breaks later is hardware or filesystem trouble, left
     # for someone to look at.
     system.build.installBootLoader = lib.mkForce install;
-    assertions = [
-      {
-        assertion = options ? boot.lanzaboote;
-        message = "nixconvoy.bootAssessment needs lanzaboote (it installs the counted stubs through lzbt)";
-      }
-      {
-        assertion = !(options ? boot.lanzaboote) || (!config.boot.lanzaboote.measuredBoot.enable && config.boot.lanzaboote.extraEfiSysMountPoints == [ ]);
-        message = "nixconvoy.bootAssessment runs lzbt itself: one ESP, no measured boot";
-      }
-    ];
+    assertions = [ {
+      assertion = !config.boot.lanzaboote.measuredBoot.enable && config.boot.lanzaboote.extraEfiSysMountPoints == [ ];
+      message = "nixconvoy.bootAssessment needs lanzaboote with one ESP and no measured boot: it installs the counted stubs through lzbt itself";
+    } ];
+    boot.lanzaboote.bootCounting.initialTries = initialTries;
+    boot.lanzaboote.configurationLimit = bootable;
 
     nix.gc.options = lib.mkForce "";
     systemd.services.nix-gc.serviceConfig.ExecStartPre = run "prune";
@@ -208,7 +192,6 @@ in
         DefaultDependencies = false;
         ConditionPathExists = countPath;
       };
-      path = [ pkgs.coreutils pkgs.systemd ];
       restartIfChanged = false;
       serviceConfig = {
         Type = "exec";
@@ -227,7 +210,9 @@ in
       before = [ "boot-complete.target" ];
       wants = [ "network-online.target" ];
       after = [ "network-online.target" "sshd.service" ] ++ cfg.requiredUnits;
-      path = [ pkgs.coreutils pkgs.iproute2 pkgs.systemd ];
+      # The confirmed-switch checks may run ip or ss by name: here they find
+      # them only through this path (their own runtimeInputs lack iproute2).
+      path = [ pkgs.iproute2 ];
       restartIfChanged = false;
       serviceConfig = {
         Type = "oneshot";
@@ -250,7 +235,6 @@ in
       wants = [ "network-online.target" ];
       after = [ "local-fs.target" "network-online.target" ];
       unitConfig.ConditionPathExists = "!${reported}";
-      path = [ pkgs.coreutils ];
       restartIfChanged = false;
       serviceConfig = {
         Type = "oneshot";
@@ -259,8 +243,5 @@ in
         EnvironmentFile = lib.mkIf (cfg.noticeEnvironmentFile != null) cfg.noticeEnvironmentFile;
       };
     };
-  } (lib.optionalAttrs (options ? boot.lanzaboote) {
-    boot.lanzaboote.bootCounting.initialTries = initialTries;
-    boot.lanzaboote.configurationLimit = bootable;
-  }) ]);
+  };
 }

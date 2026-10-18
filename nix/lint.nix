@@ -28,12 +28,7 @@ let
     inherit (switch-guard) version cargoDeps preBuild;
     src = fs.toSource {
       root = ../switch-guard;
-      fileset = fs.unions [
-        ../switch-guard/Cargo.toml
-        ../switch-guard/Cargo.lock
-        ../switch-guard/rustfmt.toml
-        ../switch-guard/src
-      ];
+      fileset = fs.union switch-guard.fileset ../switch-guard/rustfmt.toml;
     };
     nativeBuildInputs = [ pkgs.rustfmt pkgs.clippy ];
     buildPhase = ''
