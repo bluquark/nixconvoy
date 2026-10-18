@@ -325,31 +325,18 @@ def target_cases() -> None:
         else:
             raise AssertionError(bad)
     for bad_cfg, hint in ((toml('[targets.a]\ntag = ["vps"]\n'), "unknown key targets.a.tag"),
-                          (toml('target = "x@{host}"\n'), "now ssh_address"),
-                          (toml('[hosts.a]\n'), "now targets"),
-                          (toml('[build]\nhost = "b"\n'), "now build.builder"),
-                          (toml('[build]\nbuilder = { darwin = "b" }\n'), "not by platform"),
-                          (toml('[build]\nbuilder = { linux = "b" }\n'), "not by platform"),
                           (toml('[build]\nbuilder = { big = 3 }\n'), "build.builder.big must be a string"),
                           (toml('[build]\nbuilder = 3\n'), "build.builder is a machine name"),
                           (toml().replace("config_version = 1", "config_version = true"), "not supported"),
                           (toml('[build]\nunreachable_hint = "zzz"\n'), "unknown key build.unreachable_hint"),
                           (toml('[targets.a]\nlocal_only = true\n'), "unknown key targets.a.local_only"),
-                          (toml('worktrees = "w"\n'), "now child_worktrees"),
-                          (toml('[precheck]\ncheck = "lint"\n'), "now eval.precheck"),
-                          (toml('[targets.a]\ntarget = "x"\n'), "now ssh_address"),
                           (toml(ssh_address_template="x@{host}"), "over {target} alone"),
-                          (toml('ssh_address = "x@{target}"\n'), "now ssh_address_template"),
                           (toml(branch_prefix="{host}-d"), "over {machine} alone"),
                           # No defaults: every scalar key is required.
                           ("", "config_version is required"),
                           (toml().replace('flake_dir = "."\n', ""), "flake_dir is required"),
-                          (toml('flake = "."\n'), "now flake_dir"),
                           (toml().replace('targets_dir = "hosts"\n', ""), "targets_dir is required"),
                           (toml().replace('targets_arch = "x86_64-linux"\n', ""), "targets_arch is required"),
-                          (toml('hosts_dir = "h"\n'), "now targets_dir"),
-                          (toml('system = "x"\n'), "now targets_arch"),
-                          (toml('version = 1\n'), "now config_version"),
                           (toml().replace('ssh_address_template = "{target}"\n', ""), "ssh_address_template is required"),
                           (toml().replace('branch_prefix = "work/{machine}/"\n', ""), "branch_prefix is required"),
                           (toml().replace('child_worktrees = ".claude/worktrees"\n', ""), "child_worktrees is required"),
@@ -376,7 +363,7 @@ def protected_cases() -> None:
     """The protected-units gate: a group's units touched refuse the switch
     with its why and the exact --allow command (one for every refused target,
     an apply for an unapply, whose reset is over); --allow <name> admits them; the
-    memo entry round-trips and rejects the old flat list."""
+    memo entry round-trips."""
     net = memo.Protection("risky-network-reload-or-restart",
                           ("systemd-networkd.service", "nftables.service"),
                           "risk of breaking essential LAN/WAN functionality")
@@ -1332,9 +1319,8 @@ def announce_cases(d: Path) -> None:
         assert main is not None
         # Holds replay oldest first: reached and not applied holds, a later
         # deploy of the target ends the hold, a commit without trailers is
-        # nothing, and so is one from before Reaches: (Affected:).
-        chain = checkout.deployed_commit(snap, "h0\n\nAffected: a, b, c, d\nApplied: a")
-        chain = out_at(co, chain, "h1\n\nReaches: a, b, c\nApplied: a")
+        # nothing.
+        chain = checkout.deployed_commit(snap, "h1\n\nReaches: a, b, c\nApplied: a")
         chain = out_at(co, chain, "plain")
         chain = out_at(co, chain, "h2\n\nReaches: b\nApplied: b")
         chain = out_at(co, chain, "h3\n\nReaches: none\nApplied: none")
@@ -1342,7 +1328,6 @@ def announce_cases(d: Path) -> None:
         assert checkout.held_targets(f"{main}..{chain}^") == {"c"}
         assert checkout.held_targets(f"{main}..{chain}~2") == {"b", "c"}
         assert checkout.held_targets(f"{main}..{chain}~3") == {"b", "c"}
-        assert checkout.held_targets(f"{chain}~5..{chain}~4") == set()  # h0 alone
         rec1 = checkout.record_commit("a", snap, ["", main, "f" * 40, committed], "two", '{"doc": 1}')
         assert sh(co, "log", "-1", "--format=%P", rec1).split() == [main, committed]
         assert sh(co, "log", "-1", "--format=%s%n%b", rec1) == 'deploy a: two\n{"doc": 1}'

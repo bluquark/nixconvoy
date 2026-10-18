@@ -981,9 +981,7 @@ def held_targets(commits: str, cwd: str | None = None) -> set[str]:
     """The targets the increments in the range `commits` hold back: reached
     by one (its Reaches: trailer) that was deployed to other targets alone
     (its Applied: one), and not running the branch's tip after any later
-    increment's deploy (the Applied: of each, oldest first).  Commits
-    from before Reaches: (an Affected: trailer, the targets then drifting)
-    hold nothing."""
+    increment's deploy (the Applied: of each, oldest first)."""
     fmt = ("%(trailers:key=Reaches,valueonly,separator=%x2C)%x09"
            "%(trailers:key=Applied,valueonly,separator=%x2C)")
     held: set[str] = set()

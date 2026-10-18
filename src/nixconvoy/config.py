@@ -138,22 +138,6 @@ def _bare_url(u: str) -> str:
     return u.split("?")[0].rstrip("/")
 
 
-# The keys the target/builder/machine vocabulary renamed, for the error a
-# config still using one gets.
-_RENAMED = {"target": "ssh_address_template (over {target}, not {host})", "hosts": "targets",
-            "ssh_address": "ssh_address_template (per target, targets.<name>.ssh_address stays)",
-            "version": "config_version", "hosts_dir": "targets_dir", "system": "targets_arch", "flake": "flake_dir",
-            "worktrees": "child_worktrees", "precheck": "eval.precheck",
-            "build.host": "build.builder",
-            "build.caches": "build.skip_substituters: the builder's nix.conf lists the caches",
-            "build.public_substituters": "build.skip_substituters: the builder's nix.conf lists the caches"}
-
-
-def _renamed(k: str) -> str:
-    new = _RENAMED.get(k)
-    return f" (now {new})" if new else ""
-
-
 def _template(t: dict[str, object], k: str, placeholder: str) -> str:
     """A required template setting, proven here to format with
     `placeholder` alone, so a stale placeholder fails as a ConfigError
@@ -171,18 +155,12 @@ def parse(text: str) -> Config:
         doc = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{CONFIG_FILE}: {e}") from e
-    for k in doc:
-        if k in _RENAMED:
-            raise ConfigError(f"{CONFIG_FILE}: unknown key {k}{_renamed(k)}")
     version = _required(doc, "config_version", CONFIG_FILE)
     if isinstance(version, bool) or version != 1:
         raise ConfigError(f"{CONFIG_FILE}: config_version {version} is not supported (1 is)")
     known = {"config_version", "flake_dir", "targets_dir", "targets_arch", "ssh_address_template", "branch_prefix",
              "child_worktrees",
              "eval", "build", "targets", "submodules"}
-    if "memo" in doc:
-        raise ConfigError(f"{CONFIG_FILE}: [memo] is gone: the eval memo needs no settings, it keys "
-                          "each target on the files its configuration reaches by path literal")
     for k in doc:
         if k not in known:
             raise ConfigError(f"{CONFIG_FILE}: unknown key {k}")
@@ -203,7 +181,7 @@ def parse(text: str) -> Config:
     build = _table(doc.get("build", {}), "build")
     for k in build:
         if k not in ("builder", "skip_substituters"):
-            raise ConfigError(f"{CONFIG_FILE}: unknown key build.{k}{_renamed(f'build.{k}')}")
+            raise ConfigError(f"{CONFIG_FILE}: unknown key build.{k}")
     raw_builder = build.get("builder", {})
     if isinstance(raw_builder, str):
         builder = {"*": raw_builder}
@@ -213,9 +191,6 @@ def parse(text: str) -> Config:
     else:
         builder = {}
         for k, v in raw_builder.items():
-            if k in ("linux", "darwin"):
-                raise ConfigError(f"{CONFIG_FILE}: build.builder is keyed by the hostname nixconvoy runs on "
-                                  f"(\"*\" for any other), not by platform: {k}")
             if not isinstance(v, str):
                 raise ConfigError(f"{CONFIG_FILE}: build.builder.{k} must be a string")
             builder[k] = v
