@@ -1,41 +1,33 @@
 # The nixconvoy command: the Python package wrapped with the switch-guard
-# binaries it drives and the tools its subprocesses need.
+# binaries it drives and the tools its subprocesses need, and `git review`
+# beside it.
 { pkgs, switch-guard }:
 let
   inherit (pkgs) lib;
   python = pkgs.python3;
-  app = python.pkgs.buildPythonApplication {
-    pname = "nixconvoy";
-    version = "0.1.0";
-    pyproject = true;
-    src = lib.fileset.toSource {
-      root = ../.;
-      fileset = lib.fileset.unions [ ../pyproject.toml ../src ../README.md ];
-    };
-    build-system = [ python.pkgs.setuptools ];
-    doCheck = false;
-  };
-  # `git review`, a wrapper of `nixconvoy review`, and the Claude Code
-  # plugin (hooks, prompt segment) under share/, for an install by path.
-  integrations = pkgs.runCommand "nixconvoy-integrations" { } ''
-    mkdir -p $out/bin $out/share/nixconvoy
-    cp ${../integrations/claude-code/bin}/* $out/bin/
-    chmod +x $out/bin/*
-    cp -r ${../integrations/claude-code} $out/share/nixconvoy/claude-code
-    cp -r ${../integrations/claude-code-isolate} $out/share/nixconvoy/claude-code-isolate
-    chmod +x $out/share/nixconvoy/claude-code/hooks/*.sh $out/share/nixconvoy/claude-code/bin/* \
-      $out/share/nixconvoy/claude-code-isolate/hooks/*.sh
-  '';
 in
-pkgs.symlinkJoin {
-  name = "nixconvoy";
-  paths = [ app integrations ];
-  nativeBuildInputs = [ pkgs.makeWrapper ];
-  postBuild = ''
-    wrapProgram $out/bin/nixconvoy \
-      --set NIXCONVOY_GUARD_DIR ${switch-guard}/bin \
-      --prefix PATH : $out/bin:${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.mergiraf pkgs.util-linux ]}
+python.pkgs.buildPythonApplication {
+  pname = "nixconvoy";
+  version = "0.1.0";
+  pyproject = true;
+  src = lib.fileset.toSource {
+    root = ../.;
+    fileset = lib.fileset.unions [
+      ../pyproject.toml
+      ../src
+      ../README.md
+      ../integrations/claude-code/bin/git-review
+    ];
+  };
+  build-system = [ python.pkgs.setuptools ];
+  doCheck = false;
+  makeWrapperArgs = [
+    "--set" "NIXCONVOY_GUARD_DIR" "${switch-guard}/bin"
+    "--prefix" "PATH" ":" (lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.mergiraf pkgs.util-linux ])
+  ];
+  postInstall = ''
+    install -Dm755 integrations/claude-code/bin/git-review $out/bin/git-review
   '';
-  passthru = { inherit app switch-guard; };
+  passthru = { inherit switch-guard; };
   meta.mainProgram = "nixconvoy";
 }

@@ -345,14 +345,11 @@ def close_submodules(names: list[str], *, force: bool = False) -> None:
 
 
 class Stop(NamedTuple):
-    """A stop's prune: the claude session (pid) whose agent stopped, the
-    worktree's lock then (see the core's Stopped), and the agent's
-    transcript with its turns then."""
+    """A stop's prune: the claude session (pid) whose agent stopped and the
+    worktree's lock then (see the core's Stopped)."""
 
     pid: int
     lock: str | None
-    transcript: Path
-    turns: int | None
 
 
 def prune_one(d: Path, *, named: bool, own_session_ends: bool = False,
@@ -462,13 +459,10 @@ def occupied(d: Path, *, invoker: bool = False) -> bool:
 
 class PruneQueries(GitQueries):
     """The prune core's queries on the subagent worktree `d`: its name lock
-    (the create hook's too) and deploy lock held until close(), its lock
-    file claimed by renaming it aside (git refuses to remove a locked
-    worktree, so a lock renamed in meanwhile keeps it); `fetched` shares one
-    fetch across a run; `invoker`: the invoking command is a named close's, its
-    processes in `d` no occupants; `stop`: a stop's prune, its agent's
-    ignored files counted as its own, its transcript telling whether it ran
-    again."""
+    (the create hook's too) and deploy lock held until close(); `fetched`
+    shares one fetch across a run; `invoker`: the invoking command is a
+    named close's, its processes in `d` no occupants; `stop`: a stop's
+    prune, its agent's ignored files counted as its own."""
 
     def __init__(self, d: Path, fetched: list[dict[str, object]], *, deploy_held: bool = False,
                  invoker: bool = False, stop: Stop | None = None,
@@ -486,17 +480,10 @@ class PruneQueries(GitQueries):
         self.fetched = fetched
         self.deploy_held = deploy_held
         self.locked = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path", "locked"]))
-        self.claimed = self.locked.with_name("locked.prune")
         self.held: list[IO[str]] = []
         self.name_fd: int | None = None
-        # A claimed lock not yet removed with the worktree or restored.
-        self.claim_out = False
 
     def close(self) -> None:
-        """Put back a claimed lock a failure or interrupt left aside, then
-        release both locks."""
-        if self.claim_out and self.d.is_dir():
-            self.restore()
         for f in self.held:
             f.close()
         self.held.clear()
@@ -513,36 +500,6 @@ class PruneQueries(GitQueries):
             return f.read_text().removesuffix("\n")
         except FileNotFoundError:
             return None
-
-    @staticmethod
-    def current_lock(locked: Path) -> str | None:
-        """The worktree's lock, at `locked`, or as a removal claimed it
-        (one that died before restoring it still counts)."""
-        lock = PruneQueries.read(locked)
-        return lock if lock is not None else PruneQueries.read(locked.with_name("locked.prune"))
-
-    def restore(self) -> None:
-        # Not onto a registration whose tree git deleted: locked, it would
-        # stay, and the name with it.
-        if self.d.is_dir():
-            with contextlib.suppress(FileExistsError, FileNotFoundError):
-                os.link(self.claimed, self.locked)
-        self.claimed.unlink(missing_ok=True)
-        self.claim_out = False
-
-    def claim(self, expect: object) -> bool:
-        if expect is None:
-            return not self.locked.exists() and not self.claimed.exists()
-        if not self.locked.exists():
-            return self.read(self.claimed) == expect  # claimed by a run that died
-        if self.read(self.locked) != expect:
-            return False
-        with contextlib.suppress(FileNotFoundError):
-            self.locked.rename(self.claimed)
-        if self.read(self.claimed) == expect:
-            return True
-        self.restore()  # a new lock was renamed in between
-        return False
 
     def __call__(self, ask: dict[str, object]) -> dict[str, object]:
         kind = ask.get("ask")
@@ -561,7 +518,7 @@ class PruneQueries(GitQueries):
             return {"flag": self.take(Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path",
                                                 "nixconvoy-deploy.lock"]))) is not None}
         if kind == "lock":
-            return {"text": self.current_lock(self.locked)}
+            return {"text": self.read(self.locked)}
         if kind == "alive":
             start = ask.get("start")
             reason = f"pid {ask.get('pid')}" + (f" start {start}" if start is not None else "")
@@ -584,34 +541,37 @@ class PruneQueries(GitQueries):
             return {"flag": bool(out(["git", "status", "--porcelain", *ignored])) or submodule.own(self.d)}
         if kind == "occupied":
             return {"flag": occupied(self.d, invoker=self.invoker)}
-        if kind == "ran_again":
-            now = None if self.stop is None else transcript_turns(self.stop.transcript)
-            return {"flag": self.stop is not None and (now is None or now[0] != self.stop.turns or now[1])}
         if kind == "fetch":
             if not self.fetched:
                 self.fetched.append(super().__call__(ask))
             return self.fetched[0]
-        if kind == "claim_lock":
-            claimed = self.claim(ask.get("expect"))
-            self.claim_out = claimed and ask.get("expect") is not None
-            return {"flag": claimed}
         if kind == "remove_worktree":
             submodule.remove_all(self.d)  # nested in it: their registrations go first
-            os.chdir(self.parent)
-            # git holds the name lock too, so a prune killed meanwhile
-            # leaves it deleting under the lock.
-            removed = git("worktree", "remove", str(self.d), check=False,
-                          pass_fds=() if self.name_fd is None else (self.name_fd,))
+            # Under the name lock, which every relock takes too: the lock
+            # judged is the one lifted.
+            try:
+                lock: bytes | None = self.locked.read_bytes()
+            except FileNotFoundError:
+                lock = None
+            self.locked.unlink(missing_ok=True)
+            try:
+                os.chdir(self.parent)
+                # git holds the name lock too, so a prune killed meanwhile
+                # leaves it deleting under the lock.
+                removed = git("worktree", "remove", str(self.d), check=False,
+                              pass_fds=() if self.name_fd is None else (self.name_fd,))
+            finally:
+                # Still there (refused, or interrupted): locked as it was,
+                # unless a hand lock took its place meanwhile.
+                if lock is not None and self.d.is_dir() and not self.locked.exists():
+                    with contextlib.suppress(FileNotFoundError):
+                        self.locked.write_bytes(lock)
             if removed.returncode != 0 and self.d.is_dir():
                 os.chdir(self.d)
                 return ran(removed)
-            self.claim_out = False
             if removed.returncode != 0:
-                # The tree went but not its registration, unlocked now.
+                # The tree went but not its registration.
                 git("worktree", "prune", check=False)
-            return done
-        if kind == "restore_lock":
-            self.restore()
             return done
         if kind == "drop_branches":
             cur = ask.get("cur")
@@ -626,36 +586,6 @@ def outermost(d: Path) -> Path:
     while (up := sub_parent(d)) is not None:
         d = up
     return d
-
-
-def transcript_turns(path: Path) -> tuple[int, bool] | None:
-    """How many turns a Claude Code transcript records its agent taking, and
-    whether a prompt awaits one: an agent running again records its prompt
-    at once, its turn only once a block of it is done.  Its tools' results
-    (written after it stopped, too) are no prompt; an error Claude Code
-    records in its place is no turn."""
-    turns, pending = 0, False
-    try:
-        with path.open("rb") as f:
-            for raw in f:
-                if b'"assistant"' not in raw and b'"user"' not in raw:
-                    continue
-                try:
-                    rec = json.loads(raw)
-                except ValueError:
-                    continue
-                if not isinstance(rec, dict) or not isinstance(msg := rec.get("message"), dict):
-                    continue
-                if rec.get("type") == "assistant":
-                    turns += msg.get("model") != "<synthetic>"
-                    pending = False
-                elif rec.get("type") == "user":
-                    content = msg.get("content")
-                    pending |= not isinstance(content, list) or any(
-                        not isinstance(b, dict) or b.get("type") != "tool_result" for b in content)
-    except OSError:
-        return None
-    return turns, pending
 
 
 def transcript_cwd(path: Path, *, last: bool = False) -> Path | None:

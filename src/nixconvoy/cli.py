@@ -341,9 +341,9 @@ may resume its agent, which needs the worktree.  So is one at work (a
 nixconvoy, git operation or push running in it), on a work branch (land
 or unapply decides it), locked by hand (or, in a sweep, unlocked) or
 holding anything; each kept one is said so, as is one a process works
-in.  It all happens under a lock on the worktree's name, which open takes
-too, and the removal claims the lock it judged and leaves git to refuse a
-worktree locked meanwhile.  The plugin's hooks run these removals on
+in.  It all happens under a lock on the worktree's name, which open (and
+so a resume's relock) takes too, so the lock judged is the one the
+removal lifts; git refuses an unclean worktree still.  The plugin's hooks run these removals on
 their own as agents stop and sessions exit (see Hook).  <submodule> (a
 name .gitmodules declares): its worktree with its branch, here and on its
 origin (the last tip kept under refs/nixconvoy/past/<branch>/<sha> there
@@ -374,12 +374,14 @@ eval.precheck, the targets' names.  git is only read: what it wrote is
 left for you to stage.
 
 Hook (nixconvoy hook <event>): the Claude Code plugin's hook of that
-event - session-start, subagent-stop or worktree-create - run by
-integrations/claude-code/hooks/<event>.sh with the hook's JSON input on
-stdin, never by hand.  Each acts for the claude session it runs under
-(the nearest claude ancestor of its process) in the repository Claude
-Code runs it for (CLAUDE_PROJECT_DIR, else the input's cwd); the two
-prunes do nothing outside a nixconvoy repository.  worktree-create:
+event - session-start, subagent-stop, worktree-create, worktree-remove
+or worktree-resume - run by integrations/claude-code/hooks/run.sh <event>
+with the hook's JSON input on stdin, never by hand.  Each acts for the
+claude session it runs under (the nearest claude ancestor of its
+process) in the repository Claude Code runs it for (CLAUDE_PROJECT_DIR,
+else the input's cwd; the worktree's own for worktree-remove and
+worktree-resume); the two prunes and worktree-resume do nothing outside a
+nixconvoy repository.  worktree-create:
 `open --child <name>` for the input's name under the session's checkout, the
 worktree locked with the session's pid and start time (how status and
 close tell whether the session that may resume the agent still runs)
@@ -387,14 +389,21 @@ plus a token of this create, so a lock taken again - a reuse, a resume -
 never reads as one a close judged before; with no session found it is
 locked as sessionless; prints the path.  subagent-stop: detached, the
 stopped agent's worktree (where its transcript starts) removed when it
-holds nothing of its own, no process or other running agent of the
-session works in it and, a few seconds on, the agent has not run again
-(a message, or Claude Code's own follow-up turn) and no resume relocked
-it - whether its session still runs or not: a resume recreates it (the
-plugin's PreToolUse hook on SendMessage).  session-start: detached, a
-sweep of what dead sessions left, then, once this session exits, a sweep
-of what its agents' stops kept (one waiter per session).  Both log to
-nixconvoy-prune.log in the common git dir.
+holds nothing of its own, no process, background task or other running
+agent of the session works in it and, a few seconds on, no resume
+relocked it - whether its session still runs or not.  worktree-resume
+(PreToolUse on SendMessage): a message to a stopped agent first has its
+worktree recreated, or relocked, as worktree-create does; the resume is
+refused (exit 2) when that fails.  session-start: detached, a sweep of
+what dead sessions left, then, once this session exits, a sweep of what
+its agents' stops kept (one waiter per session).  Both log to
+nixconvoy-prune.log in the common git dir.  worktree-remove: Claude
+Code letting go of a worktree the create hook made (a `claude
+--worktree` session's, at its exit), removed with its branch unless
+another live session holds it, it has changes, commits not on
+origin/main or a submodule worktree planted in it, or (in a nixconvoy
+repository) close by name would keep it; a kept one fails the hook,
+which leaves it on disk.
 
 --evict evicts every other work branch from the targets it switches: they
 run this checkout's view alone, the other branches left out of the union
@@ -483,9 +492,10 @@ on: land and unapply act in that worktree, so a branch with none here is
 refused, while review, which only reads, takes any <branch> (against its
 merge-base) and a <submodule>'s name too.  A <path> (with a /, no branch
 here) is an agent checkout's.
-hook <event> (session-start, subagent-stop or worktree-create) is the
-plugin's hook of that event, which its hooks/<event>.sh runs with the
-hook's input on stdin - never typed by hand.
+hook <event> (session-start, subagent-stop, worktree-create,
+worktree-remove or worktree-resume) is the plugin's hook of that event,
+which its hooks/run.sh <event> runs with the hook's input on stdin - never
+typed by hand.
 init writes nixconvoy.toml (and a missing deploy-branches) for a fresh
 install, every required key detected (the ssh address template as this
 user, to edit)."""

@@ -1081,17 +1081,14 @@ def git_cases(d: Path) -> None:
             # ...unless its agent stopped: that session ended for it, while
             # nothing relocked it since the stop (a resume does).
             held = f"claude agent review (pid {parent} start {pstart})"
-            transcript = Path(tempfile.mkdtemp()) / "agent-review.jsonl"
             with contextlib.redirect_stdout(io.StringIO()):
-                why = commands.prune_one(rv.resolve(), named=True,
-                                         stopped=commands.Stop(parent, f"{held} 1.2", transcript, None))
+                why = commands.prune_one(rv.resolve(), named=True, stopped=commands.Stop(parent, f"{held} 1.2"))
                 assert why == "the claude session that spawned its agent still runs", why
                 # A lock naming no session tells no relock apart: kept.
                 sh(co, "worktree", "unlock", str(rv))
                 sessionless = f"claude agent review {checkout.SESSIONLESS}"
                 sh(co, "worktree", "lock", "--reason", sessionless, str(rv))
-                why = commands.prune_one(rv.resolve(), named=True,
-                                         stopped=commands.Stop(parent, sessionless, transcript, None))
+                why = commands.prune_one(rv.resolve(), named=True, stopped=commands.Stop(parent, sessionless))
                 assert why is not None and why.startswith("its create found no claude session to outlive"), why
                 sh(co, "worktree", "unlock", str(rv))
                 sh(co, "worktree", "lock", "--reason", held, str(rv))
@@ -1101,28 +1098,24 @@ def git_cases(d: Path) -> None:
                 exclude.write_text(kept_out + "target/\n")
                 (rv / "target").mkdir()
                 (rv / "target" / "build").write_text("x\n")
-                why = commands.prune_one(rv.resolve(), named=True, stopped=commands.Stop(parent, held, transcript, None))
+                why = commands.prune_one(rv.resolve(), named=True, stopped=commands.Stop(parent, held))
                 assert why is not None and why.startswith("it has uncommitted or untracked changes"), why
                 (rv / "target" / "build").unlink()
                 (rv / "target").rmdir()
                 exclude.write_text(kept_out)
-                # A turn recorded since the stop, or a prompt awaiting one:
-                # it runs again.  Its tool's result, or an error recorded in
-                # its place, is neither.
-                turn = '{"type":"assistant","message":{"model":"m","content":[]}}\n'
-                result = '{"type":"user","message":{"content":[{"type":"tool_result"}]}}\n'
-                error = '{"type":"assistant","message":{"model":"<synthetic>","content":[]}}\n'
-                transcript.write_text(turn + result + "[]\n" + error)
-                assert commands.transcript_turns(transcript) == (1, False)
-                why = commands.prune_one(rv.resolve(), named=True, stopped=commands.Stop(parent, held, transcript, 0))
-                assert why == "its agent ran again since it stopped", why
-                with transcript.open("a") as f:
-                    f.write('{"type":"user","message":{"content":"go on"}}\n')
-                assert commands.transcript_turns(transcript) == (1, True)
-                why = commands.prune_one(rv.resolve(), named=True, stopped=commands.Stop(parent, held, transcript, 1))
-                assert why == "its agent ran again since it stopped", why
-                transcript.write_text(turn + result)
-                assert commands.prune_one(rv.resolve(), named=True, stopped=commands.Stop(parent, held, transcript, 1)) is None
+                # A removal git refuses leaves the lock as it was.
+                (rv / "u.txt").write_text("untracked\n")
+                os.chdir(rv)
+                queries = commands.PruneQueries(rv.resolve(), [])
+                try:
+                    refused = queries({"ask": "remove_worktree"})
+                finally:
+                    queries.close()
+                    os.chdir(co)
+                assert refused.get("ran") is False and rv.exists(), refused
+                assert checkout.worktree_lock(rv) == held
+                (rv / "u.txt").unlink()
+                assert commands.prune_one(rv.resolve(), named=True, stopped=commands.Stop(parent, held)) is None
             assert not rv.exists() and Path.cwd().resolve() == co.resolve()
             sh(co, "worktree", "add", "--quiet", "--detach", str(rv), "origin/main")
         # Where an agent's transcript says it started, and is now.
@@ -2142,6 +2135,65 @@ def open_cases(d: Path) -> None:
                 os.environ["CLAUDE_PROJECT_DIR"] = project0
         assert got.getvalue().strip() == str(co / ".claude/worktrees/viahook")
         assert (checkout.worktree_lock(co / ".claude/worktrees/viahook") or "").startswith("claude agent viahook ")
+        # A message resuming a stopped agent: the worktree its transcript
+        # started in recreated first; anything else sent is let through.
+        (d / "sess/subagents").mkdir(parents=True)
+        gone = co / ".claude/worktrees/agent-a1b2"
+        (d / "sess/subagents/agent-a1b2.jsonl").write_text(json.dumps({"cwd": str(gone)}) + "\n")
+        for to in ("main", "a1b2"):
+            with contextlib.redirect_stderr(io.StringIO()):
+                hooks.worktree_resume({"tool_input": {"to": to}, "transcript_path": str(d / "sess.jsonl")})
+        assert (checkout.worktree_lock(gone) or "").startswith("claude agent agent-a1b2 ")
+        assert Path.cwd().resolve() == co.resolve()
+        # Whatever fails, the resume is refused (exit 2), never let through.
+        create0 = hooks.worktree_create
+
+        def broken(name: str, session: int | None) -> None:
+            raise OSError(f"no room for {name} (session {session})")
+        hooks.worktree_create = broken
+        try:
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                try:
+                    hooks.worktree_resume({"tool_input": {"to": "a1b2"}, "transcript_path": str(d / "sess.jsonl")})
+                except SystemExit as e:
+                    assert e.code == 2, e.code
+                else:
+                    raise AssertionError("resumed")
+            assert "no room for agent-a1b2" in err.getvalue(), err.getvalue()
+        finally:
+            hooks.worktree_create = create0
+        # Claude Code letting go of a worktree (worktree-remove): kept while
+        # another live session holds it or it holds anything, else removed
+        # with its branch.
+        sh(co, "worktree", "unlock", str(gone))
+        sh(co, "worktree", "lock", "--reason", f"claude agent agent-a1b2 (pid {os.getpid()})", str(gone))
+        assert "kept: another claude session holds it" in dies(lambda: hooks.worktree_remove(str(gone)))
+        sh(co, "worktree", "unlock", str(gone))
+        (gone / "u.txt").write_text("u\n")
+        assert "kept: it has uncommitted, untracked or ignored changes" in dies(lambda: hooks.worktree_remove(str(gone)))
+        (gone / "u.txt").unlink()
+        (gone / ".claude/worktrees").mkdir(parents=True)
+        (gone / ".claude/worktrees/build.log").write_text("ignored\n")  # excluded, as nested worktrees are
+        assert "kept: it has uncommitted, untracked or ignored changes" in dies(lambda: hooks.worktree_remove(str(gone)))
+        shutil.rmtree(gone / ".claude")
+        put(gone, "g.txt", "g\n", "by hand")
+        assert "kept: it carries commits not on origin/main" in dies(lambda: hooks.worktree_remove(str(gone)))
+        sh(gone, "reset", "--quiet", "--hard", "HEAD~1")
+        with contextlib.redirect_stdout(io.StringIO()):
+            hooks.worktree_remove(str(gone))
+        assert not gone.exists() and proc.rev("refs/heads/worktree-agent-a1b2") is None
+        assert Path.cwd().resolve() == co.resolve()
+        # ...in a repository nixconvoy does not manage, by those rules alone.
+        bare, plain = d / "plain.git", d / "plain"
+        sh(d, "init", "--quiet", "--bare", "-b", "main", str(bare))
+        sh(d, "clone", "--quiet", str(bare), str(plain))
+        put(plain, "p.txt", "p\n", "plain")
+        sh(plain, "push", "--quiet", "origin", "HEAD:main")
+        pw = plain / ".claude/worktrees/x"
+        sh(plain, "worktree", "add", "--quiet", "--lock", "-b", "worktree-x", str(pw), "origin/main")
+        hooks.worktree_remove(str(pw))
+        assert not pw.exists() and not sh(plain, "branch", "--list", "worktree-x")
+        os.chdir(co)
         # The session a hook acts for: the nearest ancestor named claude.
         if Path("/proc/self").exists():
             fake = d / "claude"

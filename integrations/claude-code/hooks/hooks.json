@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" session-start",
             "timeout": 30
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/worktree-create.sh\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" worktree-create",
             "timeout": 120,
             "statusMessage": "Creating the subagent worktree under this checkout"
           }
@@ -28,8 +28,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/worktree-remove.sh\"",
-            "timeout": 60,
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" worktree-remove",
+            "timeout": 150,
             "statusMessage": "Removing the subagent worktree"
           }
         ]
@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/subagent-stop.sh\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" subagent-stop",
             "timeout": 30
           }
         ]
@@ -52,7 +52,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/worktree-resume.sh\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" worktree-resume",
             "timeout": 120,
             "statusMessage": "Recreating the subagent's worktree"
           }

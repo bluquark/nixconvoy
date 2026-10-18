@@ -3,25 +3,21 @@
 //! nixconvoy's WorktreeCreate hook makes, and an agent can be resumed while
 //! the session that spawned it runs, which needs its worktree; so a
 //! worktree goes only once the session its lock names has exited, or its
-//! agent stopped and neither a resume relocked it nor anything woke the
-//! agent since, and only when it holds nothing of its own.  A sweep (no
-//! name given) keeps an unlocked one, which no session's exit tells the
-//! end of.
+//! agent stopped and no resume relocked it since, and only when it holds
+//! nothing of its own.  A sweep (no name given) keeps an unlocked one,
+//! which no session's exit tells the end of.
 //!
 //! A live session or a hand lock is told before origin is fetched, which
 //! may be offline; every check after the fetch is taken under the
 //! worktree's name lock - a file in the common git dir that the create hook
-//! also holds while it adds or reuses a worktree of that name, as do the
-//! other removals - and under its deploy lock, so neither a create
-//! nor a deploy moves it meanwhile; the agent's session is dead, so its
-//! agent does not either.  `git worktree remove` checks the lock, then
-//! cleanliness, then deletes the tree and the admin directory by name, so
-//! without the name lock a reuse could relock and hand out the worktree
-//! after git's check, or a fresh add recreate the admin directory that
-//! git then deletes.  The removal claims the lock it judged - renames it
-//! aside, only if it still holds that reason - and leaves git to refuse a
-//! locked or unclean worktree; a process working in it without its lock
-//! (a shell cd'd there) keeps it too.
+//! (a create, a reuse, a resume's relock) also holds while it adds or
+//! relocks a worktree of that name, as do the other removals - and under
+//! its deploy lock, so neither a create nor a deploy moves it meanwhile;
+//! the agent's session is dead, so its agent does not either.  The lock
+//! judged under the name lock therefore stands until the removal, which
+//! lifts it right before `git worktree remove` and puts it back when git
+//! refuses; a process working in it without its lock (a shell cd'd there)
+//! keeps it too.
 use super::{Query, Run, Script, MAIN};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -94,7 +90,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     let outcome = if s.flag(Query::TakeDeployLock)? {
         let o = match judge(s, p)? {
             Err(o) => o,
-            Ok((lock, wb, cur)) => remove(s, p, lock, &wb, cur)?,
+            Ok((wb, cur)) => remove(s, &wb, cur)?,
         };
         s.tolerate(Query::ReleaseDeployLock)?;
         o
@@ -105,11 +101,12 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     Ok(outcome)
 }
 
-/// The lock it holds, or why it is kept: a session it outlives, or none.
-fn holder(s: &mut Script, p: &Params) -> Run<Result<Option<String>, Outcome>> {
+/// Why it is kept for its lock, if it is: a session it does not outlive,
+/// or none to outlive.
+fn holder(s: &mut Script, p: &Params) -> Run<Result<(), Outcome>> {
     let lock = s.text(Query::Lock)?;
     match lock.as_deref() {
-        None if !p.named => return kept(format!("unlocked: no session to outlive; `nixconvoy prune {}` judges it", p.name)),
+        None if !p.named => return kept(format!("unlocked: no session to outlive; `nixconvoy close {}` judges it", p.name)),
         None => {}
         // Unapply ends the session that would have unlocked it.
         Some(reason) if p.own_session_ends && reason.ends_with(SESSIONLESS) => {}
@@ -132,17 +129,14 @@ fn holder(s: &mut Script, p: &Params) -> Run<Result<Option<String>, Outcome>> {
             }
         },
     }
-    Ok(Ok(lock))
+    Ok(Ok(()))
 }
 
-/// The lock it holds, its work branch and its branch, or why it is kept.
-type Judged = (Option<String>, String, Option<String>);
-
-fn judge(s: &mut Script, p: &Params) -> Run<Result<Judged, Outcome>> {
-    let lock = match holder(s, p)? {
-        Ok(lock) => lock,
-        Err(o) => return Ok(Err(o)),
-    };
+/// Its work branch and its branch, or why it is kept.
+fn judge(s: &mut Script, p: &Params) -> Run<Result<(String, Option<String>), Outcome>> {
+    if let Err(o) = holder(s, p)? {
+        return Ok(Err(o));
+    }
     if let Some(op) = s.text(Query::OpInProgress)? {
         return kept(format!("a {op} is in progress"));
     }
@@ -184,25 +178,14 @@ fn judge(s: &mut Script, p: &Params) -> Run<Result<Judged, Outcome>> {
     if !s.flag(Query::OnOrigin)? {
         return kept("it carries commits not on origin, which the removal would lose; push them (git push origin HEAD:main) or deploy from the work branch");
     }
-    Ok(Ok((lock, wb, cur)))
+    Ok(Ok((wb, cur)))
 }
 
-fn remove(s: &mut Script, p: &Params, lock: Option<String>, wb: &str, cur: Option<String>) -> Run<Outcome> {
-    if !s.flag(Query::ClaimLock { expect: lock })? {
-        return Ok(Outcome::Kept("its lock changed meanwhile: a session took it over".into()));
-    }
+fn remove(s: &mut Script, wb: &str, cur: Option<String>) -> Run<Outcome> {
     if s.flag(Query::Occupied)? {
-        s.tolerate(Query::RestoreLock)?;
         return Ok(Outcome::Kept("a process works in it".into()));
     }
-    // Woken past the resume hook, whose relock would have kept it.
-    if p.stopped.is_some() && s.flag(Query::RanAgain)? {
-        s.tolerate(Query::RestoreLock)?;
-        return Ok(Outcome::Kept("its agent ran again since it stopped".into()));
-    }
-
     if let Err(detail) = s.ran(Query::RemoveWorktree)? {
-        s.tolerate(Query::RestoreLock)?;
         return Ok(Outcome::Kept(format!("git refused to remove it:\n{}", detail.trim())));
     }
     if let Err(detail) = s.ran(Query::DropBranches { wb: wb.into(), cur })? {
@@ -211,7 +194,5 @@ fn remove(s: &mut Script, p: &Params, lock: Option<String>, wb: &str, cur: Optio
     Ok(Outcome::Removed)
 }
 
-#[cfg(test)]
-mod model;
 #[cfg(test)]
 mod tests;

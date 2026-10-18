@@ -238,20 +238,9 @@ pub enum Query {
     /// Whether a process other than nixconvoy's own has its working
     /// directory in it -> Flag.
     Occupied,
-    /// A stop's prune: whether its agent took a turn since the stop or a
-    /// prompt awaits one (it runs again) -> Flag.
-    RanAgain,
-
-    /// Rename its lock aside, if it still holds `expect` (None: if it is
-    /// still unlocked) -> Flag: claimed.
-    ClaimLock {
-        expect: Option<String>,
-    },
-    /// `git worktree remove` without force: refused for a locked or
-    /// unclean worktree -> Ran.
+    /// `git worktree remove` without force, its lock lifted first and put
+    /// back when git refuses (an unclean worktree) -> Ran.
     RemoveWorktree,
-    /// The claimed lock back in place, unless a new one took it -> Ran.
-    RestoreLock,
     /// Delete its branches - `wb`, and `cur` or its fresh branch when its
     /// own - here and on origin -> Ran.
     DropBranches {

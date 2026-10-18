@@ -260,7 +260,7 @@ nixconvoy init [<flake-dir>]   write nixconvoy.toml (and a missing deploy-branch
 nixconvoy close [<path> ... | <worktree> ... | <submodule> ...] [--force]   remove agent checkouts by path (with their work branch), subagent worktrees, or submodule worktrees (with their branch), holding nothing of their own (--force: whatever they hold)
 nixconvoy pull                 rebase every checkout on this machine onto origin/main
 nixconvoy status               every checkout on this machine, and origin's other branches
-nixconvoy hook <event>         the Claude Code plugin's hook of that event (session-start, subagent-stop, worktree-create), run by its hooks/<event>.sh with the hook's input on stdin
+nixconvoy hook <event>         the Claude Code plugin's hook of that event (session-start, subagent-stop, worktree-create, worktree-remove, worktree-resume), run by its hooks/run.sh <event> with the hook's input on stdin
 nixconvoy open <path> [--branch <work-branch>]   an agent checkout at that path on a work branch of this machine's
 nixconvoy open --child <worktree>   a child (subagent) worktree <checkout>/<child_worktrees>/<worktree> (what the plugin's create hook makes)
 nixconvoy open --submodule <input>   the flake input developed in place under this checkout (see Submodules)
@@ -307,8 +307,10 @@ path on a listed work branch of this machine's, numbered after the path's
 name - and `close <path>` removes one holding nothing of its own.
 `integrations/claude-code/` is a Claude Code plugin holding the hooks
 that create an isolated subagent's worktree under the spawning checkout,
-close it when its agent stops and recreate it for its resume, beside the
-`git review` command and a bash prompt segment; `integrations/claude-code-isolate/`
+close it when its agent stops and recreate it for its resume, beside
+`bin/git-review` (which the package installs as `git review`) and
+`prompt.bash`, a bash prompt segment to source from a copy of this
+repository (the package does not ship it); `integrations/claude-code-isolate/`
 is a second plugin whose one hook gives every subagent spawned inside a
 repository such a worktree (`isolation: worktree` added to the Agent
 call unless it chose otherwise):
@@ -337,15 +339,8 @@ with `deploy-branches`: at user scope they run in every repository you
 open, where the create hook still makes a subagent's worktree (a plain
 `.claude/worktrees/<name>` on `worktree-<name>`) but the prunes, which
 read the work branches, leave it to `git worktree remove`.  `nixconvoy`
-must be on PATH where the hooks run.
-
-The package also ships both plugin trees under `share/nixconvoy/` for a
-repo that wires the hooks itself: a settings.json pointing at
-`claude-code/hooks/worktree-create.sh`, `worktree-remove.sh`,
-`session-start.sh`, `subagent-stop.sh`, `worktree-resume.sh` (PreToolUse,
-matcher `SendMessage`) and `claude-code-isolate/hooks/subagent-isolate.sh`
-(PreToolUse, matcher `Agent|Task`), as each `hooks/hooks.json` does (such
-a repo should not also enable the plugins, or both would run).
+must be on PATH where the hooks run (each is `hooks/run.sh <event>`, which runs
+`nixconvoy hook <event>`).
 
 ## Submodules
 

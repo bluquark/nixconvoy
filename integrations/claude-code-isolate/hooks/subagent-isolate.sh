@@ -1,7 +1,7 @@
 #!/bin/bash
 # PreToolUse hook (matcher: Agent|Task).  A subagent spawned inside a git
 # repository gets a worktree of its own (isolation: worktree, unless the
-# call chose otherwise), which worktree-create.sh then puts under the
+# call chose otherwise), which the nixconvoy plugin's create hook puts under the
 # spawning checkout, so parallel agents never share one checkout's index,
 # branch and deploy lock.  The repository is the session's project
 # directory, not the shell's working directory, which drifts (an agent
