@@ -988,44 +988,22 @@ def tree_less_msg(ref: str, cwd: str | None = None) -> str:
         Path(tmpidx).unlink()
 
 
-# The last pushed tip of each work branch remove_sub deleted on origin,
-# <branch> -> tip, with a reflog: the remote-tracking ref's goes with the
-# branch, and on_origin needs the memory.
-PAST_REFS = "refs/nixconvoy/past"
-
-
 def on_origin(cwd: str | None = None, pats: set[str] | None = None) -> bool:
-    """Whether HEAD holds nothing of its own beyond origin: it is on
-    origin/main or a pushed listed work branch - as fetched now, or at a
-    tip fetched here before (the remote-tracking refs' reflogs, PAST_REFS
-    for a branch since deleted: a review subagent's checkout of a work
-    branch that was landed or reset since)
-    - or, that tip since rebased or landed, its tree less MSG_FILE is
-    that of an origin/main commit past their merge base, or each commit it
-    has beyond a tip is patch-equivalent to one of the tip's (git cherry,
-    which skips merges: a merge among them is its own)."""
-    tips = listed_tips(allowed_branches() if pats is None else pats, cwd)
-    past = set(tips.values())
-    gone = out(["git", "for-each-ref", "--format=%(refname)", PAST_REFS], cwd=cwd).split()
-    refs = [f"refs/remotes/origin/{b}" for b in tips] + gone
-    past.update(run(["git", "log", "-g", "--format=%H", *refs], cwd=cwd, check=False).stdout.split())
+    """Whether HEAD holds nothing of its own beyond origin: it is an
+    ancestor of origin/main or of origin's tip of a listed work branch, or
+    its tree less MSG_FILE is that of an origin/main commit past their
+    merge base (a review checkout of a tip since landed)."""
+    tips = set(listed_tips(allowed_branches() if pats is None else pats, cwd).values())
     # Excluded as ^sha lines: --not does not reach revisions read from stdin.
     if not out(["git", "rev-list", "-n", "1", "HEAD", "--stdin"], cwd=cwd,
-               input="".join(f"^{c}\n" for c in sorted(past))):
+               input="".join(f"^{c}\n" for c in sorted(tips))):
         return True
-    base = run(["git", "merge-base", "HEAD", "refs/remotes/origin/main"], cwd=cwd,
-               check=False).stdout.strip()
+    main = "refs/remotes/origin/main"
+    base = run(["git", "merge-base", "HEAD", main], cwd=cwd, check=False).stdout.strip()
     if not base:
-        return False  # no common history: nothing of origin's to be on
-    landed = out(["git", "log", "--format=%T", f"{base}..refs/remotes/origin/main"], cwd=cwd)
-    if tree_less_msg("HEAD", cwd) in landed.split():
-        return True
-    for t in tips.values():
-        marks = out(["git", "cherry", t, "HEAD"], cwd=cwd).splitlines()
-        n = int(out(["git", "rev-list", "--count", f"{t}..HEAD"], cwd=cwd) or 0)
-        if marks and len(marks) == n and all(m.startswith("-") for m in marks):
-            return True
-    return False
+        return False
+    landed = out(["git", "log", "--format=%T", f"{base}..{main}"], cwd=cwd).split()
+    return tree_less_msg("HEAD", cwd) in landed
 
 
 def increment_fate(branch: str, tip: str, union: str, checkout: str | None) -> str:
@@ -1039,15 +1017,11 @@ def increment_fate(branch: str, tip: str, union: str, checkout: str | None) -> s
     that first switch failed and the increment stays staged there; close
     removes a subagent's worktree, and an agent checkout's branch is reset
     on origin, not absent), or merging it into the union changes nothing but MSG_FILE
-    (rebased, redeployed after a failed switch, landed intact).  Otherwise
-    the union lacks it: "landed" when a later tip of the branch (one
-    fetched here before, by the remote-tracking ref's reflog or PAST_REFS;
-    only the entries newer than the tip's own can descend from it, or the
-    newest few when it never was one) carried it and was landed - the
-    increment undone since - else "abandoned": reset, dropped with its
-    subagent worktree or force-pushed over.  A tip this repository never
-    fetched, or one conflicting with the union (its lines changed since, by
-    whatever), is "kept": nothing to announce."""
+    (rebased, redeployed after a failed switch, landed intact).  A tip this
+    repository never fetched, or one conflicting with the union (its lines
+    changed since, by whatever), is "kept" too: nothing to announce.
+    Otherwise the union lacks it: "abandoned" (reset, dropped with its
+    subagent worktree, force-pushed over, or landed and since undone)."""
     if rev(f"{tip}^{{commit}}") is None:
         return "kept"
     up = f"refs/remotes/origin/{branch}"
@@ -1063,18 +1037,6 @@ def increment_fate(branch: str, tip: str, union: str, checkout: str | None) -> s
     merged = p.stdout.split("\n", 1)[0].strip()
     if not merged or tree_less_msg(merged) == rev(f"{union}^{{tree}}"):
         return "kept"
-    main = "refs/remotes/origin/main"
-    base = run(["git", "merge-base", tip, main], check=False).stdout.strip()
-    if base:
-        landed = set(out(["git", "log", "--format=%T", f"{base}..{main}"]).split())
-        for ref in (up, f"{PAST_REFS}/{branch}"):
-            if rev(ref) is None:
-                continue
-            entries = out(["git", "log", "-g", "--format=%H", ref]).split()  # newest first
-            newer = entries[:entries.index(tip)] if tip in entries else entries[:20]
-            for later in dict.fromkeys(newer):
-                if is_ancestor(tip, later) and tree_less_msg(later) in landed:
-                    return "landed"
     return "abandoned"
 
 

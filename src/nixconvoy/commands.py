@@ -17,7 +17,6 @@ from . import names, submodule
 from .checkout import (
     KEPT_EDIT,
     MACHINE_ENV,
-    PAST_REFS,
     SESSIONLESS,
     WAIT_STALE,
     GitQueries,
@@ -737,44 +736,28 @@ def sub_branches(here: Path, cur: str | None, branches: list[str]) -> list[str]:
 
 
 def drop_branches(names: list[str]) -> list[str]:
-    """Delete `names` here and on origin, remembering origin's tips in
-    PAST_REFS (on_origin's memory): the origin deletions that failed."""
+    """Delete `names` here and on origin: the origin deletions that failed."""
     gone = {b: rev(f"refs/remotes/origin/{b}") for b in names}
     failed = []
     for b in names:
         git("branch", "--quiet", "-D", b, check=False)
-    on_origin = {b: old for b, old in gone.items() if old}
-    for b, old in on_origin.items():
-        # Every tip the remote-tracking ref's reflog remembers (a branch
-        # reset onto main by a land or unapply before this), oldest first,
-        # so the deletion of that ref with its reflog forgets none.
-        past = out(["git", "log", "-g", "--format=%H", f"refs/remotes/origin/{b}"]).split()[::-1] or [old]
-        git("update-ref", "--create-reflog", f"{PAST_REFS}/{b}", past[0], check=False)
-        for tip in past[1:]:
-            git("update-ref", "-m", "past tip", f"{PAST_REFS}/{b}", tip, check=False)
+    pushed = {b: old for b, old in gone.items() if old}
     # A gone branch's announcement is cleared with it (never deleted: a
     # deleted ref lingers uncleared in every other clone).
     clears = [spec for b in names for spec in clear_refspec(b)]
-    if on_origin or clears:
+    if pushed or clears:
         # One push, bounded: prune holds the worktree's name lock meanwhile.
         # Retried once: origin has rejected a deletion out of the blue.
         cmd = ["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "origin",
-               *(f":refs/heads/{b}" for b in on_origin), *clears,
-               *(f"--force-with-lease=refs/heads/{b}:{old}" for b, old in on_origin.items())]
-        pushed = run(cmd, check=False, timeout=30)
-        if pushed.returncode != 0:
+               *(f":refs/heads/{b}" for b in pushed), *clears,
+               *(f"--force-with-lease=refs/heads/{b}:{old}" for b, old in pushed.items())]
+        p = run(cmd, check=False, timeout=30)
+        if p.returncode != 0:
             time.sleep(2)
-            pushed = run(cmd, check=False, timeout=30)
-        if pushed.returncode != 0:
-            failed.append(f"deleting {', '.join(on_origin)} on origin failed: "
-                          f"{(pushed.stderr or '').strip() or 'timed out'}")
-    # A review of a branch gone this long is no longer expected.
-    cutoff = time.time() - 90 * 86400
-    past = run(["git", "for-each-ref", "--format=%(refname) %(committerdate:unix)", PAST_REFS], check=False)
-    for ln in past.stdout.splitlines():
-        ref, _, when = ln.partition(" ")
-        if when and int(when) < cutoff:
-            git("update-ref", "-d", ref, check=False)
+            p = run(cmd, check=False, timeout=30)
+        if p.returncode != 0:
+            failed.append(f"deleting {', '.join(pushed)} on origin failed: "
+                          f"{(p.stderr or '').strip() or 'timed out'}")
     return failed
 
 
@@ -1104,7 +1087,7 @@ def open_checkout(path: Path, branch: str | None) -> Path:
 
 def close_checkout(path: Path, *, force: bool = False) -> None:
     """`nixconvoy close <path>`: the agent checkout at `path` removed with
-    its work branch, here and on origin (the tip kept under PAST_REFS),
+    its work branch, here and on origin,
     when it holds nothing of its own - no edits, nothing beyond
     origin/main, no submodule holding anything - or `force`."""
     here = Path.cwd().resolve()

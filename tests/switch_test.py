@@ -990,20 +990,12 @@ def git_cases(d: Path) -> None:
         rv = co / "worktrees" / "review"
         sh(co, "worktree", "add", "--quiet", "--detach", str(rv), "origin/work/other/1")
         assert (got := checkout.update_checkout(rv)) == left, got
-        # ...also once that branch was rebased, the old tip forgotten (its
-        # commits patch-equivalent)...
+        # ...or at a tip since landed (its tree less COMMIT_MSG.md is
+        # main's)...
         sh(seed, "switch", "--quiet", "work/other/1")
         sh(seed, "rebase", "--quiet", "origin/main")
-        sh(seed, "push", "--quiet", "--force", "origin", "work/other/1")
-        sh(co, "reflog", "expire", "--expire=all", "refs/remotes/origin/work/other/1")
-        sh(co, "fetch", "--quiet")
-        assert sh(rv, "rev-parse", "HEAD") != proc.rev("refs/remotes/origin/work/other/1")
-        assert (got := checkout.update_checkout(rv)) == left, got
-        # ...or at that tip while the branch moved on and was landed (the
-        # remote-tracking ref's reflog remembers the tip as once pushed)...
-        sh(rv, "checkout", "--quiet", "--detach", "origin/work/other/1")
         put(seed, "o.txt", "other, more\n", "more")
-        sh(seed, "push", "--quiet", "origin", "work/other/1")
+        sh(seed, "push", "--quiet", "--force", "origin", "work/other/1")
         sh(co, "fetch", "--quiet")
         more = sh(seed, "rev-parse", "HEAD")
         sh(seed, "rm", "--quiet", "COMMIT_MSG.md")
@@ -1011,10 +1003,6 @@ def git_cases(d: Path) -> None:
         landed = sh(seed, "commit-tree", "HEAD^{tree}", "-p", "origin/main", "-m", "squashed")
         sh(seed, "push", "--quiet", "--force", "origin", f"{landed}:main", f"{landed}:work/other/1")
         sh(co, "fetch", "--quiet")
-        assert (got := checkout.update_checkout(rv)) == left, got
-        # ...or at the landed tip itself, forgotten (its tree less
-        # COMMIT_MSG.md is main's)...
-        sh(co, "reflog", "expire", "--expire=all", "refs/remotes/origin/work/other/1")
         sh(rv, "checkout", "--quiet", "--detach", more)
         assert (got := checkout.update_checkout(rv)) == left, got
         # ...but a commit of its own strands.
@@ -1208,9 +1196,8 @@ def git_cases(d: Path) -> None:
         assert "/review: removed (--force)" in out.getvalue(), out.getvalue()
         assert not rv.exists() and Path.cwd().resolve() == co.resolve()
 
-        # A subagent's pushed branch, deleted with its worktree, stays in
-        # on_origin's memory (PAST_REFS): a review checkout at its tip still
-        # holds nothing of its own.
+        # A subagent's pushed branch, unapplied and deleted with its
+        # worktree: a review checkout at its old tip holds commits of its own.
         sub_wb = f"{wb}-review"
         sh(co, "worktree", "add", "--quiet", "-b", sub_wb, str(rv), "origin/main")
         put(rv, "s.txt", "sub\n", "sub work\n\nReaches: a\nApplied: a")
@@ -1227,14 +1214,14 @@ def git_cases(d: Path) -> None:
         with contextlib.redirect_stdout(io.StringIO()):
             commands.close_worktrees(["rev"])
         assert not rv.exists() and proc.rev(f"refs/remotes/origin/{sub_wb}") is None
-        assert proc.rev(f"{checkout.PAST_REFS}/{sub_wb}") == proc.rev("refs/remotes/origin/main")
         sh(seed, "fetch", "--quiet")
         sh(seed, "switch", "--quiet", "--detach", "origin/main")
         put(seed, "a.txt", "ONE\nTWO-upstream\nthree\nfour\nfive\n", "upstream 4")
         sh(seed, "push", "--quiet", "origin", "HEAD:main")
         sh(co, "fetch", "--quiet")
         sh(co, "worktree", "add", "--quiet", "--detach", str(rv), str(tip))
-        assert (got := checkout.update_checkout(rv)) == left, got
+        good, status = checkout.update_checkout(rv)
+        assert not good and status.startswith("the detached HEAD carries commits not on origin/main"), status
         commands.enter_sub("rev")
         assert "nothing to unapply" in dies(lambda: commands.unapply("origin/main"))  # detached: not on its branch
         assert rv.exists()

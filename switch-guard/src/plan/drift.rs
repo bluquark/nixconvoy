@@ -28,9 +28,9 @@
 //! A target to be switched may run an increment that left the convoy since:
 //! a branch tip its lineage recorded that origin's tip of the branch no
 //! longer carries.  Query::Fate asks git whether this deploy's union still
-//! holds it and, when not, what became of it - abandoned (reset or
-//! dropped, landed nowhere) or landed and since undone - and the target's
-//! verdict line names each abandoned increment the switch reverts:
+//! holds it ("kept") or not ("abandoned": reset, dropped, force-pushed
+//! over, or landed and since undone), and the target's verdict line names
+//! each abandoned increment the switch reverts:
 //! unapply runs that switch itself; a branch reset by hand waits for the
 //! next deploy by anyone, and this is where the revert shows.  A
 //! subagent's branch, pushed by its first deploy and deleted with its
@@ -378,8 +378,8 @@ pub fn refusal(refused: &[(String, Kind, Option<String>)]) -> String {
 }
 
 /// Query::Fate's answer for `branch`'s increment at `tip` of the lineage
-/// `lin`, asked once per tip (`fates` memoises it across targets): "kept",
-/// "landed" or "abandoned".  The query names the deploying checkout when
+/// `lin`, asked once per tip (`fates` memoises it across targets): "kept"
+/// or "abandoned".  The query names the deploying checkout when
 /// it is on this machine: one still on the branch keeps the increment.
 fn fate(s: &mut Script, branch: &str, tip: &str, lin: &Lineage, p: &Params, fates: &mut BTreeMap<(String, String), String>) -> Run<String> {
     let key = (branch.to_string(), tip.to_string());
@@ -394,8 +394,7 @@ fn fate(s: &mut Script, branch: &str, tip: &str, lin: &Lineage, p: &Params, fate
 
 /// The increments a switch of a target reverts: each branch tip its lineage
 /// recorded that is not origin's tip now and that the union no longer
-/// holds, as "<branch>'s abandoned increment <sha>" (or "landed and since
-/// undone").
+/// holds, as "<branch>'s abandoned increment <sha>".
 fn reverted(s: &mut Script, lin: &Lineage, p: &Params, fates: &mut BTreeMap<(String, String), String>) -> Run<Vec<String>> {
     let mut notes = Vec::new();
     for (b, tip) in &lin.tips {
@@ -403,10 +402,8 @@ fn reverted(s: &mut Script, lin: &Lineage, p: &Params, fates: &mut BTreeMap<(Str
             continue;
         }
         let short: String = tip.chars().take(12).collect();
-        match fate(s, b, tip, lin, p, fates)?.as_str() {
-            "abandoned" => notes.push(format!("{b}'s abandoned increment {short}")),
-            "landed" => notes.push(format!("{b}'s increment {short}, landed and since undone")),
-            _ => {}
+        if fate(s, b, tip, lin, p, fates)? == "abandoned" {
+            notes.push(format!("{b}'s abandoned increment {short}"));
         }
     }
     Ok(notes)

@@ -300,7 +300,7 @@ fn held_targets() {
 }
 
 /// The core run with every increment that left origin's tips `fate`
-/// ("kept", "landed" or "abandoned"); it asks nothing else.
+/// ("kept" or "abandoned"); it asks nothing else.
 fn run_with(p: Params, fate: &str) -> (Vec<Query>, Vec<Effect>, Result<Outcome, String>) {
     drive(Replay::new(p, program), 64, |q| match q {
         Query::Fate { .. } => Reply::Text(Some(fate.into())),
@@ -336,15 +336,10 @@ fn names_the_abandoned_increments() {
     );
 
     // Still in the union (rebased, redeployed, landed intact): nothing is
-    // reverted, so nothing is said; landed but undone since is a revert too.
+    // reverted, so nothing is said.
     let (asked, fx, _) = run_with(p.clone(), "kept");
     assert_eq!(asked.len(), 1);
     assert!(matches!(&fx[0], Effect::Print(l) if l.ends_with("at 13:46)")), "{fx:?}");
-    let (_, fx, _) = run_with(p.clone(), "landed");
-    assert!(
-        matches!(&fx[0], Effect::Print(l) if l.ends_with(&format!("; reverting {BRANCH}'s increment hhhhhhhhhhhh, landed and since undone)"))),
-        "{fx:?}"
-    );
 
     // A pending increment of a branch origin has no tip of: in flight
     // while its first push is on its way, caught up once the branch is
@@ -616,7 +611,7 @@ proptest! {
     /// branch origin has no tip of is caught up (never refused or left
     /// alone) once its fate is not "kept".
     #[test]
-    fn plans(p in arb_params(), fate in prop::sample::select(vec!["kept", "landed", "abandoned"])) {
+    fn plans(p in arb_params(), fate in prop::sample::select(vec!["kept", "abandoned"])) {
         let (_, fx, out) = run_with(p.clone(), fate);
         let affected: Vec<String> = switch_order(&p.targets, &p.router).into_iter()
             .filter(|h| matches!((p.running.get(h), p.built.get(h)), (Some(Some(r)), Some(b)) if r != b))

@@ -108,11 +108,9 @@ pub enum Query {
     /// Whether HEAD is already on origin: an ancestor of origin/main or of
     /// origin's tip of a listed work branch -> Flag.
     Pushed,
-    /// Whether HEAD holds nothing of its own beyond origin: Pushed, or on a
-    /// tip fetched before (a review checkout of a work branch since
-    /// squashed or reset), or - that tip since rebased or squashed - its
-    /// tree less MSG_FILE an origin/main commit's, or each of its commits
-    /// beyond a tip patch-equivalent to one of the tip's -> Flag.
+    /// Whether HEAD holds nothing of its own beyond origin: Pushed, or its
+    /// tree less MSG_FILE an origin/main commit's past their merge base (a
+    /// review checkout of a tip since landed) -> Flag.
     OnOrigin,
     /// The branch's configured merge ref -> Text.
     Upstream {
@@ -123,8 +121,7 @@ pub enum Query {
     /// it, or `checkout` (the deploying one, on this machine) still has the
     /// branch checked out - its first push on its way, or its switch
     /// failed - or merging it into `union` changes nothing (rebased,
-    /// redeployed, landed intact), else "landed" (an origin/main commit
-    /// squashed a later tip of it) or "abandoned" -> Text.
+    /// redeployed, landed intact), else "abandoned" -> Text.
     Fate {
         branch: String,
         tip: String,
