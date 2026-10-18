@@ -26,8 +26,8 @@ what is deployed.
   system.  Whatever differs from the union is switched; a no-op deploy
   evaluates and switches nothing.  An increment that changes nothing any
   target's evaluation reads (docs, dotfiles) is committed and pushed
-  without a deploy: nothing probed, built or switched, so nothing need be
-  reachable; the targets' drift waits for the next deploy reaching one,
+  without a deploy: the probes' results are dropped and nothing is built
+  or switched, so nothing need be reachable; the targets' drift waits for the next deploy reaching one,
   or for an apply naming targets.
 - **`land` lands a branch on main**, as one commit whose message is the
   branch's `COMMIT_MSG.md` (or `-m <msg>`, for a quick landing of a
@@ -83,9 +83,7 @@ no work.
   target alone, or is refused when its own work reaches it; a main
   checkout's deploy (a nightly's) leaves it behind rather than fail; and
   `land` refuses without `--not-yet-applied` - no restricted apply rolls
-  out elsewhere by accident - unless the branch builds the target just as
-  main does (`land` evaluates the held targets at its tip and at main),
-  so nothing is held there.
+  out elsewhere by accident.
 - **Deploy records.**  Before a target is switched, its deploy record - a
   commit of the exact tree it will run, on its previous record, main, the
   unioned branches and the increment - is pushed to origin, so no target

@@ -43,8 +43,9 @@ Deploy (nixconvoy apply [<target> | @<tag> ...] [-m <msg>] [--evict]
      those.  An unreachable candidate fails the deploy before anything is
      evaluated
   3. snapshot the staged state (index) as an ephemeral deterministic commit
-     on top of the work branch; unstaged and untracked changes are excluded,
-     since staging marks a change as ready to deploy.  Nothing is committed.
+     on top of the work branch, rebased onto the fetched origin/main;
+     unstaged and untracked changes are excluded, since staging marks a
+     change as ready to deploy.  Nothing is committed.
      The pending state - the increment, or a HEAD origin lacks (the
      nightly's lock commit on main) - is announced: its tree as a commit
      of its own, pushed to origin's refs/nixconvoy/pending/<branch> and
@@ -69,10 +70,11 @@ Deploy (nixconvoy apply [<target> | @<tag> ...] [-m <msg>] [--evict]
      the targets again and redo step 4 with what it pushed.  Building without
      it would only end refused - or rebuilt - once it switched.  Only
      deploys announced before this one are waited for (two never wait for
-     each other); one whose announcement goes 30 s without a renewal, or
-     whose process is gone on this machine, is taken for dead and gone on
-     without, with a warning; one settled (over, its push pending) is not
-     waited for; --evict waits for nobody
+     each other); one whose announcement goes 30 s without a renewal (by
+     this machine's clock, as of successful fetches) is taken for dead and
+     gone on without, with a warning; one settled (over, its push pending:
+     a main checkout's, which its owner pushes) is not waited for; --evict
+     waits for nobody
   5. evaluate every reachable target's toplevel for the union, one nix eval
      process per stale target, concurrently, memoized per target by the git
      hashes of the files its configuration references and the lock entries
@@ -158,8 +160,9 @@ Deploy (nixconvoy apply [<target> | @<tag> ...] [-m <msg>] [--evict]
 An increment that changes nothing any target's evaluation reads (the eval
 memo's read scan over the staged snapshot, no eval: docs, dotfiles, a
 COMMIT_MSG.md) is committed onto the work branch and pushed without a
-deploy - nothing probed, evaluated, built or switched, the commit's
-trailers Reaches: none and Applied: none - after the precheck unless
+deploy - nothing evaluated, built or switched, step 2's probes dropped
+unread, the commit's trailers Reaches: none and Applied: none - after
+the precheck unless
 its tree has a proven pass; the precheck needs the builder when one is
 set.  The targets' drift
 (another branch's work, main's) waits for the next deploy reaching one, or
@@ -178,9 +181,7 @@ target) or lands with --not-yet-applied, a deploy from any other work
 branch leaves the target alone - or is refused when its own work reaches
 it, as for an in-flight increment - a main checkout's deploy (the
 nightly's) leaves it behind on main's advance, and `land` refuses without
---not-yet-applied - unless the branch builds the target as main does (land
-evaluates the held targets at its tip and at main), so nothing is held
-there.  --evict unions no other
+--not-yet-applied.  --evict unions no other
 branch, so it switches the target to this checkout's view alone, without
 the held work, the hold standing.  `status` shows what each checkout holds
 back.
@@ -471,8 +472,7 @@ of a group the target's configuration protects (nixconvoy.protected.<name>).
 --dry-activate stops before any switch, printing what each would do.
 land --not-yet-applied lands work a target is held back from (increments
 that reach it, applied to other targets alone), for the next deploy anywhere
-to roll out there.  Without it, land evaluates the held targets at its tip
-and at main: one the branch builds as main does is not held, the rest refuse.
+to roll out there; without it, such a landing is refused.
 unapply reverts this checkout's increments on the targets, from HEAD back
 to --back-to <rev> (HEAD^ by default: the latest one; origin/main: the whole
 branch): the work branch is reset onto <rev> (the reflog keeps the tip),

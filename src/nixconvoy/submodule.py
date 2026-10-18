@@ -594,11 +594,6 @@ def carries_one(sub: Sub, top: Path) -> bool:
     return default is None or (pin(sub, top) != head and has_own(sub, default))
 
 
-def carries(top: Path) -> bool:
-    """carries_one over the submodules present under `top`."""
-    return any(carries_one(sub, top) for sub in present(top))
-
-
 def reset_below_deployed(sub: Sub, pinned: str | None) -> list[str]:
     """The deployed commits a worktree reset below its own work dropped:
     when HEAD holds nothing beyond the default branch as fetched while

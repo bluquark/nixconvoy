@@ -13,7 +13,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import IO, NamedTuple
 
-from . import memo, names, submodule
+from . import names, submodule
 from .checkout import (
     KEPT_EDIT,
     MACHINE_ENV,
@@ -24,7 +24,6 @@ from .checkout import (
     add_worktree,
     allowed_branches,
     ancestor_pids,
-    announcer_dead,
     await_background_push,
     branch_at,
     catch_up,
@@ -72,50 +71,17 @@ from .names import label as sub_label
 from .proc import Fail, die, failure, git, is_ancestor, ok, out, painter, rev, run, solve_with_mergiraf
 
 
-def unchanged_at(tip: str, main: str, held: list[str]) -> set[str]:
-    """Among `held`, the targets `tip` builds identically to its base on
-    `main` (the tree that lands: without MSG_FILE).  A hold is read off
-    Reaches:, the scan of what each evaluation reads, so an increment
-    touching a file every target reads (a shared lib) holds targets whose
-    toplevel it leaves as it was.  One commit after the other: a deploy's
-    worth of evals at a time."""
-    print(f"evaluating {', '.join(held)} at the branch's tip and at main (land --not-yet-applied skips this)...")
-    base = out(["git", "merge-base", main, tip])
-    landing = out(["git", "commit-tree", tree_less_msg(tip), "-p", rev(tip) or tip, "-m", "landing"],
-                  env=MACHINE_ENV)
-    tops: list[dict[str, memo.Top]] = []
-    wts: list[str] = []
-    try:
-        for ref in (landing, base):
-            wts.append(add_worktree(ref))
-            tops.append(memo.eval_toplevels(wts[-1], ref, held, None))
-    finally:
-        for wt in wts:
-            drop_worktree(wt)
-    at_tip, at_base = tops
-    return {h for h in held if at_tip[h].out == at_base[h].out}
-
-
 def holds(wb: str, tip: str, main: str, not_yet_applied: bool = False) -> None:
     """The targets `wb`'s increments (`main..tip`) hold back: a landing is
     refused on them unless `not_yet_applied` (the landed work then rolls out
-    there from the next deploy anywhere) - or unless the branch builds them
-    as main does, which holds nothing; evaluated without the flag alone."""
+    there from the next deploy anywhere)."""
     held = sorted(held_targets(f"{main}..{tip}"))
     if not held:
         return
-    if not not_yet_applied:
-        same = unchanged_at(tip, main, held)
-        if same:
-            print(f"{', '.join(sorted(same))}: built the same at {wb}'s tip as at main, "
-                  f"so nothing is held back there")
-        held = [h for h in held if h not in same]
-        if not held:
-            return
     them = ", ".join(held)
     if not not_yet_applied:
         die(f"{wb} holds back {them}: increments of it reach {'it' if len(held) == 1 else 'them'} "
-            f"(built differently from main's) but were applied to other targets alone.  "
+            f"but were applied to other targets alone.  "
             f"`nixconvoy apply {' '.join(held)}` from its checkout applies them there first; "
             f"`land --not-yet-applied` lands them as they are, for the next deploy anywhere to roll out")
     print(f"landing with {them} not yet applied: the next deploy anywhere rolls the landed work out there")
@@ -989,11 +955,7 @@ def status() -> None:
             entry = f"{a.key}: {summarize(a.sha)}" + (" (settled, awaiting its push)" if a.settled else "")
             # Display only: the announcer's clock, not this machine's.
             silent = now - a.at
-            if a.settled:
-                print(f"  {paint(entry, 'yellow')}")
-            elif announcer_dead(a):
-                print(f"  {paint(f'{entry} - its process (pid {a.pid} here) is gone', 'red')}")
-            elif silent > WAIT_STALE:
+            if not a.settled and silent > WAIT_STALE:
                 print(f"  {paint(f'{entry} - not renewed for {silent / 60:.0f} min: dead?', 'red')}")
             else:
                 print(f"  {paint(entry, 'yellow')}")

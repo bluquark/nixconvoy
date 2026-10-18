@@ -731,7 +731,7 @@ class Announce:
         self.detail = ""
         # The targets running this checkout's pending state, or whose
         # switch onto it was started: deploy keeps the announcement when it
-        # ends unsettled with one.
+        # ends without its push with one.
         self.claimed: list[str] = []
         self._ok: bool | None = None
         self._landed = threading.Event()
@@ -750,7 +750,7 @@ class Announce:
         # Off the main thread: nothing here may die().
         parent, tree = self.target
         subject = (f"pending increment of {self.branch} from {proc.this_machine()}:{Path.cwd()} "
-                   f"(pid {os.getpid()})" + (" settled" if settled else ""))
+                   f"(pid {os.getpid()})" + (SETTLED if settled else ""))
         commit = run(["git", "commit-tree", tree, "-p", parent, "-m", subject],
                      env={**DATELESS_ENV, "GIT_AUTHOR_DATE": f"{self.since} +0000"}, check=False)
         sha = commit.stdout.strip()
@@ -826,13 +826,11 @@ class Pending(NamedTuple):
     # committer date), by the announcing machine's clock.
     since: int
     at: int
-    machine: str
-    pid: int
     # Its deploy is over, its push pending (Announce.settle).
     settled: bool
 
 
-ANNOUNCE_SUBJECT = re.compile(r"^pending increment of \S+ from ([^:\s]+):\S+ \(pid (\d+)\)( settled)?$")
+SETTLED = " settled"
 
 
 def pending_announcements() -> list[Pending]:
@@ -849,10 +847,7 @@ def pending_announcements() -> list[Pending]:
             continue
         if branch == "main" and is_ancestor(f"{sha}^", "refs/remotes/origin/main"):
             continue
-        m = ANNOUNCE_SUBJECT.match(subject)
-        machine, pid = (m.group(1), int(m.group(2))) if m else ("", 0)
-        found.append(Pending(key, branch, sha, int(since), int(at), machine, pid,
-                             bool(m and m.group(3))))
+        found.append(Pending(key, branch, sha, int(since), int(at), subject.endswith(SETTLED)))
     return found
 
 
@@ -863,24 +858,6 @@ def announced(own: str | None) -> dict[str, str]:
     push never landed); one whose key is still announced is in flight,
     dead or not."""
     return {p.key: p.sha for p in pending_announcements() if p.key != own}
-
-
-def announcer_dead(p: Pending) -> bool:
-    """Whether the announcing deploy demonstrably died: on this machine,
-    its pid gone and (by the clock the two share) no renewal for
-    WAIT_STALE - a deploy just over may still have its background push
-    in flight, which clears the announcement within seconds."""
-    if p.settled or p.machine != proc.this_machine() or p.pid <= 0:
-        return False
-    if time.time() - p.at <= WAIT_STALE:
-        return False
-    try:
-        os.kill(p.pid, 0)
-    except ProcessLookupError:
-        return True
-    except PermissionError:
-        return False
-    return False
 
 
 def clear_refspec(wb: str) -> list[str]:

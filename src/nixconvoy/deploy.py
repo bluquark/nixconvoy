@@ -21,7 +21,6 @@ from .checkout import (
     add_worktree,
     adopt_commit,
     announced,
-    announcer_dead,
     await_background_push,
     commit_deployed,
     current_branch,
@@ -103,8 +102,9 @@ def increment_reaches(snap: str, all_targets: list[str]) -> bool:
 def commit_unreached(wb: str, msg: str, snap: str) -> None:
     """The increment `snap`, reaching no target: committed onto `wb` and
     pushed, after the precheck unless its tree has a proven pass (no build
-    gates it), with nothing probed, evaluated, built or switched - the
-    targets have nothing to catch up on from it."""
+    gates it), with nothing evaluated, built or switched - the probes
+    started are dropped unread: the targets have nothing to catch up on
+    from it."""
     if memo.precheck_unproven(snap):
         targets.check_builder()
         wt = add_worktree(snap)
@@ -118,7 +118,7 @@ def commit_unreached(wb: str, msg: str, snap: str) -> None:
     PERF.mark("commit-push")
     commit_deployed(wb, snap, f"{msg}\n\nReaches: none\nApplied: none")
     push_work_branch(wb)
-    print(f"reaches no target: committed onto {wb} and pushed; nothing probed, built or switched")
+    print(f"reaches no target: committed onto {wb} and pushed; nothing built or switched (the probes' results dropped)")
 
 
 def deploy(filter_targets: list[str], msg: str | None, evict: bool,
@@ -149,15 +149,10 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool,
     probe_names: list[str] = [] if skip else list(all_targets)
     pool = ThreadPoolExecutor(1 + len(probe_names) + len(submodule.present(Path.cwd())))
     fetch = pool.submit(git, *fetch_args("--no-auto-gc"))
-    carrying = submodule.carries(Path.cwd())  # read before the prefetch moves the refs it reads
     if not dry:  # a dry activation brings no submodule along
         submodule.prefetch(Path.cwd(), pool)
-    probes: dict[str, Future[Probe]] = {}
-
-    def start_probes() -> None:
-        nonlocal probes
-        probes = {n: pool.submit(targets.probe, n) for n in probe_names}
-        pool.shutdown(wait=False)
+    probes = {n: pool.submit(targets.probe, n) for n in probe_names}
+    pool.shutdown(wait=False)
 
     pop_tmp_commits()
     wb = work_branch()
@@ -170,24 +165,13 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool,
             "main checkout deploys from main (a hand commit there is claimed as main's "
             "until pushed) or parked on origin/main")
 
-    # An increment that changes nothing any target's evaluation reads is
-    # committed without a deploy (commit_unreached), the targets left to
-    # the next deploy reaching one; naming targets asks for a deploy.  The
-    # probes start at once unless the staged state as it is looks that
-    # way; what decides is a scan of the final snapshot, after the submodule
-    # step (a pin reaches targets) and the rebase onto origin/main.
-    PERF.mark("reach")
-    scanned = ""  # the snapshot the early scan judged, so an unchanged one is not scanned again
+    def increment_name() -> str:
+        n = int(out(["git", "rev-list", "--count", "refs/remotes/origin/main..HEAD"])) + 1
+        return f"{Path.cwd().name}: increment {n}"
+
     if msg is None and wb is not None and not dry and (
             staged_differs() or any(submodule.staged(sub.dir, less_msg=True) for sub in submodule.present(Path.cwd()))):
-        msg = f"{Path.cwd().name}: increment {int(out(['git', 'rev-list', '--count', 'refs/remotes/origin/main..HEAD'])) + 1}"
-    if (wb is not None and bool(msg) and not dry and not skip and not evict and not filter_targets
-            and staged_differs() and not carrying):
-        scanned = staged_snapshot()
-    maybe_unreached = bool(scanned) and not increment_reaches(scanned, all_targets)
-    if not maybe_unreached:
-        start_probes()
-
+        msg = increment_name()
     snap = ""
     PERF.mark("submodules")
     for told in submodule.sync(wb, msg, dry=dry):
@@ -195,7 +179,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool,
     if msg is None and wb is not None and not dry and staged_differs():
         # A pin the submodule step staged on its own (a catch-up) is an
         # increment too.
-        msg = f"{Path.cwd().name}: increment {int(out(['git', 'rev-list', '--count', 'refs/remotes/origin/main..HEAD'])) + 1}"
+        msg = increment_name()
     PERF.mark("snapshot")
     if staged_differs():
         if wb is None:
@@ -204,18 +188,19 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool,
         ensure_on_work_branch(wb)  # the increment must land (and union) on wb
         # A snapshot's tree is HEAD + staged, so one taken on a stale HEAD
         # would commit main's changes away.
+        fetch.result()
         ensure_rebased()
         snap = staged_snapshot()
-        if maybe_unreached:
-            assert msg is not None
-            fetch.result()
-            ensure_rebased()  # onto the fetched origin/main, as the union would be
-            snap = staged_snapshot()
-            if snap == scanned or not increment_reaches(snap, all_targets):
-                pool.shutdown(wait=False)
-                commit_unreached(wb, msg, snap)
-                return
-            start_probes()
+        # An increment that changes nothing any target's evaluation reads
+        # is committed without a deploy, the targets left to the next
+        # deploy reaching one; naming targets asks for a deploy.
+        PERF.mark("reach")
+        if msg and not (dry or skip or evict or filter_targets) and not increment_reaches(snap, all_targets):
+            # The probes are never collected: an ssh to a dark target must
+            # not hold the exit.
+            proc.kill_children("the increment reaches no target")
+            commit_unreached(wb, msg, snap)
+            return
     elif msg:
         die("nothing is staged; stage the change or drop -m")
     else:
@@ -234,12 +219,12 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool,
         ann = Announce(own, snap or "HEAD")
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, exit_on_signal)
-    settled = False
+    pushed = False
     try:
-        settled = run_deploy(filter_targets, candidates, all_targets, msg, evict, allow, dry, skip,
+        pushed = run_deploy(filter_targets, candidates, all_targets, msg, evict, allow, dry, skip,
                              me, main0, wb, snap, ann, fetch, probes)
     finally:
-        if ann is not None and not settled:
+        if ann is not None and not pushed:
             if ann.claimed:
                 # Those targets run the increment (or a switch onto it was
                 # started): the announcement stays, dead, so a deploy
@@ -259,7 +244,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                msg: str | None, evict: bool, allow: frozenset[str], dry: bool, skip: bool, me: str,
                main0: str | None, wb: str | None, snap: str, ann: Announce | None,
                fetch: Future[subprocess.CompletedProcess[str]], probes: dict[str, Future[Probe]]) -> bool:
-    """The deploy from its union on: whether its announcement is settled by
+    """The deploy from its union on: whether its announcement is left to
     the push that ends it (push_deployed), rather than to withdraw."""
     running: dict[str, str | None] = {}
     probed: dict[str, Probe] = {}
@@ -274,7 +259,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                 f"fix connectivity (or restrict targets) and re-run")
         if ann is not None:
             # A target running this checkout's announced increment from
-            # an earlier run that ended unsettled: still its claim.
+            # an earlier run that ended without its push: still its claim.
             for h, pr in probed.items():
                 if h not in ann.claimed and claims(pr.lineage, me, ann.branch):
                     ann.claimed.append(h)
@@ -301,9 +286,9 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             ann.retarget(snap or "HEAD")
 
     # The announcements (by key) whose deploy is dead as far as this run
-    # can tell (its process gone on this machine, or no renewal for
-    # WAIT_STALE seconds while waited for): told to the drift core, which
-    # names the dead deploy when it refuses a target running its increment.
+    # can tell (no renewal for WAIT_STALE seconds while waited for): told
+    # to the drift core, which names the dead deploy when it refuses a
+    # target running its increment.
     dead: set[str] = set()
 
     def await_pending(wt: str, union: str) -> bool:
@@ -313,20 +298,17 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         on `union`, checked out in `wt`), wait for it to end rather than
         build without it and be refused (or rebuild) once it switched.
         Only deploys announced before this one are waited for, so two never
-        wait for each other; one that stops renewing its announcement is
-        given up on after WAIT_STALE seconds of successful looks at origin;
-        one settled (over, its push pending) is not waited for.  Whether it
-        waited: the targets are then probed again, and the union redone
-        with what landed."""
+        wait for each other; one whose announcement is not renewed for
+        WAIT_STALE seconds of successful looks at origin is taken for dead;
+        one settled (over, its push pending) is not waited for.
+        Whether it waited: the targets are then probed again, and the union
+        redone with what landed."""
         nonlocal probes
         if evict or skip:
             return False
         own = ann.key if ann is not None else None
         rank = (ann.since, ann.branch) if ann is not None else None
         mine: list[str] | None = None
-        # (key, diff base, announced tree) -> the candidates both reach:
-        # the renewals change the commit, rarely the tree.
-        overlap: dict[tuple[str, str, str], set[str]] = {}
         # Each announcement as last seen, and when it last changed (this
         # machine's clock, as of a successful fetch).
         seen: dict[str, tuple[str, float]] = {}
@@ -340,15 +322,9 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                 if p.key == own or p.key in dead or p.settled or \
                         (rank is not None and (p.since, p.branch) >= rank):
                     continue
-                if announcer_dead(p):
-                    print(f"warning: {p.key}'s deploy (pid {p.pid} here) is gone with its "
-                          f"announcement still up; going on without it", flush=True)
-                    dead.add(p.key)
-                    continue
                 sha, changed = seen.get(p.key, ("", now))
                 if sha != p.sha:
                     seen[p.key] = (p.sha, now)
-                    changed = now
                 elif now - changed > WAIT_STALE:
                     print(f"warning: no news of {p.key}'s deploy for {WAIT_STALE} s (its "
                           f"announcement is no longer renewed): taken as dead, going on "
@@ -365,11 +341,9 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                 # main's changes count too, but never a narrower one.
                 tip = rev(f"refs/remotes/origin/{p.branch}")
                 base = f"{p.sha}^" if tip is None or is_ancestor(f"{p.sha}^", tip) else tip
-                key = (p.key, base, rev(f"{p.sha}^{{tree}}") or p.sha)
-                if key not in overlap:
-                    overlap[key] = memo.reached_between(wt, union, mine, base, p.sha)
-                if overlap[key]:
-                    waiting[p.key] = sorted(overlap[key])
+                both = memo.reached_between(wt, union, mine, base, p.sha)
+                if both:
+                    waiting[p.key] = sorted(both)
             if not waiting:
                 break
             for b, hs in waiting.items():

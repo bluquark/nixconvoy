@@ -1336,14 +1336,7 @@ def announce_cases(d: Path) -> None:
             f"pending increment of {wb} from tester:{co} (pid {os.getpid()})"
         (pend,) = checkout.pending_announcements()
         assert pend.key == pend.branch == wb and pend.sha == first and not pend.settled and \
-            t0 <= pend.since <= pend.at <= t0 + 60 and (pend.machine, pend.pid) == ("tester", os.getpid()), pend
-        # Dead here: its pid gone and no renewal for WAIT_STALE (one clock).
-        assert not checkout.announcer_dead(pend)
-        assert not checkout.announcer_dead(pend._replace(pid=2 ** 22 - 1))
-        old = pend._replace(pid=2 ** 22 - 1, at=int(time.time()) - checkout.WAIT_STALE - 5)
-        assert checkout.announcer_dead(old)
-        assert not checkout.announcer_dead(old._replace(machine="elsewhere"))
-        assert not checkout.announcer_dead(old._replace(settled=True))
+            t0 <= pend.since <= pend.at <= t0 + 60, pend
         assert checkout.announced(wb) == {}
         assert checkout.announced(None) == {wb: first}
         # Renewed while the deploy runs: a fresh commit of the same tree on
@@ -1419,15 +1412,17 @@ def announce_cases(d: Path) -> None:
         checkout.push_deployed(wb, None, {})
         assert not Path(checkout.push_state("pid")).exists()
         # A main checkout's announcement (its HEAD origin lacks), under
-        # main@<machine>, is cleared by the push of main that lands that
-        # HEAD, not by nixconvoy; settled, it marks the deploy as over.
+        # main@<machine>, is settled by the push that ends its deploy (over,
+        # not waited for) and cleared by the push of main that lands that
+        # HEAD, not by nixconvoy.
         ann = checkout.Announce("main", "HEAD")
         assert ann.collect() and ann.key == "main@tester"
-        ann.settle()
+        with contextlib.redirect_stdout(io.StringIO()):
+            checkout.push_deployed(None, ann, {"a": rec2})
+        checkout.await_background_push()
         sh(co, *checkout.fetch_args())
         (pend,) = checkout.pending_announcements()
         assert (pend.key, pend.branch, pend.settled) == ("main@tester", "main", True), pend
-        assert not checkout.announcer_dead(pend._replace(pid=2 ** 22 - 1, at=0))
         sh(co, "push", "--quiet", "origin", "HEAD:main")
         sh(co, *checkout.fetch_args())
         assert checkout.pending_announcements() == []
@@ -1888,7 +1883,6 @@ def submodule_cases(d: Path) -> None:
         # A dry activation leaves the submodule where it is; the deploy's
         # own submodule step brings it along.
         sh(ax, "reset", "--quiet", "--hard", dep_main)
-        assert submodule.carries(co) is False
         assert submodule.sync(wb, None, dry=True) == [] and sh(ax, "rev-parse", "HEAD") == dep_main
         with contextlib.redirect_stdout(io.StringIO()):
             assert submodule.sync(wb, None) == []
@@ -2050,39 +2044,12 @@ def open_cases(d: Path) -> None:
         sh(w, "reset", "--quiet", "n.txt")
         # The sub holds b back: its increment reached b, deployed to a alone.
         assert checkout.held_targets("origin/main..HEAD", str(w)) == {"b"}
-        # A held target is evaluated at the branch's tip (the landing tree,
-        # without COMMIT_MSG.md) and at its base on main: built differently
-        # it refuses the landing, built the same it is not held; --not-yet-applied
-        # evaluates nothing.
-        real_eval = memo.eval_toplevels
-
-        def differs(wt: str, union: str, targets: list[str], check: Future[str | None] | None) -> dict[str, memo.Top]:
-            assert check is None and union and not (Path(wt) / "COMMIT_MSG.md").exists()
-            tip = (Path(wt) / "s.txt").exists()
-            return {h: memo.Top(f"/nix/store/{h}-{'tip' if tip and h == 'b' else 'main'}", "d", (), False, False)
-                    for h in targets}
-
-        def same(wt: str, union: str, targets: list[str], check: Future[str | None] | None) -> dict[str, memo.Top]:
-            assert check is None and union and wt
-            return {h: memo.Top(f"/nix/store/{h}", "d", (), False, False) for h in targets}
-
-        def never(wt: str, union: str, targets: list[str], check: Future[str | None] | None) -> dict[str, memo.Top]:
-            raise AssertionError(f"evaluated {targets} in {wt} at {union} ({check})")
-
+        # A held target refuses the landing unless --not-yet-applied.
+        assert "work/tester/9-task holds back b:" in dies(commands.land_with_children)
         told = io.StringIO()
-        try:
-            memo.eval_toplevels = differs
-            assert "work/tester/9-task holds back b:" in dies(commands.land_with_children)
-            memo.eval_toplevels = never
-            with contextlib.redirect_stdout(told):
-                commands.holds("work/tester/9-task", "refs/heads/work/tester/9-task", sh(co, "rev-parse", "origin/main"), True)
-            assert "landing with b not yet applied:" in told.getvalue()
-            memo.eval_toplevels = same
-            with contextlib.redirect_stdout(told):
-                commands.land_with_children()
-            assert "b: built the same at work/tester/9-task's tip as at main" in told.getvalue()
-        finally:
-            memo.eval_toplevels = real_eval
+        with contextlib.redirect_stdout(told):
+            commands.land_with_children(not_yet_applied=True)
+        assert "landing with b not yet applied:" in told.getvalue()
         assert not sh(co, "worktree", "list").count("deploy-wt")
         main = sh(co, "rev-parse", "origin/main")
         assert sh(co, "ls-tree", "--name-only", main).split() == ["a.txt", "deploy-branches", "p.txt", "s.txt"]
