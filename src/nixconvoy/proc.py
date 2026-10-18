@@ -87,46 +87,83 @@ def dump_json(obj: object) -> str:
     return json.dumps(obj)
 
 
+class Fail(Exception):
+    """A failure die() has said: the run's end, unless a loop going on
+    past one item's failure catches it."""
+
+
+# The tail of every failure before any target is switched (the work
+# branch is committed only after the switches).
+NOTHING_DONE = "nothing was switched or committed"
+
 # Every run() child in flight, killed by die(): an exit must not wait for a
 # nix eval or precheck build another thread started (executors join their
 # workers at interpreter shutdown) nor let their output trail the error.
-# DYING, set under the lock run() spawns under, stops a thread between two
-# commands from starting the next one after the sweep.
+# SWEPT holds the message each killed child's run() fails with instead of
+# its own report of the kill.  Reentrant: a signal handler sweeps too.
 CHILDREN: set[subprocess.Popen[str]] = set()
-CHILDREN_LOCK = threading.Lock()
-DYING = False
+SWEPT: dict[subprocess.Popen[str], str] = {}
+CHILDREN_LOCK = threading.RLock()
+# A worker thread's die(): every later run() or stream() fails with it, but
+# in a thread finishing what must still run (a deploy's cleanup, an armed
+# switch).  A main-thread die() leaves it unset, so a loop that goes
+# on past one item's failure is not stopped by it.
+EXITING: str | None = None
+_LOCAL = threading.local()
 # Targets armed for a confirmed switch and neither confirmed nor rolled back
 # yet: a die() for another target in their batch leaves them to their timers.
 ARMED: set[str] = set()
 
 
-def abort_children() -> None:
-    """die()'s kill of the children, for a signal handler: it takes no lock,
-    since the frame it interrupted may hold CHILDREN_LOCK."""
-    global DYING
-    DYING = True
+def set_finishing(on: bool) -> bool:
+    """Whether this thread's commands run past a worker's die() under way
+    (EXITING); the previous setting."""
+    was = getattr(_LOCAL, "finishing", False)
+    _LOCAL.finishing = on
+    return was
+
+
+@contextlib.contextmanager
+def finishing() -> Iterator[None]:
+    was = set_finishing(True)
     try:
-        for c in list(CHILDREN):
+        yield
+    finally:
+        set_finishing(was)
+
+
+def gate() -> None:
+    if EXITING is not None and not getattr(_LOCAL, "finishing", False):
+        raise Fail(EXITING)
+
+
+def kill_children(why: str) -> None:
+    with CHILDREN_LOCK:
+        for c in CHILDREN:
+            if c.poll() is not None:
+                continue  # done already: its run() reports its own result
             with contextlib.suppress(OSError):
                 c.kill()
-    except RuntimeError:  # the set changed under the copy
-        pass
+            SWEPT[c] = why
 
 
 def die(msg: str) -> NoReturn:
-    global DYING
-    if DYING and threading.current_thread() is not threading.main_thread():
-        raise SystemExit(1)  # a worker's child killed by the die under way: its report is noise
-    with CHILDREN_LOCK:
-        DYING = True
-        for c in list(CHILDREN):
-            c.kill()
+    global EXITING
+    if threading.current_thread() is not threading.main_thread():
+        EXITING = msg
+    kill_children(msg)
     sys.stdout.flush()  # keep the order straight when both streams are piped
     print(f"{TOOL}: {msg}", file=sys.stderr)
     if ARMED:
         print(f"{TOOL}: {', '.join(sorted(ARMED))} still armed: each finishes verifying "
               f"and is then confirmed or rolled back", file=sys.stderr)
-    sys.exit(1)
+    raise Fail(msg)
+
+
+def failure(e: Exception) -> str:
+    """An exception for a verdict line: a Fail by its message, said by
+    die() already; anything else with its type."""
+    return str(e) if isinstance(e, Fail) else repr(e)
 
 
 def run(
@@ -137,22 +174,19 @@ def run(
     check: bool = True,
     capture: bool = True,
     merged: bool = False,
-    cleanup: bool = False,
     timeout: float | None = None,
     input: str | None = None,
     pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     """`merged` captures stderr into stdout, in order (p.stderr is None).
-    `cleanup` marks the commands that must still run after die().  `timeout`
-    kills the command after that many seconds (returncode -SIGKILL).
+    `timeout` kills the command after that many seconds (returncode -SIGKILL).
     `input` is fed to the command's stdin; the command inherits `pass_fds`."""
     full_env = dict(os.environ)
     if env:
         full_env.update(env)
     t0 = time.monotonic()
     with CHILDREN_LOCK:
-        if DYING and not cleanup:
-            raise RuntimeError(f"{TOOL} is exiting")
+        gate()
         child = subprocess.Popen(
             cmd, cwd=cwd, env=full_env, text=True,
             stdin=subprocess.PIPE if input is not None else None,
@@ -170,6 +204,9 @@ def run(
     finally:
         with CHILDREN_LOCK:
             CHILDREN.discard(child)
+            swept = SWEPT.pop(child, None)
+    if swept is not None:
+        raise Fail(swept)
     p = subprocess.CompletedProcess(cmd, child.returncode, stdout, stderr)
     PERF.call(cmd, time.monotonic() - t0)
     if check and p.returncode != 0:
@@ -183,18 +220,17 @@ def out(cmd: list[str], *, cwd: str | None = None,
     return run(cmd, cwd=cwd, env=env, input=input).stdout.strip()
 
 
-def ok(cmd: list[str], *, cwd: str | None = None, timeout: float | None = None,
-       cleanup: bool = False) -> bool:
-    return run(cmd, cwd=cwd, check=False, timeout=timeout, cleanup=cleanup).returncode == 0
+def ok(cmd: list[str], *, cwd: str | None = None, timeout: float | None = None) -> bool:
+    return run(cmd, cwd=cwd, check=False, timeout=timeout).returncode == 0
 
 
 # git with user hooks disabled: machinery pushes/commits must never trigger
 # a global post-commit auto-push or pre-push hook.
 def git(*args: str, cwd: str | None = None, env: dict[str, str] | None = None,
         check: bool = True, capture: bool = True,
-        cleanup: bool = False, pass_fds: tuple[int, ...] = ()) -> subprocess.CompletedProcess[str]:
+        pass_fds: tuple[int, ...] = ()) -> subprocess.CompletedProcess[str]:
     return run(["git", "-c", "core.hooksPath=/dev/null", *args],
-               cwd=cwd, env=env, check=check, capture=capture, cleanup=cleanup, pass_fds=pass_fds)
+               cwd=cwd, env=env, check=check, capture=capture, pass_fds=pass_fds)
 
 
 def rev(ref: str) -> str | None:
@@ -234,6 +270,7 @@ def stream(cmd: list[str], *, held_as: str | None = None,
     """Run `cmd` with stderr merged into stdout and its lines squashed
     (squash_agenix), printed as they arrive - or, with `held_as`, all at
     once at the end under that prefix - and appended to `sink`."""
+    gate()
     t0 = time.monotonic()
     p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT, text=True)

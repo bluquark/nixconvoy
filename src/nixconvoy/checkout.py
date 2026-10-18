@@ -802,11 +802,12 @@ class Announce:
         a switch, so the next deploy anywhere need not wait for it; after
         die() too."""
         self.stop()
-        main = run(["git", "rev-parse", "-q", "--verify", "refs/remotes/origin/main"],
-                   check=False, cleanup=True).stdout.strip()
-        if main:
-            run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--force", "origin",
-                 f"{main}:{PENDING_REFS}/{self.branch}"], check=False, cleanup=True, timeout=60)
+        with proc.finishing():
+            main = run(["git", "rev-parse", "-q", "--verify", "refs/remotes/origin/main"],
+                       check=False).stdout.strip()
+            if main:
+                run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--force", "origin",
+                     f"{main}:{PENDING_REFS}/{self.branch}"], check=False, timeout=60)
 
 
 def announce_key(branch: str) -> str:
@@ -1203,5 +1204,6 @@ def add_worktree(ref: str) -> str:
 
 
 def drop_worktree(wt: str) -> None:
-    git("worktree", "remove", "--force", wt, check=False, cleanup=True)
+    with proc.finishing():
+        git("worktree", "remove", "--force", wt, check=False)
     shutil.rmtree(wt, ignore_errors=True)

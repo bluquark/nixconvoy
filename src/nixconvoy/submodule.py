@@ -56,7 +56,7 @@ from .checkout import (
 )
 from .config import MSG_FILE, cfg
 from .guard import decide
-from .proc import die, git, is_ancestor, ok, out, run, solve_with_mergiraf
+from .proc import NOTHING_DONE, Fail, die, git, is_ancestor, ok, out, run, solve_with_mergiraf
 
 # On a submodule's origin: every tip a branch left behind (a reset, a
 # rebase, its removal) as refs/nixconvoy/past/<branch>/<sha>, since nix
@@ -251,8 +251,7 @@ def fetch_refs(name: str, repo: Path) -> bool:
     p = run(["git", "fetch", "--quiet", "--prune", "origin", *REFSPECS],
             cwd=str(repo), check=False, timeout=300)
     if p.returncode != 0:
-        if not proc.DYING:  # killed by a die under way: not news
-            print(f"note: submodule {name}: fetching its origin failed:\n{(p.stderr or '').strip()}", file=sys.stderr)
+        print(f"note: submodule {name}: fetching its origin failed:\n{(p.stderr or '').strip()}", file=sys.stderr)
         return False
     FETCHED.add(repo)
     return True
@@ -334,7 +333,8 @@ def merge_commit(name: str, repo: Path, ours: str, theirs: str, subject: str) ->
             git("commit", "--quiet", "--no-edit", "--no-verify", cwd=wt, env=MACHINE_ENV)
         return out(["git", "rev-parse", "HEAD"], cwd=wt)
     finally:
-        git("worktree", "remove", "--force", wt, cwd=str(repo), check=False, cleanup=True)
+        with proc.finishing():
+            git("worktree", "remove", "--force", wt, cwd=str(repo), check=False)
         shutil.rmtree(wt, ignore_errors=True)
 
 
@@ -673,8 +673,7 @@ def catch_up(top: Path, wb: str) -> list[str]:
     for sub in present(top):
         try:
             problem = catch_up_one(sub, wb, top)
-        except SystemExit:  # a die() along the way, said above: this submodule's alone
-            proc.DYING = False
+        except Fail:  # said: this submodule's alone
             problem = f"submodule {sub.name}: failed (above)"
         if problem is not None:
             problems.append(problem)
@@ -739,8 +738,7 @@ def catch_up_repos() -> bool:
     for name, repo in on_default.items():
         try:
             problem = catch_up_repo(name, repo)
-        except SystemExit:
-            proc.DYING = False
+        except Fail:
             problem = f"{repo} (submodule {name}): failed (above)"
         if problem is not None:
             print(problem, file=sys.stderr)
@@ -788,7 +786,7 @@ def sync(wb: str | None, msg: str | None, *, dry: bool = False) -> list[str]:
         refuse_dropped(sub, wb, top)
     if not dry:  # a dry activation rebases, pushes and pins nothing
         for problem in catch_up(top, wb):
-            die(f"{problem}; nothing was deployed")
+            die(f"{problem}; {NOTHING_DONE}")
     told = []
     for sub in found:
         mark(sub.repo)

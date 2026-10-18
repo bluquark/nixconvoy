@@ -13,7 +13,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import IO, NamedTuple
 
-from . import memo, names, proc, submodule
+from . import memo, names, submodule
 from .checkout import (
     KEPT_EDIT,
     MACHINE_ENV,
@@ -69,7 +69,7 @@ from .checkout import (
 from .config import MSG_FILE
 from .guard import binary, decide
 from .names import label as sub_label
-from .proc import die, git, is_ancestor, ok, out, painter, rev, run, solve_with_mergiraf
+from .proc import Fail, die, failure, git, is_ancestor, ok, out, painter, rev, run, solve_with_mergiraf
 
 
 def unchanged_at(tip: str, main: str, held: list[str]) -> set[str]:
@@ -230,7 +230,7 @@ def pull() -> None:
     await_background_push()
     binary("nixconvoy-plan")  # resolved before update_checkout moves into the others
     if not (catch_up([Path.cwd(), *sibling_checkouts()]) & submodule.catch_up_repos()):
-        sys.exit(1)
+        die("pull left some checkouts or submodule repositories as they were (above)")
 
 
 def deployed_targets(commits: str) -> list[str]:
@@ -347,9 +347,8 @@ def close_worktrees(names: list[str], *, force: bool = False) -> None:
                 else:
                     why = prune_one(d, named=bool(names), own_session_ends=bool(names), fetched=fetched)
                     verdict = "empty, removed" if why is None else f"kept, {why}"
-            except (Exception, SystemExit) as e:  # noqa: BLE001 - one worktree's failure, reported
-                proc.DYING = False
-                verdict = f"kept, its check failed: {e!r}"
+            except Exception as e:  # noqa: BLE001 - one worktree's failure, reported
+                verdict = f"kept, its check failed: {failure(e)}"
             finally:
                 os.chdir(top)
             print(f"{label}: {verdict}", flush=True)
@@ -372,10 +371,9 @@ def close_submodules(names: list[str], *, force: bool = False) -> None:
             if work_branch_name() and submodule.off_default(sub, top):
                 submodule.restore(sub, top)
             submodule.remove_one(sub)
-        except SystemExit:
+        except Fail:
             if len(names) == 1:
                 raise
-            proc.DYING = False
             failed.append(name)
     if failed:
         die(f"close failed for submodule {', '.join(failed)} (see above)")

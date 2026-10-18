@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from .config import cfg
-from .proc import die, dump_json, is_ancestor, load_json, out, run, xdg_dir
+from .proc import NOTHING_DONE, die, dump_json, is_ancestor, load_json, out, run, xdg_dir
 
 MEMO_MAX_AGE = 30 * 86400
 
@@ -521,7 +521,7 @@ def eval_toplevels(wt: str, union: str, targets: list[str],
             done, _ = wait(pending, timeout=0.2 if waiting else None, return_when=FIRST_COMPLETED)
             pending -= done
             if check is not None and check.done() and check.result():
-                die(f"{check.result()}; nothing was pushed or switched")
+                die(f"{check.result()}; {NOTHING_DONE}")
     for h in stale:
         p = evals[h].result()
         if p.returncode != 0:

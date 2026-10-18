@@ -20,10 +20,12 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future
 from pathlib import Path
+from typing import Any
 
 from nixconvoy import (
     checkout,
@@ -157,16 +159,14 @@ def scenario(name: str, *, helper: bool = True, check_ok: bool = True, activate_
         "running": running, "profile": running, "armed": False, "rollback_to": rollback_to,
         "check_killed": check_killed, "confirm_rc": confirm_rc, "rollback_rc": rollback_rc,
     }))
-    proc.DYING = False
     proc.ARMED.clear()
-    err = io.StringIO()
     died: str | None = None
-    with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+    with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
         try:
             switch.switch("testhost", OLD, NEW, nixconvoy_switch or guard.binary("nixconvoy-switch"),
                           lineage=LINEAGE)
-        except SystemExit:
-            died = err.getvalue().strip().splitlines()[0].removeprefix("nixconvoy: ")
+        except proc.Fail as e:
+            died = str(e).splitlines()[0]
     print(f"{name}: {died or 'switched'}")
     return died, load(state_file)
 
@@ -194,6 +194,47 @@ def main() -> None:
     assert died is None and s["running"] == NEW and s["profile"] == NEW, (died, s)
     assert not proc.ARMED
     assert s.get("lineage") == LINEAGE, s
+
+    # A batch sibling's die() sweeps this switch's verification probes:
+    # those rounds fail and are retried, the switch still confirmed.
+    running_system, run = targets.running_system, switch.run
+    swept: list[str] = []
+
+    def swept_running(*args: Any, **kwargs: Any) -> str | None:
+        if "running" not in swept:
+            swept.append("running")
+            raise proc.Fail("another target's switch failed")
+        return running_system(*args, **kwargs)
+
+    def swept_check(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if cmd[-1] == "check" and "check" not in swept:
+            swept.append("check")
+            raise proc.Fail("another target's switch failed")
+        return run(cmd, **kwargs)
+    targets.running_system, switch.run = swept_running, swept_check
+    try:
+        died, s = scenario("probes swept")
+    finally:
+        targets.running_system, switch.run = running_system, run
+    assert died is None and s["running"] == NEW and swept == ["running", "check"], (died, s, swept)
+
+    # A batch sibling's die() on its worker thread: this switch, armed,
+    # still verifies and is confirmed; one not armed yet stops there.
+    def sibling_died(*args: Any, **kwargs: Any) -> str | None:
+        proc.EXITING = "a sibling's switch failed"
+        return running_system(*args, **kwargs)
+    targets.running_system = sibling_died
+    try:
+        died, s = scenario("sibling died while armed")
+    finally:
+        targets.running_system, proc.EXITING = running_system, None
+    assert died is None and s["running"] == NEW, (died, s)
+    proc.EXITING = "a sibling's switch failed"
+    try:
+        died, s = scenario("sibling died before arming")
+    finally:
+        proc.EXITING = None
+    assert died == "a sibling's switch failed" and s["running"] == OLD and not s["armed"], (died, s)
 
     died, s = scenario("verification fails", check_ok=False)
     assert "lineage" not in s, s
@@ -266,19 +307,20 @@ def report(text: str, *, tips: dict[str, str] | None = None,
            held: dict[str, list[str]] | None = None) -> tuple[str, str]:
     """nixconvoy-plan's drift verdict on one drifting target carrying `text` as
     its lineage file: its report line, and the deploy's die message."""
-    out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
-            contextlib.suppress(SystemExit):
-        guard.decide(
-            "drift", me=list(ME), union="u" * 40, listed=sorted(LISTED),
-            tips={BRANCH: BASE} if tips is None else tips, in_flight=in_flight or {},
-            dead=dead or [], tz_offset=0, router="choko", targets=["side1"], candidates=["side1"],
-            evict=evict, named=named, work_branch=True, reached=["side1"] if reached else [],
-            running={"side1": running},
-            built={"side1": "/nix/store/union-system"}, held=held or {},
-            lineages={"side1": text})
-    proc.DYING = False
-    return out.getvalue().strip(), err.getvalue().strip().removeprefix("nixconvoy: ")
+    out, died = io.StringIO(), ""
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+        try:
+            guard.decide(
+                "drift", me=list(ME), union="u" * 40, listed=sorted(LISTED),
+                tips={BRANCH: BASE} if tips is None else tips, in_flight=in_flight or {},
+                dead=dead or [], tz_offset=0, router="choko", targets=["side1"], candidates=["side1"],
+                evict=evict, named=named, work_branch=True, reached=["side1"] if reached else [],
+                running={"side1": running},
+                built={"side1": "/nix/store/union-system"}, held=held or {},
+                lineages={"side1": text})
+        except proc.Fail as e:
+            died = str(e).strip()
+    return out.getvalue().strip(), died
 
 
 def target_cases() -> None:
@@ -320,7 +362,7 @@ def target_cases() -> None:
         try:
             with contextlib.redirect_stderr(io.StringIO()):
                 targets.expand_targets(bad, inv)
-        except SystemExit:
+        except proc.Fail:
             pass
         else:
             raise AssertionError(bad)
@@ -357,6 +399,34 @@ def target_cases() -> None:
         else:
             raise AssertionError("loaded without a file")
     print("targets: ok")
+
+
+def gate_cases() -> None:
+    """A worker thread's die() stops every later command but a finishing
+    thread's; a main-thread die() stops nothing."""
+    def worker() -> None:
+        with contextlib.suppress(proc.Fail):
+            proc.die("worker failed")
+    with contextlib.redirect_stderr(io.StringIO()) as err:
+        with contextlib.suppress(proc.Fail):
+            proc.die("main failed")
+        assert proc.EXITING is None and proc.ok(["true"])
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+    assert err.getvalue() == "nixconvoy: main failed\nnixconvoy: worker failed\n", err.getvalue()
+    try:
+        try:
+            proc.run(["true"])
+        except proc.Fail as e:
+            assert str(e) == "worker failed", e
+        else:
+            raise AssertionError("ran past a worker's die()")
+        with proc.finishing():
+            assert proc.ok(["true"])
+    finally:
+        proc.EXITING = None
+    print("gate: ok")
 
 
 def protected_cases() -> None:
@@ -797,16 +867,6 @@ def git_cases(d: Path) -> None:
     def state(where: Path) -> tuple[str, ...]:
         return (sh(where, "rev-parse", "HEAD"), sh(where, "diff", "--cached"), sh(where, "diff"),
                 sh(where, "status", "--porcelain"))
-
-    def dies(f: Callable[[], object]) -> str:
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
-            try:
-                f()
-            except SystemExit:
-                proc.DYING = False
-                return err.getvalue()
-        raise AssertionError("did not die")
 
     origin, seed, co = d / "origin.git", d / "seed", d / "homelab9"
     wb = "work/tester/9"
@@ -1401,13 +1461,15 @@ def out_at(co: Path, parent: str, msg: str) -> str:
 
 
 def dies(f: Callable[[], object]) -> str:
-    """Run `f`, which must die(): its stderr."""
+    """Run `f`, which must die() (cli.main: exit 1 after one): its stderr."""
     err = io.StringIO()
     with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
         try:
             f()
-        except SystemExit:
-            proc.DYING = False
+        except proc.Fail:
+            return err.getvalue()
+        except SystemExit as e:
+            assert e.code == 1, e.code
             return err.getvalue()
     raise AssertionError("did not die")
 
@@ -2247,6 +2309,7 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as d:
         os.environ["FAKE_TARGET_STATE"] = str(Path(d) / "target.json")
         main()
+    gate_cases()
     lineage_cases()
     target_cases()
     protected_cases()

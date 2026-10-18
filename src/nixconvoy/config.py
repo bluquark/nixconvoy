@@ -6,7 +6,6 @@ detected - and the sections are optional: absent means none."""
 from __future__ import annotations
 
 import os
-import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -252,8 +251,7 @@ def cfg() -> Config:
         try:
             _CFG = load(Path.cwd())
         except ConfigError as e:
-            print(f"nixconvoy: {e}", file=sys.stderr)
-            sys.exit(1)
+            proc.die(str(e))
     return _CFG
 
 

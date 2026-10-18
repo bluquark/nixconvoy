@@ -17,7 +17,6 @@ import sys
 import time
 from pathlib import Path
 
-from . import proc
 from .checkout import SESSIONLESS, ancestors, lock_pid_alive, proc_stat, sub_parent
 from .commands import (
     PruneQueries,
@@ -31,7 +30,7 @@ from .commands import (
     transcript_turns,
 )
 from .config import BRANCHES_FILE
-from .proc import die, out, run
+from .proc import die, failure, out, run
 
 EVENTS = ("session-start", "subagent-stop", "worktree-create")
 
@@ -125,9 +124,8 @@ def session_start(pid: int) -> None:
         print(f"{time.strftime('%F %T')} claude session {pid} {what} ({top})", flush=True)
         try:
             close_worktrees([])
-        except (Exception, SystemExit) as e:  # noqa: BLE001 - the waiter outlives a failed sweep
-            proc.DYING = False
-            print(f"prune failed: {e!r}", flush=True)
+        except Exception as e:  # noqa: BLE001 - the waiter outlives a failed sweep
+            print(f"prune failed: {failure(e)}", flush=True)
 
     try:
         sweep("started: pruning dead sessions'")
@@ -227,7 +225,7 @@ def subagent_stop(session: int, stop: dict[str, object]) -> None:
                 gone = not d.is_dir()
                 why = None if gone else prune_one(d, named=True, stopped=Stop(session, stop_lock, transcript, turns))
             verdict = "removed meanwhile" if gone else "empty, removed" if why is None else f"kept, {why}"
-    except (Exception, SystemExit) as e:  # noqa: BLE001 - reported in the log
-        verdict = f"kept, its check failed: {e!r}"
+    except Exception as e:  # noqa: BLE001 - reported in the log
+        verdict = f"kept, its check failed: {failure(e)}"
     print(f"{time.strftime('%F %T')} agent {agent} stopped: {sub_label(d)}: {verdict}", flush=True)
     os._exit(0)

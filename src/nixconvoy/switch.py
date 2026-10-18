@@ -15,7 +15,7 @@ from pathlib import Path
 from . import proc, targets
 from .checkout import current_branch
 from .guard import CONTROL_PROTOCOL, drive
-from .proc import out, rev, run, stream
+from .proc import Fail, out, rev, run, stream
 from .targets import PROBE_TIMEOUT, control_opts, lineage_digest
 
 
@@ -180,13 +180,20 @@ def switch(target: str, expected: str, toplevel: str, nixconvoy_switch: str,
             return {"code": rc, "to": said(rb_lines, r"rolled back to (\S+)$")}
         if kind == "now":
             return {"now": proc.monotonic_ms()}
+        # A verification probe killed by another target's die() is a failed
+        # round, retried until the deadline.
         if kind == "running":
-            return {"running": targets.running_system(target, cleanup=True,
-                                                    timeout=secs(ask.get("timeout_ms")), fresh=True)}
+            try:
+                return {"running": targets.running_system(target, timeout=secs(ask.get("timeout_ms")),
+                                                        fresh=True)}
+            except Fail:
+                return {"running": None}
         if kind == "check":
             t = secs(ask.get("timeout_ms"))
-            p = run(targets.target_cmd(target, [helper, "check"], sudo=True), check=False, timeout=t,
-                    cleanup=True)
+            try:
+                p = run(targets.target_cmd(target, [helper, "check"], sudo=True), check=False, timeout=t)
+            except Fail as e:
+                return {"check": 1, "last": f"check interrupted: {e}"}
             lines = (p.stderr or "").strip().splitlines()
             return {"check": p.returncode, "last": lines[-1] if lines else None}
         if kind == "internet":
@@ -198,10 +205,14 @@ def switch(target: str, expected: str, toplevel: str, nixconvoy_switch: str,
 
     def effect(e: dict[str, object]) -> None:
         if e.get("armed") is True:
+            # Armed, it is confirmed or rolled back on its own merits
+            # whatever fails elsewhere.
+            proc.set_finishing(True)
             proc.ARMED.add(target)
         elif e.get("armed") is False:
             proc.ARMED.discard(target)
 
+    was_finishing = proc.set_finishing(False)
     try:
         drive(nixconvoy_switch, {
             "protocol": CONTROL_PROTOCOL, "target": target, "toplevel": toplevel,
@@ -211,6 +222,7 @@ def switch(target: str, expected: str, toplevel: str, nixconvoy_switch: str,
             "fail_verify": os.environ.get("NIXCONVOY_FAIL_VERIFY") == "1"},
             perform, "nixconvoy-switch", f" while switching {target}", effect)
     finally:
+        proc.set_finishing(was_finishing)
         if guard is not None:
             if guard.stdin is not None:
                 with contextlib.suppress(OSError):

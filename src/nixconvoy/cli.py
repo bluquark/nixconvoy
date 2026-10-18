@@ -436,7 +436,7 @@ from typing import IO, NoReturn
 from . import commands, hooks, init, names, proc, review, submodule
 from .checkout import lock_checkout, require_work_branch, sub_parent
 from .deploy import deploy
-from .proc import PERF, TOOL, die, ok, out, painter
+from .proc import PERF, TOOL, Fail, die, ok, out, painter
 from .targets import ALLOW_FLAG
 
 # The synopsis: one line per form under its section's heading (= ...).
@@ -537,6 +537,13 @@ BACK_TO_FLAG = "--back-to"
 
 
 def main() -> None:
+    try:
+        dispatch()
+    except Fail:  # said by die()
+        sys.exit(1)
+
+
+def dispatch() -> None:
     args = sys.argv[1:]
     if not args:
         print(usage())
@@ -698,8 +705,7 @@ def main() -> None:
             else:
                 try:
                     due |= commands.unapply(back_to or "HEAD^")
-                except SystemExit:
-                    proc.DYING = False
+                except Fail:
                     failed.append(d.name)
             lock.close()
         if given or with_children:
@@ -710,8 +716,7 @@ def main() -> None:
                     print(f"== {here.name}")
                     try:
                         due |= commands.unapply(back_to or "HEAD^")
-                    except SystemExit:
-                        proc.DYING = False
+                    except Fail:
                         failed.append(here.name)
                 if due:
                     deploy([], None, False, frozenset(allow))

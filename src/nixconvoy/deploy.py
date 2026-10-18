@@ -45,7 +45,7 @@ from .checkout import (
 from .config import builder
 from .guard import binary, decide
 from .memo import Top
-from .proc import PERF, die, dump_json, git, is_ancestor, load_json, out, rev
+from .proc import NOTHING_DONE, PERF, die, dump_json, git, is_ancestor, load_json, out, rev
 from .switch import lineage_record, switch
 from .targets import Probe, expand_targets, flake_target_names
 from .union import UnionQueries
@@ -55,10 +55,11 @@ WAIT_POLL = 5
 
 
 def exit_on_signal(signum: int, _frame: object) -> None:
-    """SIGTERM and SIGHUP end the run as die() would - the children killed,
-    no switch left to finish on its own - and as SystemExit, so a deploy's
-    finally clauses (the announcement's withdrawal) still run."""
-    proc.abort_children()
+    """SIGTERM and SIGHUP end the run: the children killed, as by die(),
+    and SystemExit raised, so a deploy's finally clauses (the
+    announcement's withdrawal) still run.  A switch armed by then is left
+    to its rollback timer."""
+    proc.kill_children(f"killed by signal {signum}")
     raise SystemExit(128 + signum)
 
 
@@ -113,7 +114,7 @@ def commit_unreached(wb: str, msg: str, snap: str) -> None:
         finally:
             drop_worktree(wt)
         if err:
-            die(f"{err}; nothing was committed")
+            die(f"{err}; {NOTHING_DONE}")
     PERF.mark("commit-push")
     commit_deployed(wb, snap, f"{msg}\n\nReaches: none\nApplied: none")
     push_work_branch(wb)
@@ -269,7 +270,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         running = {n: p.running for n, p in probed.items()}
         unreachable = [h for h in candidates if running.get(h) is None]
         if unreachable:
-            die(f"unreachable: {', '.join(unreachable)} - nothing was committed; "
+            die(f"unreachable: {', '.join(unreachable)}; {NOTHING_DONE}; "
                 f"fix connectivity (or restrict targets) and re-run")
         if ann is not None:
             # A target running this checkout's announced increment from
@@ -390,8 +391,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                     break
                 failed_polls += 1
                 if failed_polls >= 12:
-                    die("origin stopped answering while waiting for the deploy under way; "
-                        "nothing was built, switched or committed")
+                    die(f"origin stopped answering while waiting for the deploy under way; {NOTHING_DONE}")
         if waited:
             print("...ended; probing the targets again and redoing the union", flush=True)
             PERF.mark("probe")
@@ -417,8 +417,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             return True
 
         if ann is not None and not ann.collect():
-            die(f"announcing this deploy on origin failed; nothing was built, switched or "
-                f"committed:\n{ann.detail}")
+            die(f"announcing this deploy on origin failed; {NOTHING_DONE}:\n{ann.detail}")
         PERF.mark("eval")
         memo.memo_prune(memo.memo_dir())
         # The precheck gates the union, not the increment: a branch rebased
@@ -435,7 +434,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         if check is not None:
             err = check.result()
             if err:
-                die(f"{err}; nothing was pushed or switched")
+                die(f"{err}; {NOTHING_DONE}")
         reached = memo.reached_targets(wt, union, sorted(tops), snap or "HEAD",
                                      {h: probed[h].lineage for h in tops if h in probed})
         # The targets the other unioned branches hold back (held_targets):
@@ -527,7 +526,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             print(f"building {', '.join(plan)}{where}...")
             err = targets.build_drvs([tops[h].drv for h in plan], f"build of {', '.join(plan)}")
             if err:
-                die(f"{err}; nothing was pushed or switched")
+                die(f"{err}; {NOTHING_DONE}")
 
         # Another machine may have pushed a work branch while we built;
         # switching without it would revert its deployed changes (the union
@@ -554,11 +553,11 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             unpushed = pushed.result()
         if dry:
             if refusals:
-                die("--dry-activate: nothing was switched, committed or pushed; a deploy "
+                die(f"--dry-activate: {NOTHING_DONE}; a deploy "
                     "would stop here:\n" + targets.refusals_message(refusals))
             if plan:
                 print(f"--dry-activate: {', '.join(plan)} would be switched (union {union}); "
-                      f"nothing was switched, committed or pushed")
+                      f"{NOTHING_DONE}")
             elif left_alone:
                 print(f"--dry-activate: nothing would be switched: {', '.join(left_alone)} left "
                       f"alone, running another checkout's work this checkout's does not reach "
@@ -569,7 +568,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         if refusals:
             die(targets.refusals_message(refusals))
         if unpushed:
-            die(f"pushing the deploy records to origin failed; nothing was switched:\n{unpushed}")
+            die(f"pushing the deploy records to origin failed; {NOTHING_DONE}:\n{unpushed}")
         return False
 
     queries = UnionQueries(lambda: snap or "HEAD", fetch, refresh, stage, await_pending)

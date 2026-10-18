@@ -17,7 +17,7 @@ from typing import NamedTuple
 from . import proc
 from .config import builder, cfg
 from .memo import Protection
-from .proc import die, load_json, ok, run
+from .proc import NOTHING_DONE, die, load_json, ok, run
 
 # Seconds one probe of a target may take, so a stalled ssh session holds
 # neither a deploy's start nor verification past the deadline.
@@ -152,8 +152,7 @@ def probe(name: str) -> Probe:
     return parse_probe(p.stdout)
 
 
-def running_system(name: str, cleanup: bool = False,
-                   timeout: float = PROBE_TIMEOUT, fresh: bool = False) -> str | None:
+def running_system(name: str, timeout: float = PROBE_TIMEOUT, fresh: bool = False) -> str | None:
     """The target's /run/current-system (`fresh`: over a new ssh connection),
     or None if it cannot be read."""
     if name == proc.this_machine():
@@ -162,7 +161,7 @@ def running_system(name: str, cleanup: bool = False,
         except OSError:
             return None
     p = run(target_cmd(name, ["readlink", CURRENT_SYSTEM], fresh=fresh),
-            check=False, timeout=timeout, cleanup=cleanup)
+            check=False, timeout=timeout)
     if p.returncode != 0:
         return None
     return p.stdout.strip() or None
@@ -286,8 +285,7 @@ def copy_closure(target: str, toplevel: str, quiet: bool = False) -> None:
         p = run(["nix", "copy", "--no-check-sigs", "--from", f"ssh://{ssh_address(b)}", toplevel],
                 env={"NIX_SSHOPTS": sshopts}, check=False, capture=quiet, merged=True)
         if p.returncode != 0:
-            die(f"fetching the closure from {b} failed; nothing was committed "
-                f"or pushed - the changes are still staged"
+            die(f"fetching the closure from {b} failed; {NOTHING_DONE} - the changes are still staged"
                 + (f"\n{p.stdout.strip()}" if p.stdout else ""))
         return
     tgt = ssh_address(target)
@@ -306,8 +304,7 @@ def copy_closure(target: str, toplevel: str, quiet: bool = False) -> None:
         p = run(["nix", "copy", *subst, "--to", f"ssh://{tgt}", toplevel],
                 env={"NIX_SSHOPTS": sshopts}, check=False, capture=quiet, merged=True)
     if p.returncode != 0:
-        die(f"copying the closure to {target} failed; nothing was committed "
-            f"or pushed - the changes are still staged"
+        die(f"copying the closure to {target} failed; {NOTHING_DONE} - the changes are still staged"
             + (f"\n{p.stdout.strip()}" if p.stdout else ""))
 
 
@@ -317,7 +314,7 @@ def check_builder() -> None:
     b = builder()
     if b and not ok(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
                       *control_opts(), ssh_address(b), "true"]):
-        die(f"builder {b} unreachable - nothing was committed")
+        die(f"builder {b} unreachable; {NOTHING_DONE}")
 
 
 def rejected_generation(target: str, toplevel: str) -> str | None:
@@ -333,7 +330,7 @@ def rejected_generation(target: str, toplevel: str) -> str | None:
     p = run(target_cmd(target, ["sh", "-c", script], sudo=True), check=False, timeout=PROBE_TIMEOUT)
     if p.returncode != 0:
         die(f"could not scan {target}'s ESP for rejected generations (exit {p.returncode}); "
-            f"nothing was switched or committed")
+            f"{NOTHING_DONE}")
     return p.stdout.strip() or None
 
 
@@ -366,15 +363,13 @@ def dry_activate(target: str, toplevel: str) -> tuple[dict[str, list[str]], str 
     the caller dies once the other copies have finished."""
     p = run(target_cmd(target, [f"{toplevel}/bin/switch-to-configuration", "dry-activate"],
                      sudo=True), check=False, merged=True, timeout=DRY_ACTIVATE_TIMEOUT)
-    if proc.DYING:  # another thread's die() killed the child; it reports, not us
-        return {}, None
     if p.returncode == -signal.SIGKILL:
         return {}, (f"dry-activating the new system on {target} did not finish within "
-                    f"{DRY_ACTIVATE_TIMEOUT} s (a stalled ssh connection?); nothing was "
-                    f"switched or committed")
+                    f"{DRY_ACTIVATE_TIMEOUT} s (a stalled ssh connection?); "
+                    f"{NOTHING_DONE}")
     if p.returncode != 0:
         return {}, (f"dry-activating the new system on {target} failed (exit {p.returncode}); "
-                    f"nothing was switched or committed"
+                    f"{NOTHING_DONE}"
                     + (f"\n{p.stdout.strip()}" if p.stdout else ""))
     changes = unit_changes(p.stdout)
     for verb, units in changes.items():
@@ -393,7 +388,7 @@ class Refusal(NamedTuple):
 
     def __str__(self) -> str:
         return (f"switching {self.target} would {self.hits}, which its configuration protects "
-                f"(nixconvoy.protected); nothing was switched or committed.")
+                f"(nixconvoy.protected); {NOTHING_DONE}.")
 
 
 def protected_units_gate(target: str, toplevel: str, protected: tuple[Protection, ...],
