@@ -19,8 +19,8 @@ Model:
     its work branch, reset onto origin/main.
   - COMMIT_MSG.md at a work branch's root describes the branch's work since
     its last landing.  It never reaches main's tree: `land` consumes it as
-    the commit message (`land -m <msg>`, for a branch without one, lands
-    under <msg>).
+    the commit message, opened in git's editor first when run on a terminal
+    (`land -m <msg>`, for a branch without one, lands under <msg>).
   - Targets are inferred: each target's ground truth is its running system
     (/run/current-system), compared against the union build.  Every deploy
     converges whatever differs.
@@ -188,7 +188,14 @@ back.
 Land (nixconvoy land [<worktree> ... | --with-children] [-m <msg>] [--not-yet-applied]):
 commit the work branch's tree minus COMMIT_MSG.md onto origin/main with
 COMMIT_MSG.md as the message (or -m <msg>, for a branch without the file:
-both at once is refused), push
+both at once is refused).  Without -m, on a terminal, the message opens in
+git's editor (`git var GIT_EDITOR`; `:` skips it) over a scissors line
+listing the branch's increments and changed paths - an agent's COMMIT_MSG.md
+adjusted by hand before it lands, an empty message aborting; off a terminal
+(an agent's shell) COMMIT_MSG.md lands as it is.  The editor opens once every
+check has passed, and the edit is kept in the git dir (NIXCONVOY_LANDMSG)
+until it lands, so a landing that fails after it (a push rejected) re-runs
+with the edit.  Then push
 main, reset this branch (and its origin copy) onto the new main, the
 checkout staying on it.  Every other checkout on this machine is then
 brought onto the new main (see Pull); checkouts on other machines rebase

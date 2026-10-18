@@ -31,7 +31,10 @@ what is deployed.
   or for an apply naming targets.
 - **`land` lands a branch on main**, as one commit whose message is the
   branch's `COMMIT_MSG.md` (or `-m <msg>`, for a quick landing of a
-  branch without one: both at once is refused); **`unapply --back-to origin/main`** discards it.  Either way the
+  branch without one: both at once is refused), opened in git's editor
+  first when `land` runs on a terminal without `-m`, so a message an agent
+  wrote can be adjusted by hand before it lands (an agent's own shell is no
+  terminal: there the file lands as it is); **`unapply --back-to origin/main`** discards it.  Either way the
   checkout stays on its work branch, reset onto the new main (a subagent
   worktree too: `close` removes one), and every
   other checkout on the machine is rebased onto it.  A landing touches no
@@ -267,7 +270,7 @@ nixconvoy open --submodule <input>   the flake input developed in place under th
 # Deploying and committing changes
 nixconvoy apply [<target> | @<tag> ...] [-m <msg>] [--evict] [--dry-activate]   deploy the staged increment (-m: its message, default "<checkout>: increment <n>"), or with nothing staged converge the targets on the union as it is; --dry-activate: build and copy, then only report what each switch would do
 nixconvoy unapply [<worktree> ... | --with-children] [--back-to <rev>]   undo the increments from HEAD back to <rev> (default HEAD^, the latest one; origin/main: the whole branch): the branch reset there, then a deploy reverting them on the targets (--with-children: every subagent worktree holding increments, then this checkout, one deploy)
-nixconvoy land [<worktree> ... | --with-children] [-m <msg>] [--not-yet-applied]   land the work branch on main (--with-children: this checkout and its subagent worktrees as one unit, one main commit with the subs' COMMIT_MSG.md appended; -m: under <msg>, for a branch without COMMIT_MSG.md; --not-yet-applied: targets its increments held back included)
+nixconvoy land [<worktree> ... | --with-children] [-m <msg>] [--not-yet-applied]   land the work branch on main (--with-children: this checkout and its subagent worktrees as one unit, one main commit with the subs' COMMIT_MSG.md appended; -m: under <msg>, for a branch without COMMIT_MSG.md, else the message opens in git's editor on a terminal; --not-yet-applied: targets its increments held back included)
 nixconvoy review [<worktree> | <submodule> | <branch> ... | --with-children] [<diff-arg> ...]   the pending landing: COMMIT_MSG.md, then the diff (--with-children: the checkout's and its subagent worktrees' together)
 
 ```

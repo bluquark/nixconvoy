@@ -15,6 +15,7 @@ from typing import IO, NamedTuple
 
 from . import memo, names, proc, submodule
 from .checkout import (
+    KEPT_EDIT,
     MACHINE_ENV,
     PAST_REFS,
     SESSIONLESS,
@@ -32,6 +33,8 @@ from .checkout import (
     current_branch,
     deploy_running,
     drop_worktree,
+    edit_message,
+    editor,
     ensure_rebased,
     fetch_args,
     git_common,
@@ -118,18 +121,55 @@ def holds(wb: str, tip: str, main: str, not_yet_applied: bool = False) -> None:
     print(f"landing with {them} not yet applied: the next deploy anywhere rolls the landed work out there")
 
 
-def main_message(wb: str, given: str | None) -> str:
-    """The main commit's message (checkout.landing_message over HEAD's
-    MSG_FILE and the one on disk), refused when there is none."""
+def kept_edit() -> Path:
+    """Where a landing's edited message waits for the landing (checkout.KEPT_EDIT)."""
+    return Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path", KEPT_EDIT]))
+
+
+def committed_message(wb: str, given: str | None) -> str:
+    """checkout.landing_message over HEAD's MSG_FILE and the one on disk."""
     on_file = out(["git", "show", f"HEAD:{MSG_FILE}"]) if rev(f"HEAD:{MSG_FILE}") else ""
     try:
         draft = Path(MSG_FILE).read_text(encoding="utf-8")
     except OSError:
         draft = ""
-    msg = landing_message(given, on_file, draft, wb)
-    if not msg:
+    return landing_message(given, on_file, draft, wb)
+
+
+def refuse_no_message(wb: str, given: str | None) -> None:
+    """The refusal main_message ends in, up front when no editor could
+    supply the message - before the checks that cost (holds' evaluation,
+    the merge of --with-children)."""
+    if not committed_message(wb, given) and not kept_edit().exists() and editor() is None:
         die(f"{wb} has no {MSG_FILE}; write one (it becomes the main commit message), or pass -m <msg>")
-    return msg
+
+
+def main_message(wb: str, given: str | None, main: str, appended: str = "",
+                 tips: list[tuple[str, str]] | None = None) -> str:
+    """The main commit's message: committed_message, `appended` (the subs'
+    MSG_FILEs, land --with-children) below it, the whole offered in the
+    editor on a terminal (checkout.edit_message, `tips` as there) unless -m
+    gave it; refused when the checkout's own says nothing and no editor
+    runs.  Called once every refusal is behind, since the user's edit is
+    work: it is kept in the git dir (kept_edit), where a re-run after a
+    failure further on (a push rejected) seeds the editor from it, or lands
+    it off a terminal; the landing removes it.  `main`, origin/main as the
+    landing read it, is checked again after the edit, the landing refused
+    rather than retried on a main that moved meanwhile."""
+    msg = committed_message(wb, given)
+    kept = kept_edit()
+    whole = "\n\n".join(x for x in (msg, appended) if x)
+    if given is None and kept.exists():
+        whole = kept.read_text(encoding="utf-8").strip()
+    if given is None and (edited := edit_message(whole, wb, tips)) is not None:
+        kept.write_text(edited + "\n", encoding="utf-8")
+        git(*fetch_args())
+        if rev("refs/remotes/origin/main") != main:
+            die("origin/main moved while the message was being edited; re-run (the edit is kept)")
+        return edited
+    if not whole:
+        die(f"{wb} has no {MSG_FILE}; write one (it becomes the main commit message), or pass -m <msg>")
+    return whole
 
 
 def land(message: str | None = None, not_yet_applied: bool = False) -> None:
@@ -146,7 +186,7 @@ def land(message: str | None = None, not_yet_applied: bool = False) -> None:
     main = rev("refs/remotes/origin/main")
     if main is None or tree_less_msg("HEAD") == out(["git", "rev-parse", "origin/main^{tree}"]):
         die("no changes vs origin/main to land")
-    msg = main_message(wb, message)
+    refuse_no_message(wb, message)
     # A branch forked from another's tip (a subagent worktree made by hand at
     # its parent's) would land that branch's increments under this message.
     carried = [b for b, tip in listed_tips(allowed_branches()).items()
@@ -162,6 +202,7 @@ def land(message: str | None = None, not_yet_applied: bool = False) -> None:
             f"`nixconvoy open --submodule <input>` recreates it from origin's branch to land it, or "
             f"`nixconvoy close <input> --force` after it drops it")
     holds(wb, "HEAD", main, not_yet_applied)
+    msg = main_message(wb, message, main)
     submodule.land_all(wb, msg)
     tree = tree_less_msg("HEAD")
 
@@ -175,6 +216,7 @@ def land(message: str | None = None, not_yet_applied: bool = False) -> None:
 
     git("reset", "--quiet", commit)  # move wb to main; working tree untouched
     Path(MSG_FILE).unlink(missing_ok=True)  # now main's commit message
+    kept_edit().unlink(missing_ok=True)
     print(f"landed on main: {summarize(commit)}")
     siblings = sibling_checkouts()  # the parent of a subagent worktree included
     finish(wb)
@@ -1172,9 +1214,8 @@ def land_with_children(message: str | None = None, not_yet_applied: bool = False
     main = rev("refs/remotes/origin/main")
     if main is None:
         die("origin/main not found")
+    refuse_no_message(wb, message)
     main_tree = out(["git", "rev-parse", f"{main}^{{tree}}"])
-    msg = main_message(wb, message)
-
     # The participants: each sub on its work branch with work beyond main.
     parts: list[tuple[Path, str]] = []
     locks: list[IO[str]] = []
@@ -1204,11 +1245,12 @@ def land_with_children(message: str | None = None, not_yet_applied: bool = False
             die(f"no subagent worktree under {here.name} holds work to land; `nixconvoy land` "
                 f"lands this checkout alone")
         # Each sub's MSG_FILE, as its branch carries it, appended in turn.
+        sub_msgs = []
         for d, _ in parts:
             if ok(["git", "cat-file", "-e", f"HEAD:{MSG_FILE}"], cwd=str(d)):
                 sub_msg = out(["git", "show", f"HEAD:{MSG_FILE}"], cwd=str(d)).strip()
                 if sub_msg:
-                    msg = f"{msg}\n\n{sub_msg}"
+                    sub_msgs.append(sub_msg)
         own = {wb, *(b for _, b in parts)}
         for d, b in [(here, wb), *parts]:
             carried = [x for x, tip in listed_tips(allowed_branches()).items()
@@ -1265,6 +1307,8 @@ def land_with_children(message: str | None = None, not_yet_applied: bool = False
 
         # Proven to merge before any submodule lands (which cannot be undone).
         clashes(merged_tree())
+        msg = main_message(wb, message, main, "\n\n".join(sub_msgs),
+                           [(here.name, "HEAD"), *((sub_label(d), f"refs/heads/{b}") for d, b in parts)])
         for d, b in [(here, wb), *parts]:
             os.chdir(d)
             submodule.land_all(b, msg)
@@ -1280,6 +1324,7 @@ def land_with_children(message: str | None = None, not_yet_applied: bool = False
             die(f"pushing main failed (moved since fetch?); re-run:\n{p.stderr.strip()}")
         git("branch", "-f", "main", commit, check=False)
         print(f"landed on main: {summarize(commit)}")
+        kept_edit().unlink(missing_ok=True)
         for d, b in [(here, wb), *parts]:
             os.chdir(d)
             git("checkout", "--quiet", "--", MSG_FILE, check=False)  # consumed: the commit's message

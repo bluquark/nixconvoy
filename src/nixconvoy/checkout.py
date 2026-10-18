@@ -521,6 +521,71 @@ def landing_message(given: str | None, on_file: str, draft: str, where: str) -> 
     return fold_subject(given.strip())
 
 
+SCISSORS = "# ------------------------ >8 ------------------------"
+KEPT_EDIT = "NIXCONVOY_LANDMSG"  # in the git dir: a landing's edited message, until it lands
+
+
+def editor() -> str | None:
+    """The command edit_message would run (`git var GIT_EDITOR`): None off a
+    terminal (an agent's shell: `! nixconvoy land` in a Claude Code
+    session) or with the editor set to `:`."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()) or os.environ.get("TERM") == "dumb":
+        return None
+    cmd = run(["git", "var", "GIT_EDITOR"], check=False).stdout.strip()
+    return cmd if cmd and cmd != ":" else None
+
+
+def edit_message(draft: str, wb: str, tips: list[tuple[str, str]] | None = None) -> str | None:
+    """`draft` (the landing's message so far, "" for none) as the user leaves
+    it in git's editor (editor()), on a terminal: a landing run by hand gets
+    to adjust what an agent wrote; None when no editor runs, the draft
+    standing.  Below a scissors line, dropped with everything under it as
+    git's scissors cleanup does (so a `#` heading in the draft survives) -
+    and each note line dropped wherever it is, for a user who deleted the
+    scissors line instead - the increments and changed paths of each branch
+    landing (`tips`: label and rev; this checkout's HEAD when None); a
+    message left empty aborts.  SIGINT and SIGQUIT are caught and ignored
+    here while it runs, as under git, so a Ctrl-C is the editor's alone
+    (a handler, not SIG_IGN, which the editor would inherit)."""
+    cmd = editor()
+    if cmd is None:
+        return None
+    main = "refs/remotes/origin/main"
+    notes = [f"Landing {wb} on main.  Edit the message above; the rest is dropped, and an empty message aborts."]
+    for label, tip in tips or [("", "HEAD")]:
+        of = f" of {label}" if label else ""
+        notes += [f"Increments{of}:",
+                  *(f"  {ln}" for ln in out(["git", "log", "--format=%s", f"{main}..{tip}"]).splitlines()),
+                  f"Changes{of}:",
+                  *(f"  {ln}" for ln in out(["git", "diff", "--name-status", f"{main}...{tip}", "--", ".",
+                                              f":!{MSG_FILE}"]).splitlines())]
+    note_lines = {f"# {n}" for n in notes}
+    tmpdir = tempfile.mkdtemp(prefix=f"{TMP_PREFIX}editmsg.", dir="/tmp")
+    path = Path(tmpdir) / "COMMIT_EDITMSG"  # the name editors style as a commit message
+    handlers = {sig: signal.signal(sig, lambda *_: None) for sig in (signal.SIGINT, signal.SIGQUIT)}
+    try:
+        path.write_text("".join([draft.rstrip("\n"), "\n\n", SCISSORS, "\n", *(f"# {n}\n" for n in notes)]),
+                        encoding="utf-8")
+        p = run(["sh", "-c", f'{cmd} "$@"', cmd, str(path)], capture=False, check=False)
+        if p.returncode != 0:
+            die(f"editor {cmd} exited with {p.returncode}; landing aborted")
+        lines = [ln.rstrip() for ln in path.read_text(encoding="utf-8").splitlines()]
+    finally:
+        for sig, h in handlers.items():
+            signal.signal(sig, h)
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    if SCISSORS in lines:
+        del lines[lines.index(SCISSORS):]
+    lines = [ln for ln in lines if ln not in note_lines]
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+    if not lines:
+        die("empty message; landing aborted")
+    return fold_subject("\n".join(lines))
+
+
 def warn_no_msgfile(wb: str) -> None:
     if rev(f"HEAD:{MSG_FILE}") is None:
         print(f"note: {wb} carries work but no {MSG_FILE} yet - landing needs "
