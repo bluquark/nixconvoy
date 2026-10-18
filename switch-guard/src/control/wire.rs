@@ -2,30 +2,15 @@
 //! the parameters, then one reply per query; the binary answers each with
 //! `{"effects": [...], "next": {...}}`.
 use super::{Effect, Guard, Next, Params, Query, Reply};
+use crate::wire::{field, flag, int, opt_text, text};
 use serde_json::{json, Map, Value};
 
 /// Bumped on any change of the messages below; nixconvoy sends the version
 /// it speaks.
-pub const PROTOCOL: u64 = 1;
-
-fn field<'a>(v: &'a Value, k: &str) -> Result<&'a Value, String> {
-    v.get(k).ok_or_else(|| format!("missing {k} in {v}"))
-}
-
-fn text(v: &Value, k: &str) -> Result<String, String> {
-    field(v, k)?.as_str().map(str::to_string).ok_or_else(|| format!("{k} is not a string"))
-}
-
-fn flag(v: &Value, k: &str) -> Result<bool, String> {
-    field(v, k)?.as_bool().ok_or_else(|| format!("{k} is not a boolean"))
-}
+pub const PROTOCOL: u64 = 2;
 
 pub fn params(line: &str) -> Result<Params, String> {
-    let v: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
-    let protocol = field(&v, "protocol")?.as_u64();
-    if protocol != Some(PROTOCOL) {
-        return Err(format!("nixconvoy-switch speaks protocol {PROTOCOL}, nixconvoy {protocol:?}"));
-    }
+    let v = crate::wire::params(line, "nixconvoy-switch", PROTOCOL)?;
     Ok(Params {
         target: text(&v, "target")?,
         toplevel: text(&v, "toplevel")?,
@@ -38,38 +23,31 @@ pub fn params(line: &str) -> Result<Params, String> {
 }
 
 pub fn reply(line: &str) -> Result<Reply, String> {
-    let v: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
-    let o = v.as_object().ok_or("a reply is an object")?;
-    let int = |k: &str| -> Result<i64, String> { field(&v, k)?.as_i64().ok_or_else(|| format!("{k} is not an integer")) };
-    let opt = |k: &str| -> Result<Option<String>, String> {
-        match field(&v, k)? {
-            Value::Null => Ok(None),
-            Value::String(s) => Ok(Some(s.clone())),
-            _ => Err(format!("{k} is not a string or null")),
-        }
-    };
-    Ok(if let Some(g) = o.get("guard") {
+    let v = crate::wire::reply(line)?;
+    let has = |k: &str| v.get(k).is_some();
+    let opt = |k: &str| opt_text(field(&v, k)?);
+    Ok(if let Some(g) = v.get("guard") {
         Reply::Guard(match g.as_str() {
             Some("locked") => Guard::Locked,
             Some("moved") => Guard::Moved(text(&v, "running")?),
             Some("failed") => Guard::Failed(text(&v, "line")?),
             _ => return Err(format!("bad guard reply {v}")),
         })
-    } else if o.contains_key("to") {
-        Reply::Said { code: int("code")? as i32, to: opt("to")? }
-    } else if o.contains_key("code") {
-        Reply::Code(int("code")? as i32)
-    } else if o.contains_key("text") {
+    } else if has("to") {
+        Reply::Said { code: int(&v, "code")? as i32, to: opt("to")? }
+    } else if has("code") {
+        Reply::Code(int(&v, "code")? as i32)
+    } else if has("text") {
         Reply::Text(text(&v, "text")?)
-    } else if o.contains_key("now") {
-        Reply::Now(int("now")?.max(0) as u64)
-    } else if o.contains_key("running") {
+    } else if has("now") {
+        Reply::Now(int(&v, "now")?.max(0) as u64)
+    } else if has("running") {
         Reply::Running(opt("running")?)
-    } else if o.contains_key("check") {
-        Reply::Check { code: int("check")? as i32, last: opt("last")? }
-    } else if o.contains_key("flag") {
+    } else if has("check") {
+        Reply::Check { code: int(&v, "check")? as i32, last: opt("last")? }
+    } else if has("flag") {
         Reply::Flag(flag(&v, "flag")?)
-    } else if o.contains_key("done") {
+    } else if has("done") {
         Reply::Done
     } else {
         return Err(format!("unknown reply {v}"));
@@ -95,10 +73,7 @@ fn next(n: &Next) -> Value {
                 Query::Guard => "guard",
                 Query::ProbeHelper => "probe_helper",
                 Query::SetProfile => "set_profile",
-                Query::Activate => {
-                    o.insert("action".into(), json!("switch"));
-                    "activate"
-                }
+                Query::Activate => "activate",
                 Query::Deadline => "deadline",
                 Query::Arm => "arm",
                 Query::Helper(args) => {
@@ -129,8 +104,10 @@ fn next(n: &Next) -> Value {
     }
 }
 
-pub fn step(s: &super::Step) -> String {
-    json!({ "effects": s.effects.iter().map(effect).collect::<Vec<_>>(), "next": next(&s.next) }).to_string()
+/// The step's line, and whether it asks a query.
+pub fn step(s: &super::Step) -> (String, bool) {
+    let line = json!({ "effects": s.effects.iter().map(effect).collect::<Vec<_>>(), "next": next(&s.next) }).to_string();
+    (line, matches!(s.next, Next::Ask(_)))
 }
 
 #[cfg(test)]
@@ -140,7 +117,7 @@ mod tests {
     #[test]
     fn round_trip() {
         let p = params(
-            r#"{"protocol":1,"target":"h","toplevel":"/t","expected":"/e","place":"local","quiet":false,"router":true,"fail_verify":false}"#,
+            r#"{"protocol":2,"target":"h","toplevel":"/t","expected":"/e","place":"local","quiet":false,"router":true,"fail_verify":false}"#,
         )
         .unwrap();
         assert!(p.router && p.place == "local");
@@ -150,6 +127,8 @@ mod tests {
         assert_eq!(reply(r#"{"running":null}"#).unwrap(), Reply::Running(None));
         assert_eq!(reply(r#"{"code":0,"to":"/p"}"#).unwrap(), Reply::Said { code: 0, to: Some("/p".into()) });
         let s = super::super::Step { effects: vec![Effect::Armed], next: Next::Ask(Query::Check { timeout_ms: 3000 }) };
-        assert_eq!(step(&s), r#"{"effects":[{"armed":true}],"next":{"ask":"check","timeout_ms":3000}}"#);
+        assert_eq!(step(&s), (r#"{"effects":[{"armed":true}],"next":{"ask":"check","timeout_ms":3000}}"#.to_string(), true));
+        let s = super::super::Step { effects: vec![], next: Next::Ask(Query::Activate) };
+        assert_eq!(step(&s).0, r#"{"effects":[],"next":{"ask":"activate"}}"#);
     }
 }

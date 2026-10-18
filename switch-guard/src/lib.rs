@@ -10,3 +10,4 @@ pub mod plan;
 pub mod proc;
 pub mod record;
 pub mod switch;
+pub mod wire;

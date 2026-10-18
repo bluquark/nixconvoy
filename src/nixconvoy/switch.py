@@ -161,8 +161,7 @@ def switch(target: str, expected: str, toplevel: str, nixconvoy_switch: str,
             return {"code": stream(targets.target_cmd(target, ["nix-env", "-p", targets.SYSTEM_PROFILE,
                                                               "--set", toplevel], sudo=True), held_as=held)}
         if kind == "activate":
-            action = str(ask.get("action"))
-            return {"code": detached([f"{toplevel}/bin/switch-to-configuration", action],
+            return {"code": detached([f"{toplevel}/bin/switch-to-configuration", "switch"],
                                      unit="nixconvoy-switch-to-configuration")}
         if kind == "deadline":
             return {"text": out(targets.target_cmd(target, [helper, "deadline"]))}

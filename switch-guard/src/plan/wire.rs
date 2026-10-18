@@ -3,45 +3,12 @@
 //! then one reply per query; the binary answers each with
 //! `{"effects": [...], "next": {"ask": ...} | {"done": ...} | {"die": ...}}`.
 use super::{drift, prune, rebase, union, Effect, Next, Query, Replay, Reply, Step};
+use crate::wire::{field, flag, int, map_of, opt_text, string_lists, string_map, strings, text};
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
 
 /// Bumped on any change of the messages below; nixconvoy sends the version
 /// it speaks.
 pub const PROTOCOL: u64 = 10;
-
-fn field<'a>(v: &'a Value, k: &str) -> Result<&'a Value, String> {
-    v.get(k).ok_or_else(|| format!("missing {k} in {v}"))
-}
-
-fn text(v: &Value, k: &str) -> Result<String, String> {
-    field(v, k)?.as_str().map(str::to_string).ok_or_else(|| format!("{k} is not a string"))
-}
-
-fn opt_text(v: &Value) -> Result<Option<String>, String> {
-    match v {
-        Value::Null => Ok(None),
-        Value::String(s) => Ok(Some(s.clone())),
-        _ => Err(format!("{v} is not a string or null")),
-    }
-}
-
-fn flag(v: &Value, k: &str) -> Result<bool, String> {
-    field(v, k)?.as_bool().ok_or_else(|| format!("{k} is not a boolean"))
-}
-
-fn strings(v: &Value, k: &str) -> Result<Vec<String>, String> {
-    field(v, k)?
-        .as_array()
-        .ok_or_else(|| format!("{k} is not a list"))?
-        .iter()
-        .map(|x| x.as_str().map(str::to_string).ok_or_else(|| format!("{k} holds a non-string")))
-        .collect()
-}
-
-fn object<'a>(v: &'a Value, k: &str) -> Result<&'a Map<String, Value>, String> {
-    field(v, k)?.as_object().ok_or_else(|| format!("{k} is not an object"))
-}
 
 fn pairs(v: &Value) -> Result<Vec<(String, String)>, String> {
     v.as_array()
@@ -57,41 +24,14 @@ fn pairs(v: &Value) -> Result<Vec<(String, String)>, String> {
 fn drift_params(v: &Value) -> Result<drift::Params, String> {
     let me = strings(v, "me")?;
     let [machine, checkout] = me.as_slice() else { return Err("me is not [machine, checkout]".into()) };
-    let mut running = BTreeMap::new();
-    for (h, r) in object(v, "running")? {
-        running.insert(h.clone(), opt_text(r)?);
-    }
-    let mut built = BTreeMap::new();
-    for (h, t) in object(v, "built")? {
-        built.insert(h.clone(), t.as_str().ok_or("built holds a non-string")?.to_string());
-    }
-    let mut lineages = BTreeMap::new();
-    for (h, l) in object(v, "lineages")? {
-        lineages.insert(h.clone(), l.as_str().ok_or("lineages holds a non-string")?.to_string());
-    }
-    let mut tips = BTreeMap::new();
-    for (b, t) in object(v, "tips")? {
-        tips.insert(b.clone(), t.as_str().ok_or("tips holds a non-string")?.to_string());
-    }
-    let mut in_flight = BTreeMap::new();
-    for (b, a) in object(v, "in_flight")? {
-        in_flight.insert(b.clone(), a.as_str().ok_or("in_flight holds a non-string")?.to_string());
-    }
-    let mut held = BTreeMap::new();
-    for (h, by) in object(v, "held")? {
-        let by = by.as_array().ok_or("held holds a non-list")?;
-        let by: Result<Vec<String>, String> =
-            by.iter().map(|b| b.as_str().map(str::to_string).ok_or_else(|| "held holds a non-string".to_string())).collect();
-        held.insert(h.clone(), by?);
-    }
     Ok(drift::Params {
         cx: drift::Context {
             me: (machine.clone(), checkout.clone()),
             listed: strings(v, "listed")?.into_iter().collect(),
-            tips,
-            in_flight,
+            tips: string_map(v, "tips")?,
+            in_flight: string_map(v, "in_flight")?,
             dead: strings(v, "dead")?.into_iter().collect(),
-            tz_offset: field(v, "tz_offset")?.as_i64().ok_or("tz_offset is not an integer")?,
+            tz_offset: int(v, "tz_offset")?,
         },
         union: text(v, "union")?,
         router: text(v, "router")?,
@@ -101,10 +41,10 @@ fn drift_params(v: &Value) -> Result<drift::Params, String> {
         named: flag(v, "named")?,
         work_branch: flag(v, "work_branch")?,
         reached: strings(v, "reached")?.into_iter().collect(),
-        running,
-        built,
-        held,
-        lineages,
+        running: map_of(v, "running", opt_text)?,
+        built: string_map(v, "built")?,
+        held: string_lists(v, "held")?,
+        lineages: string_map(v, "lineages")?,
     })
 }
 
@@ -135,19 +75,19 @@ fn union_params(v: &Value) -> Result<union::Params, String> {
 }
 
 pub fn reply(line: &str) -> Result<Reply, String> {
-    let v: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
-    let o = v.as_object().ok_or("a reply is an object")?;
-    Ok(if o.contains_key("flag") {
+    let v = crate::wire::reply(line)?;
+    let has = |k: &str| v.get(k).is_some();
+    Ok(if has("flag") {
         Reply::Flag(flag(&v, "flag")?)
-    } else if let Some(t) = o.get("text") {
+    } else if let Some(t) = v.get("text") {
         Reply::Text(opt_text(t)?)
-    } else if o.contains_key("ran") {
+    } else if has("ran") {
         Reply::Ran { ok: flag(&v, "ran")?, detail: text(&v, "detail")? }
-    } else if let Some(r) = o.get("refs") {
+    } else if let Some(r) = v.get("refs") {
         Reply::Refs(pairs(r)?)
-    } else if o.contains_key("names") {
+    } else if has("names") {
         Reply::Names(strings(&v, "names")?)
-    } else if o.contains_key("merge") {
+    } else if has("merge") {
         Reply::Merge { ok: flag(&v, "merge")?, files: strings(&v, "files")?, detail: text(&v, "detail")? }
     } else {
         return Err(format!("unknown reply {v}"));
@@ -253,11 +193,7 @@ pub enum Core {
 }
 
 pub fn start(line: &str) -> Result<Core, String> {
-    let v: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
-    let protocol = field(&v, "protocol")?.as_u64();
-    if protocol != Some(PROTOCOL) {
-        return Err(format!("nixconvoy-plan speaks protocol {PROTOCOL}, nixconvoy {protocol:?}"));
-    }
+    let v = crate::wire::params(line, "nixconvoy-plan", PROTOCOL)?;
     Ok(match text(&v, "core")?.as_str() {
         "drift" => Core::Drift(Box::new(Replay::new(drift_params(&v)?, drift::program))),
         "rebase" => Core::Rebase(Replay::new(rebase_params(&v)?, rebase::program)),
