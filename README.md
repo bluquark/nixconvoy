@@ -205,6 +205,7 @@ tags = ["portable"]          # `@portable` on the command line names every targe
 
 [submodules.mytool]          # a flake input developed in place, a git submodule (see Submodules)
 repo = "~/projects/mytool"   # its repository's checkout here; its origin is the .gitmodules url
+pin_file = "pins/mytool.json"  # optional: the pinned rev and its committer date, kept beside the gitlink
 ```
 
 ### The NixOS module
@@ -403,6 +404,17 @@ commit.  From a checkout on a work branch:
   removal leaves behind stays under `refs/nixconvoy/past/<branch>/<sha>`
   while a pushed work branch or deploy record pins it (nix fetches a rev
   only while a ref holds it); a landing deletes the rest.
+- **`pin_file` keeps the pin readable.**  A flake cannot see a
+  submodule's gitlink, nor its history: the tree it gets is the
+  submodule's files.  With `[submodules.<input>] pin_file = "<path>"`,
+  every pin nixconvoy sets also writes that file, staged beside the
+  gitlink, as JSON: `{"committed": <its committer date, seconds since the
+  epoch>, "rev": "<sha>"}` - a version number that rises across rebases,
+  union merges (dated a second past their parents') and squash landings,
+  or the rev itself, for the flake to read
+  (`builtins.fromJSON (builtins.readFile ./<path>)`).  A union or rebase
+  that resolves a gitlink rewrites the file with it; a deploy rewrites a
+  file a hand-moved gitlink left behind (a main checkout only says so).
 - **Never work in the repository's own checkout.**  `status` flags
   edits there, and the `nixconvoy-submodule` marker nixconvoy leaves in
   its git dir lets a global pre-commit hook refuse an agent's commit on

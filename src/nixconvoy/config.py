@@ -29,6 +29,16 @@ class TargetConfig:
     tags: tuple[str, ...] = ()
 
 
+
+@dataclass(frozen=True)
+class SubmoduleConfig:
+    # The repository's checkout on this machine, whose origin nix fetches.
+    repo: str
+    # A repo-relative file nixconvoy keeps beside the gitlink, staged with
+    # every pin it sets: the pinned rev and its committer date as JSON, for
+    # a flake that wants the commit's identity or age (a version number).
+    pin_file: str = ""
+
 @dataclass(frozen=True)
 class Config:
     # The directory holding flake.nix, relative to the repo root.
@@ -64,9 +74,8 @@ class Config:
     # nix.conf's business.
     skip_substituters: tuple[str, ...] = ()
     targets: dict[str, TargetConfig] = field(default_factory=dict)
-    # The flake inputs developed in place (submodule.py): input name -> the
-    # repository's checkout on this machine, whose origin nix fetches.
-    submodules: dict[str, str] = field(default_factory=dict)
+    # The flake inputs developed in place (submodule.py), by input name.
+    submodules: dict[str, SubmoduleConfig] = field(default_factory=dict)
 
     def target(self, name: str) -> TargetConfig:
         return self.targets.get(name, TargetConfig())
@@ -206,16 +215,19 @@ def parse(text: str) -> Config:
                 raise ConfigError(f"{CONFIG_FILE}: unknown key targets.{name}.{k}")
         targets[name] = TargetConfig(ssh_address=_str(t, "ssh_address", f"targets.{name}"),
                                      tags=_strs(t, "tags", f"targets.{name}"))
-    submodules: dict[str, str] = {}
+    submodules: dict[str, SubmoduleConfig] = {}
     for name, a in _table(doc.get("submodules", {}), "submodules").items():
         t = _table(a, f"submodules.{name}")
         for k in t:
-            if k != "repo":
+            if k not in ("repo", "pin_file"):
                 raise ConfigError(f"{CONFIG_FILE}: unknown key submodules.{name}.{k}")
         repo = _str(t, "repo", f"submodules.{name}")
         if not repo:
             raise ConfigError(f"{CONFIG_FILE}: submodules.{name}.repo is required")
-        submodules[name] = repo
+        pin_file = _str(t, "pin_file", f"submodules.{name}")
+        if pin_file.startswith("/") or ".." in pin_file.split("/"):
+            raise ConfigError(f"{CONFIG_FILE}: submodules.{name}.pin_file must be a path inside the repository")
+        submodules[name] = SubmoduleConfig(repo=repo, pin_file=pin_file)
     return Config(
         flake_dir=flake_dir,
         targets_dir=targets_dir,

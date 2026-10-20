@@ -69,7 +69,7 @@ class UnionQueries(GitQueries):
         if kind == "drop_file":
             return ran(git("rm", "--quiet", "-f", arg("file"), cwd=wt, check=False))
         if kind == "solve":
-            if submodule.at_path(Path(wt), arg("file")) is not None:
+            if submodule.owner(Path(wt), arg("file")) is not None:
                 return {"flag": submodule.solve_union(Path(wt), arg("file"))}
             return {"flag": solve_with_mergiraf(wt, arg("file"))}
         if kind == "add":

@@ -1791,6 +1791,33 @@ def submodule_cases(d: Path) -> None:
         assert submodule.sync(wb, None) == []
         assert sh(ax, "rev-parse", "HEAD") == new_main
         submodule.remove_all(co)
+        # pin_file: every pin also writes the rev and its committer date,
+        # staged; a union merge is dated a second past its parents' newest.
+        config.set_cfg(config.parse(toml(f'[submodules.dep]\nrepo = "{dep_repo}"\npin_file = "nixos/submodules/dep.json"\n',
+                                         flake_dir="nixos", targets_dir="nixos/hosts")))
+        s = submodule.sub_of("dep", submodule.entries(co)["dep"], co)
+        pin_json = co / "nixos/submodules/dep.json"
+        date = lambda rev: int(sh(dep_repo, "show", "-s", "--format=%ct", rev))
+        submodule.set_pin(s, new_main, co)
+        assert json.loads(pin_json.read_text()) == {"committed": date(new_main), "rev": new_main}
+        assert "nixos/submodules/dep.json" in sh(co, "diff", "--cached", "--name-only").split()
+        sh(dep_seed, "checkout", "--quiet", dep_main)
+        put(dep_seed, "side.txt", "s\n", "side")  # diverging from new_main
+        side = sh(dep_seed, "rev-parse", "HEAD")
+        sh(dep_seed, "push", "--quiet", "origin", f"{side}:refs/heads/side")
+        sh(dep_repo, "fetch", "--quiet", "origin")
+        merge = submodule.merge_commit("dep", dep_repo, new_main, side, "union")
+        assert merge is not None and merge not in (new_main, side)
+        assert date(merge) == max(date(new_main), date(side)) + 1
+        assert submodule.merge_commit("dep", dep_repo, new_main, side, "union") == merge  # deterministic
+        submodule.set_pin(s, merge, co)
+        assert json.loads(pin_json.read_text()) == {"committed": date(merge), "rev": merge}
+        # A stale file (a hand-moved gitlink) is rewritten by a deploy on a
+        # work branch, only said in a main checkout.
+        pin_json.write_text('{"committed": 1, "rev": "0"}\n')
+        assert warned(lambda: submodule.heal_pin_files(co, None, False)) and json.loads(pin_json.read_text())["rev"] == "0"
+        assert submodule.heal_pin_files(co, wb, False) == [f"submodule dep: nixos/submodules/dep.json rewritten for {merge[:12]}"]
+        assert json.loads(pin_json.read_text())["rev"] == merge
     say("submodules: ok")
 
 

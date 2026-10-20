@@ -306,7 +306,9 @@ copy of it when there is one, else new off the repository's default
 branch.  Work there as in the checkout: stage what is ready, and each
 deploy commits the worktree's staged state onto that branch with the -m
 message, pushes it (before the build, which fetches it) and stages the
-gitlink on the pushed rev - the increment then carries the submodule as
+gitlink on the pushed rev (and, with submodules.<input>.pin_file set,
+that file beside it naming the rev and its committer date, for the flake
+to read) - the increment then carries the submodule as
 a tree change.  Two work branches that moved the same submodule meet in
 the union as a gitlink conflict, merged in the submodule repository and
 pinned on refs/nixconvoy/union/<input>/<sha> of its origin; once one

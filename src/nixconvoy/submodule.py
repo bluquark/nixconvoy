@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import os
 import re
 import shutil
@@ -82,6 +83,7 @@ class Sub(NamedTuple):
     repo: Path  # the repository's checkout here; its origin is what nix fetches
     path: str  # the submodule's path in the tree (.gitmodules)
     dir: Path  # <checkout>/<path>
+    pin_file: str | None = None  # the repo-relative pin file (nixconvoy.toml's pin_file), if any
 
 
 class Entry(NamedTuple):
@@ -90,7 +92,15 @@ class Entry(NamedTuple):
 
 
 def configured() -> dict[str, Path]:
-    return {n: Path(r).expanduser() for n, r in cfg().submodules.items()}
+    return {n: Path(c.repo).expanduser() for n, c in cfg().submodules.items()}
+
+
+def pin_files() -> dict[str, str]:
+    return {n: c.pin_file for n, c in cfg().submodules.items() if c.pin_file}
+
+
+def sub_of(name: str, entry: Entry, top: Path) -> Sub:
+    return Sub(name, configured()[name], entry.path, top / entry.path, pin_files().get(name))
 
 
 def entries(top: Path) -> dict[str, Entry]:
@@ -110,16 +120,22 @@ def entries(top: Path) -> dict[str, Entry]:
 
 def present(top: Path) -> list[Sub]:
     """The configured submodules with a worktree planted under `top`."""
-    repos = configured()
-    return [Sub(n, repos[n], e.path, top / e.path) for n, e in entries(top).items()
-            if (top / e.path / ".git").exists()]
+    return [sub_of(n, e, top) for n, e in entries(top).items() if (top / e.path / ".git").exists()]
 
 
 def at_path(top: Path, path: str) -> Sub | None:
     """The configured submodule at `path` in the tree under `top`."""
     for n, e in entries(top).items():
         if e.path == path:
-            return Sub(n, configured()[n], e.path, top / e.path)
+            return sub_of(n, e, top)
+    return None
+
+
+def owner(top: Path, path: str) -> Sub | None:
+    """The configured submodule `path` belongs to: its gitlink, or its pin file."""
+    for n, e in entries(top).items():
+        if path in (e.path, pin_files().get(n)):
+            return sub_of(n, e, top)
     return None
 
 
@@ -195,8 +211,64 @@ def pin_at(commit: str, path: str, cwd: Path) -> str | None:
 
 
 def set_pin(sub: Sub, sha: str, top: Path) -> None:
-    """The index of `top` pinning the submodule on `sha`, staged."""
+    """The index of `top` pinning the submodule on `sha`, staged - with its
+    pin file, when one is configured: the rev and its date (commit_time)
+    as JSON, written and staged beside the gitlink."""
     git("update-index", "--add", "--cacheinfo", f"{GITLINK},{sha},{sub.path}", cwd=str(top))
+    if sub.pin_file:
+        f = top / sub.pin_file
+        f.parent.mkdir(parents=True, exist_ok=True)
+        date = commit_time(sub, sha, entries(top)[sub.name].url)
+        f.write_text(json.dumps({"committed": date, "rev": sha}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        git("add", "--", sub.pin_file, cwd=str(top))
+
+
+def pin_file_rev(sub: Sub, top: Path) -> str | None:
+    """The rev the submodule's pin file under `top` names, if it is one."""
+    assert sub.pin_file
+    try:
+        d = json.loads((top / sub.pin_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    rev = d.get("rev") if isinstance(d, dict) else None
+    return rev if isinstance(rev, str) else None
+
+
+def commit_time(sub: Sub, sha: str, url: str) -> int:
+    """The committer date of `sha` (seconds since the epoch; a union
+    merge's is a second past its parents', merge_commit), from the
+    repository here, else the mirror of `url` the unions merge in (store),
+    fetching once."""
+    repo = store(sub.name, url)
+    for fetch in (False, True):
+        if fetch and not fetch_once(sub.name, repo):
+            break
+        p = run(["git", "show", "-s", "--format=%ct", f"{sha}^{{commit}}", "--"], cwd=str(repo), check=False)
+        if p.returncode == 0 and p.stdout.strip().isdigit():
+            return int(p.stdout.strip())
+    return die(f"submodule {sub.name}: {sha[:12]} is not in {repo}, so its pin file cannot name the commit's date")
+
+
+def heal_pin_files(top: Path, wb: str | None, dry: bool) -> list[str]:
+    """Each configured pin file under `top` that does not name the rev the
+    index pins its submodule on (the gitlink moved by hand) rewritten and
+    staged, one line each; only said, with no work branch to carry it or
+    for a dry activation."""
+    told = []
+    for n, e in entries(top).items():
+        if n not in pin_files():
+            continue
+        sub = sub_of(n, e, top)
+        cur = pin(sub, top)
+        if cur is None or pin_file_rev(sub, top) == cur:
+            continue
+        if wb is None or dry:
+            print(f"warning: {sub.pin_file} does not name {cur[:12]}, which the tree pins submodule {n} on: "
+                  f"a deploy from a checkout on a work branch rewrites it", file=sys.stderr)
+            continue
+        set_pin(sub, cur, top)
+        told.append(f"submodule {n}: {sub.pin_file} rewritten for {cur[:12]}")
+    return told
 
 
 def gitlink_stages(wt: Path, path: str) -> dict[int, str]:
@@ -316,11 +388,16 @@ def repo_lock(repo: Path) -> Iterator[None]:
 def merge_commit(name: str, repo: Path, ours: str, theirs: str, subject: str) -> str | None:
     """`theirs` merged into `ours` in a throwaway worktree of `repo`
     (mergiraf on the conflicts, MSG_FILE dropped) as a deterministic
-    commit: its sha, or None when they conflict (said on stderr)."""
+    commit, dated a second past the newer of the two (so a pin file's
+    date keeps rising through nested unions): its sha, or None when they
+    conflict (said on stderr)."""
+    newest = max(int(out(["git", "show", "-s", "--format=%ct", f"{sha}^{{commit}}", "--"], cwd=str(repo)))
+                 for sha in (ours, theirs))
+    env = {**MACHINE_ENV, "GIT_AUTHOR_DATE": f"{newest + 1} +0000", "GIT_COMMITTER_DATE": f"{newest + 1} +0000"}
     wt = tempfile.mkdtemp(prefix=f"{TMP_PREFIX}submodule-merge.", dir="/tmp")
     try:
         git("worktree", "add", "--detach", "--quiet", wt, ours, cwd=str(repo))
-        p = git("merge", "--quiet", "--no-edit", "-m", subject, theirs, cwd=wt, env=MACHINE_ENV, check=False)
+        p = git("merge", "--quiet", "--no-edit", "-m", subject, theirs, cwd=wt, env=env, check=False)
         if p.returncode != 0:
             for f in out(["git", "diff", "--name-only", "--diff-filter=U"], cwd=wt).splitlines():
                 if f == MSG_FILE:
@@ -330,12 +407,16 @@ def merge_commit(name: str, repo: Path, ours: str, theirs: str, subject: str) ->
                 else:
                     print(f"note: submodule {name}: {ours[:12]} and {theirs[:12]} conflict in {f}", file=sys.stderr)
                     return None
-            git("commit", "--quiet", "--no-edit", "--no-verify", cwd=wt, env=MACHINE_ENV)
+            git("commit", "--quiet", "--no-edit", "--no-verify", cwd=wt, env=env)
         return out(["git", "rev-parse", "HEAD"], cwd=wt)
     finally:
         with proc.finishing():
             git("worktree", "remove", "--force", wt, cwd=str(repo), check=False)
         shutil.rmtree(wt, ignore_errors=True)
+
+
+def mirror_dir(name: str) -> Path:
+    return proc.xdg_dir("XDG_CACHE_HOME", ".cache") / "nixconvoy" / "submodules" / f"{name}.git"
 
 
 def store(name: str, url: str) -> Path:
@@ -345,7 +426,7 @@ def store(name: str, url: str) -> Path:
     repo = configured().get(name)
     if repo is not None and (repo / ".git").exists():
         return repo
-    cache = proc.xdg_dir("XDG_CACHE_HOME", ".cache") / "nixconvoy" / "submodules" / f"{name}.git"
+    cache = mirror_dir(name)
     if not cache.is_dir():
         cache.parent.mkdir(parents=True, exist_ok=True)
         p = run(["git", "clone", "--quiet", "--bare", url, str(cache)], check=False, timeout=600)
@@ -389,10 +470,18 @@ def solve_union(wt: Path, path: str) -> bool:
     """A deploy's union: the gitlink `path` conflicted in the union
     worktree `wt` (another branch pinned the submodule too) pinned on the
     union of the two revs (union_rev), staged.  Whether it resolved."""
-    sub = at_path(wt, path)
+    sub = owner(wt, path)
     if sub is None:
         return False
-    stages = gitlink_stages(wt, path)
+    stages = gitlink_stages(wt, sub.path)
+    if not stages:
+        # The pin file alone conflicted, or was resolved with its gitlink
+        # already: rewritten from the gitlink.
+        cur = pin(sub, wt)
+        if cur is None:
+            return False
+        set_pin(sub, cur, wt)
+        return True
     if 2 not in stages or 3 not in stages:
         return False
     sha = union_rev(sub, entries(wt)[sub.name].url, stages[2], stages[3])
@@ -416,7 +505,7 @@ def solve_rebase(wt: Path, checkout: Path, upstream: str) -> str | None:
     failure text - git merges no gitlink itself (the submodule's commits
     are not in this repository), so that is the one way through."""
     files = out(["git", "diff", "--name-only", "--diff-filter=U"], cwd=str(wt)).splitlines()
-    subs = {f: at_path(wt, f) for f in files}
+    subs = {f: owner(wt, f) for f in files}
     if not subs or any(s is None for s in subs.values()):
         return ""
     # HEAD is detached mid-rebase: the branch is in the rebase's state.
@@ -427,11 +516,21 @@ def solve_rebase(wt: Path, checkout: Path, upstream: str) -> str | None:
         head_name = ""
     wb = head_name.removeprefix("refs/heads/") or branch_at(checkout) or ""
     upstream = upstream.removeprefix("refs/remotes/")
-    for f, sub in subs.items():
+    done: set[str] = set()
+    for sub in subs.values():
         assert sub is not None
-        stages = gitlink_stages(wt, f)
+        if sub.name in done:
+            continue
+        done.add(sub.name)
+        stages = gitlink_stages(wt, sub.path)
         why = (f"{upstream} and {wb} both moved submodule {sub.name}'s pin (a landing there), which git "
                f"cannot merge itself: nixconvoy rebases the submodule's branch onto the landed one instead, but ")
+        if not stages:  # the pin file alone: rewritten from the gitlink
+            cur = pin(sub, wt)
+            if cur is None:
+                return f"{sub.pin_file} conflicts with no gitlink to rewrite it from: resolve the rebase by hand"
+            set_pin(sub, cur, wt)
+            continue
         if 3 not in stages:  # mine (stage 3) is the replayed commit's pin
             return why + f"one side deleted the pin: resolve the rebase by hand (`git rebase {upstream}` there)"
         pending = PENDING.get((sub.name, wb))
@@ -767,9 +866,10 @@ def sync(wb: str | None, msg: str | None, *, dry: bool = False) -> list[str]:
     `dry` (a dry activation) commits and pushes nothing, so a change it
     cannot carry is refused instead."""
     top = Path.cwd()
+    told = heal_pin_files(top, wb, dry)
     found = present(top)
     if not found:
-        return []
+        return told
     if wb is None:
         die("a submodule worktree in the main checkout, which has no work branch to carry it: "
             "remove it, or work in a checkout on a work branch")
@@ -782,7 +882,6 @@ def sync(wb: str | None, msg: str | None, *, dry: bool = False) -> list[str]:
     if not dry:  # a dry activation rebases, pushes and pins nothing
         for problem in catch_up(top, wb):
             die(f"{problem}; {NOTHING_DONE}")
-    told = []
     for sub in found:
         mark(sub.repo)
         if out(["git", "diff", "--name-only"], cwd=str(sub.dir)):
@@ -1058,9 +1157,8 @@ def orphaned(top: Path) -> list[str]:
     default branch (a work branch's) while no worktree of theirs is under
     `top`: a landing must not take that to main."""
     here = {s.name for s in present(top)}
-    repos = configured()
     return [name for name, e in entries(top).items() if name not in here
-            and off_default(Sub(name, repos[name], e.path, top / e.path), top)]
+            and off_default(sub_of(name, e, top), top)]
 
 
 def own(top: Path) -> bool:
