@@ -122,10 +122,12 @@ def memo_prune(d: Path) -> None:
 
 
 # A Nix path literal inside a .nix file: ./x, ../files/x.py, ../lib (a
-# directory).  The lookbehind keeps "foo/../bar" fragments inside strings from
-# matching; a stray shell "../" in a string widens the key, one climbing to
-# the repository root to the whole tree (said on stderr, naming the file).
-PATH_LITERAL = re.compile(r"(?<![\w/.\-])(\.\.?/[\w.+\-/]*)")
+# directory).  The lookbehind keeps "foo/../bar" fragments inside strings
+# and a relative input's "path:./x" url (path_inputs decides who reads
+# that one) from matching; a stray shell "../" in a string widens the key,
+# one climbing to the repository root to the whole tree (said on stderr,
+# naming the file).
+PATH_LITERAL = re.compile(r"(?<![\w/.\-:])(\.\.?/[\w.+\-/]*)")
 WORD = re.compile(r"[A-Za-z][\w\-]*")
 # flake.nix's outputs argument list and mkHost's specialArgs literal name
 # every input; what remains of flake.nix names the inputs it uses itself.
