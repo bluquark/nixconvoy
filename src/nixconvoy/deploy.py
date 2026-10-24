@@ -116,7 +116,7 @@ def commit_unreached(wb: str, msg: str, snap: str) -> None:
         if err:
             die(f"{err}; {NOTHING_DONE}")
     PERF.mark("commit-push")
-    commit_deployed(wb, snap, f"{msg}\n\nReaches: none\nApplied: none")
+    commit_deployed(wb, snap, f"{msg}\n\nReaches: none\nDeployed: none")
     push_work_branch(wb)
     print(f"reaches no target: committed onto {wb} and pushed; nothing built or switched (the probes' results dropped)")
 
@@ -457,7 +457,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         # switch: the lineage the targets get names the commit origin will
         # hold, and the records reach origin before anything runs them.
         # The commit's trailers: Reaches, the targets the increment reaches
-        # among those deployable from here; Applied, the probed targets
+        # among those deployable from here; Deployed, the probed targets
         # running the branch's tip once this deploy is over (switched now,
         # or up to date with the union already, a non-candidate too: every
         # reachable target was evaluated) - a target in the first and not
@@ -472,7 +472,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             reaches = sorted(memo.reached_between(wt, union, all_targets,
                                                   "HEAD", snap))
             full = (f"{msg}\n\nReaches: {fmt(reaches) or 'none'}"
-                    f"\nApplied: {fmt(deployed) or 'none'}")
+                    f"\nDeployed: {fmt(deployed) or 'none'}")
             committed = deployed_commit(snap, full)
             subject = (msg or "").partition("\n")[0] or subject
         elif wb is not None and not dry and current_branch() == wb:
@@ -482,7 +482,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             ends = sorted(held_targets("refs/remotes/origin/main..HEAD") & set(deployed))
             if ends:
                 subject = f"deployed to {fmt(ends)}, held back until now"
-                committed = deployed_commit("HEAD", f"{subject}\n\nReaches: none\nApplied: {fmt(deployed)}")
+                committed = deployed_commit("HEAD", f"{subject}\n\nReaches: none\nDeployed: {fmt(deployed)}")
         doc = lineage_record(union, branches, committed, ann.sha if ann else "", ann.key if ann else "")
         records, lineages = {}, {}
         if not dry:

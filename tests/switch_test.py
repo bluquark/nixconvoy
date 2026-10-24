@@ -10,7 +10,7 @@ against $NIXCONVOY_GUARD_DIR's build of this tree's switch-guard:
   gate, the lineage records and the drift classification other deploys read
   from them, and the real on-target switch guard;
 - on scratch git repos: which targets a change reaches, nixconvoy-plan's
-  rebase and union cores, pull, close, prune and unapply, the deploy's
+  rebase and union cores, pull, close, prune and undeploy, the deploy's
   announcements and records, submodules, open/review/land and the Claude
   Code hooks, and init.
 
@@ -461,7 +461,7 @@ def gate_cases() -> None:
 def protected_cases() -> None:
     """The protected-units gate: a group's units touched refuse the switch
     with its why and the exact --allow command (one for every refused target,
-    an apply for an unapply, whose reset is over); --allow <name> admits them; the
+    a deploy for an undeploy, whose reset is over); --allow <name> admits them; the
     memo entry round-trips."""
     net = memo.Protection("risky-network-reload-or-restart",
                           ("systemd-networkd.service", "nftables.service"),
@@ -483,18 +483,18 @@ def protected_cases() -> None:
         return targets.unit_changes(report), None
 
     with mock.patch.object(targets, "dry_activate", dry_activate), \
-            mock.patch.object(sys, "argv", ["nixconvoy", "apply", "-m", "a change", "router"]):
+            mock.patch.object(sys, "argv", ["nixconvoy", "deploy", "-m", "a change", "router"]):
         gate = targets.protected_units_gate
         r = gate("router", top.out, top.protected, frozenset())
         assert isinstance(r, targets.Refusal), r
         assert r.target == "router" and r.names == ("database", net.name), r
         assert "reload postgresql.service (database: " in r.hits and "restart nftables.service (" in r.hits, r
-        both = "nixconvoy apply --allow database --allow risky-network-reload-or-restart -m 'a change' router"
+        both = "nixconvoy deploy --allow database --allow risky-network-reload-or-restart -m 'a change' router"
         assert targets.refusals_message([r]).startswith(f"{r}\n") and \
             targets.refusals_message([r]).endswith(f"\n  {both}"), targets.refusals_message([r])
         r = gate("router", top.out, top.protected, frozenset({"database"}))
         assert isinstance(r, targets.Refusal) and targets.refusals_message([r]).endswith(
-            "\n  nixconvoy apply --allow risky-network-reload-or-restart -m 'a change' router"), r
+            "\n  nixconvoy deploy --allow risky-network-reload-or-restart -m 'a change' router"), r
         assert gate("router", top.out, top.protected, frozenset({"database", net.name})) is None
         assert gate("router", top.out, (), frozenset()) is None
         r2 = gate("db", top.out, (db,), frozenset())
@@ -502,8 +502,8 @@ def protected_cases() -> None:
         m = targets.refusals_message([r, "dry-activating the new system on x failed", r2])
         assert m.startswith(f"{r}\ndry-activating") and f"on x failed\n{r2}\n" in m and m.endswith(f"\n  {both}"), m
         assert "re-run" not in targets.refusals_message(["dry-activating the new system on x failed"])
-        sys.argv = ["nixconvoy", "unapply", "task"]
-        assert targets.refusals_message([r2]).endswith("\n  nixconvoy apply --allow database")
+        sys.argv = ["nixconvoy", "undeploy", "task"]
+        assert targets.refusals_message([r2]).endswith("\n  nixconvoy deploy --allow database")
     say("protected: ok")
 
 
@@ -565,7 +565,7 @@ def lineage_cases() -> None:
     # Held back by another branch: refused when reached, else left alone.
     line, died = report("", held={"side1": ["work/chikuwa/1"]})
     assert line.startswith("side1: refused: held back by work/chikuwa/1"), line
-    assert "side1 is held back" in died and "nixconvoy apply side1" in died, died
+    assert "side1 is held back" in died and "nixconvoy deploy side1" in died, died
     line, died = report("", held={"side1": ["work/chikuwa/1"]}, reached=False)
     assert line.startswith("side1: left alone: held back by") and not died, (line, died)
 
@@ -887,7 +887,7 @@ def reach_cases(d: Path) -> None:
 def git_cases(d: Path) -> None:
     """The rebase and union cores (switch-guard/src/plan/) driven through
     nixconvoy's git queries in scratch clones of a scratch origin; pull,
-    close, prune and unapply on them."""
+    close, prune and undeploy on them."""
     scratch_env()
 
     def state(where: Path) -> tuple[str, ...]:
@@ -1120,7 +1120,7 @@ def git_cases(d: Path) -> None:
         # Claude Code's lock names the spawning session's process and its start
         # time: a named close keeps the worktree while that lives, lifted
         # once it is gone (or its pid reused by a process started at another
-        # time); unapply, which removes nothing, does not mind.
+        # time); undeploy, which removes nothing, does not mind.
         me = os.getpid()
         start = Path(f"/proc/{me}/stat").read_text().rpartition(")")[2].split()[19]
         sh(co, "worktree", "lock", "--reason", f"claude agent review (pid {me} start {start})", str(rv))
@@ -1136,16 +1136,16 @@ def git_cases(d: Path) -> None:
             sh(co, "worktree", "unlock", str(rv))
         sh(co, "worktree", "lock", "--reason", f"claude agent review (pid {me} start 1)", str(rv))
         # As the CLI runs it: under the worktree's deploy lock.  A never
-        # deployed worktree has nothing to unapply; a named close removes
+        # deployed worktree has nothing to undeploy; a named close removes
         # it once empty (its lock's session counted as ended for it).
         commands.enter_sub("rev")
         (rv / "e.txt").write_text("edit\n")
         sh(rv, "add", "e.txt")
         held = checkout.lock_checkout()
         assert held is not None
-        err = dies(lambda: commands.unapply("origin/main"))
+        err = dies(lambda: commands.undeploy("origin/main"))
         held.close()
-        assert "homelab9/review is not on its work branch" in err and "nothing to unapply" in err, err
+        assert "homelab9/review is not on its work branch" in err and "nothing to undeploy" in err, err
         sh(rv, "reset", "--quiet", "--hard")
         assert rv.exists() and not sh(rv, "status", "--porcelain")
         os.chdir(co)
@@ -1171,17 +1171,17 @@ def git_cases(d: Path) -> None:
         assert "/review: removed (--force)" in out, out
         assert not rv.exists() and Path.cwd().resolve() == co.resolve()
 
-        # A subagent's pushed branch, unapplied and deleted with its
+        # A subagent's pushed branch, undeployed and deleted with its
         # worktree: a review checkout at its old tip holds commits of its own.
         sub_wb = f"{wb}-review"
         sh(co, "worktree", "add", "--quiet", "-b", sub_wb, str(rv), "origin/main")
-        put(rv, "s.txt", "sub\n", "sub work\n\nReaches: a\nApplied: a")
+        put(rv, "s.txt", "sub\n", "sub work\n\nReaches: a\nDeployed: a")
         sh(rv, "push", "--quiet", "origin", sub_wb)
         sh(co, "fetch", "--quiet")
         tip = proc.rev(f"refs/remotes/origin/{sub_wb}")
         commands.enter_sub("rev")
-        assert commands.unapply("origin/main")
-        # Unapplied: reset onto origin/main here and there, the worktree kept.
+        assert commands.undeploy("origin/main")
+        # Undeployed: reset onto origin/main here and there, the worktree kept.
         assert rv.exists() and sh(rv, "branch", "--show-current") == sub_wb
         assert proc.rev(f"refs/remotes/origin/{sub_wb}") == proc.rev("refs/remotes/origin/main")
         os.chdir(co)
@@ -1196,63 +1196,63 @@ def git_cases(d: Path) -> None:
         good, status = checkout.update_checkout(rv)
         assert not good and "carries commits" in status, status
         commands.enter_sub("rev")
-        assert "nothing to unapply" in dies(lambda: commands.unapply("origin/main"))  # detached: not on its branch
+        assert "nothing to undeploy" in dies(lambda: commands.undeploy("origin/main"))  # detached: not on its branch
         assert rv.exists()
         os.chdir(co)
         commands.close_worktrees(["rev"], force=True)
         assert not rv.exists()
 
-        # unapply alone: the latest increment off the branch, here and on
+        # undeploy alone: the latest increment off the branch, here and on
         # origin, its deployed targets named for the deploy that follows;
         # unstaged edits elsewhere and untracked files stay.
         co9, wb9 = d / "homelab90", "work/tester/90"
         sh(d, "clone", "--quiet", str(origin), str(co9))
         os.chdir(co9)
         checkout.ensure_on_work_branch(wb9)
-        assert "nothing to unapply: no increment beyond origin/main" in dies(commands.unapply)
-        put(co9, "i1.txt", "one\n", "inc 1\n\nReaches: a\nApplied: a")
-        put(co9, "i2.txt", "two\n", "inc 2\n\nReaches: a, b\nApplied: a, b")
+        assert "nothing to undeploy: no increment beyond origin/main" in dies(commands.undeploy)
+        put(co9, "i1.txt", "one\n", "inc 1\n\nReaches: a\nApplied: a")  # Applied: the trailer key before the rename, still read
+        put(co9, "i2.txt", "two\n", "inc 2\n\nReaches: a, b\nDeployed: a, b")
         sh(co9, "push", "--quiet", "origin", wb9)
         sh(co9, "fetch", "--quiet")
         tip, parent = sh(co9, "rev-parse", "HEAD"), sh(co9, "rev-parse", "HEAD^")
-        assert "--back-to nope: no such commit" in dies(lambda: commands.unapply("nope"))
-        assert "nothing to unapply: HEAD is HEAD" in dies(lambda: commands.unapply("HEAD"))
+        assert "--back-to nope: no such commit" in dies(lambda: commands.undeploy("nope"))
+        assert "nothing to undeploy: HEAD is HEAD" in dies(lambda: commands.undeploy("HEAD"))
         (co9 / "i1.txt").write_text("one, edited\n")
         (co9 / "u.txt").write_text("untracked\n")
         put(co9, "s.txt", "staged\n")
-        assert "staged but undeployed changes present" in dies(commands.unapply)
+        assert "staged but undeployed changes present" in dies(commands.undeploy)
         sh(co9, "rm", "--cached", "--quiet", "s.txt")
         (co9 / "s.txt").unlink()
         put(co9, "h.txt", "hand\n", "a hand commit, no deploy's")
-        assert "a hand commit, no deploy's is not a deploy's increment" in dies(commands.unapply)
-        assert "is not a deploy's increment" in dies(lambda: commands.unapply("origin/main"))
+        assert "a hand commit, no deploy's is not a deploy's increment" in dies(commands.undeploy)
+        assert "is not a deploy's increment" in dies(lambda: commands.undeploy("origin/main"))
         sh(co9, "reset", "--quiet", "--keep", "HEAD^")
         with contextlib.redirect_stdout(io.StringIO()) as out:
-            assert commands.unapply()
+            assert commands.undeploy()
         said = out.getvalue()
-        assert f"unapplied {wb9}'s 1 increment(s)" in said and f"\n  {tip[:7]}" in said and \
+        assert f"undeployed {wb9}'s 1 increment(s)" in said and f"\n  {tip[:7]}" in said and \
             "deployed to a, b" in said and f"reset onto {parent[:12]}" in said, said
         assert sh(co9, "rev-parse", "HEAD") == parent and proc.rev(f"refs/remotes/origin/{wb9}") == parent
         assert not (co9 / "i2.txt").exists() and (co9 / "i1.txt").read_text() == "one, edited\n"
         assert (co9 / "u.txt").exists() and sh(co9, "status", "--porcelain") == "M i1.txt\n?? u.txt"  # stripped
         # An unstaged edit to the increment's own file: nothing moves.
         before = state(co9)
-        err = dies(commands.unapply)
+        err = dies(commands.undeploy)
         assert "unstaged edits" in err and "i1.txt" in err, err
         assert state(co9) == before and proc.rev(f"refs/remotes/origin/{wb9}") == parent
         sh(co9, "restore", "i1.txt")
         # --back-to origin/main: every increment, their targets together.
-        put(co9, "i3.txt", "three\n", "inc 3\n\nReaches: c\nApplied: c")
-        assert f"is not on {wb9}" in dies(lambda: commands.unapply(tip[:12]))
+        put(co9, "i3.txt", "three\n", "inc 3\n\nReaches: c\nDeployed: c")
+        assert f"is not on {wb9}" in dies(lambda: commands.undeploy(tip[:12]))
         with contextlib.redirect_stdout(io.StringIO()) as out:
-            assert commands.unapply("origin/main")
+            assert commands.undeploy("origin/main")
         said = out.getvalue()
-        assert f"unapplied {wb9}'s 2 increment(s)" in said and "deployed to a, c" in said \
+        assert f"undeployed {wb9}'s 2 increment(s)" in said and "deployed to a, c" in said \
             and "reset onto origin/main" in said, said
         assert sh(co9, "rev-parse", "HEAD") == proc.rev("refs/remotes/origin/main") == proc.rev(f"refs/remotes/origin/{wb9}")
         assert (co9 / "u.txt").exists() and not (co9 / "i1.txt").exists()
-        assert "nothing to unapply: no increment beyond origin/main" in dies(commands.unapply)
-        assert "nothing to unapply: no increment beyond origin/main" in dies(lambda: commands.unapply("origin/main"))
+        assert "nothing to undeploy: no increment beyond origin/main" in dies(commands.undeploy)
+        assert "nothing to undeploy: no increment beyond origin/main" in dies(lambda: commands.undeploy("origin/main"))
     say("git cores: ok")
 
 
@@ -1311,16 +1311,16 @@ def announce_cases(d: Path) -> None:
         # a parent not here is left out.  Pushed before the switch.
         ann = checkout.Announce(wb, snap)
         assert ann.collect()
-        committed = checkout.deployed_commit(snap, "two\n\nReaches: a\nApplied: a")
+        committed = checkout.deployed_commit(snap, "two\n\nReaches: a\nDeployed: a")
         main = proc.rev("refs/remotes/origin/main")
         assert main is not None
-        # Holds replay oldest first: reached and not applied holds, a later
+        # Holds replay oldest first: reached and not deployed holds, a later
         # deploy of the target ends the hold, a commit without trailers is
         # nothing.
-        chain = checkout.deployed_commit(snap, "h1\n\nReaches: a, b, c\nApplied: a")
+        chain = checkout.deployed_commit(snap, "h1\n\nReaches: a, b, c\nDeployed: a")
         chain = out_at(co, chain, "plain")
-        chain = out_at(co, chain, "h2\n\nReaches: b\nApplied: b")
-        chain = out_at(co, chain, "h3\n\nReaches: none\nApplied: none")
+        chain = out_at(co, chain, "h2\n\nReaches: b\nApplied: b")  # the key before the rename
+        chain = out_at(co, chain, "h3\n\nReaches: none\nDeployed: none")
         assert checkout.held_targets(f"{main}..{chain}") == {"c"}
         assert checkout.held_targets(f"{main}..{chain}^") == {"c"}
         assert checkout.held_targets(f"{main}..{chain}~2") == {"b", "c"}
@@ -1512,7 +1512,7 @@ def submodule_cases(d: Path) -> None:
         # The deploy's commit of the pin, then the landing: the branch squashed onto its main.
         sh(co, "commit", "--quiet", "-m", "dep: v2")
 
-        # unapply: the pin the latest increment moved is put back, its
+        # undeploy: the pin the latest increment moved is put back, its
         # worktree reset below it and the branch pushed so, what stops it
         # (staged changes, an unstaged edit the reset would lose) checked
         # ahead of the checkout's own reset.
@@ -1525,10 +1525,10 @@ def submodule_cases(d: Path) -> None:
         (ax / "tool.py").write_text("v2 edited\n")
         err = dies(lambda: submodule.moved_pins(co, wb, tip, f"{tip}^"))
         assert "unstaged edits, which the reset would lose" in err and "tool.py" in err, err
-        err = dies(lambda: submodule.unapply_pins(moved, wb))
+        err = dies(lambda: submodule.undeploy_pins(moved, wb))
         assert "the reset onto" in err and sh(ax, "rev-parse", "HEAD") == v2, err
         sh(ax, "checkout", "--", "tool.py")
-        submodule.unapply_pins(moved, wb)
+        submodule.undeploy_pins(moved, wb)
         assert sh(ax, "rev-parse", "HEAD") == v1 and (ax / "loose.txt").exists()
         assert dep_ref(f"refs/heads/{wb}") == v1
         assert dep_ref(f"{submodule.PAST_REFS}/{wb}/{v2}") == v2
@@ -1859,8 +1859,8 @@ def open_cases(d: Path) -> None:
         assert review.targets(["--with-children", "--stat"], co) == ([co, w], ["--stat"])
         assert "no subagent worktree, submodule, branch or path named nope" in dies(lambda: review.targets(["nope"], co))
         assert "named foreign" in dies(lambda: review.targets(["foreign"], co))  # no configured submodule
-        # The same names for land, unapply and close (names.worktree): a
-        # branch stands for the worktree on it, which land and unapply
+        # The same names for land, undeploy and close (names.worktree): a
+        # branch stands for the worktree on it, which land and undeploy
         # take whatever checkout it is, close only as a subagent worktree.
         assert names.resolve("work/tester/9", co) == co.resolve() and names.resolve("main", co) == "main"  # seed is a clone
         assert names.resolve("origin/main", co) == "origin/main"  # a remote branch no checkout is on
@@ -1953,16 +1953,16 @@ def open_cases(d: Path) -> None:
         sh(w, "switch", "--quiet", "-c", "work/tester/9-task")
         (w / "COMMIT_MSG.md").write_text("the sub: s.txt\n- its detail\n")
         sh(w, "add", "COMMIT_MSG.md")
-        put(w, "s.txt", "sub\n", "sub increment\n\nReaches: a, b\nApplied: a")
+        put(w, "s.txt", "sub\n", "sub increment\n\nReaches: a, b\nDeployed: a")
         sh(w, "push", "--quiet", "origin", "work/tester/9-task")
         put(w, "n.txt", "unstaged\n")
         sh(w, "reset", "--quiet", "n.txt")
         # The sub holds b back: its increment reached b, deployed to a alone.
         assert checkout.held_targets("origin/main..HEAD", str(w)) == {"b"}
-        # A held target refuses the landing unless --not-yet-applied.
+        # A held target refuses the landing unless --not-yet-deployed.
         assert "work/tester/9-task holds back b:" in dies(commands.land_with_children)
-        told = printed(lambda: commands.land_with_children(not_yet_applied=True))
-        assert "landing with b not yet applied:" in told
+        told = printed(lambda: commands.land_with_children(not_yet_deployed=True))
+        assert "landing with b not yet deployed:" in told
         assert not sh(co, "worktree", "list").count("deploy-wt")
         main = sh(co, "rev-parse", "origin/main")
         assert sh(co, "ls-tree", "--name-only", main).split() == ["a.txt", "deploy-branches", "p.txt", "s.txt"]
@@ -2018,11 +2018,11 @@ def open_cases(d: Path) -> None:
         # never a flag's name.
         argv0 = sys.argv
         try:
-            for argv in (["unapply", "-m", "x"], ["unapply", "--submodule", "dep"], ["close", "--submodule", "dep"],
+            for argv in (["undeploy", "-m", "x"], ["undeploy", "--submodule", "dep"], ["close", "--submodule", "dep"],
                          ["open", "--child", "--branch", "b", "x"], ["open", "--child", "--submodule", "x"], ["open", "--child"],
                          ["close", "--after", "1"], ["close", "--stopped", "1"], ["open", "--lock", "x", "y"],
                          ["hook"], ["hook", "nope"], ["hook", "session-start", "x"],
-                         ["unapply", "--back-to"], ["unapply", "--back-to", "--with-children"], ["land", "--back-to", "x"],
+                         ["undeploy", "--back-to"], ["undeploy", "--back-to", "--with-children"], ["land", "--back-to", "x"],
                          ["land", "-m", ""], ["land", "-m", " ", "--with-children"], ["land", "-m", "--with-children"],
                          ["land", "-m", "x", "a", "b"], ["land", "-m"]):
                 sys.argv = ["nixconvoy", *argv]

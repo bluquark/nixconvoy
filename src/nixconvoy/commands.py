@@ -1,4 +1,4 @@
-"""The verbs beside deploy: commit, land, pull, unapply, open, close and status."""
+"""The verbs beside deploy: commit, land, pull, undeploy, open, close and status."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from typing import IO, NamedTuple
 
 from . import names, submodule
 from .checkout import (
+    DEPLOYED_TRAILER,
     KEPT_EDIT,
     MACHINE_ENV,
     SESSIONLESS,
@@ -70,20 +71,20 @@ from .names import label as sub_label
 from .proc import Fail, die, failure, git, is_ancestor, ok, out, painter, rev, run, solve_with_mergiraf
 
 
-def holds(wb: str, tip: str, main: str, not_yet_applied: bool = False) -> None:
+def holds(wb: str, tip: str, main: str, not_yet_deployed: bool = False) -> None:
     """The targets `wb`'s increments (`main..tip`) hold back: a landing is
-    refused on them unless `not_yet_applied` (the landed work then rolls out
+    refused on them unless `not_yet_deployed` (the landed work then rolls out
     there from the next deploy anywhere)."""
     held = sorted(held_targets(f"{main}..{tip}"))
     if not held:
         return
     them = ", ".join(held)
-    if not not_yet_applied:
+    if not not_yet_deployed:
         die(f"{wb} holds back {them}: increments of it reach {'it' if len(held) == 1 else 'them'} "
-            f"but were applied to other targets alone.  "
-            f"`nixconvoy apply {' '.join(held)}` from its checkout applies them there first; "
-            f"`land --not-yet-applied` lands them as they are, for the next deploy anywhere to roll out")
-    print(f"landing with {them} not yet applied: the next deploy anywhere rolls the landed work out there")
+            f"but were deployed to other targets alone.  "
+            f"`nixconvoy deploy {' '.join(held)}` from its checkout deploys them there first; "
+            f"`land --not-yet-deployed` lands them as they are, for the next deploy anywhere to roll out")
+    print(f"landing with {them} not yet deployed: the next deploy anywhere rolls the landed work out there")
 
 
 def kept_edit() -> Path:
@@ -137,7 +138,7 @@ def main_message(wb: str, given: str | None, main: str, appended: str = "",
     return whole
 
 
-def land(message: str | None = None, not_yet_applied: bool = False) -> None:
+def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
     await_background_push()
     git(*fetch_args())
     pop_tmp_commits()
@@ -166,7 +167,7 @@ def land(message: str | None = None, not_yet_applied: bool = False) -> None:
         die(f"the tree pins {wb}'s rev of submodule {', '.join(gone)}, whose worktree is gone: "
             f"`nixconvoy open --submodule <input>` recreates it from origin's branch to land it, or "
             f"`nixconvoy close <input> --force` after it drops it")
-    holds(wb, "HEAD", main, not_yet_applied)
+    holds(wb, "HEAD", main, not_yet_deployed)
     msg = main_message(wb, message, main)
     submodule.land_all(wb, msg)
     tree = tree_less_msg("HEAD")
@@ -200,16 +201,16 @@ def pull() -> None:
 
 def deployed_targets(commits: str) -> list[str]:
     """The targets the deploys of the commits in the range `commits` switched
-    (their Applied: trailers), sorted."""
+    (their Deployed: trailers), sorted."""
     names: set[str] = set()
-    for ln in out(["git", "log", "--format=%(trailers:key=Applied,valueonly)", commits]).splitlines():
+    for ln in out(["git", "log", f"--format={DEPLOYED_TRAILER}", commits]).splitlines():
         names |= trailer_targets(ln)
     return sorted(names)
 
 
-def unapply(back_to: str = "HEAD^") -> bool:
+def undeploy(back_to: str = "HEAD^") -> bool:
     """Undo the work branch's increments from HEAD back to `back_to` (cli
-    docstring: Unapply) ahead of the deploy the caller runs at once, which
+    docstring: Undeploy) ahead of the deploy the caller runs at once, which
     reverts them on the targets: whether any target runs what was undone,
     so that deploy is due."""
     await_background_push()
@@ -219,10 +220,10 @@ def unapply(back_to: str = "HEAD^") -> bool:
     here = Path.cwd().resolve()
     if ident.kind == "sub" and ident.wb and current_branch() != ident.wb and sub_parent(here):
         die(f"{sub_label(here)} is not on its work branch {ident.wb} (nothing deployed from it yet): "
-            f"nothing to unapply; `nixconvoy close {here.name} --force` discards it")
-    wb = require_work_branch("unapply")
+            f"nothing to undeploy; `nixconvoy close {here.name} --force` discards it")
+    wb = require_work_branch("undeploy")
     if current_branch() != wb:
-        die(f"unapply runs from the work branch ({wb}); currently on "
+        die(f"undeploy runs from the work branch ({wb}); currently on "
             f"{current_branch() or '(detached HEAD)'}")
     main = rev("refs/remotes/origin/main")
     if main is None:
@@ -237,18 +238,18 @@ def unapply(back_to: str = "HEAD^") -> bool:
     elif not is_ancestor(target, "HEAD"):
         die(f"--back-to {back_to} ({target[:12]}) is not on {wb}")
     if target == prev:
-        die("nothing to unapply" + (": no increment beyond origin/main" if target == base else f": HEAD is {back_to}"))
+        die("nothing to undeploy" + (": no increment beyond origin/main" if target == base else f": HEAD is {back_to}"))
     if staged_differs():
         die("staged but undeployed changes present, which the deploy would carry; "
             "deploy or unstage them first")
     # A deploy's increment carries its trailers; a hand commit, or a pin
     # commit a failed landing left, is not one and is not crossed.
-    undone = out(["git", "log", "--format=%H%x09%(trailers:key=Applied,valueonly,separator=%x2C)",
+    undone = out(["git", "log", f"--format=%H%x09{DEPLOYED_TRAILER}",
                   f"{target}..HEAD"]).splitlines()
     for ln in undone:
         sha, _, trailer = ln.partition("\t")
-        if not trailer.strip():
-            die(f"{summarize(sha)} is not a deploy's increment; unapply does not cross it: reset by hand")
+        if not trailer.strip(" ,"):
+            die(f"{summarize(sha)} is not a deploy's increment; undeploy does not cross it: reset by hand")
     deployed = deployed_targets(f"{target}..{prev}")
     # Every check before anything moves: the checkout's reset would lose
     # an unstaged edit to a file the increments changed (git reset --keep
@@ -261,8 +262,8 @@ def unapply(back_to: str = "HEAD^") -> bool:
     p = git("reset", "--quiet", "--keep", target, check=False)
     if p.returncode != 0:
         die(f"the reset onto {target[:12]} failed; nothing moved:\n{(p.stderr or '').strip()}")
-    submodule.unapply_pins(moved, wb)
-    print(f"unapplied {wb}'s {len(undone)} increment(s) (see reflog):\n  "
+    submodule.undeploy_pins(moved, wb)
+    print(f"undeployed {wb}'s {len(undone)} increment(s) (see reflog):\n  "
           + "\n  ".join(summarize(ln.partition("\t")[0]) for ln in undone))
     if deployed:
         print(f"deployed to {', '.join(deployed)}: deploying now to revert it")
@@ -612,7 +613,7 @@ def transcript_cwd(path: Path, *, last: bool = False) -> Path | None:
 
 
 def finish(wb: str, onto: str = "origin/main") -> None:
-    """The checked-out work branch after a land or unapply, now at `onto`
+    """The checked-out work branch after a land or undeploy, now at `onto`
     (origin/main's commit, or an earlier increment), moved there on origin
     too.  A subagent worktree left with nothing stays, idle: `close`
     removes it (the session-exit sweep does so on its own)."""
@@ -698,14 +699,14 @@ def subs_of(top: Path) -> list[Path]:
 
 def has_increments(d: Path) -> bool:
     """Whether the checkout `d` has commits beyond origin/main: what an
-    unapply back to origin/main undoes."""
+    undeploy back to origin/main undoes."""
     head = run(["git", "rev-parse", "HEAD"], cwd=str(d), check=False).stdout.strip()
     return bool(head and not is_ancestor(head, "refs/remotes/origin/main"))
 
 
 def enter_sub(name: str) -> None:
     """Act in the subagent worktree `name` names (names.worktree) of any
-    checkout on this machine (land/unapply run from elsewhere, as status
+    checkout on this machine (land/undeploy run from elsewhere, as status
     suggests)."""
     os.chdir(find_sub(name))
 
@@ -883,7 +884,7 @@ def open_worktree(name: str, lock_reason: str | None) -> Path:
     while judging a worktree of the name.  `lock_reason` is the worktree
     lock Claude Code's create hook names its session with (replacing a
     reused one's); without it a hand-opened worktree is locked as
-    sessionless, which prune keeps and land or unapply lift."""
+    sessionless, which prune keeps and land or undeploy lift."""
     if not re.fullmatch(r"[\w.-]+", name):
         die(f"{name}: a worktree name holds letters, digits, '.', '-' and '_' only")
     root = outermost(Path.cwd().resolve())
@@ -1052,7 +1053,7 @@ def close_checkout(path: Path, *, force: bool = False) -> None:
             if tip and not is_ancestor(tip, "refs/remotes/origin/main")
             else "a submodule holding something" if submodule.own(d) else None)
     if kept and not force:
-        die(f"{d} holds {kept}: land or unapply it first (--force removes it anyway)")
+        die(f"{d} holds {kept}: land or undeploy it first (--force removes it anyway)")
     if worktree_lock(d) is not None:
         git("worktree", "unlock", str(d), check=False)
     submodule.remove_all(d)
@@ -1065,7 +1066,7 @@ def close_checkout(path: Path, *, force: bool = False) -> None:
     print(f"checkout {d} removed, with {', '.join(sorted(names)) or 'no branch of its own'} here and on origin")
 
 
-def land_with_children(message: str | None = None, not_yet_applied: bool = False) -> None:
+def land_with_children(message: str | None = None, not_yet_deployed: bool = False) -> None:
     """`nixconvoy land --with-children`: this checkout and its subagent worktrees
     landed as one commit on main - each sub's branch merged into this
     branch's tree (mergiraf on the conflicts, as a deploy's union) under
@@ -1104,7 +1105,7 @@ def land_with_children(message: str | None = None, not_yet_applied: bool = False
                 continue
             if cur != ident.wb or not ident.wb:
                 die(f"{label} holds commits on {cur or 'a detached HEAD'} that were never deployed: "
-                    f"deploy or unapply them first")
+                    f"deploy or undeploy them first")
             if git_op_in_progress(d):
                 die(f"{label} has a {git_op_in_progress(d)} in progress")
             os.chdir(d)
@@ -1137,7 +1138,7 @@ def land_with_children(message: str | None = None, not_yet_applied: bool = False
                 die(f"the tree pins {b}'s rev of submodule {', '.join(gone)}, whose worktree is gone: "
                     f"`nixconvoy open --submodule <input>` in {d.name} first (then `close <input> --force` drops it)")
         for d, b in [(here, wb), *parts]:
-            holds(b, "HEAD" if d == here else f"refs/heads/{b}", main, not_yet_applied)
+            holds(b, "HEAD" if d == here else f"refs/heads/{b}", main, not_yet_deployed)
 
         def merged_tree() -> str:
             """The branches merged in a throwaway worktree on this branch's
@@ -1232,6 +1233,6 @@ __all__ = [
     "pull",
     "status",
     "subs_of",
-    "unapply",
+    "undeploy",
     "work_branch_name",
 ]

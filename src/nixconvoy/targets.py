@@ -464,10 +464,10 @@ def refusals_message(refusals: list[str | Refusal]) -> str:
 
 def allowing_command(names: list[str]) -> str:
     """The command admitting `names`: this invocation with `--allow <name>`
-    for each after its subcommand - as an apply from the same directory
-    for an unapply, whose reset is over."""
+    for each after its subcommand - as a deploy from the same directory
+    for an undeploy, whose reset is over."""
     argv = sys.argv[1:]
     flags = [a for n in names for a in (ALLOW_FLAG, n)]
-    if argv[:1] == ["unapply"]:
-        return shlex.join(["nixconvoy", "apply", *flags])
+    if argv[:1] == ["undeploy"]:
+        return shlex.join(["nixconvoy", "deploy", *flags])
     return shlex.join(["nixconvoy", *argv[:1], *flags, *argv[1:]])

@@ -950,18 +950,24 @@ def listed_tips(pats: set[str], cwd: str | None = None) -> dict[str, str]:
             if b == "main" or any(fnmatchcase(b, p) for p in pats)}
 
 
+# The Deployed: trailer's value in a git log format; Applied: is the same
+# trailer's key in increments from before the rename, so both are read (a
+# commit carries one of them; a hand commit neither, its value the bare comma).
+DEPLOYED_TRAILER = ("%(trailers:key=Deployed,valueonly,separator=%x2C)%x2C"
+                    "%(trailers:key=Applied,valueonly,separator=%x2C)")
+
+
 def trailer_targets(value: str) -> set[str]:
-    """The targets a Reaches:/Applied: trailer value names."""
+    """The targets a Reaches:/Deployed: trailer value names."""
     return {h.strip() for h in value.split(",") if h.strip() and h.strip() != "none"}
 
 
 def held_targets(commits: str, cwd: str | None = None) -> set[str]:
     """The targets the increments in the range `commits` hold back: reached
     by one (its Reaches: trailer) that was deployed to other targets alone
-    (its Applied: one), and not running the branch's tip after any later
-    increment's deploy (the Applied: of each, oldest first)."""
-    fmt = ("%(trailers:key=Reaches,valueonly,separator=%x2C)%x09"
-           "%(trailers:key=Applied,valueonly,separator=%x2C)")
+    (its Deployed: one), and not running the branch's tip after any later
+    increment's deploy (the Deployed: of each, oldest first)."""
+    fmt = f"%(trailers:key=Reaches,valueonly,separator=%x2C)%x09{DEPLOYED_TRAILER}"
     held: set[str] = set()
     log = run(["git", "log", f"--format={fmt}", commits], cwd=cwd).stdout  # unstripped: a tab may lead
     for ln in reversed(log.splitlines()):
@@ -1117,7 +1123,7 @@ def lock_live(reason: str) -> bool:
 
 
 # The create hook's lock when it found no claude session to name: no
-# session's exit lifts it, so land and unapply do.
+# session's exit lifts it, so land and undeploy do.
 SESSIONLESS = "(no claude session found)"
 
 

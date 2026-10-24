@@ -13,7 +13,7 @@ state onto that branch, pushes it and stages the gitlink on the pushed
 rev, so the increment carries the submodule as a tree change, which the
 union, the eval memo and the lineage handle like any other.  `land` lands
 the branch on the repository's default branch first and pins the
-gitlink there; `unapply` resets it onto the pin of the rev the checkout
+gitlink there; `undeploy` resets it onto the pin of the rev the checkout
 goes back to (`--back-to origin/main`: the gitlink restored to
 origin/main's).  The worktree stays either way, its
 branch reset onto the default branch like an agent checkout's, and
@@ -1072,7 +1072,7 @@ def moved_pins(top: Path, wb: str, tip: str, parent: str) -> list[tuple[Sub, str
     return moved
 
 
-def unapply_pins(moved: list[tuple[Sub, str]], wb: str) -> None:
+def undeploy_pins(moved: list[tuple[Sub, str]], wb: str) -> None:
     """Each worktree of `moved` (moved_pins) reset onto the pin put back,
     its unstaged edits kept (an edit the reset would lose stops it), the
     branch pushed so: the deploy's sync then finds its HEAD pinned."""
@@ -1103,9 +1103,9 @@ def keeps(sub: Sub, top: Path) -> str | None:
     if default is None:
         return "its repository's origin has no default branch to judge it against"
     if has_own(sub, default):
-        return f"it carries commits not on origin/{default}; land or unapply this checkout"
+        return f"it carries commits not on origin/{default}; land or undeploy this checkout"
     if off_default(sub, top):
-        return f"the tree still pins a rev not on origin/{default}; land or unapply this checkout"
+        return f"the tree still pins a rev not on origin/{default}; land or undeploy this checkout"
     return None
 
 

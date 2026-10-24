@@ -97,7 +97,7 @@ fn keeps_and_says_why() {
     let (_, o) = run(params(false), foreign);
     assert_eq!(kept(&o), "it has h-deploys3, another checkout's work branch, checked out");
     // On its own work branch: kept while that carries pushed increments,
-    // removed once it is reset onto main (a land, or an unapply back to it), pushed so.
+    // removed once it is reset onto main (a land, or an undeploy back to it), pushed so.
     let on_wb = |increments: bool| {
         move |q: &Query| match q {
             Query::CurrentBranch => Some(Reply::Text(Some("h-deploys3-agent-x".into()))),
@@ -107,7 +107,7 @@ fn keeps_and_says_why() {
         }
     };
     let (_, o) = run(params(false), on_wb(true));
-    assert_eq!(kept(&o), "its work branch h-deploys3-agent-x carries pushed increments: land or unapply decides it");
+    assert_eq!(kept(&o), "its work branch h-deploys3-agent-x carries pushed increments: land or undeploy decides it");
     let (asked, o) = run(params(false), on_wb(false));
     assert_eq!(o, Outcome::Removed, "{asked:?}");
 }
@@ -141,7 +141,7 @@ fn named_and_own_session() {
     let p = Params { own_session_ends: true, ..params(true) };
     let (asked, _) = run(p.clone(), |_| None);
     assert!(asked.contains(&Query::Alive { pid: 7, start: Some(9), own_ends: true }));
-    // The create hook's sessionless lock: kept by prune, not by unapply.
+    // The create hook's sessionless lock: kept by prune, not by undeploy.
     let sessionless = |q: &Query| (*q == Query::Lock).then(|| Reply::Text(Some(format!("claude agent agent-x {SESSIONLESS}"))));
     let (_, o) = run(params(true), sessionless);
     assert!(kept(&o).starts_with("its create found no claude session to outlive"), "{o:?}");

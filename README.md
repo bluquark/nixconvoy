@@ -5,7 +5,7 @@ one checkout ever reverting what another already switched.
 
 nixconvoy is for the way a homelab actually evolves: lots of small,
 experimental changes, tested in production, kept honest by NixOS's atomic
-switches and generations.  You stage a change, run `nixconvoy apply`, and the
+switches and generations.  You stage a change, run `nixconvoy deploy`, and the
 targets that differ from the result are switched.  If the target does not come
 back reachable and healthy, the switch rolls itself back.  Only after the
 targets run the change is it committed, so a branch never claims more than
@@ -28,18 +28,18 @@ what is deployed.
   target's evaluation reads (docs, dotfiles) is committed and pushed
   without a deploy: the probes' results are dropped and nothing is built
   or switched, so nothing need be reachable; the targets' drift waits for the next deploy reaching one,
-  or for an apply naming targets.
+  or for a deploy naming targets.
 - **`land` lands a branch on main**, as one commit whose message is the
   branch's `COMMIT_MSG.md` (or `-m <msg>`, for a quick landing of a
   branch without one: both at once is refused), opened in git's editor
   first when `land` runs on a terminal without `-m`, so a message an agent
   wrote can be adjusted by hand before it lands (an agent's own shell is no
-  terminal: there the file lands as it is); **`unapply --back-to origin/main`** discards it.  Either way the
+  terminal: there the file lands as it is); **`undeploy --back-to origin/main`** discards it.  Either way the
   checkout stays on its work branch, reset onto the new main (a subagent
   worktree too: `close` removes one), and every
   other checkout on the machine is rebased onto it.  A landing touches no
-  target; `unapply` deploys at once, reverting the work on the targets
-  running it - **`unapply`** alone undoes the branch's latest increment,
+  target; `undeploy` runs a deploy at once, reverting the work on the targets
+  running it - **`undeploy`** alone undoes the branch's latest increment,
   `--back-to <rev>` every increment back to that one, the branch reset
   there (an increment reset off its branch by hand stays deployed until
   the next deploy by anyone, which says what it reverts).
@@ -77,12 +77,12 @@ no work.
   refused until listed.
 - **Held-back targets.**  An increment deployed to named targets alone is
   committed with the targets it reaches (`Reaches:`) and the ones now
-  running the branch's tip (`Applied:`); a target in the first and not the
+  running the branch's tip (`Deployed:`); a target in the first and not the
   second is held back until a deploy from that checkout switches it.  The
   union carries the work, so every other work branch's deploy leaves a held
   target alone, or is refused when its own work reaches it; a main
   checkout's deploy (a nightly's) leaves it behind rather than fail; and
-  `land` refuses without `--not-yet-applied` - no restricted apply rolls
+  `land` refuses without `--not-yet-deployed` - no restricted deploy rolls
   out elsewhere by accident.
 - **Deploy records.**  Before a target is switched, its deploy record - a
   commit of the exact tree it will run, on its previous record, main, the
@@ -140,7 +140,7 @@ Then, from the repo root, write its settings and deploy:
 
 ```sh
 nix run .#nixconvoy -- init
-nix run .#nixconvoy -- apply -m "describe this increment"
+nix run .#nixconvoy -- deploy -m "describe this increment"
 ```
 
 `init` detects what it can (the flake directory, the hosts directory, the
@@ -153,7 +153,7 @@ On a NixOS machine you deploy from, the package in
 `environment.systemPackages` puts `nixconvoy` (and `git review`) on PATH.
 That is the running system's build, which trails the lock until the
 machine itself switches; an unattended deploy that first moves the lock
-should run the lock's build (`nix run .#nixconvoy -- apply ...`).
+should run the lock's build (`nix run .#nixconvoy -- deploy ...`).
 
 Requirements on each target: `/run/current-system` reachable over ssh with
 passwordless sudo for the deploying user (a switch, the lineage file under
@@ -267,15 +267,15 @@ nixconvoy open --child <worktree>   a child (subagent) worktree <checkout>/<chil
 nixconvoy open --submodule <input>   the flake input developed in place under this checkout (see Submodules)
 
 # Deploying and committing changes
-nixconvoy apply [<target> | @<tag> ...] [-m <msg>] [--evict] [--dry-activate]   deploy the staged increment (-m: its message, default "<checkout>: increment <n>"), or with nothing staged converge the targets on the union as it is; --dry-activate: build and copy, then only report what each switch would do
-nixconvoy unapply [<worktree> ... | --with-children] [--back-to <rev>]   undo the increments from HEAD back to <rev> (default HEAD^, the latest one; origin/main: the whole branch): the branch reset there, then a deploy reverting them on the targets (--with-children: every subagent worktree holding increments, then this checkout, one deploy)
-nixconvoy land [<worktree> ... | --with-children] [-m <msg>] [--not-yet-applied]   land the work branch on main (--with-children: this checkout and its subagent worktrees as one unit, one main commit with the subs' COMMIT_MSG.md appended; -m: under <msg>, for a branch without COMMIT_MSG.md, else the message opens in git's editor on a terminal; --not-yet-applied: targets its increments held back included)
+nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict] [--dry-activate]   deploy the staged increment (-m: its message, default "<checkout>: increment <n>"), or with nothing staged converge the targets on the union as it is; --dry-activate: build and copy, then only report what each switch would do
+nixconvoy undeploy [<worktree> ... | --with-children] [--back-to <rev>]   undo the increments from HEAD back to <rev> (default HEAD^, the latest one; origin/main: the whole branch): the branch reset there, then a deploy reverting them on the targets (--with-children: every subagent worktree holding increments, then this checkout, one deploy)
+nixconvoy land [<worktree> ... | --with-children] [-m <msg>] [--not-yet-deployed]   land the work branch on main (--with-children: this checkout and its subagent worktrees as one unit, one main commit with the subs' COMMIT_MSG.md appended; -m: under <msg>, for a branch without COMMIT_MSG.md, else the message opens in git's editor on a terminal; --not-yet-deployed: targets its increments held back included)
 nixconvoy review [<worktree> | <submodule> | <branch> ... | --with-children] [<diff-arg> ...]   the pending landing: COMMIT_MSG.md, then the diff (--with-children: the checkout's and its subagent worktrees' together)
 
 ```
 
 A `<worktree>` is a subagent worktree's name (a unique prefix will do) or
-a branch a worktree on this machine is on: `land` and `unapply` act in that
+a branch a worktree on this machine is on: `land` and `undeploy` act in that
 worktree, so a branch with none here is refused, while `review`, which only
 reads, takes any `<branch>` (against its merge-base) and a `<submodule>`'s
 name too.
@@ -292,7 +292,7 @@ it is ignored already), where `nixconvoy open --child <worktree>` makes one
 and the create hook below runs it - is that checkout's child, or subagent,
 worktree: it owns `<checkout's
 branch>-<name>` from its first deploy and deploys in parallel with its
-parent.  `land` and `unapply --back-to origin/main` leave it in place like any checkout, idle on
+parent.  `land` and `undeploy --back-to origin/main` leave it in place like any checkout, idle on
 its reset branch; `nixconvoy close <worktree>` removes it when it holds
 nothing of its own (`--force`: whatever it holds), as the plugin's hooks do
 on their own once its agent has stopped (a resume of the agent recreates it)
@@ -302,7 +302,7 @@ worktrees each did a piece of their parent's task, `land --with-children` merges
 their branches into the parent's tree and lands it all as one commit
 under the parent's COMMIT_MSG.md with each sub's appended (`review
 --with-children` shows each,
-`unapply --with-children --back-to origin/main` discards each).  `nixconvoy open <path>` makes a
+`undeploy --with-children --back-to origin/main` discards each).  `nixconvoy open <path>` makes a
 further agent checkout beside the others instead - a worktree at that
 path on a listed work branch of this machine's, numbered after the path's
 name - and `close <path>` removes one holding nothing of its own.
@@ -370,7 +370,7 @@ commit.  From a checkout on a work branch:
   branch, off the default branch; stage there what is ready to deploy.
   A checkout that never opens it keeps the directory empty, as git
   leaves an unpopulated submodule.
-- **A deploy carries it as a tree change.**  `apply` commits the
+- **A deploy carries it as a tree change.**  `deploy` commits the
   worktree's staged state onto its branch with the `-m` message, pushes
   it and stages the gitlink on the pushed rev, which the union, the eval
   memo and the lineage then see like any edit.  Two work branches moving
@@ -393,7 +393,7 @@ commit.  From a checkout on a work branch:
   branch as the union merges it and squashed there as one commit (the
   `COMMIT_MSG.md` in the worktree, tracked or not, else the checkout's),
   that commit pinned as a commit of the work branch, then main; a
-  submodule whose HEAD is not what the tree pins is refused.  `unapply`
+  submodule whose HEAD is not what the tree pins is refused.  `undeploy`
   resets it onto the pin of the rev the checkout goes back to (its
   default branch, for a landed pin).  Either leaves the worktree in
   place.  `close <input>`

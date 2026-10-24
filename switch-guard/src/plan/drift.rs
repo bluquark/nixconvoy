@@ -31,7 +31,7 @@
 //! holds it ("kept") or not ("abandoned": reset, dropped, force-pushed
 //! over, or landed and since undone), and the target's verdict line names
 //! each abandoned increment the switch reverts:
-//! unapply runs that switch itself; a branch reset by hand waits for the
+//! undeploy runs that switch itself; a branch reset by hand waits for the
 //! next deploy by anyone, and this is where the revert shows.  A
 //! subagent's branch, pushed by its first deploy and deleted with its
 //! worktree, leaves targets whose lineage holds a pending increment of a
@@ -40,15 +40,15 @@
 //! whose first push is on its way (refused, as any in-flight increment).
 //!
 //! A branch holds a target back when an increment of it reached the target
-//! but was deployed to other targets alone (an apply naming them): its
-//! Reaches: trailer names the target, its Applied: one does not, and no
+//! but was deployed to other targets alone (a deploy naming them): its
+//! Reaches: trailer names the target, its Deployed: one does not, and no
 //! later increment's deploy on that branch switched the target since
 //! (nixconvoy's held_targets).  The union carries that work, so switching
 //! the target would roll the increment out from a checkout that chose not
 //! to: a held target is left alone, or the deploy refused when this
 //! checkout's own work reaches it (Params::held), as for an in-flight
 //! increment - until the holding checkout deploys the target or lands with
-//! --not-yet-applied.  A main checkout's own work is main's advance, which
+//! --not-yet-deployed.  A main checkout's own work is main's advance, which
 //! a hold must not stop fleet-wide (the nightly's lock): it is left behind on
 //! the held target instead (Params::work_branch).  A --evict unions no
 //! other branch, so nothing is held under it: the target gets this
@@ -345,7 +345,7 @@ pub fn refusal(refused: &[(String, Kind, Option<String>)]) -> String {
     if targets.is_empty() {
         let one = held.len() == 1;
         return format!(
-            "nothing switched or committed: {} {} held back by another branch (see above): the union carries work that checkout deployed to other targets alone, and this checkout's work reaches {} too.  Deploy it there (nixconvoy apply {} from that checkout) or land it with --not-yet-applied; or deploy with {EVICT_FLAG} {} to switch {} to this checkout's view alone, without the held work (and without every other branch's), the hold standing.",
+            "nothing switched or committed: {} {} held back by another branch (see above): the union carries work that checkout deployed to other targets alone, and this checkout's work reaches {} too.  Deploy it there (nixconvoy deploy {} from that checkout) or land it with --not-yet-deployed; or deploy with {EVICT_FLAG} {} to switch {} to this checkout's view alone, without the held work (and without every other branch's), the hold standing.",
             held.join(", "),
             if one { "is" } else { "are" },
             if one { "it" } else { "them" },
@@ -370,7 +370,7 @@ pub fn refusal(refused: &[(String, Kind, Option<String>)]) -> String {
     }
     if !held.is_empty() {
         fixes.push(format!(
-            "{} held back by another branch: deploy it there (nixconvoy apply {} from that checkout) or land it with --not-yet-applied",
+            "{} held back by another branch: deploy it there (nixconvoy deploy {} from that checkout) or land it with --not-yet-deployed",
             held.join(", "),
             held.join(" ")
         ));

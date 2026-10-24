@@ -1,5 +1,5 @@
 """What a name on the command line means - one vocabulary for review,
-land, unapply and close: a submodule of this checkout (review alone), a
+land, undeploy and close: a submodule of this checkout (review alone), a
 subagent worktree (its exact name, this checkout's first, else a unique
 prefix of one, likewise), or a branch of this repository (the worktree
 here on it, else the branch itself).  An exact worktree name wins over a
