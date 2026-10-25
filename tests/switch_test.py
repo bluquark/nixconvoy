@@ -7,7 +7,7 @@ against $NIXCONVOY_GUARD_DIR's build of this tree's switch-guard:
   which plays the confirmed-switch helper, systemd-run and nix-env on a JSON
   state file;
 - the batch's die() gate, the targets and nixconvoy.toml, the protected-units
-  gate, the lineage records and the drift classification other deploys read
+  gate, the provenance records and the drift classification other deploys read
   from them, and the real on-target switch guard;
 - on scratch git repos: which targets a change reaches, nixconvoy-plan's
   rebase and union cores, pull, close, prune and undeploy, the deploy's
@@ -68,12 +68,12 @@ OTHER = ("haswell-wsl", "/home/blu/projects/homelab2")
 LISTED = {"main", BRANCH, "work/haswell-wsl/3", "work/chikuwa/1"}
 
 
-def lineage_line(top: str, *, by: tuple[str, str] = OTHER,
+def provenance_line(top: str, *, by: tuple[str, str] = OTHER,
                  pending: tuple[str, str | None] | None = (BRANCH, BASE), announce: str = "",
                  others: tuple[str, ...] = ("work/chikuwa/1",), at: float = 1e6,
                  key: str = "") -> str:
     own = pending[0] if pending else BRANCH
-    doc = switch.lineage_doc(
+    doc = switch.provenance_doc(
         union="u" * 40, main="m" * 40, branches={b: "c" * 40 for b in others},
         own=own, head="h" * 40, base=pending[1] if pending else "h" * 40,
         snap="s" * 40 if pending else "", announce=announce, at=at, machine=by[0], checkout=by[1],
@@ -81,7 +81,7 @@ def lineage_line(top: str, *, by: tuple[str, str] = OTHER,
     return proc.dump_json({**doc, "toplevel": top})
 
 
-LINEAGE = lineage_line(NEW)
+PROVENANCE = provenance_line(NEW)
 
 
 def say(line: str) -> None:
@@ -166,7 +166,7 @@ def fake_target(argv: list[str]) -> int:
 
 
 def fake_guard(expected: str, toplevel: str) -> int:
-    """switch_guard_cmd's contract: claim the lineage once locked, put it
+    """switch_guard_cmd's contract: claim the provenance once locked, put it
     back at the end unless the target runs or boots `toplevel`."""
     path = Path(os.environ["FAKE_TARGET_STATE"])
     running = load(path)["running"]
@@ -177,13 +177,13 @@ def fake_guard(expected: str, toplevel: str) -> int:
     rec = sys.stdin.readline().strip()
     if rec:
         state = load(path)
-        state["lineage"] = rec
+        state["provenance"] = rec
         path.write_text(proc.dump_json(state))
     print("WROTE" if rec else "SKIPPED", flush=True)
     sys.stdin.read()
     state = load(path)
     if toplevel not in (state["running"], state["profile"]):
-        state.pop("lineage", None)
+        state.pop("provenance", None)
         path.write_text(proc.dump_json(state))
     return 0
 
@@ -215,7 +215,7 @@ def scenario(name: str, *, helper: bool = True, check_ok: bool = True, activate_
     died: str | None = None
     try:
         switch.switch("testhost", OLD, NEW, nixconvoy_switch or guard.binary("nixconvoy-switch"),
-                      lineage=LINEAGE)
+                      provenance=PROVENANCE)
     except proc.Fail as e:
         died = str(e).splitlines()[0]
     say(f"{name}: {died or 'switched'}")
@@ -249,7 +249,7 @@ def switch_scenarios(d: Path) -> None:
     died, s = scenario("confirmed")
     assert died is None and s["running"] == NEW and s["profile"] == NEW, (died, s)
     assert not proc.ARMED
-    assert s.get("lineage") == LINEAGE, s
+    assert s.get("provenance") == PROVENANCE, s
 
     # A batch sibling's die() sweeps this switch's verification probes:
     # those rounds fail and are retried, the switch still confirmed.
@@ -284,7 +284,7 @@ def switch_scenarios(d: Path) -> None:
     assert died == "a sibling's switch failed" and s["running"] == OLD and not s["armed"], (died, s)
 
     died, s = scenario("verification fails", check_ok=False)
-    assert "lineage" not in s, s
+    assert "provenance" not in s, s
     assert died is not None and "did not verify (testhost: dnsmasq is not active" in died, died
     assert f"rolled back to {OLD}" in died, died
     assert s["running"] == OLD and s["profile"] == OLD, s
@@ -292,15 +292,15 @@ def switch_scenarios(d: Path) -> None:
     died, s = scenario("reboot needed", activate_rc=100)
     assert died is not None and "reboot testhost" in died, died
     assert s["running"] == OLD and s["profile"] == NEW, s
-    assert s.get("lineage") == LINEAGE, s  # the reboot takes the target to it
+    assert s.get("provenance") == PROVENANCE, s  # the reboot takes the target to it
 
     died, s = scenario("plain", helper=False)
     assert died is None and s["running"] == NEW and s["profile"] == NEW, (died, s)
-    assert s.get("lineage") == LINEAGE, s
+    assert s.get("provenance") == PROVENANCE, s
 
     died, s = scenario("moved", running="/nix/store/other")
     assert died is not None and "was switched by another deploy" in died, died
-    assert s["running"] == "/nix/store/other" and "lineage" not in s, s
+    assert s["running"] == "/nix/store/other" and "provenance" not in s, s
 
     # A dead deploy's pending rollback, taken over by this arm.
     died, s = scenario("inherited target", check_ok=False, rollback_to="/nix/store/older")
@@ -309,10 +309,10 @@ def switch_scenarios(d: Path) -> None:
 
     died, s = scenario("check killed", check_killed=True)
     assert died is not None and "check timed out" in died and f"rolled back to {OLD}" in died, died
-    assert s["running"] == OLD and "lineage" not in s, s
+    assert s["running"] == OLD and "provenance" not in s, s
 
     died, s = scenario("confirm lost, already confirmed", confirm_rc=1, rollback_rc=ALREADY_CONFIRMED)
-    assert died is None and s.get("lineage") == LINEAGE, (died, s)
+    assert died is None and s.get("provenance") == PROVENANCE, (died, s)
 
     died, s = scenario("confirm fails", confirm_rc=1)
     assert died is not None and "verified but could not be confirmed" in died, died
@@ -331,7 +331,7 @@ def report(text: str, *, tips: dict[str, str] | None = None,
            in_flight: dict[str, str] | None = None, dead: list[str] | None = None,
            held: dict[str, list[str]] | None = None) -> tuple[str, str]:
     """nixconvoy-plan's drift verdict on one drifting target carrying `text` as
-    its lineage file: its report line, and the deploy's die message."""
+    its provenance file: its report line, and the deploy's die message."""
     died = ""
 
     def drift() -> None:
@@ -344,7 +344,7 @@ def report(text: str, *, tips: dict[str, str] | None = None,
                 evict=evict, named=named, work_branch=True, reached=["side1"] if reached else [],
                 running={"side1": running},
                 built={"side1": "/nix/store/union-system"}, held=held or {},
-                lineages={"side1": text})
+                provenances={"side1": text})
         except proc.Fail as e:
             died = str(e).strip()
     return printed(drift).strip(), died
@@ -406,6 +406,8 @@ def target_cases() -> None:
                           (toml().replace('targets_arch = "x86_64-linux"\n', ""), "targets_arch is required"),
                           (toml().replace('ssh_address_template = "{target}"\n', ""), "ssh_address_template is required"),
                           (toml().replace('branch_prefix = "work/{machine}/"\n', ""), "branch_prefix is required"),
+                          (toml().replace('work_branches = ["work/tester/*"]\n', ""), "work_branches is required"),
+                          (toml(branches=("work/tester/*", "bad branch")), "work_branches: a pattern may hold"),
                           (toml().replace('child_worktrees = ".claude/worktrees"\n', ""), "child_worktrees is required"),
                           (toml().replace('[eval]\nparallel = "auto"\n', ""), "eval is required"),
                           (toml().replace('parallel = "auto"\n', ""), "eval.parallel is required"),
@@ -507,23 +509,23 @@ def protected_cases() -> None:
     say("protected: ok")
 
 
-def lineage_cases() -> None:
+def provenance_cases() -> None:
     """The drift core (switch-guard/src/plan/drift.rs, whose own tests hold
-    the cases) on the lineages lineage_doc writes."""
-    line, died = report(lineage_line(NEW))
+    the cases) on the provenances provenance_doc writes."""
+    line, died = report(provenance_line(NEW))
     assert line.startswith(f"side1: refused: runs an increment of {BRANCH}") and \
         f"{OTHER[0]}:{OTHER[1]} (pid 4242) at 13:46" in line, line
     assert f"origin/{BRANCH} is still at {BASE[:12]}" in line, line
     assert "side1 runs another" in died and "--evict side1" in died, died
-    line, died = report(lineage_line(NEW), reached=False)
+    line, died = report(provenance_line(NEW), reached=False)
     assert line.startswith(f"side1: left alone: runs an increment of {BRANCH}") and \
         "does not reach it" in line and not died, (line, died)
-    line, died = report(lineage_line(NEW), tips={BRANCH: LANDED})
+    line, died = report(provenance_line(NEW), tips={BRANCH: LANDED})
     assert line.startswith("side1: will switch (catch-up: ") and not died, (line, died)
     # An announced increment: refused while origin's pending ref of its
     # branch is uncleared - the refusal naming the deploy as dead when this
     # run found it so - and abandoned once it was cleared without the push.
-    announced = lineage_line(NEW, announce="p" * 40)
+    announced = provenance_line(NEW, announce="p" * 40)
     assert proc.load_json(announced)["pending"]["announce"] == "p" * 40  # type: ignore[index]
     line, died = report(announced, in_flight={BRANCH: "q" * 40})
     assert line.startswith("side1: refused: ") and "dead" not in line and \
@@ -536,7 +538,7 @@ def lineage_cases() -> None:
     assert line.startswith("side1: will switch, reverting it: ") and "its deploy is over" in line and \
         not died, (line, died)
     # A main checkout's, under its own ref.
-    nightly = lineage_line(NEW, by=("chikuwa", "/var/lib/homelab"), pending=("main", BASE),
+    nightly = provenance_line(NEW, by=("chikuwa", "/var/lib/homelab"), pending=("main", BASE),
                            announce="p" * 40, key="main@chikuwa")
     assert proc.load_json(nightly)["pending"]["key"] == "main@chikuwa"  # type: ignore[index]
     line, died = report(nightly, tips={"main": BASE}, in_flight={"main@chikuwa": "q" * 40}, dead=["main@chikuwa"])
@@ -544,24 +546,24 @@ def lineage_cases() -> None:
         f"{checkout.PENDING_REFS}/main@chikuwa" in died, (line, died)
     line, died = report(nightly, tips={"main": BASE}, in_flight={"main@haswell-wsl": "q" * 40})
     assert line.startswith("side1: will switch, reverting it: ") and not died, (line, died)
-    line, died = report(lineage_line(NEW), in_flight={BRANCH: "q" * 40}, dead=[BRANCH])
+    line, died = report(provenance_line(NEW), in_flight={BRANCH: "q" * 40}, dead=[BRANCH])
     assert "dead" not in line and "push its branch from its checkout" in died, (line, died)
-    line, _ = report(lineage_line(NEW), evict=True)
+    line, _ = report(provenance_line(NEW), evict=True)
     assert line.endswith("taken over by --evict"), line
-    line, _ = report(lineage_line(NEW), evict=True, named=False, reached=False)
+    line, _ = report(provenance_line(NEW), evict=True, named=False, reached=False)
     assert line.startswith("side1: left alone: "), line
-    line, _ = report(lineage_line(NEW), evict=True, named=False)
+    line, _ = report(provenance_line(NEW), evict=True, named=False)
     assert line.endswith("taken over by --evict"), line
-    line, _ = report(lineage_line(NEW, pending=None, others=("work/M3-Air/9",)))
+    line, _ = report(provenance_line(NEW, pending=None, others=("work/M3-Air/9",)))
     assert "side1: refused: runs work of work/M3-Air/9" in line, line
-    assert report(lineage_line(NEW, by=ME))[0].startswith("side1: will switch (this-branch: ")
+    assert report(provenance_line(NEW, by=ME))[0].startswith("side1: will switch (this-branch: ")
     assert report("") == ("side1: will switch", "")
     assert report("{not json") == ("side1: will switch", "")
-    assert report(lineage_line(OLD)) == ("side1: will switch", "")
-    # A lineage of another version is none.
-    assert report(json.dumps({**json.loads(lineage_line(NEW)), "version": 1})) == ("side1: will switch", "")
-    assert report(lineage_line(NEW), running=OLD)[0] == "side1: will switch"
-    assert report(lineage_line(NEW), running="/nix/store/union-system")[0] == "side1: up to date"
+    assert report(provenance_line(OLD)) == ("side1: will switch", "")
+    # A provenance of another version is none.
+    assert report(json.dumps({**json.loads(provenance_line(NEW)), "version": 1})) == ("side1: will switch", "")
+    assert report(provenance_line(NEW), running=OLD)[0] == "side1: will switch"
+    assert report(provenance_line(NEW), running="/nix/store/union-system")[0] == "side1: up to date"
     # Held back by another branch: refused when reached, else left alone.
     line, died = report("", held={"side1": ["work/chikuwa/1"]})
     assert line.startswith("side1: refused: held back by work/chikuwa/1"), line
@@ -569,9 +571,9 @@ def lineage_cases() -> None:
     line, died = report("", held={"side1": ["work/chikuwa/1"]}, reached=False)
     assert line.startswith("side1: left alone: held back by") and not died, (line, died)
 
-    text = lineage_line(NEW)
+    text = provenance_line(NEW)
     p = targets.parse_probe(f"{NEW}\n{text}")
-    assert p.running == NEW and p.lineage == text, p
+    assert p.running == NEW and p.provenance == text, p
     assert p.digest == hashlib.sha256(text.encode()).hexdigest(), p
     p = targets.parse_probe(f"{OLD}\n")
     assert p == targets.Probe(OLD, "", hashlib.sha256(b"").hexdigest()), p
@@ -581,16 +583,16 @@ def lineage_cases() -> None:
             switch.current_branch = lambda: branch
             r = {"HEAD": head, f"refs/remotes/origin/{branch}": origin, "refs/remotes/origin/main": "m"}
             switch.rev = lambda ref: r.get(ref)
-            return switch.lineage_record("u", [("work/chikuwa/1", "c")], snap)["pending"]
+            return switch.provenance_record("u", [("work/chikuwa/1", "c")], snap)["pending"]
 
         assert record("work/haswell-wsl/3", "h", "h", "") is None
         assert record("work/haswell-wsl/3", "h", "h", "s") == {
             "branch": "work/haswell-wsl/3", "base": "h", "head": "s"}
         switch.current_branch = lambda: "work/haswell-wsl/3"
-        assert switch.lineage_record("u", [], "s", "p")["pending"] == {
+        assert switch.provenance_record("u", [], "s", "p")["pending"] == {
             "branch": "work/haswell-wsl/3", "base": "h", "head": "s", "announce": "p",
             "key": "work/haswell-wsl/3"}
-        assert switch.lineage_record("u", [], "s", "p", "k")["pending"] == {
+        assert switch.provenance_record("u", [], "s", "p", "k")["pending"] == {
             "branch": "work/haswell-wsl/3", "base": "h", "head": "s", "announce": "p", "key": "k"}
         assert record("work/haswell-wsl/3", "h2", "h", "") == {
             "branch": "work/haswell-wsl/3", "base": "h", "head": "h2"}
@@ -598,17 +600,17 @@ def lineage_cases() -> None:
         # Detached at origin/main counts as main's; a hand commit there is pending.
         assert record(None, "m", None, "") is None
         assert record(None, "h", None, "") == {"branch": "main", "base": "m", "head": "h"}
-    say("lineage classification: ok")
+    say("provenance classification: ok")
 
 
 def guard_cases(d: Path) -> None:
     """The real switch guard (switch_guard_cmd's script, flock and all) in a
-    scratch directory, through the window a lineage written only after the
+    scratch directory, through the window a provenance written only after the
     switch left open: B probes while A's switch is between activation and
     confirmation."""
-    cur, profile, lineage = d / "current-system", d / "profile", d / "deploy" / "lineage.json"
+    cur, profile, provenance = d / "current-system", d / "profile", d / "deploy" / "provenance.json"
     targets.CURRENT_SYSTEM, targets.SYSTEM_PROFILE = str(cur), str(profile)
-    targets.SWITCH_LOCK, targets.LINEAGE_FILE, targets.LINEAGE_WRITER = str(d / "lock"), str(lineage), ""
+    targets.SWITCH_LOCK, targets.PROVENANCE_FILE, targets.PROVENANCE_WRITER = str(d / "lock"), str(provenance), ""
 
     def point(link: Path, to: str) -> None:
         link.unlink(missing_ok=True)
@@ -634,14 +636,14 @@ def guard_cases(d: Path) -> None:
         return g.stdout.readline().strip()
 
     def drift(p: targets.Probe) -> str:
-        return report(p.lineage, running=p.running or "")[0]
+        return report(p.provenance, running=p.running or "")[0]
 
     point(cur, OLD)
     point(profile, OLD)
     b_early = targets.probe("tester")
-    assert b_early.running == OLD and b_early.lineage == "", b_early
+    assert b_early.running == OLD and b_early.provenance == "", b_early
     a = guard(OLD, NEW, targets.probe("tester").digest)
-    assert lock(a, lineage_line(NEW)) == "WROTE"
+    assert lock(a, provenance_line(NEW)) == "WROTE"
     b_claimed = targets.probe("tester")  # A claimed, not yet activated
     point(cur, NEW)  # A's test activation: verification starts
     b_mid = targets.probe("tester")
@@ -649,43 +651,44 @@ def guard_cases(d: Path) -> None:
     # Probes from before the activation wait on A's lock and then abort.
     late = [guard(b.running or "", "/nix/store/b-system", b.digest) for b in (b_early, b_claimed)]
     assert until_eof(a) == "", "A's claim stands: the target runs NEW"
-    assert [lock(g, lineage_line("/nix/store/b-system")) for g in late] == [f"MOVED {NEW}"] * 2
+    assert [lock(g, provenance_line("/nix/store/b-system")) for g in late] == [f"MOVED {NEW}"] * 2
     for g in late:
         until_eof(g)
     assert targets.probe("tester").digest == b_mid.digest
-    # A third switch that rolls back puts A's lineage back.
+    # A third switch that rolls back puts A's provenance back.
     c = guard(NEW, "/nix/store/c-system", b_mid.digest)
-    assert lock(c, lineage_line("/nix/store/c-system")) == "WROTE"
+    assert lock(c, provenance_line("/nix/store/c-system")) == "WROTE"
     until_eof(c)
     assert targets.probe("tester").digest == b_mid.digest
     # One staged for a reboot keeps its claim: the profile names it.
     c = guard(NEW, "/nix/store/c-system", b_mid.digest)
-    assert lock(c, lineage_line("/nix/store/c-system")) == "WROTE"
+    assert lock(c, provenance_line("/nix/store/c-system")) == "WROTE"
     point(profile, "/nix/store/c-system")
     until_eof(c)
     staged = targets.probe("tester")
-    assert '"toplevel": "/nix/store/c-system"' in staged.lineage, staged
-    # Same running system, rewritten lineage: B's compare fails.
+    assert '"toplevel": "/nix/store/c-system"' in staged.provenance, staged
+    # Same running system, rewritten provenance: B's compare fails.
     g = guard(NEW, "/nix/store/b-system", b_mid.digest)
-    assert lock(g, "") == f"MOVED {NEW}, its lineage rewritten by another deploy"
+    assert lock(g, "") == f"MOVED {NEW}, its provenance rewritten by another deploy"
     until_eof(g)
-    # A rolled-back switch onto a target with no lineage leaves none.
-    lineage.unlink()
+    # A rolled-back switch onto a target with no provenance leaves none.
+    provenance.unlink()
     point(profile, NEW)
     g = guard(NEW, "/nix/store/d-system", targets.probe("tester").digest)
-    assert lock(g, lineage_line("/nix/store/d-system")) == "WROTE"
+    assert lock(g, provenance_line("/nix/store/d-system")) == "WROTE"
     until_eof(g)
-    assert not lineage.exists()
+    assert not provenance.exists()
     say("switch guard: ok")
 
 
-def toml(extra: str = "", precheck: str = "", **over: str) -> str:
+def toml(extra: str = "", precheck: str = "", branches: tuple[str, ...] = ("work/tester/*",), **over: str) -> str:
     """A nixconvoy.toml with every required key (the defaults the scratch
-    repos use, `over` overriding), `extra` appended before the [eval] table
-    and `precheck` in it."""
+    repos use, `over` overriding, `branches` the work_branches), `extra`
+    appended before the [eval] table and `precheck` in it."""
     keys = {"flake_dir": ".", "targets_dir": "hosts", "targets_arch": "x86_64-linux", "ssh_address_template": "{target}",
             "branch_prefix": "work/{machine}/", "child_worktrees": ".claude/worktrees", **over}
     return ("config_version = 1\n" + "".join(f'{k} = "{v}"\n' for k, v in keys.items())
+            + f"work_branches = {json.dumps(list(branches))}\n"
             + extra + '[eval]\nparallel = "auto"\n' + (f'precheck = "{precheck}"\n' if precheck else ""))
 
 
@@ -720,13 +723,15 @@ def clear_memo() -> None:
 @contextlib.contextmanager
 def scratch_origin(d: Path, branches: str, files: dict[str, str], *, wb: str | None = None,
                    seeded: Callable[[Path], object] = lambda _seed: None) -> Iterator[tuple[Path, Path, Path]]:
-    """(origin, seed, co): a bare origin whose main holds deploy-branches
-    (`branches`), `files` and what `seeded` adds in the seed clone, and the
-    checkout co cloned from it, on `wb` when given and the cwd throughout."""
+    """(origin, seed, co): a bare origin whose main holds a nixconvoy.toml
+    listing `branches` (patterns, one per line), `files` and what `seeded`
+    adds in the seed clone, and the checkout co cloned from it, on `wb`
+    when given and the cwd throughout."""
     origin, seed, co = d / "origin.git", d / "seed", d / "homelab9"
     sh(d, "init", "--quiet", "--bare", "-b", "main", str(origin))
     sh(d, "clone", "--quiet", str(origin), str(seed))
-    put(seed, "deploy-branches", branches)
+    put(seed, "nixconvoy.toml", toml(precheck="lint", flake_dir="nixos", targets_dir="nixos/hosts",
+                                     branches=tuple(ln.strip() for ln in branches.splitlines() if ln.strip())))
     for name, text in files.items():
         put(seed, name, text)
     seeded(seed)
@@ -746,7 +751,7 @@ def scratch_origin(d: Path, branches: str, files: dict[str, str], *, wb: str | N
 def reach_cases(d: Path) -> None:
     """reached_targets on a scratch repo of two targets: which of them this
     checkout's work changes a read file or lock entry of, measured from
-    what each target's lineage recorded of the branch."""
+    what each target's provenance recorded of the branch."""
     scratch_env()
     wb = "work/tester/9"
     lock = {"version": 7, "root": "root", "nodes": {
@@ -775,12 +780,12 @@ def reach_cases(d: Path) -> None:
     with scratch_origin(d, f"{wb}*\n", files, wb=wb) as (_origin, _seed, co):
         targets = ["a", "b"]
 
-        def reached(lineages: dict[str, str] | None = None) -> set[str]:
+        def reached(provenances: dict[str, str] | None = None) -> set[str]:
             tip = sh(co, "rev-parse", "HEAD")
             clear_memo()
-            return memo.reached_targets(str(co), tip, targets, tip, lineages or {})
+            return memo.reached_targets(str(co), tip, targets, tip, provenances or {})
 
-        def lineage(**tips: str) -> str:
+        def provenance(**tips: str) -> str:
             return proc.dump_json({"version": 2, "main": sh(co, "rev-parse", "origin/main"),
                                      "branches": tips})
 
@@ -796,32 +801,32 @@ def reach_cases(d: Path) -> None:
         # whole directory.
         put(co, "nixos/pkgs/tool.nix", "2\n", "tool")
         put(co, "nixos/pkgs/other.nix", "2\n", "other")
-        assert reached({"a": lineage(**{wb: c_x})}) == {"a"}
+        assert reached({"a": provenance(**{wb: c_x})}) == {"a"}
         c_tool = sh(co, "rev-parse", "HEAD")
         put(co, "nixos/pkgs/other.nix", "3\n", "other again")
-        assert reached({"a": lineage(**{wb: c_tool}), "b": lineage(**{wb: c_tool})}) == set()
+        assert reached({"a": provenance(**{wb: c_tool}), "b": provenance(**{wb: c_tool})}) == set()
         c_tool = sh(co, "rev-parse", "HEAD")
         put(co, "nixos/lib/lint.nix", "2\n", "lib lint")
-        assert reached({"a": lineage(**{wb: c_tool}), "b": lineage(**{wb: c_tool})}) == {"a", "b"}
+        assert reached({"a": provenance(**{wb: c_tool}), "b": provenance(**{wb: c_tool})}) == {"a", "b"}
         c_tool = sh(co, "rev-parse", "HEAD")
         # A module naming a directory that holds the flake keys its target
         # on the whole tree, and the scan says so.
         put(co, "nixos/modules/y.nix", "{ ... }: { all = ../.; }\n", "y whole")
         c_whole = sh(co, "rev-parse", "HEAD")
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            assert reached({"a": lineage(**{wb: c_tool}), "b": lineage(**{wb: c_tool})}) == {"b"}
+            assert reached({"a": provenance(**{wb: c_tool}), "b": provenance(**{wb: c_tool})}) == {"b"}
         assert "b keys on the whole nixos/ tree: nixos/modules/y.nix" in err.getvalue(), err.getvalue()
         # ...so an edit nothing imports reaches it from then on.
         put(co, "nixos/pkgs/other.nix", "4\n", "other under whole")
-        assert reached({"a": lineage(**{wb: c_whole}), "b": lineage(**{wb: c_whole})}) == {"b"}
+        assert reached({"a": provenance(**{wb: c_whole}), "b": provenance(**{wb: c_whole})}) == {"b"}
         # The repository root likewise: the flake's source is the whole repo.
         put(co, "nixos/modules/y.nix", "{ ... }: { all = ../..; }\n", "y root")
         c_root = sh(co, "rev-parse", "HEAD")
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            assert reached({"a": lineage(**{wb: c_whole}), "b": lineage(**{wb: c_whole})}) == {"b"}
+            assert reached({"a": provenance(**{wb: c_whole}), "b": provenance(**{wb: c_whole})}) == {"b"}
         assert "b keys on the whole repository: nixos/modules/y.nix" in err.getvalue(), err.getvalue()
         put(co, "README.md", "docs, under root\n", "docs under root")
-        assert reached({"a": lineage(**{wb: c_root}), "b": lineage(**{wb: c_root})}) == {"b"}
+        assert reached({"a": provenance(**{wb: c_root}), "b": provenance(**{wb: c_root})}) == {"b"}
         put(co, "nixos/modules/y.nix", "{ ... }: { }\n", "y plain")
         c_tool = sh(co, "rev-parse", "HEAD")
         # A lock bump reaches the targets whose files name the input.
@@ -829,18 +834,18 @@ def reach_cases(d: Path) -> None:
         put(co, "nixos/flake.lock", proc.dump_json(lock), "bump q")
         c_q = sh(co, "rev-parse", "HEAD")
         assert reached() == {"a", "b"}
-        assert reached({"a": lineage(**{wb: c_tool})}) == {"b"}
+        assert reached({"a": provenance(**{wb: c_tool})}) == {"b"}
         # An input only the precheck's stanza names reaches no target.
         lock["nodes"]["r"]["locked"]["rev"] = "r2"
         put(co, "nixos/flake.lock", proc.dump_json(lock), "bump r")
-        assert reached({"a": lineage(**{wb: c_q}), "b": lineage(**{wb: c_q})}) == set()
+        assert reached({"a": provenance(**{wb: c_q}), "b": provenance(**{wb: c_q})}) == set()
         c_q = sh(co, "rev-parse", "HEAD")
         # What a target already runs of this branch is not new work for it:
         # a recorded tip between the merge base and HEAD narrows the delta,
         # one at HEAD empties it, an unknown or foreign one is ignored.
-        assert reached({"a": lineage(**{wb: c_x}), "b": lineage(**{wb: c_q})}) == {"a"}
-        assert reached({"a": lineage(**{wb: c_q}), "b": lineage(**{wb: c_q})}) == set()
-        assert reached({"a": lineage(**{wb: "f" * 40}), "b": lineage(**{"work/other/1": c_q})}) == {"a", "b"}
+        assert reached({"a": provenance(**{wb: c_x}), "b": provenance(**{wb: c_q})}) == {"a"}
+        assert reached({"a": provenance(**{wb: c_q}), "b": provenance(**{wb: c_q})}) == set()
+        assert reached({"a": provenance(**{wb: "f" * 40}), "b": provenance(**{"work/other/1": c_q})}) == {"a", "b"}
         assert reached({"a": "", "b": "{not json"}) == {"a", "b"}
         # A file moved out of a directory a target reads whole changes that
         # target, though the move lists no path it reads any more.
@@ -848,7 +853,7 @@ def reach_cases(d: Path) -> None:
         c_extra = sh(co, "rev-parse", "HEAD")
         sh(co, "mv", "nixos/hosts/a/extra.nix", "nixos/modules/extra.nix")
         sh(co, "commit", "--quiet", "-m", "moved")
-        assert reached({"a": lineage(**{wb: c_extra}), "b": lineage(**{wb: c_extra})}) == {"a"}
+        assert reached({"a": provenance(**{wb: c_extra}), "b": provenance(**{wb: c_extra})}) == {"a"}
         # An input taken as a relative path (a submodule's gitlink) is read
         # from the tree: moving it reaches the targets naming the input.
         lock["nodes"]["p"] = {"locked": {"path": "./vendor/p", "type": "path"}}
@@ -857,14 +862,14 @@ def reach_cases(d: Path) -> None:
         c_p = sh(co, "rev-parse", "HEAD")
         sh(co, "update-index", "--add", "--cacheinfo", f"160000,{'2' * 40},nixos/vendor/p")
         sh(co, "commit", "--quiet", "-m", "p moved")
-        assert reached({"a": lineage(**{wb: c_p}), "b": lineage(**{wb: c_p})}) == {"a"}
+        assert reached({"a": provenance(**{wb: c_p}), "b": provenance(**{wb: c_p})}) == {"a"}
         # A recorded tip on main's side of the merge base (the branch had
         # nothing then; main moved since) is the merge base.
         upstream = sh(co, "commit-tree", f"{main0}^{{tree}}", "-p", main0, "-m", "upstream")
         sh(co, "push", "--quiet", "origin", f"{upstream}:main")
         sh(co, "fetch", "--quiet")
         sh(co, "rebase", "--quiet", "origin/main")
-        assert reached({"a": lineage(**{wb: main0}), "b": lineage(**{wb: main0})}) == {"a", "b"}
+        assert reached({"a": provenance(**{wb: main0}), "b": provenance(**{wb: main0})}) == {"a", "b"}
         # Between two commits, as the wait for a deploy under way measures
         # its increment (reached_between): x.nix's change reaches a alone.
         tip = sh(co, "rev-parse", "HEAD")
@@ -969,7 +974,7 @@ def git_cases(d: Path) -> None:
         done = union()
         assert done["branches"] == [["work/other/1", proc.rev("refs/remotes/origin/work/other/1")]], done
         assert sh(co, "rev-parse", f"{done['union']}^") == proc.rev("refs/remotes/origin/main")
-        assert staged == [[".git", "a.txt", "b.txt", "deploy-branches", "o.txt"]], staged
+        assert staged == [[".git", "a.txt", "b.txt", "nixconvoy.toml", "o.txt"]], staged
         # A fetch that moved origin/main redoes the union on the refreshed
         # checkout.
         redo = union(main0="0" * 40)
@@ -1920,15 +1925,14 @@ def open_cases(d: Path) -> None:
         assert shown.startswith(f"══ {co.name}/task ══\n") and "task done" in shown.partition("\n\n")[0] and "b.txt" in shown, shown
         assert "COMMIT_MSG.md" not in shown.partition("\n\n")[2]  # the diff leaves the message out
         sh(w, "reset", "--quiet", "--hard", "HEAD")
-        # An agent checkout beside the others: numbered after its name
-        # when that branch is listed and free, else the first free number.
+        # An agent checkout beside the others, on the branch named after its path.
         five = commands.open_checkout(d / "homelab5", None)
         one = commands.open_checkout(d / "other", None)
-        assert five == d / "homelab5" and checkout.branch_at(five) == "work/tester/5"
-        assert one == d / "other" and checkout.branch_at(one) == "work/tester/1"
+        assert five == d / "homelab5" and checkout.branch_at(five) == "work/tester/homelab5"
+        assert one == d / "other" and checkout.branch_at(one) == "work/tester/other"
         assert sh(five, "rev-parse", "HEAD") == sh(co, "rev-parse", "origin/main")
-        assert sh(five, "config", "branch.work/tester/5.merge") == "refs/heads/main"
-        assert checkout.identity_of(five.resolve(), "work/tester/5") == checkout.Checkout("agent", "work/tester/5")
+        assert sh(five, "config", "branch.work/tester/homelab5.merge") == "refs/heads/main"
+        assert checkout.identity_of(five.resolve(), "work/tester/homelab5") == checkout.Checkout("agent", "work/tester/homelab5")
         assert "exists already" in dies(lambda: commands.open_checkout(d / "homelab5", None))
         assert "nested" in dies(lambda: commands.open_checkout(co / "inside", None))
         assert "not a work branch" in dies(lambda: commands.open_checkout(d / "x", "work/other/1"))
@@ -1938,7 +1942,7 @@ def open_cases(d: Path) -> None:
         commands.close_checkout(d / "homelab5", force=True)
         commands.close_checkout(d / "other")
         assert not five.exists() and not one.exists()
-        assert not sh(co, "branch", "--list", "work/tester/5", "work/tester/1")
+        assert not sh(co, "branch", "--list", "work/tester/homelab5", "work/tester/other")
         assert "no worktree of this repository" in dies(lambda: commands.close_checkout(foreign))
         os.chdir(w)
         assert "primary worktree" in dies(lambda: commands.close_checkout(co))
@@ -1965,7 +1969,7 @@ def open_cases(d: Path) -> None:
         assert "landing with b not yet deployed:" in told
         assert not sh(co, "worktree", "list").count("deploy-wt")
         main = sh(co, "rev-parse", "origin/main")
-        assert sh(co, "ls-tree", "--name-only", main).split() == ["a.txt", "deploy-branches", "p.txt", "s.txt"]
+        assert sh(co, "ls-tree", "--name-only", main).split() == ["a.txt", "nixconvoy.toml", "p.txt", "s.txt"]
         assert sh(co, "log", "-1", "--format=%B", main).strip() == (
             "the union\n\n- the sub's piece\n\nthe sub: s.txt\n- its detail")  # the sub's appended
         assert sh(co, "rev-parse", "HEAD") == main and checkout.branch_at(co) == "work/tester/9"
@@ -2156,8 +2160,8 @@ def require_guard_of_this_tree() -> None:
 def init_cases(d: Path) -> None:
     """`nixconvoy init`: nixconvoy.toml detected from the repository (the
     flake under nixos/, its hosts directory, the one system literal), the
-    ssh address template as this user, deploy-branches written when
-    missing, nothing staged; a second init refused."""
+    ssh address template as this user, this machine's work-branch pattern,
+    nothing staged; a second init refused."""
     scratch_env()
 
     repo = d / "repo"
@@ -2177,7 +2181,6 @@ def init_cases(d: Path) -> None:
     put(repo, "nixos/pkgs/p1/default.nix", "{ }\n")  # packages, not hosts
     put(repo, "nixos/pkgs/p2/default.nix", "{ }\n")
     put(repo, "nixos/pkgs/p3/default.nix", "{ }\n")
-    put(repo, "deploy-branches", "# comment\nwork/other/*\ntester-lab/tester/*\n")
     prev = Path.cwd()
     me = getpass.getuser()
     try:
@@ -2187,6 +2190,7 @@ def init_cases(d: Path) -> None:
         c = config.load(repo)
         assert (c.flake_dir, c.targets_dir, c.targets_arch) == ("nixos", "nixos/hosts", "aarch64-linux"), c
         assert c.ssh_template == me + "@{target}" and c.branch_prefix == "nixconvoy/{machine}/", c
+        assert c.work_branches == ("nixconvoy/tester/*",), c
         assert c.child_worktrees == ".claude/worktrees" and c.parallel_eval is None and not c.precheck
         assert not c.submodules and not c.targets
         text = (repo / "nixconvoy.toml").read_text()
@@ -2194,13 +2198,10 @@ def init_cases(d: Path) -> None:
         assert "?? nixconvoy.toml" in sh(repo, "status", "--porcelain")  # written, not staged
         assert "already there" in dies(lambda: run_cli(["init"]))
         (repo / "nixconvoy.toml").unlink()
-        (repo / "deploy-branches").unlink()
-        # The flake named, relative to where init runs; the branches file
-        # written for this machine.
+        # The flake named, relative to where init runs.
         run_cli(["init", ".."])
         c = config.load(repo)
         assert (c.flake_dir, c.branch_prefix) == ("nixos", "nixconvoy/{machine}/"), c
-        assert (repo / "deploy-branches").read_text() == "nixconvoy/tester/*\n"
     finally:
         os.chdir(prev)
     # A flake at the root with no hosts directory yet.
@@ -2229,7 +2230,7 @@ if __name__ == "__main__":
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         with tempfile.TemporaryDirectory() as d:
             switch_cases(Path(d))
-        for cases in (gate_cases, lineage_cases, target_cases, protected_cases):
+        for cases in (gate_cases, provenance_cases, target_cases, protected_cases):
             cases()
         for scratch_cases in (guard_cases, reach_cases, git_cases, announce_cases, submodule_cases, open_cases,
                               init_cases):

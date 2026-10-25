@@ -1,18 +1,18 @@
 //! nixconvoy's step 5 verdict on the targets whose running system differs
-//! from the union: whose work each runs (its lineage, as nixconvoy's
-//! lineage_doc wrote it), and so which of them the deploy may switch.
+//! from the union: whose work each runs (its provenance, as nixconvoy's
+//! provenance_doc wrote it), and so which of them the deploy may switch.
 //!
 //! A target runs another checkout's increment that this union cannot contain
 //! when that checkout's push has not landed (origin's tip of its branch is
 //! still the one it built on) or when it holds work of a branch
-//! deploy-branches here does not list.  Switching it would revert that work
+//! work_branches here does not list.  Switching it would revert that work
 //! until its owner redeploys, so it is never switched as is - unless that
-//! deploy is over: the lineage names its increment's announcement
+//! deploy is over: the provenance names its increment's announcement
 //! (`pending.announce`, its ref `pending.key`) and that ref is cleared
 //! (Context::in_flight lacks it), which only the deploy's own end does -
 //! its push, or its withdrawal having switched nothing - or the removal
 //! of its branch, or a hand clear; or the deploy is a --evict that names
-//! the target or reaches it.  Work of a branch deploy-branches here does
+//! the target or reaches it.  Work of a branch work_branches here does
 //! not list stays refused until listed.  A deploy that died leaves its announcement up
 //! (nixconvoy tells one from its stopped renewals: Context::dead), so
 //! its target stays refused, the refusal naming the deploy and the
@@ -26,7 +26,7 @@
 //! land cleanly.
 //!
 //! A target to be switched may run an increment that left the convoy since:
-//! a branch tip its lineage recorded that origin's tip of the branch no
+//! a branch tip its provenance recorded that origin's tip of the branch no
 //! longer carries.  Query::Fate asks git whether this deploy's union still
 //! holds it ("kept") or not ("abandoned": reset, dropped, force-pushed
 //! over, or landed and since undone), and the target's verdict line names
@@ -34,7 +34,7 @@
 //! undeploy runs that switch itself; a branch reset by hand waits for the
 //! next deploy by anyone, and this is where the revert shows.  A
 //! subagent's branch, pushed by its first deploy and deleted with its
-//! worktree, leaves targets whose lineage holds a pending increment of a
+//! worktree, leaves targets whose provenance holds a pending increment of a
 //! branch origin never had as far as this run can see: the same query
 //! tells a dropped branch (switched over, the increment named) from one
 //! whose first push is on its way (refused, as any in-flight increment).
@@ -53,7 +53,7 @@
 //! the held target instead (Params::work_branch).  A --evict unions no
 //! other branch, so nothing is held under it: the target gets this
 //! checkout's view alone, the hold standing.
-use super::{listed, Halt, Query, Run, Script, BRANCHES_FILE};
+use super::{listed, Halt, Query, Run, Script, BRANCHES_KEY};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -62,7 +62,7 @@ pub const EVICT_FLAG: &str = "--evict";
 pub const PENDING_REFS: &str = "refs/nixconvoy/pending";
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Lineage {
+pub struct Provenance {
     pub toplevel: String,
     pub union: String,
     /// Every branch the union holds work of (the deploying checkout's own included),
@@ -85,7 +85,7 @@ pub struct Lineage {
     pub pid: i64,
 }
 
-impl Lineage {
+impl Provenance {
     /// The ref of the pending increment's announcement, when it has one.
     pub fn announce_key(&self) -> Option<&str> {
         self.announce.as_ref()?;
@@ -104,8 +104,8 @@ fn opt_str(o: &serde_json::Map<String, Value>, key: &str) -> Option<Option<Strin
     }
 }
 
-/// A lineage file's contents, or None when absent or malformed.
-pub fn parse(text: &str) -> Option<Lineage> {
+/// A provenance file's contents, or None when absent or malformed.
+pub fn parse(text: &str) -> Option<Provenance> {
     let v: Value = serde_json::from_str(text).ok()?;
     let o = v.as_object()?;
     if o.get("version").and_then(Value::as_i64)? != 2 {
@@ -129,7 +129,7 @@ pub fn parse(text: &str) -> Option<Lineage> {
     let mut branches: Vec<String> = held.keys().cloned().collect();
     branches.sort();
     let tips = held.iter().filter_map(|(b, t)| Some((b.clone(), t.as_str()?.to_string()))).collect();
-    Some(Lineage {
+    Some(Provenance {
         toplevel: s(o.get("toplevel"))?,
         union: s(o.get("union"))?,
         branches,
@@ -146,7 +146,7 @@ pub fn parse(text: &str) -> Option<Lineage> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Kind {
-    /// No lineage for the system it runs: as before lineages.
+    /// No provenance for the system it runs: as before provenances.
     Untracked,
     /// This checkout deployed it, so its union carries it.
     ThisBranch,
@@ -155,7 +155,7 @@ pub enum Kind {
     CatchUp,
     /// Another checkout's increment whose push has not landed - refused.
     InFlight,
-    /// Work of a branch deploy-branches does not list here - refused.
+    /// Work of a branch work_branches does not list here - refused.
     Unlisted,
     /// Held back by another branch whose work the union carries - refused.
     Held,
@@ -194,12 +194,12 @@ impl Kind {
 pub struct Context {
     /// This checkout: (machine, checkout directory).
     pub me: (String, String),
-    /// The branches its union may contain: deploy-branches' patterns plus
+    /// The branches its union may contain: work_branches' patterns plus
     /// main.
     pub listed: BTreeSet<String>,
     /// This run's fetched origin tip of each branch.
     pub tips: BTreeMap<String, String>,
-    /// The uncleared announcements by ref name (a lineage's `key`):
+    /// The uncleared announcements by ref name (a provenance's `key`):
     /// origin's pending refs as fetched, this run's own left out.
     pub in_flight: BTreeMap<String, String>,
     /// The announcements (by ref name) whose deploy nixconvoy found dead:
@@ -216,7 +216,7 @@ fn clock(at: f64, tz_offset: i64) -> String {
 
 /// Whose work a drifting target runs, relative to this deploy's union, and
 /// why, before `demote`.
-pub fn classify(lin: Option<&Lineage>, running: &str, cx: &Context) -> (Kind, String) {
+pub fn classify(lin: Option<&Provenance>, running: &str, cx: &Context) -> (Kind, String) {
     let Some(lin) = lin.filter(|l| l.toplevel == running) else {
         return (Kind::Untracked, String::new());
     };
@@ -230,7 +230,7 @@ pub fn classify(lin: Option<&Lineage>, running: &str, cx: &Context) -> (Kind, St
         return (
             Kind::Unlisted,
             format!(
-                "runs work of {} deployed by {who}, which {BRANCHES_FILE} here does not list, so no union here contains it",
+                "runs work of {} deployed by {who}, which {BRANCHES_KEY} here does not list, so no union here contains it",
                 unknown.join(", ")
             ),
         );
@@ -323,8 +323,8 @@ pub struct Params {
     pub built: BTreeMap<String, String>,
     /// Each target held back, by the other branches holding it (sorted).
     pub held: BTreeMap<String, Vec<String>>,
-    /// Each probed target's lineage file.
-    pub lineages: BTreeMap<String, String>,
+    /// Each probed target's provenance file.
+    pub provenances: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -366,7 +366,7 @@ pub fn refusal(refused: &[(String, Kind, Option<String>)]) -> String {
         ));
     }
     if refused.iter().any(|(_, k, _)| *k == Kind::Unlisted) {
-        fixes.push(format!("list its branch in {BRANCHES_FILE} (`nixconvoy pull` once that line is on main)"));
+        fixes.push(format!("list its branch in {BRANCHES_KEY} (`nixconvoy pull` once that line is on main)"));
     }
     if !held.is_empty() {
         fixes.push(format!(
@@ -387,11 +387,18 @@ pub fn refusal(refused: &[(String, Kind, Option<String>)]) -> String {
     )
 }
 
-/// Query::Fate's answer for `branch`'s increment at `tip` of the lineage
+/// Query::Fate's answer for `branch`'s increment at `tip` of the provenance
 /// `lin`, asked once per tip (`fates` memoises it across targets): "kept"
 /// or "abandoned".  The query names the deploying checkout when
 /// it is on this machine: one still on the branch keeps the increment.
-fn fate(s: &mut Script, branch: &str, tip: &str, lin: &Lineage, p: &Params, fates: &mut BTreeMap<(String, String), String>) -> Run<String> {
+fn fate(
+    s: &mut Script,
+    branch: &str,
+    tip: &str,
+    lin: &Provenance,
+    p: &Params,
+    fates: &mut BTreeMap<(String, String), String>,
+) -> Run<String> {
     let key = (branch.to_string(), tip.to_string());
     if let Some(f) = fates.get(&key) {
         return Ok(f.clone());
@@ -402,10 +409,10 @@ fn fate(s: &mut Script, branch: &str, tip: &str, lin: &Lineage, p: &Params, fate
     Ok(f)
 }
 
-/// The increments a switch of a target reverts: each branch tip its lineage
+/// The increments a switch of a target reverts: each branch tip its provenance
 /// recorded that is not origin's tip now and that the union no longer
 /// holds, as "<branch>'s abandoned increment <sha>".
-fn reverted(s: &mut Script, lin: &Lineage, p: &Params, fates: &mut BTreeMap<(String, String), String>) -> Run<Vec<String>> {
+fn reverted(s: &mut Script, lin: &Provenance, p: &Params, fates: &mut BTreeMap<(String, String), String>) -> Run<Vec<String>> {
     let mut notes = Vec::new();
     for (b, tip) in &lin.tips {
         if p.cx.tips.get(b) == Some(tip) {
@@ -435,7 +442,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     let mut refused = Vec::new();
     let mut fates = BTreeMap::new();
     for h in affected.iter().filter(|h| p.candidates.contains(h)) {
-        let lin = p.lineages.get(h).and_then(|text| parse(text));
+        let lin = p.provenances.get(h).and_then(|text| parse(text));
         let running = p.running.get(h).cloned().flatten().unwrap_or_default();
         let reached = p.reached.contains(h);
         let take_over = p.evict && (p.named || reached);
@@ -467,7 +474,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         if kind.refused() {
             let dead = lin
                 .as_ref()
-                .and_then(Lineage::announce_key)
+                .and_then(Provenance::announce_key)
                 .filter(|k| kind == Kind::InFlight && p.cx.dead.contains(*k))
                 .map(str::to_string);
             refused.push((h.clone(), kind, dead));

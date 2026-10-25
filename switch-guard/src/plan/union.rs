@@ -17,7 +17,7 @@
 //! the build is redone then too; ATTEMPTS such moves of origin end the
 //! run (a wait is another deploy's progress, not a move, and counts for
 //! nothing).
-use super::{failed, listed, Halt, Query, Run, Script, BRANCHES_FILE, MAIN, MSG_FILE};
+use super::{failed, listed, Halt, Query, Run, Script, BRANCHES_KEY, MAIN, MSG_FILE};
 use std::collections::BTreeSet;
 
 pub const ATTEMPTS: usize = 3;
@@ -50,7 +50,7 @@ struct Conflict {
 }
 
 /// What the passes over origin's branches carry between them: the
-/// deploy-branches the last one read, and the unlisted branches already
+/// work_branches the last one read, and the unlisted branches already
 /// named.
 struct Seen {
     listed: Vec<String>,
@@ -73,7 +73,7 @@ fn select(s: &mut Script, p: &Params, seen: &mut Seen) -> Run<Vec<(String, Strin
         }
         if !listed(seen.listed.iter().map(String::as_str), &name) {
             if seen.warned.insert(name.clone()) {
-                s.warn(format!("warning: ignoring origin/{name}: not listed in {BRANCHES_FILE}"));
+                s.warn(format!("warning: ignoring origin/{name}: not listed in {BRANCHES_KEY}"));
             }
             continue;
         }

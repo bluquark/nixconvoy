@@ -11,7 +11,7 @@ would clone a second copy under .git/modules) on a branch named after
 the checkout's work branch.  A deploy commits the worktree's staged
 state onto that branch, pushes it and stages the gitlink on the pushed
 rev, so the increment carries the submodule as a tree change, which the
-union, the eval memo and the lineage handle like any other.  `land` lands
+union, the eval memo and the provenance handle like any other.  `land` lands
 the branch on the repository's default branch first and pins the
 gitlink there; `undeploy` resets it onto the pin of the rev the checkout
 goes back to (`--back-to origin/main`: the gitlink restored to

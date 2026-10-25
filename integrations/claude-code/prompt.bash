@@ -9,7 +9,7 @@
 #   source prompt.bash; PS1='\h:$(__nixconvoy_ps1)\w\$ '
 __nixconvoy_ps1() {
   local top w n=0 agents='' out line head='' oid='' ahead='' xy unstaged='' staged=''
-  top=$(git rev-parse --show-toplevel 2>/dev/null) && [ -f "$top/deploy-branches" ] \
+  top=$(git rev-parse --show-toplevel 2>/dev/null) && [ -f "$top/nixconvoy.toml" ] \
     || { command -v __git_ps1 >/dev/null 2>&1 && __git_ps1 "(%s)"; return; }
   for w in "$top"/.claude/worktrees/*/; do
     [ -e "$w.git" ] || continue

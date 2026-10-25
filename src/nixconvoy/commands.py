@@ -620,7 +620,7 @@ def finish(wb: str, onto: str = "origin/main") -> None:
     old = rev(f"refs/remotes/origin/{wb}") or ""
     git("push", "--quiet", "origin", f"{wb}:refs/heads/{wb}",
         f"--force-with-lease=refs/heads/{wb}:{old}")
-    print(f"{wb} reset onto {onto}, here and on origin")
+    print(f"{wb} reset onto {onto}")
     here = Path.cwd().resolve()
     if sub_parent(here) is not None and rev("HEAD") == rev("refs/remotes/origin/main"):
         print(f"the worktree stays; `nixconvoy close {here.name}` removes it")
@@ -957,9 +957,8 @@ def default_base(root: Path) -> str:
 def open_checkout(path: Path, branch: str | None) -> Path:
     """`nixconvoy open <path>`: an agent checkout - a worktree of this
     repository at `path`, outside every checkout, on a work branch of this
-    machine's: `branch`, else <branch_prefix><N> for the digits `path`'s
-    name ends with when that branch is listed and free, else the first
-    listed free number.  The branch is taken as origin holds it (a removed
+    machine's: `branch`, else <branch_prefix><path's name>, listed.  The
+    branch is taken as this repository or origin holds it (a removed
     checkout's), else new off origin's default branch; its upstream is
     origin/main as nixconvoy keeps it.  Prints the path."""
     here = Path.cwd().resolve()
@@ -980,26 +979,15 @@ def open_checkout(path: Path, branch: str | None) -> Path:
     tips = origin_tips()
     local = set(out(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/"]).split())
     prefix = this_prefix()
-
-    def free(b: str) -> bool:
-        return b not in local and b not in tips
-
     if branch is None:
-        m = re.search(r"(\d+)$", d.name)
-        if m and owned(f"{prefix}{m.group(1)}", pats) and free(f"{prefix}{m.group(1)}"):
-            branch = f"{prefix}{m.group(1)}"
-        else:
-            branch = next((f"{prefix}{n}" for n in range(1, 1000)
-                           if owned(f"{prefix}{n}", pats) and free(f"{prefix}{n}")), None)
-        if branch is None:
-            die(f"no free work branch {prefix}N is listed in deploy-branches; name one with --branch")
-    elif not owned(branch, pats):
+        branch = f"{prefix}{d.name}"
+    if not owned(branch, pats):
         die(f"{branch} is not a work branch of this machine's: one named {prefix}... that "
-            f"deploy-branches lists")
-    elif branch.removeprefix(prefix) == "main" or "-" in branch.removeprefix(prefix):
+            f"nixconvoy.toml's work_branches lists; name one with --branch")
+    if branch.removeprefix(prefix) == "main" or "-" in branch.removeprefix(prefix):
         # "<leaf>-<name>" is a subagent worktree's branch, "main-<name>" the main checkout's.
         die(f"{branch}: a checkout's branch is {prefix}<leaf> with a leaf that is not 'main' "
-            f"and holds no '-'")
+            f"and holds no '-'; name one with --branch")
     d.parent.mkdir(parents=True, exist_ok=True)
     if branch in local:
         p = git("worktree", "add", "--quiet", str(d), branch, check=False)

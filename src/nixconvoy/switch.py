@@ -1,4 +1,4 @@
-"""One target's switch: the lineage it claims, the on-target compare-and-swap
+"""One target's switch: the provenance it claims, the on-target compare-and-swap
 guard, and the nixconvoy-switch core's protocol performed over ssh."""
 
 from __future__ import annotations
@@ -16,13 +16,13 @@ from . import proc, targets
 from .checkout import current_branch
 from .guard import CONTROL_PROTOCOL, drive
 from .proc import Fail, out, rev, run, stream
-from .targets import PROBE_TIMEOUT, control_opts, lineage_digest
+from .targets import PROBE_TIMEOUT, control_opts, provenance_digest
 
 
-def lineage_doc(*, union: str, main: str | None, branches: dict[str, str | None],
+def provenance_doc(*, union: str, main: str | None, branches: dict[str, str | None],
                 own: str, head: str | None, base: str | None, snap: str, announce: str,
                 at: float, machine: str, checkout: str, pid: int, key: str = "") -> dict[str, object]:
-    """The lineage of a deploy's union, before its toplevel and record are
+    """The provenance of a deploy's union, before its toplevel and record are
     added: `branches` the other work branches' unioned tips, `own` the
     checked-out branch the union was built on (`head`, or `snap`, the commit
     the branch gets once the staged increment runs), `base` origin's tip of
@@ -44,12 +44,12 @@ def lineage_doc(*, union: str, main: str | None, branches: dict[str, str | None]
     return doc
 
 
-def lineage_record(union: str, branches: list[tuple[str, str]], snap: str,
+def provenance_record(union: str, branches: list[tuple[str, str]], snap: str,
                    announce: str = "", key: str = "") -> dict[str, object]:
-    """lineage_doc for this deploy, from the refs it built its union on;
+    """provenance_doc for this deploy, from the refs it built its union on;
     `snap` the increment's work-branch commit (deployed_commit), or ""."""
     own = current_branch() or "main"  # detached: at origin/main (ensure_rebased)
-    return lineage_doc(
+    return provenance_doc(
         union=union, main=rev("refs/remotes/origin/main"), branches=dict(branches),
         own=own, head=rev("HEAD"), base=rev(f"refs/remotes/origin/{own}"), snap=snap,
         announce=announce, key=key, at=time.time(), machine=proc.this_machine(),
@@ -58,20 +58,20 @@ def lineage_record(union: str, branches: list[tuple[str, str]], snap: str,
 
 def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> list[str]:
     """The on-target lock of a switch: a process holding fd 9 that first
-    re-verifies the target still runs `expected` with the lineage whose
-    lineage_digest the probe read (else MOVED, so a deploy that probed in
+    re-verifies the target still runs `expected` with the provenance whose
+    provenance_digest the probe read (else MOVED, so a deploy that probed in
     another's switch-to-verify window aborts instead of reverting it), prints
     LOCKED and holds the lock until its stdin closes.  The first line sent
-    is the lineage of `toplevel`, claimed in LINEAGE_FILE at once (WROTE):
+    is the provenance of `toplevel`, claimed in PROVENANCE_FILE at once (WROTE):
     from then on a probe that finds `toplevel` running reads it.  At the
     end, unless the target runs `toplevel` or its profile names it (a reboot
     takes it there), the previous file is put back."""
-    f, cur_sys = targets.LINEAGE_FILE, targets.CURRENT_SYSTEM
+    f, cur_sys = targets.PROVENANCE_FILE, targets.CURRENT_SYSTEM
     claim = (f"umask 022; mkdir -p {Path(f).parent} && "
              f"{{ cp -p {f} {f}.prev 2>/dev/null || rm -f {f}.prev; }} && "
              f"cat >{f}.tmp && mv -f {f}.tmp {f}")
     restore = f"if [ -e {f}.prev ]; then mv -f {f}.prev {f}; else rm -f {f}; fi"
-    w = targets.LINEAGE_WRITER
+    w = targets.PROVENANCE_WRITER
     script = (
         f"exec 9>{targets.SWITCH_LOCK}; "
         "flock -w 900 9 || { echo TIMEOUT; exit 1; }; "
@@ -79,7 +79,7 @@ def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> 
         f'[ "$cur" = "{expected}" ] || {{ echo "MOVED $cur"; exit 1; }}; '
         f"lin=$(cat {f} 2>/dev/null | sha256sum); "
         f'[ "${{lin%% *}}" = "{digest}" ] || '
-        '{ echo "MOVED $cur, its lineage rewritten by another deploy"; exit 1; }; '
+        '{ echo "MOVED $cur, its provenance rewritten by another deploy"; exit 1; }; '
         "echo LOCKED; IFS= read -r rec || exit 0; claimed=; "
         'if [ -z "$rec" ]; then echo SKIPPED; '
         f"elif printf '%s\\n' \"$rec\" | {w} sh -c {shlex.quote(claim)}; then echo WROTE; claimed=1; "
@@ -96,7 +96,7 @@ def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> 
 
 
 def switch(target: str, expected: str, toplevel: str, nixconvoy_switch: str,
-           quiet: bool = False, lineage: str = "", digest: str = "",
+           quiet: bool = False, provenance: str = "", digest: str = "",
            needs_internet: bool = False) -> None:
     """Switch `target` to `toplevel` as nixconvoy-switch decides.  `quiet`
     (several switches at once) prints the activation output afterwards,
@@ -104,8 +104,8 @@ def switch(target: str, expected: str, toplevel: str, nixconvoy_switch: str,
     transient unit on the target (as nixos-rebuild does), so they complete
     even if this ssh session dies.  Each verification round reads the running
     system over a new ssh connection, not the deploy's master connection: a
-    switch that stopped sshd admitting logins fails it.  `lineage` (one JSON line) is claimed on
-    the target under the switch lock, `digest` the lineage_digest the probe
+    switch that stopped sshd admitting logins fails it.  `provenance` (one JSON line) is claimed on
+    the target under the switch lock, `digest` the provenance_digest the probe
     read (switch_guard_cmd).  `needs_internet`: verification also requires
     this machine to reach the internet (the router)."""
     local = target == proc.this_machine()
@@ -140,13 +140,13 @@ def switch(target: str, expected: str, toplevel: str, nixconvoy_switch: str,
             line = guard.stdout.readline().strip()
             if line == "LOCKED":
                 try:
-                    guard.stdin.write(lineage + "\n")
+                    guard.stdin.write(provenance + "\n")
                     guard.stdin.flush()
                     claimed = guard.stdout.readline().strip()
                 except OSError:
                     claimed = ""
-                if lineage and claimed != "WROTE":
-                    print(f"note: could not claim {target}'s lineage in {targets.LINEAGE_FILE}; until "
+                if provenance and claimed != "WROTE":
+                    print(f"note: could not claim {target}'s provenance in {targets.PROVENANCE_FILE}; until "
                           f"its next switch, other deploys treat its system as untracked",
                           file=sys.stderr)
                 return {"guard": "locked"}
@@ -232,5 +232,5 @@ def switch(target: str, expected: str, toplevel: str, nixconvoy_switch: str,
                 guard.kill()
 
 
-__all__ = ["lineage_digest", "lineage_doc", "lineage_record", "switch",
+__all__ = ["provenance_digest", "provenance_doc", "provenance_record", "switch",
            "switch_guard_cmd"]

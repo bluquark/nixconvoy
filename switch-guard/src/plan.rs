@@ -17,10 +17,10 @@ pub mod union;
 pub mod wire;
 
 pub const MSG_FILE: &str = "COMMIT_MSG.md";
-pub const BRANCHES_FILE: &str = "deploy-branches";
+pub const BRANCHES_KEY: &str = "nixconvoy.toml's work_branches";
 pub const MAIN: &str = "refs/remotes/origin/main";
 
-/// Whether `name` matches one of deploy-branches' patterns, where `*`
+/// Whether `name` matches one of work_branches' patterns, where `*`
 /// spans anything.
 pub fn listed<'a>(patterns: impl IntoIterator<Item = &'a str>, name: &str) -> bool {
     fn glob(p: &[u8], n: &[u8]) -> bool {
@@ -133,7 +133,7 @@ pub enum Query {
         branch: String,
     },
 
-    /// deploy-branches as the checkout now has it -> Names.
+    /// work_branches as the checkout now has it -> Names.
     Listed,
     /// origin's work branches (the listed patterns and this prefix's shape) and their tips, in ref order -> Refs.
     Branches,

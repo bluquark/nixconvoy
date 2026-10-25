@@ -3,8 +3,8 @@ key is detected from the repository - the flake directory, the hosts
 directory, the targets' system, this machine's work-branch pattern - or
 starts from this machine (the ssh address template, as this user); the
 optional sections are written as commented examples filled with what was
-found (the flake's checks, the targets).  deploy-branches is written too
-when it is missing.  git is only read: nothing is staged or committed."""
+found (the flake's checks, the targets).  git is only read: nothing is
+staged or committed."""
 
 from __future__ import annotations
 
@@ -17,8 +17,7 @@ import subprocess
 from pathlib import Path
 
 from . import config, proc
-from .checkout import allowed_branches
-from .config import BRANCHES_FILE, CONFIG_FILE
+from .config import CONFIG_FILE
 from .proc import die, out, run
 
 # A nix probe is a convenience: past this, the heuristics stand alone.
@@ -57,23 +56,19 @@ def main(flake_arg: str | None, start: Path) -> None:
     if host_names is not None:
         targets = [t for t in targets if t in host_names]
     system, system_how = detect_system(root, ref, hosts_dir, targets, nix)
-    prefix, new_branches = branch_prefix(root, notes)
+    prefix = DEFAULT_BRANCH_PREFIX
     checks = nix.json(["nix", "eval", "--json", f"{ref}#checks.{system}", "--apply", "builtins.attrNames"],
                       "the flake's checks") if system_how != "guessed" else None
     check_names = sorted(c for c in checks if isinstance(c, str)) if isinstance(checks, list) else []
     ssh = f"{this_user()}@{{target}}"
     text = render(flake=flake, hosts_dir=hosts_dir, system=system, ssh=ssh, prefix=prefix,
-                  checks=check_names, targets=targets)
+                  branches=[prefix.format(machine=proc.this_machine()) + "*"], checks=check_names, targets=targets)
     try:
         config.parse(text)
     except config.ConfigError as e:  # a bug in render, never the user's
         die(f"generated an invalid {CONFIG_FILE}: {e}")
     (root / CONFIG_FILE).write_text(text, encoding="utf-8")
-    written = [CONFIG_FILE]
-    if new_branches is not None:
-        (root / BRANCHES_FILE).write_text(new_branches, encoding="utf-8")
-        written.append(BRANCHES_FILE)
-    print(f"wrote {' and '.join(written)}:")
+    print(f"wrote {CONFIG_FILE}:")
     print(f"  flake_dir = {flake!r}, targets_dir = {hosts_dir!r} ({', '.join(targets) or 'no target directories yet'})")
     print(f"  targets_arch = {system!r} ({system_how}), ssh_address_template = {ssh!r}, branch_prefix = {prefix!r}")
     for n in notes:
@@ -218,19 +213,7 @@ def detect_system(root: Path, ref: str, hosts_dir: str, targets: list[str], nix:
     return f"{arch}-linux", "guessed"
 
 
-def branch_prefix(root: Path, notes: list[str]) -> tuple[str, str | None]:
-    """The work-branch prefix, nixconvoy/{machine}/, with the deploy-branches
-    to write when the file is missing (parsed as every deploy parses it when
-    present: an invalid pattern is refused here too)."""
-    line = DEFAULT_BRANCH_PREFIX.format(machine=proc.this_machine()) + "*"
-    if not (root / BRANCHES_FILE).is_file():
-        return DEFAULT_BRANCH_PREFIX, line + "\n"
-    if line not in allowed_branches():
-        notes.append(f"{BRANCHES_FILE} has no line for this machine: add {line}")
-    return DEFAULT_BRANCH_PREFIX, None
-
-
-def render(*, flake: str, hosts_dir: str, system: str, ssh: str, prefix: str,
+def render(*, flake: str, hosts_dir: str, system: str, ssh: str, prefix: str, branches: list[str],
            checks: list[str], targets: list[str]) -> str:
     q = json.dumps  # a TOML basic string
     lines = [
@@ -243,6 +226,9 @@ def render(*, flake: str, hosts_dir: str, system: str, ssh: str, prefix: str,
         "# {machine} is this machine's hostname; it can be left out of the prefix if you only run nixconvoy on one machine",
 
         f"branch_prefix = {q(prefix)}",
+        "# The work branches nixconvoy may union into a deploy (and own, when named with the prefix) as",
+        "# patterns (* spans anything), one per machine deploying from here; a pushed branch none matches is ignored.",
+        f"work_branches = [{', '.join(q(b) for b in branches)}]",
         "# Child worktrees are an optional feature of nixconvoy that can be used by hand if desired,",
         "# but is primarily intended to hook into worktrees that harnesses automatically create to isolate their subagents.",
         "# The default directory is set to Claude Code's, so that nixconvoy's Claude Code plugin works out of the box.",

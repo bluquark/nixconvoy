@@ -23,14 +23,14 @@ from .proc import NOTHING_DONE, die, load_json, ok, run
 # Seconds one probe of a target may take, so a stalled ssh session holds
 # neither a deploy's start nor verification past the deadline.
 PROBE_TIMEOUT = 20
-# Where a target keeps the provenance of the system it runs (switch.lineage_doc),
+# Where a target keeps the provenance of the system it runs (switch.provenance_doc),
 # claimed under the switch lock before activation, read by every probe.
 # Persistent, so a reboot keeps it beside the system it describes.
-LINEAGE_FILE: str = "/var/lib/nixconvoy/lineage.json"
+PROVENANCE_FILE: str = "/var/lib/nixconvoy/provenance.json"
 CURRENT_SYSTEM: str = "/run/current-system"
 SYSTEM_PROFILE: str = "/nix/var/nix/profiles/system"
 SWITCH_LOCK: str = "/tmp/nixconvoy-switch.lock"  # noqa: S108 - every deploy shares it
-LINEAGE_WRITER: str = "sudo -n"
+PROVENANCE_WRITER: str = "sudo -n"
 # Restricted settings for the build phase alone, honoured only from a
 # trusted user (elsewhere Nix warns and ignores them); every other nix
 # invocation keeps the daemon defaults.  always-allow-substitutes false:
@@ -115,14 +115,14 @@ def target_cmd(target: str, argv: list[str], sudo: bool = False,
 
 class Probe(NamedTuple):
     running: str | None
-    # LINEAGE_FILE as read ("" when absent).
-    lineage: str
-    # switch.lineage_digest of it, for the guard's compare.
+    # PROVENANCE_FILE as read ("" when absent).
+    provenance: str
+    # switch.provenance_digest of it, for the guard's compare.
     digest: str
 
 
-def lineage_digest(text: str) -> str:
-    """What the switch guard compares LINEAGE_FILE against (sha256sum of
+def provenance_digest(text: str) -> str:
+    """What the switch guard compares PROVENANCE_FILE against (sha256sum of
     its bytes; an absent file reads as empty)."""
     import hashlib  # noqa: PLC0415
 
@@ -130,14 +130,14 @@ def lineage_digest(text: str) -> str:
 
 
 def parse_probe(stdout: str) -> Probe:
-    """The remote probe's output: the running system, then the lineage file
+    """The remote probe's output: the running system, then the provenance file
     verbatim."""
     cur, _, text = stdout.partition("\n")
-    return Probe(cur.strip() or None, text, lineage_digest(text))
+    return Probe(cur.strip() or None, text, provenance_digest(text))
 
 
 def probe(name: str) -> Probe:
-    """The target's running system and its lineage, in one round trip;
+    """The target's running system and its provenance, in one round trip;
     running None when it cannot be read."""
     if name == proc.this_machine():
         try:
@@ -145,11 +145,11 @@ def probe(name: str) -> Probe:
         except OSError:
             return Probe(None, "", "")
         try:
-            text = Path(LINEAGE_FILE).read_bytes().decode()
+            text = Path(PROVENANCE_FILE).read_bytes().decode()
         except (OSError, UnicodeDecodeError):
             text = ""
-        return Probe(cur, text, lineage_digest(text))
-    script = f"readlink {CURRENT_SYSTEM} && {{ cat {LINEAGE_FILE} 2>/dev/null || true; }}"
+        return Probe(cur, text, provenance_digest(text))
+    script = f"readlink {CURRENT_SYSTEM} && {{ cat {PROVENANCE_FILE} 2>/dev/null || true; }}"
     p = run(target_cmd(name, ["sh", "-c", script]), check=False, timeout=PROBE_TIMEOUT)
     if p.returncode != 0:
         return Probe(None, "", "")

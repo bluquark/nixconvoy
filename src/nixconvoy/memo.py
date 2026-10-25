@@ -364,11 +364,11 @@ def target_eval_key(wt: str, union: str, target: str) -> str:
     return hashlib.sha256("\n".join(sorted(parts)).encode()).hexdigest()
 
 
-def recorded_tip(lineage: str, branch: str) -> str | None:
-    """The tip of `branch` a target's lineage file says its union held (the
+def recorded_tip(provenance: str, branch: str) -> str | None:
+    """The tip of `branch` a target's provenance file says its union held (the
     "main" field for main), or None."""
     try:
-        doc = load_json(lineage)
+        doc = load_json(provenance)
     except ValueError:
         return None
     if not isinstance(doc, dict):
@@ -419,11 +419,11 @@ def reached_between(wt: str, union: str, targets: list[str], base: str, tip: str
 
 
 def reached_targets(wt: str, union: str, targets: list[str], tip: str,
-                    lineages: dict[str, str]) -> set[str]:
+                    provenances: dict[str, str]) -> set[str]:
     """The targets among `targets` whose evaluation reads something this
     checkout's own work changed (reached_between): differing between `tip`
     (the commit about to deploy) and what of this branch the target already
-    runs - the tip its lineage recorded, when that lies between origin/main's
+    runs - the tip its provenance recorded, when that lies between origin/main's
     merge base and `tip`, else the merge base itself, so main's movement, a
     rebase or another branch's work never counts as this checkout's.  The
     drift core consults it for a target carrying another checkout's refused
@@ -439,7 +439,7 @@ def reached_targets(wt: str, union: str, targets: list[str], tip: str,
     by_base: dict[str, list[str]] = {}
     for h in targets:
         base = mb
-        rec = recorded_tip(lineages.get(h, ""), own)
+        rec = recorded_tip(provenances.get(h, ""), own)
         if rec and rec != mb and is_ancestor(mb, rec) and is_ancestor(rec, tip):
             base = rec
         by_base.setdefault(base, []).append(h)

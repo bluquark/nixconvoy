@@ -6,7 +6,7 @@ one tree silently reverts what another tree already deployed.
 
 Model:
   - main: mirror of origin/main; only finished (landed) commits.
-  - A work branch, listed by pattern in deploy-branches at the repo root and
+  - A work branch, listed by pattern in nixconvoy.toml's work_branches and
     named with this machine's branch_prefix, is owned by the checkout that
     has it checked out; nixconvoy is its only writer: it commits the staged
     state onto it and pushes it after a successful deploy.  A checkout on
@@ -36,8 +36,8 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
   converges the targets on the union as it is (the nightlies', and a main
   checkout's, deploy).
   1. start fetching origin; enumerate the targets from the hosts directory
-  2. probe every target's running system and its lineage
-     (/var/lib/nixconvoy/lineage.json, in the same round trip), concurrently
+  2. probe every target's running system and its provenance
+     (/var/lib/nixconvoy/provenance.json, in the same round trip), concurrently
      with steps 3-4.  Candidates default to all targets; naming targets (or @tag, every
      target nixconvoy.toml gives that tag) restricts switching to (at most)
      those.  An unreachable candidate fails the deploy before anything is
@@ -85,12 +85,12 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      units, switch last, boot assessment).  Targets whose running system
      matches are up to date; the rest will be switched (their drift may be
      catch-up to main or other branches, not just this increment) - unless
-     the lineage shows the target runs another checkout's increment that this
+     the provenance shows the target runs another checkout's increment that this
      union cannot contain: a switch whose push has not landed yet, or one
-     of a branch deploy-branches here does not list.  Such a target is never
+     of a branch work_branches here does not list.  Such a target is never
      switched as is: when this checkout's own work does not reach it (no
      file its configuration reads changed since the tip of this branch its
-     lineage recorded) it is left alone, running that work; when it does,
+     provenance recorded) it is left alone, running that work; when it does,
      the deploy is refused whole.  An increment whose deploy is over - its
      announcement cleared (step 8) without the push landing - is
      abandoned: switched over with a warning; so is a refused target
@@ -99,14 +99,14 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      refused: the refusal names the deploy and the clear that ends it
      (git push --force origin origin/main:refs/nixconvoy/pending/<branch>),
      or the push of its branch that keeps it.  Work of a branch
-     deploy-branches does not list stays refused until listed.  When the configuration
+     work_branches does not list stays refused until listed.  When the configuration
      names a precheck (a flake check), it runs on a thread beside the evals
      unless a pass is already proven for the union's tree (nix rebuilds it
      only when a file it reads changed), and a failure stops the deploy the
      moment it is known.  A drifting candidate
      whose boot counting rejected its new toplevel stops the deploy before
      anything is built.  Each target to be switched gets its deploy record:
-     a commit of the union's tree whose message carries the lineage below,
+     a commit of the union's tree whose message carries the provenance below,
      on the target's previous record (git log --first-parent is its deploy
      history), origin/main, each unioned branch's tip and the increment's
      commit, which is made now with its -m message and its trailers:
@@ -132,7 +132,7 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      held ON THE TARGET that first re-verifies the target still runs what
      step 2 probed.  This compare-and-swap makes a deploy abort cleanly
      instead of reverting a switch another machine made meanwhile.  The
-     guard compares the lineage too, then claims the lineage file for the
+     guard compares the provenance too, then claims the provenance file for the
      new toplevel before activation with its provenance: the toplevel, the
      union, origin/main and each unioned branch's tip, this checkout's
      branch as pending when what it unioned of it is not on origin yet
@@ -277,8 +277,8 @@ Open (nixconvoy open <path> [--branch <work-branch>] | --child <worktree>
 | --submodule <input>): a worktree.  --child <worktree>: a subagent
 worktree of that name, <root>/<child_worktrees>/<worktree> (the directory
 nixconvoy.toml's `child_worktrees` names; .claude/worktrees, Claude
-Code's own place, in a repository without nixconvoy.toml or
-deploy-branches; a nested worktree must be ignored, so the directory is
+Code's own place, in a repository without nixconvoy.toml; a nested
+worktree must be ignored, so the directory is
 written into .git/info/exclude unless it is already; root: the checkout
 this one's subagent worktrees hang off) on the fresh branch
 worktree-<worktree> off origin's default branch, owning <root's work
@@ -290,10 +290,9 @@ subagent worktree wherever it was made.  <path> (for close, written as
 one or with a / in it and no branch here): an agent checkout beside the
 others - a worktree of this repository at that path,
 outside every checkout, on a work branch of this machine's: --branch, else
-<branch_prefix><N> for the digits the path's name ends with (homelab5 ->
-nixconvoy/<machine>/5) when that is listed and free, else the first listed free
-number; origin's copy of the branch when it has one (a checkout removed
-before), else new off origin's default branch.  --submodule:
+<branch_prefix><path's name> (lab5 -> nixconvoy/<machine>/lab5), listed;
+this repository's or origin's copy of the branch when one has it (a
+checkout removed before), else new off origin's default branch.  --submodule:
 the flake input <input> developed in place - a git submodule of this
 repository named after the input, taken by flake.nix as a relative path
 input with inputs.self.submodules = true, so the gitlink in the tree is
@@ -367,9 +366,8 @@ best match the nixosConfigurations' names (`nix eval`, best effort within
 the one system literal the hosts' .nix files agree on, else the first
 target's evaluated hostPlatform, else this machine's architecture as a
 guess the file says to verify; ssh_address_template, "<this
-user>@{target}", to edit; branch_prefix nixconvoy/{machine}/ - and
-deploy-branches itself, this machine's line, when the file is missing;
-child_worktrees
+user>@{target}", to edit; branch_prefix nixconvoy/{machine}/ and
+work_branches, this machine's pattern; child_worktrees
 .claude/worktrees; eval.parallel "auto".  The optional sections follow as
 commented examples filled with what was found: the flake's checks for
 eval.precheck, the targets' names.  git is only read: what it wrote is
@@ -498,7 +496,7 @@ hook <event> (session-start, subagent-stop, worktree-create,
 worktree-remove or worktree-resume) is the plugin's hook of that event,
 which its hooks/run.sh <event> runs with the hook's input on stdin - never
 typed by hand.
-init writes nixconvoy.toml (and a missing deploy-branches) for a fresh
+init writes nixconvoy.toml for a fresh
 install, every required key detected (the ssh address template as this
 user, to edit)."""
 
@@ -756,7 +754,7 @@ def init_args(args: list[str], start: Path) -> None:
 def is_path(arg: str) -> bool:
     """A close argument naming an agent checkout by its path rather than a
     subagent worktree by its name (no / in one) or a branch
-    (work/<machine>/N has slashes too): one written as a path, or with a /
+    (work/<machine>/<leaf> has slashes too): one written as a path, or with a /
     in it when it is no branch of this repository."""
     if arg.startswith(("/", "~", "./", "../")) or arg.endswith("/"):
         return True

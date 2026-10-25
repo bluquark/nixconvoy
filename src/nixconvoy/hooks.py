@@ -43,7 +43,7 @@ from .commands import (
     sub_label,
     transcript_cwd,
 )
-from .config import BRANCHES_FILE
+from .config import CONFIG_FILE
 from .proc import die, failure, git, ok, out, run
 
 EVENTS = ("session-start", "subagent-stop", "worktree-create", "worktree-remove", "worktree-resume")
@@ -78,7 +78,7 @@ def run_hook(event: str) -> None:
     if event == "worktree-create":
         worktree_create(str(given.get("name") or ""), session)
         return
-    if session is None or not Path(BRANCHES_FILE).is_file():
+    if session is None or not Path(CONFIG_FILE).is_file():
         return
     if event == "session-start":
         session_start(session)
@@ -149,7 +149,7 @@ def worktree_resume(given: dict[str, object]) -> None:
         while not up.is_dir() and up != up.parent:
             up = up.parent
         root = toplevel(up)
-        if root is None or not (root / BRANCHES_FILE).is_file():
+        if root is None or not (root / CONFIG_FILE).is_file():
             return
         os.chdir(root)
         with contextlib.redirect_stdout(sys.stderr):
@@ -175,7 +175,7 @@ def worktree_remove(path: str) -> None:
     if top is None:
         return
     os.chdir(top)
-    nixconvoy = Path(BRANCHES_FILE).is_file()
+    nixconvoy = Path(CONFIG_FILE).is_file()
     held = hold_lock(name_lock_path(d), wait=60)
     if held is None:
         die(f"hook worktree-remove: {d} stayed locked for 60s by a close or a create, kept")

@@ -18,7 +18,7 @@ fn landed() -> String {
     "b".repeat(40)
 }
 
-/// nixconvoy's lineage_doc with the toplevel added: `pending` is the
+/// nixconvoy's provenance_doc with the toplevel added: `pending` is the
 /// deploying checkout's own branch and origin's tip of it, `announce` its
 /// increment's announcement.
 fn doc_ann(top: &str, by: (&str, &str), pending: Option<(&str, Option<&str>)>, announce: Option<&str>, others: &[&str], at: f64) -> String {
@@ -70,32 +70,32 @@ fn lin_ann(
     announce: Option<&str>,
     others: &[&str],
     at: f64,
-) -> Lineage {
-    let l = parse(&doc_ann(top, by, pending, announce, others, at)).expect("a lineage_doc parses");
+) -> Provenance {
+    let l = parse(&doc_ann(top, by, pending, announce, others, at)).expect("a provenance_doc parses");
     assert_eq!(l.pending, pending.map(|(b, base)| (b.to_string(), base.map(str::to_string))));
     assert_eq!(l.announce.as_deref(), announce.filter(|_| pending.is_some()));
     l
 }
 
-fn lin(top: &str, by: (&str, &str), pending: Option<(&str, Option<&str>)>, others: &[&str], at: f64) -> Lineage {
+fn lin(top: &str, by: (&str, &str), pending: Option<(&str, Option<&str>)>, others: &[&str], at: f64) -> Provenance {
     lin_ann(top, by, pending, None, others, at)
 }
 
-fn std_lin() -> Lineage {
+fn std_lin() -> Provenance {
     let b = base();
     lin(NEW, OTHER, Some((BRANCH, Some(&b))), &["work/chikuwa/1"], T0)
 }
 
-fn verdict(l: Option<&Lineage>, c: &Context, take_over: bool, reached: bool) -> (Kind, String) {
+fn verdict(l: Option<&Provenance>, c: &Context, take_over: bool, reached: bool) -> (Kind, String) {
     let (kind, why) = classify(l, NEW, c);
     demote(kind, why, take_over, reached)
 }
 
 #[test]
-fn classifies_lineages() {
+fn classifies_provenances() {
     let b = base();
     let at_base = cx(&[(BRANCH, &b)]);
-    let k = |l: Option<&Lineage>, c: &Context, over: bool| verdict(l, c, over, true);
+    let k = |l: Option<&Provenance>, c: &Context, over: bool| verdict(l, c, over, true);
 
     let (kind, why) = k(Some(&std_lin()), &at_base, false);
     assert_eq!(kind, Kind::InFlight);
@@ -104,7 +104,7 @@ fn classifies_lineages() {
     assert!(why.contains(&format!("origin/{BRANCH} is still at {}", &b[..12])), "{why}");
     assert_eq!(k(Some(&std_lin()), &cx(&[(BRANCH, &landed())]), false).0, Kind::CatchUp);
 
-    // A lineage without an announcement (nothing tells its deploy's end)
+    // A provenance without an announcement (nothing tells its deploy's end)
     // stays in flight however old; the writer's `at` is display only.
     let old = lin(NEW, OTHER, Some((BRANCH, Some(&b))), &["work/chikuwa/1"], T0 - 7200.0);
     assert_eq!(k(Some(&old), &at_base, false).0, Kind::InFlight);
@@ -128,7 +128,7 @@ fn classifies_lineages() {
     assert!(kind == Kind::Abandoned && why.contains("the announcement cleared without the push"), "{why}");
     assert_eq!(verdict(Some(&announced), &at_base, false, false).0, Kind::Abandoned);
     assert_eq!(k(Some(&announced), &cx(&[(BRANCH, &landed())]), false).0, Kind::CatchUp);
-    // A dead deploy's lineage without an announcement: nothing to go by.
+    // A dead deploy's provenance without an announcement: nothing to go by.
     let mut dead = at_base.clone();
     dead.dead.insert(BRANCH.into());
     let (kind, why) = k(Some(&std_lin()), &dead, false);
@@ -193,10 +193,15 @@ fn refusal_advice() {
             && a.contains("Re-run once that deploy ends, or push its branch from its checkout; or deploy with"),
         "{a}"
     );
-    assert!(a.contains(&format!("{EVICT_FLAG} side1")) && !a.contains(BRANCHES_FILE) && !a.contains("dead"), "{a}");
+    assert!(a.contains(&format!("{EVICT_FLAG} side1")) && !a.contains(BRANCHES_KEY) && !a.contains("dead"), "{a}");
     let a = refusal(&[("side1".into(), Kind::Unlisted, None), ("side6".into(), Kind::InFlight, None)]);
     assert!(a.contains("side1, side6 run another") && a.contains("reaches them too"), "{a}");
-    assert!(a.contains("Re-run once that deploy ends, or push its branch from its checkout; or list its branch in deploy-branches"), "{a}");
+    assert!(
+        a.contains(
+            "Re-run once that deploy ends, or push its branch from its checkout; or list its branch in nixconvoy.toml's work_branches"
+        ),
+        "{a}"
+    );
     assert!(a.contains(&format!("{EVICT_FLAG} side1 ")), "{a}");
     // A dead deploy's: the clear that ends it, named once per branch.
     let a = refusal(&[("side1".into(), Kind::InFlight, Some(BRANCH.into())), ("side6".into(), Kind::InFlight, Some(BRANCH.into()))]);
@@ -240,7 +245,7 @@ fn params(targets: &[&str], candidates: &[&str], evict: (bool, bool), drifting: 
             .collect(),
         built: targets.iter().map(|h| (h.to_string(), NEW.to_string())).collect(),
         held: BTreeMap::new(),
-        lineages: drifting.iter().filter_map(|(h, l)| l.clone().map(|l| (h.to_string(), l))).collect(),
+        provenances: drifting.iter().filter_map(|(h, l)| l.clone().map(|l| (h.to_string(), l))).collect(),
     }
 }
 
@@ -269,10 +274,10 @@ fn held_targets() {
     // refusal (here: in flight, and dead) says more than the hold.
     let b = base();
     let mut q = p.clone();
-    q.lineages.insert("side1".into(), doc(OLD, OTHER, Some((BRANCH, Some(&b))), &[], T0));
+    q.provenances.insert("side1".into(), doc(OLD, OTHER, Some((BRANCH, Some(&b))), &[], T0));
     let msg = run(q.clone()).1.unwrap_err();
     assert!(msg.starts_with("nothing switched or committed: side1 runs another checkout's work") && msg.contains("Re-run once that deploy ends, or push its branch from its checkout; or choko held back by another branch: deploy it there (nixconvoy deploy choko from that checkout) or land it with --not-yet-deployed; or deploy with"), "{msg}");
-    q.lineages.insert("choko".into(), doc_ann(OLD, OTHER, Some((BRANCH, Some(&b))), Some("p"), &[], T0));
+    q.provenances.insert("choko".into(), doc_ann(OLD, OTHER, Some((BRANCH, Some(&b))), Some("p"), &[], T0));
     q.cx.in_flight.insert(BRANCH.into(), "q".into());
     q.cx.dead.insert(BRANCH.into());
     let (fx, out) = run(q);
@@ -319,7 +324,7 @@ fn run(p: Params) -> (Vec<Effect>, Result<Outcome, String>) {
 }
 
 /// A switch to pushed work names the abandoned increments it reverts: the
-/// lineage's branch tips origin no longer has, whose fate git reports
+/// provenance's branch tips origin no longer has, whose fate git reports
 /// abandoned - asked once per tip, never for a tip origin still has.
 #[test]
 fn names_the_abandoned_increments() {
@@ -327,7 +332,7 @@ fn names_the_abandoned_increments() {
     let pushed = doc(OLD, OTHER, None, &["work/chikuwa/1"], T0);
     let mut p =
         params(&["chikuwa", "choko"], &["chikuwa", "choko"], (false, false), &[("chikuwa", Some(pushed.clone())), ("choko", Some(pushed))]);
-    // The lineage holds BRANCH at h..h and work/chikuwa/1 at c..c; origin
+    // The provenance holds BRANCH at h..h and work/chikuwa/1 at c..c; origin
     // has BRANCH reset (at `b`) and work/chikuwa/1 still at c..c.
     p.cx = cx(&[(BRANCH, &b), ("work/chikuwa/1", &"c".repeat(40))]);
     let (asked, fx, out) = run_with(p.clone(), "abandoned");
@@ -360,7 +365,7 @@ fn names_the_abandoned_increments() {
     // Deployed from another machine: no checkout here to look at.
     let elsewhere = doc(OLD, ("chikuwa", "/var/lib/homelab"), Some((sub, None)), &[], T0);
     let mut q = p.clone();
-    q.lineages.insert("chikuwa".into(), elsewhere);
+    q.provenances.insert("chikuwa".into(), elsewhere);
     let (asked, _, _) = run_with(q, "kept");
     assert!(matches!(&asked[0], Query::Fate { checkout: None, .. }), "{asked:?}");
     let (asked, fx, out) = run_with(p.clone(), "abandoned");
@@ -382,7 +387,7 @@ fn names_the_abandoned_increments() {
         "{fx:?}"
     );
 
-    // A refused or left-alone target, and one whose lineage tips origin
+    // A refused or left-alone target, and one whose provenance tips origin
     // still has, asks nothing.
     let in_flight = doc(OLD, OTHER, Some((BRANCH, Some(&b))), &[], T0);
     let mut p = params(&["chikuwa"], &["chikuwa"], (false, false), &[("chikuwa", Some(in_flight))]);
@@ -420,7 +425,7 @@ fn reports_the_plan() {
     // The announced increment of a deploy found dead: refused still, the
     // refusal naming the deploy and the clear that ends it.
     let mut q = p.clone();
-    q.lineages.insert("side1".into(), doc_ann(OLD, OTHER, Some((BRANCH, Some(&b))), Some("p"), &[], T0));
+    q.provenances.insert("side1".into(), doc_ann(OLD, OTHER, Some((BRANCH, Some(&b))), Some("p"), &[], T0));
     q.cx.in_flight.insert(BRANCH.into(), "q".into());
     q.cx.dead.insert(BRANCH.into());
     let (fx, out) = run(q);
@@ -490,7 +495,7 @@ fn arb_top() -> impl Strategy<Value = String> {
     prop::sample::select(vec![NEW, OLD, "/nix/store/other"]).prop_map(str::to_string)
 }
 
-fn arb_lineage() -> impl Strategy<Value = Option<String>> {
+fn arb_provenance() -> impl Strategy<Value = Option<String>> {
     prop_oneof![
         Just(None),
         any::<String>().prop_map(Some),
@@ -525,7 +530,7 @@ fn arb_params() -> impl Strategy<Value = Params> {
         prop::collection::btree_set(target(), 0..5),
         (any::<bool>(), any::<bool>()),
         prop::collection::btree_set(target(), 0..5),
-        prop::collection::vec((proptest::option::of(arb_top()), arb_top(), arb_lineage()), 5),
+        prop::collection::vec((proptest::option::of(arb_top()), arb_top(), arb_provenance()), 5),
         prop::collection::btree_map(arb_name(), prop::sample::select(vec!["a", "b"]).prop_map(str::to_string), 0..4),
         prop::collection::btree_map(arb_name(), prop::sample::select(vec!["p", "q"]).prop_map(str::to_string), 0..3),
         prop::collection::btree_set(arb_name(), 0..3),
@@ -547,15 +552,15 @@ fn arb_params() -> impl Strategy<Value = Params> {
                 running: BTreeMap::new(),
                 built: BTreeMap::new(),
                 held,
-                lineages: BTreeMap::new(),
+                provenances: BTreeMap::new(),
             };
-            for (h, (running, built, lineage)) in targets.iter().zip(facts) {
+            for (h, (running, built, provenance)) in targets.iter().zip(facts) {
                 if running.is_some() {
                     p.built.insert(h.clone(), built);
                 }
                 p.running.insert(h.clone(), running);
-                if let Some(l) = lineage {
-                    p.lineages.insert(h.clone(), l);
+                if let Some(l) = provenance {
+                    p.provenances.insert(h.clone(), l);
                 }
             }
             p
@@ -570,10 +575,10 @@ proptest! {
         let _ = parse(&text);
     }
 
-    /// The verdicts follow from the lineage, and only refusals are
+    /// The verdicts follow from the provenance, and only refusals are
     /// demoted by a cleared announcement or --evict.
     #[test]
-    fn verdicts(text in arb_lineage(), running in arb_top(), p in arb_params()) {
+    fn verdicts(text in arb_provenance(), running in arb_top(), p in arb_params()) {
         let lin = text.as_deref().and_then(parse);
         let (kind, why) = classify(lin.as_ref(), &running, &p.cx);
         prop_assert_eq!(demote(kind, why.clone(), false, true), (kind, why.clone()));

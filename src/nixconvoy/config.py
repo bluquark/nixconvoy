@@ -6,6 +6,7 @@ detected - and the sections are optional: absent means none."""
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,7 +15,6 @@ from . import proc
 
 CONFIG_FILE = "nixconvoy.toml"
 MSG_FILE = "COMMIT_MSG.md"
-BRANCHES_FILE = "deploy-branches"
 # Where Claude Code puts a subagent worktree: the one place a repository
 # without nixconvoy.toml has for one (the plugin's create hook runs in every
 # repository).
@@ -54,6 +54,10 @@ class Config:
     # A checkout owns "<prefix><leaf>", its subagent worktrees "<prefix><leaf>-<name>"
     # (the main checkout's "<prefix>main-<name>"); {machine} is this machine's hostname.
     branch_prefix: str
+    # The patterns of the work branches nixconvoy may union or own (`*`
+    # spans anything, the one wildcard every matcher - here, the plan cores
+    # - agrees on): a pushed branch none matches is ignored with a warning.
+    work_branches: tuple[str, ...]
     # Where `open --child <name>` puts a child (subagent) worktree, relative
     # to the checkout.  A nested worktree must be ignored (open writes it
     # into .git/info/exclude); any worktree nested in a checkout is one of
@@ -167,7 +171,7 @@ def parse(text: str) -> Config:
     if isinstance(version, bool) or version != 1:
         raise ConfigError(f"{CONFIG_FILE}: config_version {version} is not supported (1 is)")
     known = {"config_version", "flake_dir", "targets_dir", "targets_arch", "ssh_address_template", "branch_prefix",
-             "child_worktrees",
+             "work_branches", "child_worktrees",
              "eval", "build", "targets", "submodules"}
     for k in doc:
         if k not in known:
@@ -179,6 +183,16 @@ def parse(text: str) -> Config:
     targets_arch = _str(doc, "targets_arch", CONFIG_FILE, None)
     ssh_template = _template(doc, "ssh_address_template", "target")
     branch_prefix = _template(doc, "branch_prefix", "machine")
+    if "work_branches" not in doc:
+        raise ConfigError(f"{CONFIG_FILE}: work_branches is required: the patterns of the work branches "
+                          f"(`*` the wildcard), e.g. [\"{branch_prefix}*\"]")
+    pats = doc["work_branches"]
+    if not isinstance(pats, list) or not all(isinstance(s, str) for s in pats) or not pats:
+        raise ConfigError(f"{CONFIG_FILE}: work_branches must be a non-empty list of strings")
+    bad = [p for p in pats if not re.fullmatch(r"[\w.*/-]+", p)]
+    if bad:
+        raise ConfigError(f"{CONFIG_FILE}: work_branches: a pattern may hold letters, digits, '.', '-', '_', '/' "
+                          f"and '*' only: {', '.join(bad)}")
     children = _str(doc, "child_worktrees", CONFIG_FILE, None).strip("/")
     if not children or ".." in children.split("/"):
         raise ConfigError(f"{CONFIG_FILE}: child_worktrees is a directory inside the checkout")
@@ -234,6 +248,7 @@ def parse(text: str) -> Config:
         targets_arch=targets_arch,
         ssh_template=ssh_template,
         branch_prefix=branch_prefix,
+        work_branches=tuple(pats),
         child_worktrees=children,
         precheck=_str(ev, "precheck", "eval"),
         parallel_eval=_auto_bool(ev, "parallel", "eval"),

@@ -8,7 +8,7 @@ use serde_json::{json, Map, Value};
 
 /// Bumped on any change of the messages below; nixconvoy sends the version
 /// it speaks.
-pub const PROTOCOL: u64 = 10;
+pub const PROTOCOL: u64 = 11;
 
 fn pairs(v: &Value) -> Result<Vec<(String, String)>, String> {
     v.as_array()
@@ -44,7 +44,7 @@ fn drift_params(v: &Value) -> Result<drift::Params, String> {
         running: map_of(v, "running", opt_text)?,
         built: string_map(v, "built")?,
         held: string_lists(v, "held")?,
-        lineages: string_map(v, "lineages")?,
+        provenances: string_map(v, "provenances")?,
     })
 }
 
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn round_trip() {
         assert!(start(r#"{"protocol":0,"core":"rebase","mode":"pop_tmp"}"#).is_err());
-        let mut c = start(r#"{"protocol":10,"core":"rebase","mode":"pop_tmp"}"#).unwrap();
+        let mut c = start(r#"{"protocol":11,"core":"rebase","mode":"pop_tmp"}"#).unwrap();
         assert_eq!(c.decide(None), (r#"{"effects":[],"next":{"ask":"head_subject"}}"#.to_string(), true));
         assert_eq!(reply(r#"{"text":null}"#).unwrap(), Reply::Text(None));
         let (line, more) = c.decide(Some(Reply::Text(None)));
@@ -256,16 +256,16 @@ mod tests {
         );
         assert_eq!(reply(r#"{"ran":true,"detail":""}"#).unwrap(), Reply::Ran { ok: true, detail: String::new() });
         assert_eq!(query(&Query::Switch { branch: "b".into(), start: None }).to_string(), r#"{"ask":"switch","branch":"b","start":null}"#);
-        let mut d = start(r#"{"protocol":10,"core":"drift","me":["h","/c"],"union":"u","listed":["main"],"tips":{},"in_flight":{},"dead":[],"tz_offset":0,"router":"choko","targets":["a"],"candidates":["a"],"evict":false,"named":false,"work_branch":true,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"lineages":{"a":""},"held":{}}"#).unwrap();
+        let mut d = start(r#"{"protocol":11,"core":"drift","me":["h","/c"],"union":"u","listed":["main"],"tips":{},"in_flight":{},"dead":[],"tz_offset":0,"router":"choko","targets":["a"],"candidates":["a"],"evict":false,"named":false,"work_branch":true,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"provenances":{"a":""},"held":{}}"#).unwrap();
         let (line, _) = d.decide(None);
         assert_eq!(
             line,
             r#"{"effects":[{"print":"  a: will switch"}],"next":{"done":{"affected":["a"],"drift":{"a":["untracked",""]},"plan":["a"]}}}"#
         );
-        let mut u = start(r#"{"protocol":10,"core":"union","wb":"w","evict":true,"main0":null}"#).unwrap();
+        let mut u = start(r#"{"protocol":11,"core":"union","wb":"w","evict":true,"main0":null}"#).unwrap();
         assert_eq!(u.decide(None).0, r#"{"effects":[{"mark":"union"}],"next":{"ask":"listed"}}"#);
         let mut p =
-            start(r#"{"protocol":10,"core":"prune","name":"agent-x","named":false,"own_session_ends":false,"stopped":null}"#).unwrap();
+            start(r#"{"protocol":11,"core":"prune","name":"agent-x","named":false,"own_session_ends":false,"stopped":null}"#).unwrap();
         assert_eq!(p.decide(None).0, r#"{"effects":[],"next":{"ask":"lock"}}"#);
         assert_eq!(
             p.decide(Some(Reply::Text(Some("pid 7".into())))).0,

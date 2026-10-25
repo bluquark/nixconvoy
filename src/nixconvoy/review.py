@@ -1,6 +1,6 @@
 """`nixconvoy review`: a pending landing shown as its COMMIT_MSG.md, then
 its diff - `git diff --cached`, from the merge-base with origin's default
-branch when the checkout is on a work branch (one deploy-branches lists),
+branch when the checkout is on a work branch (one work_branches lists),
 a subagent worktree or a worktree beside the primary one on a branch of
 its own (a submodule worktree reviewed from its repository), so it shows
 everything pending against main (COMMIT_MSG.md itself left out unless
@@ -27,7 +27,7 @@ from typing import IO
 
 from . import names, submodule
 from .checkout import sub_parent
-from .config import BRANCHES_FILE, MSG_FILE
+from .config import MSG_FILE, ConfigError, load
 from .proc import die, painter, run
 from .submodule import Sub
 
@@ -86,12 +86,12 @@ def targets(args: list[str], here: Path) -> tuple[list[Path | Sub | str], list[s
 
 
 def listed_in(top: Path, branch: str) -> bool:
-    """Whether `top`'s deploy-branches lists `branch`."""
+    """Whether `top`'s nixconvoy.toml lists `branch` among its work_branches."""
     try:
-        pats = [ln.strip() for ln in (top / BRANCHES_FILE).read_text(encoding="utf-8").splitlines()]
-    except OSError:
+        pats = load(top).work_branches
+    except (OSError, ConfigError):
         return False
-    return any(fnmatchcase(branch, p) for p in pats if p and not p.startswith("#"))
+    return any(fnmatchcase(branch, p) for p in pats)
 
 
 def base_of(d: Path, all_wts: dict[Path, str | None]) -> str | None:

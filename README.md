@@ -14,7 +14,7 @@ what is deployed.
 ## The model in git terms
 
 - **A work branch is where experiments live.**  Each checkout you deploy from
-  owns one, listed by pattern in `deploy-branches` at the repo root.  A
+  owns one, listed by pattern in `nixconvoy.toml`'s `work_branches`.  A
   deploy commits the staged state onto it and pushes it; nothing else
   writes there.
 - **The targets run the convoy: origin/main plus every open work branch.**
@@ -44,7 +44,7 @@ what is deployed.
   there (an increment reset off its branch by hand stays deployed until
   the next deploy by anyone, which says what it reverts).
 
-A checkout on `main` (or any branch `deploy-branches` does not list) is a
+A checkout on `main` (or any branch `work_branches` does not list) is a
 plain checkout: it deploys the convoy too, catching the targets up, but owns
 no work.
 
@@ -64,7 +64,7 @@ no work.
   taken for dead and no longer waited for.  The push that ends the deploy
   clears the announcement (a main checkout's: the push of main that lands
   its HEAD, by its owner); a deploy ending without a switch withdraws it.
-- **Lineage.**  Every target records where its system came from: the union,
+- **Provenance.**  Every target records where its system came from: the union,
   each branch's tip, and the machine and checkout that deployed it.  A
   deploy that would overwrite another checkout's not-yet-pushed increment
   is refused (or leaves that target alone when its own work does not reach
@@ -73,7 +73,7 @@ no work.
   is abandoned and taken over with a warning.  A deploy that died leaves
   its announcement up, so its targets stay refused - the refusal names the
   dead deploy and the clear that ends it - and nothing is ever taken over
-  on a clock.  Work of a branch `deploy-branches` does not list stays
+  on a clock.  Work of a branch `work_branches` does not list stays
   refused until listed.
 - **Held-back targets.**  An increment deployed to named targets alone is
   committed with the targets it reaches (`Reaches:`) and the ones now
@@ -145,8 +145,8 @@ nix run .#nixconvoy -- deploy -m "describe this increment"
 
 `init` detects what it can (the flake directory, the hosts directory, the
 targets' system) and writes `nixconvoy.toml` - its optional sections as
-commented examples, the branch prefix `nixconvoy/{machine}/` - and a
-missing `deploy-branches`; the ssh address template starts as
+commented examples, the branch prefix `nixconvoy/{machine}/` and this
+machine's work-branch pattern; the ssh address template starts as
 `<you>@{target}`, for you to edit.
 
 On a NixOS machine you deploy from, the package in
@@ -156,14 +156,13 @@ machine itself switches; an unattended deploy that first moves the lock
 should run the lock's build (`nix run .#nixconvoy -- deploy ...`).
 
 Requirements on each target: `/run/current-system` reachable over ssh with
-passwordless sudo for the deploying user (a switch, the lineage file under
+passwordless sudo for the deploying user (a switch, the provenance file under
 `/var/lib/nixconvoy` and a dry activation all need root), and the target's
 nixosConfiguration named after its directory under `hosts/`.
 
 ## Layout nixconvoy expects
 
 ```
-deploy-branches     patterns of the work branches (one per line, `*` the wildcard)
 nixconvoy.toml      the settings (below), written by `nixconvoy init`
 COMMIT_MSG.md       on a work branch: the pending landing's commit message
 <flake>/flake.nix
@@ -172,8 +171,7 @@ COMMIT_MSG.md       on a work branch: the pending landing's commit message
 
 ### nixconvoy.toml
 
-`nixconvoy init [<flake-dir>]` writes it (and a missing `deploy-branches`),
-refusing to overwrite one.  The keys up to `[eval]` are required and have
+`nixconvoy init [<flake-dir>]` writes it, refusing to overwrite one.  The keys up to `[eval]` are required and have
 no defaults - init detects each, the ssh address template starting as
 `<you>@{target}`.  The sections after are optional: absent means none.
 
@@ -184,8 +182,10 @@ targets_dir = "nixos/hosts"       # one directory per nixosConfiguration: the ta
 targets_arch = "x86_64-linux"     # the targets' system
 ssh_address_template = "me@{target}.lan"   # a target's ssh address; the builder's too
 branch_prefix = "nixconvoy/{machine}/"   # {machine}: this machine's hostname: a checkout owns
-                                     # "<prefix><N>", a subagent worktree "<checkout's branch>-<name>"
+                                     # "<prefix><leaf>", a subagent worktree "<checkout's branch>-<name>"
                                      # ("<prefix>main-<name>" under a plain checkout)
+work_branches = ["nixconvoy/laptop/*"]     # the work branches nixconvoy may union or own, as patterns (`*` the
+                                            # wildcard): one per machine; a pushed branch none matches is ignored
 child_worktrees = ".claude/worktrees"   # where `open --child <worktree>` puts a child (subagent) worktree, under the
                                         # checkout (Claude Code's own place; excluded through .git/info/exclude)
 
@@ -255,7 +255,7 @@ on the whole tree.
 
 ```
 # Setting up a repository
-nixconvoy init [<flake-dir>]   write nixconvoy.toml (and a missing deploy-branches) for a fresh install: the flake, hosts directory and system detected, the ssh address template as this user
+nixconvoy init [<flake-dir>]   write nixconvoy.toml for a fresh install: the flake, hosts directory and system detected, the ssh address template as this user
 
 # Managing worktrees
 nixconvoy close [<path> ... | <worktree> ... | <submodule> ...] [--force]   remove agent checkouts by path (with their work branch), subagent worktrees, or submodule worktrees (with their branch), holding nothing of their own (--force: whatever they hold)
@@ -304,8 +304,8 @@ under the parent's COMMIT_MSG.md with each sub's appended (`review
 --with-children` shows each,
 `undeploy --with-children --back-to origin/main` discards each).  `nixconvoy open <path>` makes a
 further agent checkout beside the others instead - a worktree at that
-path on a listed work branch of this machine's, numbered after the path's
-name - and `close <path>` removes one holding nothing of its own.
+path on a listed work branch of this machine's, named after the path -
+and `close <path>` removes one holding nothing of its own.
 `integrations/claude-code/` is a Claude Code plugin holding the hooks
 that create an isolated subagent's worktree under the spawning checkout,
 close it when its agent stops and recreate it for its resume, beside
@@ -336,7 +336,7 @@ prompt for a spawn they isolated.
 `--scope project`, run in the repository, writes the enablement into its
 tracked `.claude/settings.json`: every worktree of it has it, and each
 collaborator runs the install once.  The hooks belong to a repository
-with `deploy-branches`: at user scope they run in every repository you
+with `nixconvoy.toml`: at user scope they run in every repository you
 open, where the create hook still makes a subagent's worktree (a plain
 `.claude/worktrees/<name>` on `worktree-<name>`) but the prunes, which
 read the work branches, leave it to `git worktree remove`.  `nixconvoy`
@@ -373,7 +373,7 @@ commit.  From a checkout on a work branch:
 - **A deploy carries it as a tree change.**  `deploy` commits the
   worktree's staged state onto its branch with the `-m` message, pushes
   it and stages the gitlink on the pushed rev, which the union, the eval
-  memo and the lineage then see like any edit.  Two work branches moving
+  memo and the provenance then see like any edit.  Two work branches moving
   the same submodule meet in the union as a gitlink conflict: the
   branches are merged in the repository (its configured checkout, else a
   bare mirror under `~/.cache/nixconvoy/submodules/`; mergiraf on the
@@ -433,7 +433,7 @@ commit.  From a checkout on a work branch:
   resumes), `nixconvoy-switch` (the switch protocol), `nixconvoy-confirmed-switch` (the
   target-side helper) and `nixconvoy-boot-assessment`.
 - `tests/switch_test.py`: the switch driven end to end against a fake target,
-  the lineage classification, and the git cores on scratch repositories.
+  the provenance classification, and the git cores on scratch repositories.
 - `nix flake check` runs all of it.
 
 ## Prior art

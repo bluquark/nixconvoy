@@ -22,9 +22,9 @@ from pathlib import Path
 from typing import IO, NamedTuple
 
 from . import proc
-from .config import BRANCHES_FILE, CLAUDE_WORKTREES, CONFIG_FILE, MSG_FILE, cfg
+from .config import CLAUDE_WORKTREES, CONFIG_FILE, MSG_FILE, ConfigError, cfg, load
 from .guard import decide
-from .proc import die, git, is_ancestor, ok, out, rev, run
+from .proc import PERF, die, git, is_ancestor, ok, out, rev, run
 
 # Identity for machinery commits (snapshots, union merges); the fixed date
 # makes an unchanged union re-create the same commit hash.  Work-branch and
@@ -70,20 +70,13 @@ def fetch_args(*flags: str) -> list[str]:
 
 
 def allowed_branches() -> set[str]:
-    """The patterns of the work branches nixconvoy may union or own, from this
-    checkout's working-tree copy of deploy-branches: `*` spans anything, the
-    one wildcard every matcher (here, the plan cores) agrees on."""
+    """The patterns of the work branches nixconvoy may union or own: this
+    checkout's working-tree copy of nixconvoy.toml's work_branches, read
+    afresh each time (a rebase may have brought a pattern)."""
     try:
-        lines = Path(BRANCHES_FILE).read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        die(f"{BRANCHES_FILE} is missing from the repo root: list the work branches "
-            f"(patterns, `*` the wildcard) one per line, e.g. `{this_prefix()}*`")
-    pats = {ln.strip() for ln in lines if ln.strip() and not ln.lstrip().startswith("#")}
-    bad = [p for p in pats if not re.fullmatch(r"[\w.*/-]+", p)]
-    if bad:
-        die(f"{BRANCHES_FILE}: a pattern may hold letters, digits, '.', '-', '_', '/' and '*' "
-            f"only: {', '.join(bad)}")
-    return pats
+        return set(load(Path.cwd()).work_branches)
+    except ConfigError as e:
+        die(str(e))
 
 
 def listed(name: str, pats: set[str] | None = None) -> bool:
@@ -112,7 +105,7 @@ def sub_dir() -> Path:
     checkout: nixconvoy.toml's child_worktrees, or Claude Code's own place
     in a repository nixconvoy does not configure (the plugin's create hook
     runs in every repository)."""
-    if not Path(CONFIG_FILE).is_file() and not Path(BRANCHES_FILE).is_file():
+    if not Path(CONFIG_FILE).is_file():
         return Path(CLAUDE_WORKTREES)
     return Path(cfg().child_worktrees)
 
@@ -219,8 +212,8 @@ def work_branch_name() -> str | None:
 def work_branch() -> str | None:
     wb = work_branch_name()
     if wb is not None and not listed(wb):
-        die(f"this checkout's work branch {wb} matches no pattern in {BRANCHES_FILE}; "
-            "add this machine's line there (and land it on main so other "
+        die(f"this checkout's work branch {wb} matches no pattern in {CONFIG_FILE}'s work_branches; "
+            "add this machine's pattern there (and land it on main so other "
             "checkouts union its branches) before deploying")
     return wb
 
@@ -229,7 +222,7 @@ def require_work_branch(what: str) -> str:
     wb = work_branch()
     if wb is None:
         die(f"{what} needs a work branch, and this checkout has none: "
-            f"`git switch -c {this_prefix()}N` (a branch {BRANCHES_FILE} lists) and re-run")
+            f"`git switch -c {this_prefix()}<leaf>` (a branch {CONFIG_FILE}'s work_branches lists) and re-run")
     return wb
 
 
@@ -551,7 +544,7 @@ def edit_message(draft: str, wb: str, tips: list[tuple[str, str]] | None = None)
     if cmd is None:
         return None
     main = "refs/remotes/origin/main"
-    notes = [f"Landing {wb} on main.  Edit the message above; the rest is dropped, and an empty message aborts."]
+    notes = [f"Landing {wb} on main."]
     for label, tip in tips or [("", "HEAD")]:
         of = f" of {label}" if label else ""
         notes += [f"Increments{of}:",
@@ -566,7 +559,8 @@ def edit_message(draft: str, wb: str, tips: list[tuple[str, str]] | None = None)
     try:
         path.write_text("".join([draft.rstrip("\n"), "\n\n", SCISSORS, "\n", *(f"# {n}\n" for n in notes)]),
                         encoding="utf-8")
-        p = run(["sh", "-c", f'{cmd} "$@"', cmd, str(path)], capture=False, check=False)
+        with PERF.excluded():
+            p = run(["sh", "-c", f'{cmd} "$@"', cmd, str(path)], capture=False, check=False)
         if p.returncode != 0:
             die(f"editor {cmd} exited with {p.returncode}; landing aborted")
         lines = [ln.rstrip() for ln in path.read_text(encoding="utf-8").splitlines()]
@@ -621,7 +615,7 @@ def staged_snapshot() -> str:
 def deployed_commit(snap: str, msg: str) -> str:
     """The work-branch commit of the increment `snap` deploys: exactly the
     snapshot's tree on HEAD, with the user's identity.  Made before the
-    switch, so the lineage the targets get names the commit origin will hold
+    switch, so the provenance the targets get names the commit origin will hold
     (a later deploy anywhere can then tell what became of it); dangling if
     the switch fails."""
     tree = out(["git", "rev-parse", f"{snap}^{{tree}}"])
@@ -780,7 +774,7 @@ class Announce:
 
     def collect(self) -> bool:
         """Whether the announcement reached origin, waiting for its first
-        push (a lineage names only an announcement origin got)."""
+        push (a provenance names only an announcement origin got)."""
         self._landed.wait(70)
         return bool(self._ok)
 
@@ -853,7 +847,7 @@ def pending_announcements() -> list[Pending]:
 
 def announced(own: str | None) -> dict[str, str]:
     """The uncleared announcements, key -> commit, this run's own (by its
-    key) left out: the drift core's in_flight.  A lineage naming an
+    key) left out: the drift core's in_flight.  A provenance naming an
     announcement whose key has none is abandoned (its deploy is over, the
     push never landed); one whose key is still announced is in flight,
     dead or not."""
@@ -872,7 +866,7 @@ def clear_refspec(wb: str) -> list[str]:
 
 def record_commit(target: str, union: str, parents: list[str], subject: str, doc: str) -> str:
     """`target`'s deploy record: the union's tree under a commit whose message
-    carries the lineage the target gets, on `parents` (first the target's
+    carries the provenance the target gets, on `parents` (first the target's
     previous record, for `git log --first-parent`), each one that exists
     here, once."""
     tree = out(["git", "rev-parse", f"{union}^{{tree}}"])
@@ -1013,7 +1007,7 @@ def on_origin(cwd: str | None = None, pats: set[str] | None = None) -> bool:
 
 
 def increment_fate(branch: str, tip: str, union: str, checkout: str | None) -> str:
-    """What became of `branch`'s increment at `tip`, a tip a target's lineage
+    """What became of `branch`'s increment at `tip`, a tip a target's provenance
     recorded that origin's tip of the branch no longer is, for the deploy
     of `union` (the drift core's Query::Fate; `checkout` the deploying one, when
     it is on this machine).  "kept" when the switch reverts none of

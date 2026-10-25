@@ -45,6 +45,19 @@ class Perf:
         self.phases.append((self.phase, now - self._phase_t0))
         self.phase, self._phase_t0 = phase, now
 
+    @contextlib.contextmanager
+    def excluded(self) -> Iterator[None]:
+        """A wait on the user (an editor): its time kept out of the phase
+        and the total, its subprocesses out of the slow calls."""
+        t0, n = time.monotonic(), len(self.calls)
+        try:
+            yield
+        finally:
+            secs = time.monotonic() - t0
+            self.t0 += secs
+            self._phase_t0 += secs
+            del self.calls[n:]
+
     def call(self, cmd: list[str], secs: float) -> None:
         if secs >= 0.2:
             self.calls.append((secs, self.phase, " ".join(cmd[:8])))

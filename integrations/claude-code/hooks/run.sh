@@ -8,7 +8,7 @@ set -u
 case "${1:-}" in
   session-start | subagent-stop | worktree-resume)
     top=$(git -C "${CLAUDE_PROJECT_DIR:-.}" rev-parse --show-toplevel 2>/dev/null) || exit 0
-    [ -f "$top/deploy-branches" ] || exit 0
+    [ -f "$top/nixconvoy.toml" ] || exit 0
     ;;
 esac
 case "${1:-}" in

@@ -45,7 +45,7 @@ from .config import builder
 from .guard import binary, decide
 from .memo import Top
 from .proc import NOTHING_DONE, PERF, die, dump_json, git, is_ancestor, load_json, out, rev
-from .switch import lineage_record, switch
+from .switch import provenance_record, switch
 from .targets import Probe, expand_targets, flake_target_names
 from .union import UnionQueries
 
@@ -62,11 +62,11 @@ def exit_on_signal(signum: int, _frame: object) -> None:
     raise SystemExit(128 + signum)
 
 
-def claims(lineage: str, me: str, branch: str) -> bool:
-    """Whether a target's lineage is this checkout's announced, unpushed
+def claims(provenance: str, me: str, branch: str) -> bool:
+    """Whether a target's provenance is this checkout's announced, unpushed
     increment of `branch`."""
     try:
-        doc = load_json(lineage)
+        doc = load_json(provenance)
     except ValueError:
         return False
     if not isinstance(doc, dict):
@@ -77,10 +77,10 @@ def claims(lineage: str, me: str, branch: str) -> bool:
             and (by.get("machine"), by.get("checkout")) == (me, str(Path.cwd())))
 
 
-def previous_record(lineage: str) -> str:
-    """The deploy record a target's lineage names, "" when none."""
+def previous_record(provenance: str) -> str:
+    """The deploy record a target's provenance names, "" when none."""
     try:
-        doc = load_json(lineage)
+        doc = load_json(provenance)
     except ValueError:
         return ""
     rec = doc.get("record") if isinstance(doc, dict) else None
@@ -145,7 +145,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool,
     await_background_push()
     main0 = rev("refs/remotes/origin/main")
     # Non-candidates are probed best-effort: the verdict reports their
-    # drift, and a hold on one is read off its lineage.
+    # drift, and a hold on one is read off its provenance.
     probe_names: list[str] = [] if skip else list(all_targets)
     pool = ThreadPoolExecutor(1 + len(probe_names) + len(submodule.present(Path.cwd())))
     fetch = pool.submit(git, *fetch_args("--no-auto-gc"))
@@ -158,10 +158,10 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool,
     wb = work_branch()
     cur = current_branch()
     if wb is not None and cur not in (wb, "main", None):
-        # A subagent worktree's fresh branch: the lineage must name wb.
+        # A subagent worktree's fresh branch: the provenance must name wb.
         ensure_on_work_branch(wb)
     elif wb is None and cur not in ("main", None):
-        die(f"on branch {cur}, which deploy-branches does not list as a work branch; the "
+        die(f"on branch {cur}, which nixconvoy.toml's work_branches does not list; the "
             "main checkout deploys from main (a hand commit there is claimed as main's "
             "until pushed) or parked on origin/main")
 
@@ -206,7 +206,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool,
     else:
         ensure_rebased()
 
-    # The pending state the targets' lineages will name - the increment, or
+    # The pending state the targets' provenances will name - the increment, or
     # a HEAD origin lacks (the nightly's lock commit on main) - is announced
     # for as long as this run lives.
     ann: Announce | None = None
@@ -261,7 +261,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             # A target running this checkout's announced increment from
             # an earlier run that ended without its push: still its claim.
             for h, pr in probed.items():
-                if h not in ann.claimed and claims(pr.lineage, me, ann.branch):
+                if h not in ann.claimed and claims(pr.provenance, me, ann.branch):
                     ann.claimed.append(h)
 
     if not skip:
@@ -275,7 +275,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
     tops: dict[str, Top] = {}
     committed = ""
     records: dict[str, str] = {}
-    lineages: dict[str, str] = {}
+    provenances: dict[str, str] = {}
 
     def refresh() -> None:
         nonlocal snap
@@ -334,7 +334,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                 if mine is None:
                     mine = sorted(memo.reached_targets(
                         wt, union, candidates, snap or "HEAD",
-                        {h: probed[h].lineage for h in candidates if h in probed}))
+                        {h: probed[h].provenance for h in candidates if h in probed}))
                 # The announced state against what the union has of the
                 # branch: its parent (the announcer's HEAD) when origin has
                 # that, else origin's tip of the branch - a wider diff, so
@@ -376,9 +376,9 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
 
     def stage(wt: str, union: str, listed: list[str], branches: list[tuple[str, str]]) -> bool:
         """Eval, precheck, build and copy for `union`, checked out in `wt`,
-        from the branches `listed` in deploy-branches, `branches` the ones
+        from the branches `listed` in nixconvoy.toml's work_branches, `branches` the ones
         it merged: whether the deploy ends here."""
-        nonlocal plan, affected, left_alone, tops, committed, records, lineages
+        nonlocal plan, affected, left_alone, tops, committed, records, provenances
         if skip:
             if dry:
                 print(f"NIXCONVOY_SKIP_SWITCH=1 --dry-activate: union {union}; nothing done")
@@ -410,14 +410,14 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             if err:
                 die(f"{err}; {NOTHING_DONE}")
         reached = memo.reached_targets(wt, union, sorted(tops), snap or "HEAD",
-                                     {h: probed[h].lineage for h in tops if h in probed})
+                                     {h: probed[h].provenance for h in tops if h in probed})
         # The targets the other unioned branches hold back (held_targets):
         # each ran its increments to other targets alone - one already
-        # running the branch's tip (its lineage) is not held by it.
+        # running the branch's tip (its provenance) is not held by it.
         held: dict[str, list[str]] = {}
         for name, tip in branches:
             for h in held_targets(f"refs/remotes/origin/main..{tip}"):
-                if h in probed and memo.recorded_tip(probed[h].lineage, name) == tip:
+                if h in probed and memo.recorded_tip(probed[h].provenance, name) == tip:
                     continue
                 held.setdefault(h, []).append(name)
         last = [h for h in sorted(tops) if tops[h].last]
@@ -428,7 +428,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             targets=all_targets, candidates=candidates, evict=evict, named=bool(filter_targets),
             work_branch=wb is not None, reached=sorted(reached), running=running,
             built={h: t.out for h, t in tops.items()},
-            lineages={h: p.lineage for h, p in probed.items()},
+            provenances={h: p.provenance for h, p in probed.items()},
             held={h: sorted(bs) for h, bs in held.items()},
             in_flight=announced(ann.key if ann is not None else None), dead=sorted(dead))
         assert isinstance(verdict, dict)
@@ -454,7 +454,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                     f"under /boot/EFI/Linux).")
 
         # The increment's commit and each target's record, before the
-        # switch: the lineage the targets get names the commit origin will
+        # switch: the provenance the targets get names the commit origin will
         # hold, and the records reach origin before anything runs them.
         # The commit's trailers: Reaches, the targets the increment reaches
         # among those deployable from here; Deployed, the probed targets
@@ -483,15 +483,15 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             if ends:
                 subject = f"deployed to {fmt(ends)}, held back until now"
                 committed = deployed_commit("HEAD", f"{subject}\n\nReaches: none\nDeployed: {fmt(deployed)}")
-        doc = lineage_record(union, branches, committed, ann.sha if ann else "", ann.key if ann else "")
-        records, lineages = {}, {}
+        doc = provenance_record(union, branches, committed, ann.sha if ann else "", ann.key if ann else "")
+        records, provenances = {}, {}
         if not dry:
             for h in plan:
                 body = dump_json({**doc, "toplevel": tops[h].out})
-                parents = [previous_record(probed[h].lineage), rev("refs/remotes/origin/main") or "",
+                parents = [previous_record(probed[h].provenance), rev("refs/remotes/origin/main") or "",
                            *(t for _, t in branches), committed]
                 records[h] = record_commit(h, union, parents, subject, body)
-                lineages[h] = dump_json({**doc, "toplevel": tops[h].out, "record": records[h]})
+                provenances[h] = dump_json({**doc, "toplevel": tops[h].out, "record": records[h]})
 
         if plan:
             b = builder()
@@ -574,12 +574,12 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                 ann.claimed += [n for n in batch if n not in ann.claimed]
             if len(batch) == 1:
                 n = batch[0]
-                switch(n, expected[n], tops[n].out, nixconvoy_switch, lineage=lineages[n],
+                switch(n, expected[n], tops[n].out, nixconvoy_switch, provenance=provenances[n],
                        digest=probed[n].digest, needs_internet=tops[n].last)
                 continue
             with ThreadPoolExecutor(len(batch)) as pool:
                 switches = [pool.submit(switch, n, expected[n], tops[n].out, nixconvoy_switch, True,
-                                        lineages[n], probed[n].digest, tops[n].last)
+                                        provenances[n], probed[n].digest, tops[n].last)
                             for n in batch]
             for f in switches:
                 f.result()
