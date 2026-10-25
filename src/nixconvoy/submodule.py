@@ -416,7 +416,7 @@ def merge_commit(name: str, repo: Path, ours: str, theirs: str, subject: str) ->
 
 
 def mirror_dir(name: str) -> Path:
-    return proc.xdg_dir("XDG_CACHE_HOME", ".cache") / "nixconvoy" / "submodules" / f"{name}.git"
+    return proc.cache_dir() / "submodules" / f"{name}.git"
 
 
 def store(name: str, url: str) -> Path:

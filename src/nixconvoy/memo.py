@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from .config import cfg
-from .proc import NOTHING_DONE, die, dump_json, is_ancestor, load_json, out, run, xdg_dir
+from .proc import NOTHING_DONE, cache_dir, die, dump_json, is_ancestor, load_json, out, run
 
 MEMO_MAX_AGE = 30 * 86400
 
@@ -101,7 +101,7 @@ def memo_dir() -> Path:
     checkout on the machine (keys are content-addressed), so checkouts
     alternating different trees do not evict each other.  Per-entry files
     written by atomic rename make concurrent deploys safe."""
-    d = xdg_dir("XDG_CACHE_HOME", ".cache") / "nixconvoy" / "eval-memo"
+    d = cache_dir() / "eval-memo"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

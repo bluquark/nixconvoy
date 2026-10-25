@@ -27,6 +27,12 @@ def xdg_dir(var: str, default: str) -> Path:
     return Path(v) if v and Path(v).is_absolute() else Path.home() / default
 
 
+def cache_dir() -> Path:
+    """Everything nixconvoy keeps on the machine between runs: the eval
+    memo, the submodule mirrors and the perf log, all disposable."""
+    return xdg_dir("XDG_CACHE_HOME", ".cache") / TOOL
+
+
 class Perf:
     """Phase timings plus the slowest subprocess calls, appended as one JSON
     line per run (via atexit, so failed runs log too) to one log per machine
@@ -78,7 +84,7 @@ class Perf:
                            for s, p, c in sorted(self.calls, reverse=True)[:15]],
         }
         try:
-            path = xdg_dir("XDG_STATE_HOME", ".local/state") / TOOL / "perf.jsonl"
+            path = cache_dir() / "perf.jsonl"
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a") as f:
                 f.write(dump_json(rec) + "\n")
