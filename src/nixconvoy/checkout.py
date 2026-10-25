@@ -21,7 +21,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import IO, NamedTuple
 
-from . import proc
+from . import config, proc
 from .config import CLAUDE_WORKTREES, CONFIG_FILE, MSG_FILE, ConfigError, cfg, load
 from .guard import decide
 from .proc import PERF, die, git, is_ancestor, ok, out, rev, run
@@ -70,11 +70,12 @@ def fetch_args(*flags: str) -> list[str]:
 
 
 def allowed_branches() -> set[str]:
-    """The patterns of the work branches nixconvoy may union or own: this
-    checkout's working-tree copy of nixconvoy.toml's work_branches, read
+    """The patterns of the work branches nixconvoy may union or own: the
+    invoking checkout's working-tree copy of nixconvoy.toml's
+    work_branches (config.root(), wherever the run has moved to), read
     afresh each time (a rebase may have brought a pattern)."""
     try:
-        return set(load(Path.cwd()).work_branches)
+        return set(load(config.root()).work_branches)
     except ConfigError as e:
         die(str(e))
 

@@ -740,12 +740,14 @@ def scratch_origin(d: Path, branches: str, files: dict[str, str], *, wb: str | N
     sh(d, "clone", "--quiet", str(origin), str(co))
     prev = Path.cwd()
     os.chdir(co)
+    config.set_root(co)
     try:
         if wb is not None:
             checkout.ensure_on_work_branch(wb)
         yield origin, seed, co
     finally:
         os.chdir(prev)
+        config.set_root(prev)
 
 
 def reach_cases(d: Path) -> None:
@@ -1930,6 +1932,11 @@ def open_cases(d: Path) -> None:
         one = commands.open_checkout(d / "other", None)
         assert five == d / "homelab5" and checkout.branch_at(five) == "work/tester/homelab5"
         assert one == d / "other" and checkout.branch_at(one) == "work/tester/other"
+        # A sibling whose tree cannot even be parsed as a configuration is
+        # caught up on this checkout's listing, not its own.
+        (one / "nixconvoy.toml").write_text("config_version = 1\n")
+        assert checkout.catch_up([one]) and (one / "nixconvoy.toml").read_text() == "config_version = 1\n"
+        sh(one, "checkout", "--", "nixconvoy.toml")
         assert sh(five, "rev-parse", "HEAD") == sh(co, "rev-parse", "origin/main")
         assert sh(five, "config", "branch.work/tester/homelab5.merge") == "refs/heads/main"
         assert checkout.identity_of(five.resolve(), "work/tester/homelab5") == checkout.Checkout("agent", "work/tester/homelab5")

@@ -268,15 +268,27 @@ def load(root: Path) -> Config:
 
 
 _CFG: Config | None = None
+# The invoking checkout's root (set_root, by cli.main's chdir), the one
+# tree the configuration is read from: a run that moves into other
+# checkouts (pull, land, close) keeps reading its own.
+_ROOT: Path | None = None
+
+
+def set_root(root: Path) -> None:
+    global _ROOT
+    _ROOT = root
+
+
+def root() -> Path:
+    return _ROOT if _ROOT is not None else Path.cwd()
 
 
 def cfg() -> Config:
-    """The current repo's configuration, read once from the repo root (the
-    working directory after cli.main's chdir)."""
+    """The current repo's configuration, read once from root()."""
     global _CFG
     if _CFG is None:
         try:
-            _CFG = load(Path.cwd())
+            _CFG = load(root())
         except ConfigError as e:
             proc.die(str(e))
     return _CFG

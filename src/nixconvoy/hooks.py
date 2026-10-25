@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import names
+from . import config, names
 from .checkout import (
     SESSIONLESS,
     ancestors,
@@ -74,6 +74,7 @@ def run_hook(event: str) -> None:
             die(f"hook worktree-create: {where} is not in a git repository")
         return
     os.chdir(root)
+    config.set_root(root)
     session = claude_session()
     if event == "worktree-create":
         worktree_create(str(given.get("name") or ""), session)

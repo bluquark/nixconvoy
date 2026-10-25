@@ -443,7 +443,7 @@ import sys
 from pathlib import Path
 from typing import IO, NoReturn
 
-from . import commands, hooks, init, names, proc, review, submodule
+from . import commands, config, hooks, init, names, proc, review, submodule
 from .checkout import lock_checkout, require_work_branch, sub_parent
 from .deploy import deploy
 from .proc import PERF, TOOL, Fail, die, ok, out, painter
@@ -586,6 +586,7 @@ def dispatch() -> None:
         return
     start = Path.cwd()
     os.chdir(out(["git", "rev-parse", "--show-toplevel"]))
+    config.set_root(Path.cwd())
     if subcmd == "init":
         # Before anything reads nixconvoy.toml, which it writes.
         init_args(args, start)
