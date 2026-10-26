@@ -31,20 +31,11 @@ MEMO_MAX_AGE = 30 * 86400
 ROOT_TIMEOUT = 300
 
 
-class Protection(NamedTuple):
-    """A named group of a target's units (nixconvoy.protected.<name>) whose
-    stop/restart/reload the switch refuses unless `--allow <name>` admits it."""
-    name: str
-    units: tuple[str, ...]
-    why: str
-
-
 class Top(NamedTuple):
     """A target's evaluated toplevel and the switch policy its configuration
     declares through the nixconvoy NixOS module."""
     out: str
     drv: str
-    protected: tuple[Protection, ...]
     # Switched after every other target, alone, with this machine's internet
     # verified too (the router).
     last: bool
@@ -60,27 +51,7 @@ def memo_entry(obj: object) -> Top | None:
     o, drv = obj.get("out"), obj.get("drv")
     if not (isinstance(o, str) and isinstance(drv, str)):
         return None
-    prot = protections(obj.get("protected", {}))
-    if prot is None:
-        return None
-    return Top(o, drv, prot, obj.get("last") is True, obj.get("assessed") is True)
-
-
-def protections(obj: object) -> tuple[Protection, ...] | None:
-    """The nixconvoy.protected attrset (name -> {units, why}) as Protections,
-    sorted by name; None where it is not one."""
-    if not isinstance(obj, dict):
-        return None
-    found = []
-    for name, p in sorted(obj.items()):
-        if not isinstance(name, str) or not isinstance(p, dict):
-            return None
-        units, why = p.get("units"), p.get("why")
-        if not (isinstance(units, list) and all(isinstance(u, str) for u in units)
-                and isinstance(why, str)):
-            return None
-        found.append(Protection(name, tuple(units), why))
-    return tuple(found)
+    return Top(o, drv, obj.get("last") is True, obj.get("assessed") is True)
 
 
 def memo_read(path: Path) -> Top | None:
@@ -95,8 +66,6 @@ def memo_write(path: Path, ent: Top) -> None:
     try:
         tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
         tmp.write_text(dump_json({"out": ent.out, "drv": ent.drv,
-                                  "protected": {p.name: {"units": list(p.units), "why": p.why}
-                                                for p in ent.protected},
                                   "last": ent.last, "assessed": ent.assessed}))
         tmp.replace(path)
     except OSError:
@@ -554,7 +523,7 @@ def eval_expr(target: str, parallel: bool) -> str:
     container declared by `path` alone, whose `config` is unset."""
     head = (f'cs: let c = cs."{target}".config; top = c.system.build.toplevel; '
             'ncv = c.nixconvoy or {}; '
-            'policy = { out = top.outPath; drv = top.drvPath; protected = ncv.protected or {}; '
+            'policy = { out = top.outPath; drv = top.drvPath; '
             'last = ncv.switchLast or false; assessed = (ncv.bootAssessment or {}).enable or false; }; ')
     if not parallel:
         return head + "in policy"

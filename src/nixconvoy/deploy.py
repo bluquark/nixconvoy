@@ -121,8 +121,7 @@ def commit_unreached(wb: str, msg: str, snap: str) -> None:
     print(f"reaches no target: committed onto {wb} and pushed; nothing built or switched (the probes' results dropped)")
 
 
-def deploy(filter_targets: list[str], msg: str | None, evict: bool,
-           allow: frozenset[str] = frozenset(), dry: bool = False) -> None:
+def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = False) -> None:
     """`msg` describes the staged increment (default: the checkout's name
     and the increment's number on its branch); with nothing staged the
     deploy converges the targets on the union as it is.
@@ -130,8 +129,6 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool,
     union, no wait for a deploy under way, and a target running another
     checkout's refused work switched over when this work reaches it or
     `filter_targets` names it.
-    `allow`: the protected groups (nixconvoy.protected.<name>) a switch may
-    stop, restart or reload units of, this run.
     `dry`: stop after the dry activation of every target that would be
     switched, printing the units it would stop, restart or reload; nothing
     is switched, committed or pushed."""
@@ -221,7 +218,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool,
         signal.signal(sig, exit_on_signal)
     pushed = False
     try:
-        pushed = run_deploy(filter_targets, candidates, all_targets, msg, evict, allow, dry, skip,
+        pushed = run_deploy(filter_targets, candidates, all_targets, msg, evict, dry, skip,
                              me, main0, wb, snap, ann, fetch, probes)
     finally:
         if ann is not None and not pushed:
@@ -241,7 +238,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool,
 
 
 def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: list[str],
-               msg: str | None, evict: bool, allow: frozenset[str], dry: bool, skip: bool, me: str,
+               msg: str | None, evict: bool, dry: bool, skip: bool, me: str,
                main0: str | None, wb: str | None, snap: str, ann: Announce | None,
                fetch: Future[subprocess.CompletedProcess[str]], probes: dict[str, Future[Probe]]) -> bool:
     """The deploy from its union on: whether its announcement is left to
@@ -507,28 +504,23 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         # core compares once this returns).
         PERF.mark("copy")
 
-        def copy_then_gate(name: str, top: Top, quiet: bool) -> str | targets.Refusal | None:
+        def copy_then_dry(name: str, top: Top, quiet: bool) -> str | None:
             targets.copy_closure(name, top.out, quiet)
-            if dry:
-                # The gate's verdict is part of the report, not a stop.
-                return targets.protected_units_gate(name, top.out, top.protected, allow)
-            if top.protected:
-                return targets.protected_units_gate(name, top.out, top.protected, allow)
-            return None
+            return targets.dry_activate(name, top.out) if dry else None
 
         if dry and plan:
             print(f"dry-activating {', '.join(plan)}...")
         with ThreadPoolExecutor(2 + len(plan)) as pool:
             refetch = pool.submit(git, *fetch_args())
             pushed = pool.submit(push_records, records)
-            copies = [pool.submit(copy_then_gate, n, tops[n], len(plan) > 1) for n in plan]
-            refusals = [r for r in (cp.result() for cp in copies) if r]
+            copies = [pool.submit(copy_then_dry, n, tops[n], len(plan) > 1) for n in plan]
+            failures = [r for r in (cp.result() for cp in copies) if r]
             refetch.result()
             unpushed = pushed.result()
         if dry:
-            if refusals:
-                die(f"--dry-activate: {NOTHING_DONE}; a deploy "
-                    "would stop here:\n" + targets.refusals_message(refusals))
+            if failures:
+                die(f"--dry-activate: {NOTHING_DONE}; a dry activation failed:\n"
+                    + "\n".join(failures))
             if plan:
                 print(f"--dry-activate: {', '.join(plan)} would be switched (union {union}); "
                       f"{NOTHING_DONE}")
@@ -539,8 +531,6 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             else:
                 print(f"--dry-activate: nothing drifts from the union ({union}); nothing to switch")
             return True
-        if refusals:
-            die(targets.refusals_message(refusals))
         if unpushed:
             die(f"pushing the deploy records to origin failed; {NOTHING_DONE}:\n{unpushed}")
         return False

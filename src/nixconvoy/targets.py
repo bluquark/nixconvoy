@@ -1,5 +1,4 @@
-"""The targets: inventory, probes, builds, closure copies, and the dry
-activation gate over a target's protected units."""
+"""The targets: inventory, probes, builds, closure copies and dry activations."""
 
 from __future__ import annotations
 
@@ -10,14 +9,12 @@ import re
 import shlex
 import signal
 import socket
-import sys
 import urllib.request
 from pathlib import Path
 from typing import NamedTuple
 
 from . import proc
 from .config import _bare_url, builder, cfg
-from .memo import Protection
 from .proc import NOTHING_DONE, die, load_json, ok, run
 
 # Seconds one probe of a target may take, so a stalled ssh session holds
@@ -44,7 +41,6 @@ BUILD_OPTS = ("--option", "always-allow-substitutes", "false")
 # must keep the sandbox: unsandboxed builds share the building machine's
 # /tmp across build users.
 UNSANDBOXED = ("--option", "sandbox", "false")
-ALLOW_FLAG = "--allow"
 # Seconds a dry-activate may take: it only computes the unit diff, so a
 # longer wait means a stalled connection, not work.
 DRY_ACTIVATE_TIMEOUT = 120
@@ -389,85 +385,23 @@ def unit_changes(dry_activate: str) -> dict[str, list[str]]:
     return found
 
 
-def dry_activate(target: str, toplevel: str) -> tuple[dict[str, list[str]], str | None]:
-    """Dry-activate `toplevel` on `target` (its closure already copied): the
-    unit changes it reports (unit_changes), printed under the target's name,
-    or why it could not be run.  Runs in the copy pool, so it only reports;
-    the caller dies once the other copies have finished."""
+def dry_activate(target: str, toplevel: str) -> str | None:
+    """Dry-activate `toplevel` on `target` (its closure already copied),
+    printing the unit changes it reports (unit_changes) under the target's
+    name: why it could not be run, else None.  Runs in the copy pool, so it
+    only reports; the caller dies once the other copies have finished."""
     p = run(target_cmd(target, [f"{toplevel}/bin/switch-to-configuration", "dry-activate"],
                      sudo=True), check=False, merged=True, timeout=DRY_ACTIVATE_TIMEOUT)
     if p.returncode == -signal.SIGKILL:
-        return {}, (f"dry-activating the new system on {target} did not finish within "
-                    f"{DRY_ACTIVATE_TIMEOUT} s (a stalled ssh connection?); "
-                    f"{NOTHING_DONE}")
+        return (f"dry-activating the new system on {target} did not finish within "
+                f"{DRY_ACTIVATE_TIMEOUT} s (a stalled ssh connection?); {NOTHING_DONE}")
     if p.returncode != 0:
-        return {}, (f"dry-activating the new system on {target} failed (exit {p.returncode}); "
-                    f"{NOTHING_DONE}"
-                    + (f"\n{p.stdout.strip()}" if p.stdout else ""))
+        return (f"dry-activating the new system on {target} failed (exit {p.returncode}); "
+                f"{NOTHING_DONE}" + (f"\n{p.stdout.strip()}" if p.stdout else ""))
     changes = unit_changes(p.stdout)
     for verb, units in changes.items():
         print(f"  {target}: would {verb} {', '.join(units)}")
     if not changes:
         print(f"  {target}: would stop, restart or reload no unit")
-    return changes, None
-
-
-class Refusal(NamedTuple):
-    """A switch the protected-units gate refused: what it would do to which
-    groups' units, and the group names an --allow must name."""
-    target: str
-    hits: str
-    names: tuple[str, ...]
-
-    def __str__(self) -> str:
-        return (f"switching {self.target} would {self.hits}, which its configuration protects "
-                f"(nixconvoy.protected); {NOTHING_DONE}.")
-
-
-def protected_units_gate(target: str, toplevel: str, protected: tuple[Protection, ...],
-                         allowed: frozenset[str]) -> str | Refusal | None:
-    """Dry-activate `toplevel` on `target`: why the deploy must stop (a
-    Refusal: it would stop, restart or reload a unit of one of the target's
-    `protected` groups whose name is not in `allowed`; or why the dry
-    activation failed), else None."""
-    changes, err = dry_activate(target, toplevel)
-    if err:
-        return err
-    refused: list[Protection] = []
-    hits: list[str] = []
-    admitted: list[str] = []
-    for p in protected:
-        touched = [f"{verb} {u}" for verb, units in changes.items() for u in units if u in p.units]
-        if not touched:
-            continue
-        if p.name in allowed:
-            admitted.append(f"  {target}: {ALLOW_FLAG} {p.name} admits: {', '.join(touched)}")
-            continue
-        refused.append(p)
-        hits.append(f"{', '.join(touched)} ({p.name}: {p.why})")
-    if refused:
-        return Refusal(target, "; ".join(hits), tuple(p.name for p in refused))
-    for line in admitted:
-        print(line)
     return None
 
-
-def refusals_message(refusals: list[str | Refusal]) -> str:
-    """The gate's verdicts as one message: each on its line, then the one
-    command admitting every refused group (none for failures alone)."""
-    names = sorted({n for r in refusals if isinstance(r, Refusal) for n in r.names})
-    text = "\n".join(str(r) for r in refusals)
-    if names:
-        text += f"\nTo do it deliberately, re-run:\n  {allowing_command(names)}"
-    return text
-
-
-def allowing_command(names: list[str]) -> str:
-    """The command admitting `names`: this invocation with `--allow <name>`
-    for each after its subcommand - as a deploy from the same directory
-    for an undeploy, whose reset is over."""
-    argv = sys.argv[1:]
-    flags = [a for n in names for a in (ALLOW_FLAG, n)]
-    if argv[:1] == ["undeploy"]:
-        return shlex.join(["nixconvoy", "deploy", *flags])
-    return shlex.join(["nixconvoy", *argv[:1], *flags, *argv[1:]])

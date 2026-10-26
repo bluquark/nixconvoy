@@ -6,9 +6,9 @@ against $NIXCONVOY_GUARD_DIR's build of this tree's switch-guard:
   performs, and every ssh call lands in this file's --fake-target mode,
   which plays the confirmed-switch helper, systemd-run and nix-env on a JSON
   state file;
-- the batch's die() gate, the targets and nixconvoy.toml, the protected-units
-  gate, the provenance records and the drift classification other deploys read
-  from them, and the real on-target switch guard;
+- the batch's die() gate, the targets and nixconvoy.toml, the eval memo's
+  entries, the provenance records and the drift classification other deploys
+  read from them, and the real on-target switch guard;
 - on scratch git repos: which targets a change reaches, nixconvoy-plan's
   rebase and union cores, pull, close, prune and undeploy, the deploy's
   announcements and records, submodules, open/review/land and the Claude
@@ -460,53 +460,22 @@ def gate_cases() -> None:
     say("gate: ok")
 
 
-def protected_cases() -> None:
-    """The protected-units gate: a group's units touched refuse the switch
-    with its why and the exact --allow command (one for every refused target,
-    a deploy for an undeploy, whose reset is over); --allow <name> admits them; the
-    memo entry round-trips."""
-    net = memo.Protection("risky-network-reload-or-restart",
-                          ("systemd-networkd.service", "nftables.service"),
-                          "risk of breaking essential LAN/WAN functionality")
-    db = memo.Protection("database", ("postgresql.service",), "drops every connection")
-    top = memo.Top("/nix/store/new", "/nix/store/new.drv", (db, net), True, False)
-    ent = memo.memo_entry(json.loads(json.dumps({
-        "out": top.out, "drv": top.drv, "last": True, "assessed": False,
-        "protected": {p.name: {"units": list(p.units), "why": p.why} for p in top.protected}})))
-    assert ent == top, ent
-    assert memo.memo_entry({"out": "o", "drv": "d", "protected": ["nftables.service"]}) is None
-    assert memo.memo_entry({"out": "o", "drv": "d"}) == memo.Top("o", "d", (), False, False)
-
-    report = ("would restart the following units: nftables.service, nginx.service\n"
-              "would reload the following units: postgresql.service\n")
-
-    def dry_activate(target: str, toplevel: str) -> tuple[dict[str, list[str]], str | None]:
-        del target, toplevel
-        return targets.unit_changes(report), None
-
-    with mock.patch.object(targets, "dry_activate", dry_activate), \
-            mock.patch.object(sys, "argv", ["nixconvoy", "deploy", "-m", "a change", "router"]):
-        gate = targets.protected_units_gate
-        r = gate("router", top.out, top.protected, frozenset())
-        assert isinstance(r, targets.Refusal), r
-        assert r.target == "router" and r.names == ("database", net.name), r
-        assert "reload postgresql.service (database: " in r.hits and "restart nftables.service (" in r.hits, r
-        both = "nixconvoy deploy --allow database --allow risky-network-reload-or-restart -m 'a change' router"
-        assert targets.refusals_message([r]).startswith(f"{r}\n") and \
-            targets.refusals_message([r]).endswith(f"\n  {both}"), targets.refusals_message([r])
-        r = gate("router", top.out, top.protected, frozenset({"database"}))
-        assert isinstance(r, targets.Refusal) and targets.refusals_message([r]).endswith(
-            "\n  nixconvoy deploy --allow risky-network-reload-or-restart -m 'a change' router"), r
-        assert gate("router", top.out, top.protected, frozenset({"database", net.name})) is None
-        assert gate("router", top.out, (), frozenset()) is None
-        r2 = gate("db", top.out, (db,), frozenset())
-        assert isinstance(r2, targets.Refusal) and r2.names == ("database",), r2
-        m = targets.refusals_message([r, "dry-activating the new system on x failed", r2])
-        assert m.startswith(f"{r}\ndry-activating") and f"on x failed\n{r2}\n" in m and m.endswith(f"\n  {both}"), m
-        assert "re-run" not in targets.refusals_message(["dry-activating the new system on x failed"])
-        sys.argv = ["nixconvoy", "undeploy", "task"]
-        assert targets.refusals_message([r2]).endswith("\n  nixconvoy deploy --allow database")
-    say("protected: ok")
+def memo_cases() -> None:
+    """A memo entry round-trips through its file, an entry with keys this
+    version does not know (an older one's) still loads, one missing its
+    toplevel is no entry; and the dry activation's report is parsed."""
+    top = memo.Top("/nix/store/new", "/nix/store/new.drv", True, False)
+    with tempfile.TemporaryDirectory() as d:
+        memo.memo_write(Path(d) / "e", top)
+        assert memo.memo_read(Path(d) / "e") == top
+        assert memo.memo_read(Path(d) / "missing") is None
+    assert memo.memo_entry({"out": "o", "drv": "d", "protected": {}}) == memo.Top("o", "d", False, False)
+    assert memo.memo_entry({"out": "o"}) is None
+    assert targets.unit_changes("would restart the following units: nftables.service, nginx.service\n"
+                                "would reload the following units: postgresql.service\n"
+                                "would start the following units: foo.service\n") == {
+        "restart": ["nftables.service", "nginx.service"], "reload": ["postgresql.service"]}
+    say("memo: ok")
 
 
 def provenance_cases() -> None:
@@ -2251,7 +2220,7 @@ if __name__ == "__main__":
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         with tempfile.TemporaryDirectory() as d:
             switch_cases(Path(d))
-        for cases in (gate_cases, provenance_cases, target_cases, protected_cases):
+        for cases in (gate_cases, provenance_cases, target_cases, memo_cases):
             cases()
         for scratch_cases in (guard_cases, reach_cases, git_cases, announce_cases, submodule_cases, open_cases,
                               init_cases):

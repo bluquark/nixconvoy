@@ -30,7 +30,7 @@ Model:
     performs the git, eval, build and ssh they ask for.
 
 Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
-         [--allow <protection> ...] [--dry-activate]): -m describes the
+         [--dry-activate]): -m describes the
   staged increment the deploy commits (default: "<checkout>: increment
   <n>", n its number on the branch); with nothing staged the deploy
   converges the targets on the union as it is (the nightlies', and a main
@@ -81,8 +81,8 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      of the flake inputs those files name: a change to a module only one
      target imports re-evaluates that target alone, and a no-op redeploy
      evaluates nothing.  The same eval reads the switch policy the target's
-     configuration declares through the nixconvoy NixOS module (protected
-     units, switch last, boot assessment).  Targets whose running system
+     configuration declares through the nixconvoy NixOS module (switch
+     last, boot assessment).  Targets whose running system
      matches are up to date; the rest will be switched (their drift may be
      catch-up to main or other branches, not just this increment) - unless
      the provenance shows the target runs another checkout's increment that this
@@ -121,12 +121,7 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
   7. copy the closures over, concurrently, while re-fetching to check that
      no work branch moved during the build and pushing the records to
      origin's refs/nixconvoy/deploying/target/<target>, so no target ever runs a
-     state origin does not hold.  A target with protected units
-     (nixconvoy.protected.<name>) is dry-activated once its closure has
-     landed: if the switch would stop, restart or reload one of them, the
-     deploy stops before any target is switched unless --allow <name> was
-     given, the refusal quoting the group's why and the command that admits
-     it.  Then every
+     state origin does not hold.  Then every
      target not marked switch-last is switched at once and the switch-last
      ones alone after, activating the exact evaluated toplevel under a flock
      held ON THE TARGET that first re-verifies the target still runs what
@@ -256,8 +251,8 @@ from its repository too); one that is none of these is an error;
 --with-children reviews this checkout and then each subagent worktree; the
 rest are git diff arguments.
 
-Undeploy (nixconvoy undeploy [<worktree> ... | --with-children] [--back-to <rev>]
-[--allow <protection> ...]): undo this checkout's increments on the
+Undeploy (nixconvoy undeploy [<worktree> ... | --with-children] [--back-to <rev>]):
+undo this checkout's increments on the
 targets, from HEAD back to <rev> (HEAD^ by default: the latest one;
 origin/main, or anything older: the whole branch) - each a deploy's
 increment, else refused: the work branch is reset onto <rev> (git reset
@@ -267,7 +262,7 @@ origin, each submodule whose pin they moved is reset onto <rev>'s pin
 likewise (onto its default branch when that pin is landed), and a deploy
 follows at once, from the checkout undeploy ran in, whose verdict names
 what it reverts ("will switch (catch-up: ...; reverting <branch>'s
-abandoned increment <sha>)"); it takes --allow.  The old tip remains
+abandoned increment <sha>)").  The old tip remains
 reachable via the reflog; untracked files survive; a subagent worktree
 stays (close removes it).  <worktree>s: the subagent worktrees to do it
 in (as for land), each in turn; --with-children: every subagent worktree holding
@@ -416,16 +411,11 @@ the others return on their next deploy - the durable fix is to reset the
 branch that carries the unwanted change (git push --force-with-lease origin
 origin/main:<branch>) or repair it in its own checkout.
 
---allow <protection> admits a switch that would stop, restart or reload a
-unit of that protected group (step 7), for this run only; repeat it for
-several.
-
 --dry-activate runs steps 1-7 up to the switch (the checkout is rebased and
 the closures copied as for a deploy), dry-activating every target that would
 be switched instead, and prints the units each would stop, restart or
 reload.  Nothing is switched, committed or pushed, and the staged changes
-need no -m; the run fails where a deploy would stop: a dry activation that
-fails, or protected units the switch would touch without --allow.
+need no -m; a dry activation that fails fails the run.
 
 Env: NIXCONVOY_SKIP_SWITCH=1 exercises only the branch/union machinery: no
 probe, eval, build or switch.  NIXCONVOY_FAIL_VERIFY=1 fails a confirmed
@@ -448,7 +438,6 @@ from . import commands, config, hooks, init, names, proc, review, submodule
 from .checkout import lock_checkout, require_work_branch, sub_parent
 from .deploy import deploy
 from .proc import PERF, TOOL, Fail, die, ok, out, painter
-from .targets import ALLOW_FLAG
 
 # The synopsis: one line per form under its section's heading (= ...).
 # <x> a value, [x] optional, (a | b) one of, ... repeated.  USAGE_NOTES
@@ -465,8 +454,8 @@ pull
 status
 hook <event> < <hook-input>
 = Deploying and committing changes
-deploy [<target> | @<tag> ...] [-m <msg>] [--evict] [--allow <protection> ...] [--dry-activate]
-undeploy [<worktree> ... | --with-children] [--back-to <rev>] [--allow <protection> ...]
+deploy [<target> | @<tag> ...] [-m <msg>] [--evict] [--dry-activate]
+undeploy [<worktree> ... | --with-children] [--back-to <rev>]
 review [<worktree> | <submodule> | <branch> ... | --with-children] [<diff-arg> ...]
 land [<worktree> ... | --with-children] [-m <msg>] [--not-yet-deployed]
 """
@@ -477,8 +466,6 @@ deploy converges the targets on the union as it is.
 With no targets named, every target whose running system differs from the union
 is switched; naming targets, or @tag for the targets nixconvoy.toml tags so,
 restricts switching to (at most) those.
---allow <protection> admits a switch that would stop, restart or reload a unit
-of a group the target's configuration protects (nixconvoy.protected.<name>).
 --dry-activate stops before any switch, printing what each would do.
 land --not-yet-deployed lands work a target is held back from (increments
 that reach it, deployed to other targets alone), for the next deploy anywhere
@@ -547,11 +534,11 @@ DRY_FLAG = "--dry-activate"
 BACK_TO_FLAG = "--back-to"
 # Each subcommand's flags, True for one taking a value (never one starting
 # with -), and whether it takes positionals.  A value flag given twice: the
-# last counts, every one for --allow.
+# last counts.
 FLAGS: dict[str, tuple[dict[str, bool], bool]] = {
-    "deploy": ({"-m": True, "--evict": False, ALLOW_FLAG: True, DRY_FLAG: False}, True),
+    "deploy": ({"-m": True, "--evict": False, DRY_FLAG: False}, True),
     "land": ({"-m": True, "--with-children": False, "--not-yet-deployed": False}, True),
-    "undeploy": ({ALLOW_FLAG: True, "--with-children": False, BACK_TO_FLAG: True}, True),
+    "undeploy": ({"--with-children": False, BACK_TO_FLAG: True}, True),
     "close": ({"--force": False}, True),
     "open": ({"--submodule": False, "--child": False, "--branch": True}, True),
     "pull": ({}, False),
@@ -619,7 +606,6 @@ def dispatch() -> None:
             bad_usage()
     msg = flags["-m"][-1] if "-m" in flags else None
     back_to = flags[BACK_TO_FLAG][-1] if BACK_TO_FLAG in flags else None
-    allow = frozenset(flags.get(ALLOW_FLAG, ()))
     with_children = "--with-children" in flags
     not_yet_deployed = "--not-yet-deployed" in flags
 
@@ -719,7 +705,7 @@ def dispatch() -> None:
                     except Fail:
                         failed.append(here.name)
                 if due:
-                    deploy([], None, False, allow)
+                    deploy([], None, False)
                 if failed:
                     die(f"undeploy failed in {', '.join(failed)} (see above)")
             return
@@ -728,13 +714,13 @@ def dispatch() -> None:
         commands.land(msg, not_yet_deployed)
     elif subcmd == "undeploy":
         if commands.undeploy(back_to or "HEAD^"):
-            deploy([], None, False, allow)
+            deploy([], None, False)
     else:  # deploy
         dry = DRY_FLAG in flags
         if dry and msg is not None:
             # Accepted so a deploy's command line reruns with the flag added.
             print(f"note: -m does nothing with {DRY_FLAG}: nothing is committed", file=sys.stderr)
-        deploy(given, msg, "--evict" in flags, allow, dry)
+        deploy(given, msg, "--evict" in flags, dry)
 
 
 def init_args(args: list[str], start: Path) -> None:

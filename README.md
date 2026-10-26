@@ -100,11 +100,6 @@ no work.
   profile and bootloader entry; otherwise the target rolls back to what it
   ran.  No reboot is ever
   automatic.
-- **Protected units.**  A target can declare named groups of units a
-  deploy must never restart unasked (a router's networkd, nftables,
-  dnsmasq), each with the reason.  The new system is dry-activated first; a
-  switch that would touch one stops the whole deploy, quoting the reason and
-  the exact `--allow <name>` command that admits it.
 - **Boot assessment** (optional, with lanzaboote).  systemd-boot's boot
   counting as a failover to the last proven generation; a generation the
   target fell back from is never switched to again.
@@ -217,10 +212,6 @@ nixconvoy.confirmedSwitch.internetCheck = true; # the check also wants the inter
 nixconvoy.confirmedSwitch.checks = ''           # bash, as root, errexit: the target's own assertions
   systemctl is-active -q nginx.service
 '';
-nixconvoy.protected.risky-network-reload-or-restart = {  # refused unless `--allow risky-network-reload-or-restart`
-  units = [ "systemd-networkd.service" "nftables.service" ];
-  why = "risk of breaking essential LAN/WAN functionality";
-};
 nixconvoy.switchLast = true;                # the router: switched alone, after everything else
 ```
 
@@ -492,7 +483,6 @@ deploying unmerged work to the same targets, each safe from the others.
 | Roll back when nixconvoy cannot confirm the switch |   | ✓ |   | ✓ |
 | Target-side checks decide the confirmation |   |   |   | ✓ |
 | A flake check gates the deploy |   | ✓ |   | ✓ |
-| Refuses a switch that would restart protected units |   |   |   | ✓ |
 | Switches the router (or any target) last |   |   |   | ✓ |
 | Commits and pushes only after the switch succeeded |   |   |   | ✓ |
 | Every deployed state is a pushed commit; a branch per target records its deploy history |   |   |   | ✓ |
