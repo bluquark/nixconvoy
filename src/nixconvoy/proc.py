@@ -66,7 +66,11 @@ class Perf:
 
     def call(self, cmd: list[str], secs: float) -> None:
         if secs >= 0.2:
-            self.calls.append((secs, self.phase, " ".join(cmd[:8])))
+            # git's leading -c settings left out, so the verb shows.
+            i = 1
+            while cmd[0] == "git" and i + 1 < len(cmd) and cmd[i] == "-c":
+                i += 2
+            self.calls.append((secs, self.phase, " ".join([cmd[0], *cmd[i:]][:8])))
 
     def write(self, cwd: Path) -> None:
         self.mark("end")
@@ -243,13 +247,26 @@ def ok(cmd: list[str], *, cwd: str | None = None, timeout: float | None = None) 
     return run(cmd, cwd=cwd, check=False, timeout=timeout).returncode == 0
 
 
+# A git transfer under 1 kB/s for 10 s aborts (HTTPS remotes; ssh ones have
+# no such limit): a stall ends quickly whatever the repository's size, which
+# no total limit could promise without cutting a big clone short.
+GIT_NET = ("-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=10")
+# A push's server goes quiet while it takes the pack in; cut off then, the
+# push has landed but is reported failed.
+PUSH_NET = (*GIT_NET[:-1], "http.lowSpeedTime=30")
+NET_VERBS = frozenset({"fetch", "push", "clone", "ls-remote"})
+# No credential prompt: a helper that has none to give fails at once.
+GIT_ENV = {"GIT_TERMINAL_PROMPT": "0"}
+
+
 # git with user hooks disabled: machinery pushes/commits must never trigger
-# a global post-commit auto-push or pre-push hook.
+# a global post-commit auto-push or pre-push hook.  A network verb gets GIT_NET.
 def git(*args: str, cwd: str | None = None, env: dict[str, str] | None = None,
-        check: bool = True, capture: bool = True,
+        check: bool = True, capture: bool = True, timeout: float | None = None,
         pass_fds: tuple[int, ...] = ()) -> subprocess.CompletedProcess[str]:
-    return run(["git", "-c", "core.hooksPath=/dev/null", *args],
-               cwd=cwd, env=env, check=check, capture=capture, pass_fds=pass_fds)
+    net = PUSH_NET if args and args[0] == "push" else GIT_NET if args and args[0] in NET_VERBS else ()
+    return run(["git", "-c", "core.hooksPath=/dev/null", *net, *args], cwd=cwd, env={**GIT_ENV, **(env or {})},
+               check=check, capture=capture, timeout=timeout, pass_fds=pass_fds)
 
 
 def rev(ref: str) -> str | None:

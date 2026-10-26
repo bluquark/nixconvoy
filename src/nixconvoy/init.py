@@ -20,8 +20,6 @@ from . import config, proc
 from .config import CONFIG_FILE
 from .proc import die, out, run
 
-# A nix probe is a convenience: past this, the heuristics stand alone.
-NIX_TIMEOUT = 60
 SYSTEM_RE = re.compile(r'"((?:x86_64|aarch64|i686|riscv64|armv7l|powerpc64le)-(?:linux|darwin))"')
 PLATFORM_LINE_RE = re.compile(r"hostPlatform|\bsystem\s*=")
 MAX_DEPTH = 3  # how deep under the root the flake and hosts directories are looked for
@@ -36,13 +34,11 @@ def main(flake_arg: str | None, start: Path) -> None:
     flake = find_flake(root, start / flake_arg if flake_arg else None)
     nix = NixProbe(notes)
     ref = "." if flake == "." else f"./{flake}"
-    hosts = nix.json(["nix", "eval", "--json", f"{ref}#nixosConfigurations", "--apply", "builtins.attrNames"],
-                     "the nixosConfigurations' names")
-    if hosts is None and not (nix.timed_out or nix.missing) and (alt := committed_ref(root, flake)) is not None:
+    hosts = nix.json(ref, "nixosConfigurations", "the nixosConfigurations' names", apply="builtins.attrNames")
+    if hosts is None and not nix.missing and (alt := committed_ref(root, flake)) is not None:
         # The working tree may not evaluate (a submodule's directory still
         # empty): the committed tree, whose submodules nix fetches itself.
-        hosts = nix.json(["nix", "eval", "--json", f"{alt}#nixosConfigurations", "--apply", "builtins.attrNames"],
-                         "HEAD's nixosConfigurations' names")
+        hosts = nix.json(alt, "nixosConfigurations", "HEAD's nixosConfigurations' names", apply="builtins.attrNames")
         if hosts is not None:
             ref = alt
     host_names = sorted(h for h in hosts if isinstance(h, str)) if isinstance(hosts, list) else None
@@ -57,8 +53,8 @@ def main(flake_arg: str | None, start: Path) -> None:
         targets = [t for t in targets if t in host_names]
     system, system_how = detect_system(root, ref, hosts_dir, targets, nix)
     prefix = DEFAULT_BRANCH_PREFIX
-    checks = nix.json(["nix", "eval", "--json", f"{ref}#checks.{system}", "--apply", "builtins.attrNames"],
-                      "the flake's checks") if system_how != "guessed" else None
+    checks = nix.json(ref, f"checks.{system}", "the flake's checks",
+                      apply="builtins.attrNames") if system_how != "guessed" else None
     check_names = sorted(c for c in checks if isinstance(c, str)) if isinstance(checks, list) else []
     ssh = f"{this_user()}@{{target}}"
     text = render(flake=flake, hosts_dir=hosts_dir, system=system, ssh=ssh, prefix=prefix,
@@ -92,35 +88,47 @@ def committed_ref(root: Path, flake: str) -> str | None:
 
 
 class NixProbe:
-    """The best-effort nix evals: each a note when nix is missing or
-    fails, and none attempted once one took longer than NIX_TIMEOUT."""
+    """The best-effort nix evals, each a note when nix is missing or fails.
+    A flake's inputs are fetched first (`nix flake archive`, under nix's
+    own transfer handling), so the evals run offline: none waits on the
+    network, and none needs a time limit."""
 
     def __init__(self, notes: list[str]) -> None:
         self.notes = notes
-        self.timed_out = False
         self.missing = False
+        self.fetched: dict[str, bool] = {}
 
-    def json(self, cmd: list[str], what: str) -> object | None:
-        if self.timed_out or self.missing:
-            self.notes.append(f"{what} not read: nix is " + ("too slow here" if self.timed_out else "not on PATH"))
-            return None
+    def nix(self, cmd: list[str], what: str, doing: str) -> str | None:
+        """`cmd`'s output, or None (noted) when nix is missing or it fails."""
         try:
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=NIX_TIMEOUT, check=False)
+            p = subprocess.run(cmd, capture_output=True, text=True, check=False)
         except FileNotFoundError:
             self.missing = True
             self.notes.append(f"no nix on PATH: {what} not read")
             return None
-        except subprocess.TimeoutExpired:
-            self.timed_out = True
-            self.notes.append(f"nix eval of {what} took over {NIX_TIMEOUT}s: skipped, as every further probe")
-            return None
         if p.returncode != 0:
             lines = [ln.strip() for ln in p.stderr.splitlines() if ln.strip()]
             errors = [ln for ln in lines if ln.startswith("error:")]
-            self.notes.append(f"nix eval of {what} failed: {(errors or lines or ['(no output)'])[-1]}")
+            self.notes.append(f"{doing} failed, so {what} not read: {(errors or lines or ['(no output)'])[-1]}")
+            return None
+        return p.stdout
+
+    def json(self, ref: str, attr: str, what: str, apply: str | None = None) -> object | None:
+        """`ref#attr` evaluated (through `apply`) as JSON: offline once the
+        inputs are fetched, fetching what it forces when the archive (every
+        input, needed or not) failed."""
+        if self.missing:
+            self.notes.append(f"{what} not read: nix is not on PATH")
+            return None
+        if ref not in self.fetched:
+            self.fetched[ref] = self.nix(["nix", "flake", "archive", ref], what,
+                                         f"fetching the inputs of {ref}") is not None
+        got = self.nix(["nix", "eval", *(["--offline"] if self.fetched[ref] else []), "--json", f"{ref}#{attr}",
+                        *(["--apply", apply] if apply else [])], what, "nix eval")
+        if got is None:
             return None
         try:
-            return json.loads(p.stdout)
+            return json.loads(got)
         except ValueError:
             return None
 
@@ -203,8 +211,8 @@ def detect_system(root: Path, ref: str, hosts_dir: str, targets: list[str], nix:
     if len(seen) == 1:
         return seen.pop(), f"from {hosts_dir}'s .nix files"
     if targets:
-        attr = f'{ref}#nixosConfigurations."{targets[0]}".config.nixpkgs.hostPlatform.system'
-        got = nix.json(["nix", "eval", "--json", attr], f"{targets[0]}'s system")
+        got = nix.json(ref, f'nixosConfigurations."{targets[0]}".config.nixpkgs.hostPlatform.system',
+                       f"{targets[0]}'s system")
         if isinstance(got, str) and got:
             return got, f"evaluated from {targets[0]}"
     arch = {"arm64": "aarch64", "amd64": "x86_64"}.get(platform.machine(), platform.machine()) or "x86_64"

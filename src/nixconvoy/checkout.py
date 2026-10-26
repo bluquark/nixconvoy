@@ -98,7 +98,8 @@ FETCH_REFSPECS = ("+refs/heads/*:refs/remotes/origin/*",
 HEARTBEAT = 10
 WAIT_STALE = 30
 # A renewal push slower than this is given up (the next renewal retries):
-# one hanging past WAIT_STALE would have the deploy taken for dead.
+# one hanging past WAIT_STALE would have the deploy taken for dead.  A
+# withdrawal too: one that never lands costs other deploys at most WAIT_STALE.
 PUSH_TIMEOUT = 15
 
 
@@ -958,8 +959,8 @@ class Announce:
             sha = self._commit(settled=False)
             if not sha:
                 return False
-            p = run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--force", "origin",
-                     f"{sha}:{PENDING_REFS}/{self.key}"], check=False, timeout=PUSH_TIMEOUT)
+            p = git("push", "--quiet", "--force", "origin", f"{sha}:{PENDING_REFS}/{self.key}",
+                    check=False, timeout=PUSH_TIMEOUT)
             if p.returncode != 0:
                 self.detail = (p.stderr or "").strip() or "push failed"
                 return False
@@ -1010,8 +1011,8 @@ class Announce:
         since a push that landed but timed out here must not strand it."""
         self.stop()
         with proc.finishing():
-            run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "origin",
-                 *delete_args({f"{PENDING_REFS}/{self.key}": self.sha})], check=False, timeout=60)
+            git("push", "--quiet", "origin", *delete_args({f"{PENDING_REFS}/{self.key}": self.sha}),
+                check=False, timeout=PUSH_TIMEOUT)
 
 
 def announce_key(branch: str) -> str:
@@ -1161,8 +1162,8 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str])
         return problem
     pidf, statusf, logf = (Path(push_state(k)) for k in ("pid", "status", "log"))
     hold = os.environ.get("NIXCONVOY_HOLD_PUSH", "")
-    push = ["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "origin"]
-    script = (shlex.join([*push, "--atomic", *refspecs]) if refspecs else "true") + "; rc=$?"
+    push = ["git", "-c", "core.hooksPath=/dev/null", *proc.PUSH_NET, "push", "--quiet", "origin"]
+    script = "export GIT_TERMINAL_PROMPT=0; " + (shlex.join([*push, "--atomic", *refspecs]) if refspecs else "true") + "; rc=$?"
     if pushed_note:
         script += f'; [ "$rc" = 0 ] && {shlex.join(pushed_note)}'
     if sweep:

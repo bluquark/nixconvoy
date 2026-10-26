@@ -219,7 +219,8 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
         tree = tree_less_msg("HEAD")
         commit = out(["git", "commit-tree", tree, "-p", main, "-m", msg])
         p = git("push", "--quiet", "origin", f"{commit}:refs/heads/main", check=False)
-        if p.returncode != 0:
+        # A push cut off while the server took it in has landed all the same.
+        if p.returncode != 0 and git("ls-remote", "origin", "refs/heads/main", check=False).stdout.split()[:1] != [commit]:
             die(f"pushing main failed (moved since fetch?); re-run:\n{p.stderr.strip()}")
     except Fail:
         submodule.abandon_all(landings)
@@ -758,31 +759,31 @@ def drop_branches(names: list[str]) -> list[str]:
         forget_pushed(b)
     pushed = {b: old for b, old in gone.items() if old}
     if pushed:
-        # One push, bounded: prune holds the worktree's name lock meanwhile.
-        # Retried once: origin has rejected a deletion out of the blue.
-        cmd = ["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "origin",
-               *(f":refs/heads/{b}" for b in pushed),
+        # One push (a stall ends it: prune holds the worktree's name lock
+        # meanwhile).  Retried once: origin has rejected a deletion out of
+        # the blue.
+        cmd = ["push", "--quiet", "origin", *(f":refs/heads/{b}" for b in pushed),
                *(f"--force-with-lease=refs/heads/{b}:{old}" for b, old in pushed.items())]
-        p = run(cmd, check=False, timeout=30)
+        p = git(*cmd, check=False)
         if p.returncode != 0:
             time.sleep(2)
-            p = run(cmd, check=False, timeout=30)
+            p = git(*cmd, check=False)
         if p.returncode != 0:
             failed.append(f"deleting {', '.join(pushed)} on origin failed: "
-                          f"{(p.stderr or '').strip() or 'timed out'}")
+                          f"{(p.stderr or '').strip() or 'no error given'}")
     # The gone branches' announcements, on their own: a stale lease (origin
     # moved since the fetch) must not count as a branch deletion failed.
     clears = [spec for b in names for spec in clear_refspec(b)]
     if clears:
-        cmd = ["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "origin", *clears]
-        p = run(cmd, check=False, timeout=30)
+        cmd = ["push", "--quiet", "origin", *clears]
+        p = git(*cmd, check=False)
         if p.returncode != 0:
             time.sleep(2)
-            p = run(cmd, check=False, timeout=30)
+            p = git(*cmd, check=False)
         if p.returncode != 0:
             failed.append(f"deleting the announcements of {', '.join(names)} on origin failed "
                           f"(git push origin :{PENDING_REFS}/<branch> clears one by hand): "
-                          f"{(p.stderr or '').strip() or 'timed out'}")
+                          f"{(p.stderr or '').strip() or 'no error given'}")
     return failed
 
 

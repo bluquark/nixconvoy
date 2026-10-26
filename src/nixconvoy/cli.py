@@ -378,8 +378,8 @@ at the repository's root, refused when one is there.  Its required keys
 are detected: flake_dir, the
 directory holding flake.nix (<flake-dir>, the root, else the one no
 deeper than any other); targets_dir, the directory whose subdirectories
-best match the nixosConfigurations' names (`nix eval`, best effort within
-60 s; without it the one holding the most configuration.nix); targets_arch,
+best match the nixosConfigurations' names (`nix eval` after `nix flake
+archive`, best effort; without it the one holding the most configuration.nix); targets_arch,
 the one system literal the hosts' .nix files agree on, else the first
 target's evaluated hostPlatform, else this machine's architecture as a
 guess the file says to verify; ssh_address_template, "<this
