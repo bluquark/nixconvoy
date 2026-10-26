@@ -330,8 +330,7 @@ PENDING: dict[tuple[str, str], Pending] = {}
 def fetch_refs(name: str, repo: Path) -> bool:
     """Fetch the submodule repository `repo`'s origin: branches, past and
     union refs, the gone ones pruned; whether it is fetched (else said)."""
-    p = run(["git", "fetch", "--quiet", "--prune", "origin", *REFSPECS],
-            cwd=str(repo), check=False, timeout=300)
+    p = git("fetch", "--quiet", "--prune", "origin", *REFSPECS, cwd=str(repo), check=False)
     if p.returncode != 0:
         print(f"note: submodule {name}: fetching its origin failed:\n{(p.stderr or '').strip()}", file=sys.stderr)
         return False
@@ -378,8 +377,7 @@ def prune_past_refs(sub: Sub) -> None:
              if r.rsplit("/", 1)[1] not in wanted]
     if not stale:
         return
-    p = run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "origin", *(f":{r}" for r in stale)],
-            cwd=str(sub.repo), check=False, timeout=120)
+    p = git("push", "--quiet", "origin", *(f":{r}" for r in stale), cwd=str(sub.repo), check=False)
     if p.returncode != 0:
         print(f"warning: submodule {sub.name}: deleting its past refs on its origin failed:\n"
               f"{(p.stderr or '').strip()}", file=sys.stderr)
@@ -442,7 +440,7 @@ def store(name: str, url: str) -> Path:
     cache = mirror_dir(name)
     if not cache.is_dir():
         cache.parent.mkdir(parents=True, exist_ok=True)
-        p = run(["git", "clone", "--quiet", "--bare", url, str(cache)], check=False, timeout=600)
+        p = git("clone", "--quiet", "--bare", url, str(cache), check=False)
         if p.returncode != 0:
             die(f"submodule {name}: cloning {url} to union its branches failed:\n{(p.stderr or '').strip()}")
     return cache
@@ -470,8 +468,7 @@ def union_rev(sub: Sub, url: str, ours: str, theirs: str) -> str | None:
         if sha is None:
             return None
         ref = f"{UNION_REFS}/{sub.name}/{sha}"
-        p = run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--force", "origin", f"{sha}:{ref}"],
-                cwd=str(repo), check=False, timeout=120)
+        p = git("push", "--quiet", "--force", "origin", f"{sha}:{ref}", cwd=str(repo), check=False)
         if p.returncode != 0:
             die(f"submodule {sub.name}: pushing its union to {ref} failed:\n{(p.stderr or '').strip()}")
         git("update-ref", ref, sha, cwd=str(repo), check=False)
@@ -700,7 +697,7 @@ def create(name: str, wb: str) -> Path:
     if d.exists() and any(d.iterdir()):
         die(f"{d} is not empty and no worktree: move it away")
     git("worktree", "prune", cwd=str(repo), check=False)
-    p = run(["git", "fetch", "--quiet", "origin"], cwd=str(repo), check=False, timeout=120)
+    p = git("fetch", "--quiet", "origin", cwd=str(repo), check=False)
     if p.returncode != 0:
         die(f"submodule {name}: fetching {repo}'s origin failed:\n{(p.stderr or '').strip()}")
     default = default_branch(repo)

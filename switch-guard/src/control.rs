@@ -6,9 +6,11 @@
 //! that fired first refuses the activation and one firing meanwhile waits
 //! for it.  An activation that reports failures is still confirmed when the
 //! target verifies (a plain switch leaves such a target on the new system too),
-//! and the deploy then fails; one that exits 100 (an init incompatible with
-//! the running one: nothing activated, a reboot needed) stages the new
-//! system as a plain switch would, and fails.
+//! and the deploy then fails; one whose ssh session was lost (its unit on
+//! the target runs on) is decided by the verification and confirm alone;
+//! one that exits 100 (an init incompatible with the running one: nothing
+//! activated, a reboot needed) stages the new system as a plain switch
+//! would, and fails.
 #[cfg(test)]
 mod model;
 pub mod wire;
@@ -32,6 +34,9 @@ pub const INTERNET_TIMEOUT_MS: u64 = 8_000;
 pub const VERIFY_PAUSE_MS: u64 = 3_000;
 /// The rollback exit code that means the confirm landed after all.
 pub const ALREADY_CONFIRMED: i32 = crate::switch::core::ALREADY_CONFIRMED;
+/// ssh's own exit code: the session died (the keepalives cut a stalled
+/// connection), telling nothing of the activation's outcome.
+pub const SESSION_LOST: i32 = 255;
 
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Params {
@@ -228,6 +233,20 @@ impl Machine {
         )
     }
 
+    /// The verified, confirmed target: the activation's own report decides
+    /// the run, unless its session was lost.
+    fn confirmed(&self, rc: i32, fx: &mut Vec<Effect>) -> Next {
+        if rc == SESSION_LOST {
+            fx.push(Effect::Print(format!("{}: the activation's ssh session was lost; verified and confirmed", self.p.target)));
+            return Next::Done;
+        }
+        if rc != 0 {
+            Next::Die(self.failed())
+        } else {
+            Next::Done
+        }
+    }
+
     fn helper(&self, args: &[&str]) -> Query {
         Query::Helper { args: args.iter().map(|a| a.to_string()).collect() }
     }
@@ -421,7 +440,7 @@ impl Machine {
             (Pc::Confirming { rc }, Reply::Code(c)) => {
                 if c == 0 {
                     fx.push(Effect::Disarmed);
-                    return if rc != 0 { Next::Die(self.failed()) } else { Next::Done };
+                    return self.confirmed(rc, fx);
                 }
                 // The helper rolled back itself if persisting failed; after
                 // a timer that fired first, this undoes the activation it
@@ -434,7 +453,7 @@ impl Machine {
             (Pc::ConfirmRollingBack { rc }, Reply::Code(r)) => {
                 fx.push(Effect::Disarmed);
                 if r == ALREADY_CONFIRMED {
-                    return if rc != 0 { Next::Die(self.failed()) } else { Next::Done };
+                    return self.confirmed(rc, fx);
                 }
                 if r == 0 {
                     return Next::Die(format!(

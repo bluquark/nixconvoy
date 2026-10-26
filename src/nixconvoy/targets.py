@@ -41,9 +41,9 @@ BUILD_OPTS = ("--option", "always-allow-substitutes", "false")
 # must keep the sandbox: unsandboxed builds share the building machine's
 # /tmp across build users.
 UNSANDBOXED = ("--option", "sandbox", "false")
-# Seconds a dry-activate may take: it only computes the unit diff, so a
-# longer wait means a stalled connection, not work.
-DRY_ACTIVATE_TIMEOUT = 120
+# A peer silent for 15 s ends the session (a master connection, and so every
+# session riding on it), however long its command may rightly run.
+SSH_KEEPALIVE = ("-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3")
 # Seconds `nix config show` may take on the store host (well under 0.1 s): a
 # longer wait means a stuck daemon or connection.
 SUBSTITUTERS_TIMEOUT = 10
@@ -87,12 +87,15 @@ def ssh_address(name: str) -> str:
     return cfg().ssh_address(name)
 
 
-def control_opts() -> list[str]:
-    # One master connection per target for the several ssh sessions of a
-    # deploy, kept for back-to-back deploys too.
-    return ["-o", "ControlMaster=auto",
-            "-o", f"ControlPath={Path.home()}/.ssh/nixconvoy-%C",
-            "-o", "ControlPersist=60"]
+def ssh_opts(fresh: bool = False) -> list[str]:
+    """The options of every ssh to a target or the builder (NIX_SSHOPTS
+    too): the deploy's master connection, one per target for its several
+    sessions and kept for back-to-back deploys, or with `fresh` a new
+    connection of its own."""
+    conn = ["-o", "ControlPath=none"] if fresh else [
+        "-o", "ControlMaster=auto", "-o", f"ControlPath={Path.home()}/.ssh/nixconvoy-%C",
+        "-o", "ControlPersist=60"]
+    return ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *SSH_KEEPALIVE, *conn]
 
 
 def target_cmd(target: str, argv: list[str], sudo: bool = False,
@@ -103,10 +106,8 @@ def target_cmd(target: str, argv: list[str], sudo: bool = False,
     pre = ["sudo"] if sudo else []
     if target == proc.this_machine():
         return [*pre, *argv]
-    opts = ["-o", "ControlPath=none"] if fresh else control_opts()
     # The remote shell re-parses ssh's command line, hence the quoting.
-    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *opts,
-            ssh_address(target), *pre, *map(shlex.quote, argv)]
+    return ["ssh", *ssh_opts(fresh), ssh_address(target), *pre, *map(shlex.quote, argv)]
 
 
 class Probe(NamedTuple):
@@ -250,12 +251,11 @@ def build_on(host: str, drvs: list[str], what: str,
     """Realise `drvs` in `host`'s store.  A .drv closure is self-authenticating,
     so the copy needs no signing or trusted user there."""
     tgt = ssh_address(host)
-    sshopts = " ".join(["-o", "BatchMode=yes", *control_opts()])
     p = run(["nix", "copy", "--derivation", "--to", f"ssh://{tgt}", *drvs],
-            env={"NIX_SSHOPTS": sshopts}, check=False, capture=capture, merged=True)
+            env={"NIX_SSHOPTS": " ".join(ssh_opts())}, check=False, capture=capture, merged=True)
     if p.returncode != 0:
         return f"copying derivations to {host} failed" + (f":\n{p.stdout}" if capture else "")
-    via = ["ssh", "-o", "BatchMode=yes", *control_opts(), tgt]
+    via = ["ssh", *ssh_opts(), tgt]
     cmd = build_cmd(opts, via)
     if isinstance(cmd, str):
         return f"{what} failed on {host}: {cmd}"
@@ -303,7 +303,7 @@ def copy_closure(target: str, toplevel: str, quiet: bool = False) -> None:
     rebuilt after it merely leaves a few extra paths there).  `quiet` keeps
     nix's progress output for the failure message."""
     b = store_host()
-    sshopts = " ".join(["-o", "BatchMode=yes", *control_opts()])
+    sshopts = " ".join(ssh_opts())
     if target == b:
         return  # built there
     if target == proc.this_machine():
@@ -325,9 +325,9 @@ def copy_closure(target: str, toplevel: str, quiet: bool = False) -> None:
     subst = ["-s"] if off_lan(tgt) else []
     if b:
         # The outputs live on the store host, not here.
-        p = run(["ssh", "-o", "BatchMode=yes", *control_opts(), ssh_address(b),
-                 ("NIX_SSHOPTS='-o BatchMode=yes' "
-                  f"nix copy {' '.join(subst)} --to ssh://{tgt} {toplevel}")],
+        there = shlex.quote(" ".join(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *SSH_KEEPALIVE]))
+        p = run(["ssh", *ssh_opts(), ssh_address(b),
+                 f"NIX_SSHOPTS={there} nix copy {' '.join(subst)} --to ssh://{tgt} {toplevel}"],
                 check=False, capture=quiet, merged=True)
     else:
         p = run(["nix", "copy", *subst, "--to", f"ssh://{tgt}", toplevel],
@@ -341,8 +341,7 @@ def check_store() -> None:
     """Fail before any nix work when a store host is set but unreachable,
     rather than on ssh's own timeout deep in a build."""
     b = store_host()
-    if b and not ok(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
-                      *control_opts(), ssh_address(b), "true"]):
+    if b and not ok(["ssh", *ssh_opts(), ssh_address(b), "true"]):
         die(f"store host {b} unreachable; {NOTHING_DONE}")
 
 
@@ -391,10 +390,7 @@ def dry_activate(target: str, toplevel: str) -> str | None:
     name: why it could not be run, else None.  Runs in the copy pool, so it
     only reports; the caller dies once the other copies have finished."""
     p = run(target_cmd(target, [f"{toplevel}/bin/switch-to-configuration", "dry-activate"],
-                     sudo=True), check=False, merged=True, timeout=DRY_ACTIVATE_TIMEOUT)
-    if p.returncode == -signal.SIGKILL:
-        return (f"dry-activating the new system on {target} did not finish within "
-                f"{DRY_ACTIVATE_TIMEOUT} s (a stalled ssh connection?); {NOTHING_DONE}")
+                     sudo=True), check=False, merged=True)
     if p.returncode != 0:
         return (f"dry-activating the new system on {target} failed (exit {p.returncode}); "
                 f"{NOTHING_DONE}" + (f"\n{p.stdout.strip()}" if p.stdout else ""))

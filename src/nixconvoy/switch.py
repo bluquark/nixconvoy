@@ -16,7 +16,7 @@ from . import proc, targets
 from .checkout import current_branch
 from .guard import drive
 from .proc import Fail, out, rev, run, stream
-from .targets import PROBE_TIMEOUT, control_opts, provenance_digest
+from .targets import PROBE_TIMEOUT, provenance_digest, ssh_opts
 from .wire import (
     Activate,
     Arm,
@@ -125,7 +125,7 @@ def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> 
     )
     if target == proc.this_machine():
         return ["bash", "-c", script]
-    return ["ssh", "-o", "BatchMode=yes", *control_opts(), targets.ssh_address(target), script]
+    return ["ssh", *ssh_opts(), targets.ssh_address(target), script]
 
 
 def switch(target: str, expected: str, toplevel: str, nixconvoy_switch: str,
