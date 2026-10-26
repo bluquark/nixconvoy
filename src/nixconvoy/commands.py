@@ -1289,12 +1289,16 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
             finally:
                 drop_worktree(wt)
 
-        def clashes(tree: str) -> None:
+        def clashes(tree: str, *, pinned: bool = False) -> None:
             """Each worktree is reset onto the landed commit with its unstaged
             edits kept (reset --keep), which an edited or untracked file the
-            others changed would stop: told now, before anything moves."""
+            others changed would stop: told now, before anything moves.
+            `pinned`: the landing pins are in the indexes (prepare_all), the
+            submodule worktrees still on their tips - a gitlink is no edit
+            then (a worktree off its pin was refused by prepare_all)."""
             for d in [here, *(d for d, _ in parts)]:
-                loose = set(out(["git", "diff", "--name-only"], cwd=str(d)).splitlines()) - {MSG_FILE}
+                diff = ["git", "diff", "--name-only", *(["--ignore-submodules=all"] if pinned else [])]
+                loose = set(out(diff, cwd=str(d)).splitlines()) - {MSG_FILE}
                 loose |= set(out(["git", "ls-files", "--others", "--exclude-standard"], cwd=str(d)).splitlines())
                 moved = set(out(["git", "diff", "--name-only", "HEAD", tree], cwd=str(d)).splitlines())
                 if clash := sorted(loose & moved):
@@ -1323,7 +1327,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
             tree = merged_tree()
             if tree == main_tree:
                 die("no changes vs origin/main to land")
-            clashes(tree)
+            clashes(tree, pinned=True)
             commit = out(["git", "commit-tree", tree, "-p", main, "-m", msg])
             p = git("push", "--quiet", "origin", f"{commit}:refs/heads/main", check=False)
             if p.returncode != 0:
