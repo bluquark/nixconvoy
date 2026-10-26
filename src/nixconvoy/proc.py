@@ -329,4 +329,4 @@ HELD: list[IO[str]] = []  # locks held until exit
 def solve_with_mergiraf(wt: str, path: str) -> bool:
     """Resolve the conflicted `path` in the worktree `wt` structurally."""
     tool = ["mergiraf"] if shutil.which("mergiraf") else ["nix", "run", "nixpkgs#mergiraf", "--"]
-    return ok([*tool, "solve", path], cwd=wt)
+    return ok([*tool, "solve", "--keep-backup=false", path], cwd=wt)

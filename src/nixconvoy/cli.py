@@ -232,6 +232,9 @@ rebased in a throwaway worktree).  Each checkout is taken under its deploy
 lock (one whose nixconvoy is running is skipped) and either ends up rebased
 with its staged/unstaged state intact and its work branch pushed, or is
 left exactly as it was: a rebase that isn't clean is aborted and reported.
+The rebase replays only what no landing has squashed yet (a branch sitting
+on another's commits that main now holds as one commit replays its own
+alone), and a conflict mergiraf solves structurally does not stop it.
 Each submodule worktree of a checkout follows (see Open), onto its
 repository's default branch as fetched, by the same rebase: fast-forwarded
 when it has nothing of its own, its staged and unstaged state riding

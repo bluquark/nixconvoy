@@ -52,6 +52,8 @@ from .checkout import (
     fold_subject,
     index_tree,
     landing_message,
+    rebase_hint,
+    rebase_solving,
     tree_less_msg,
 )
 from .config import MSG_FILE, cfg
@@ -569,11 +571,10 @@ def rebase_sub(sub: Sub, wb: str, mine: str, wt: Path, checkout: Path) -> tuple[
         return None, "its origin could not be fetched (above)"
     was = rev_in(here.dir, "HEAD")
     default = default_branch(here.repo)
-    p = git("rebase", "--quiet", f"refs/remotes/origin/{default}", cwd=str(here.dir), check=False)
-    if p.returncode != 0:
-        git("rebase", "--abort", cwd=str(here.dir), check=False)
+    upstream = f"refs/remotes/origin/{default}"
+    if not rebase_solving(here.dir, upstream):
         return None, (f"its {wb} does not rebase cleanly onto origin/{default}: "
-                      f"`git -C {here.dir} rebase origin/{default}`, resolve")
+                      f"`git -C {here.dir} {rebase_hint(upstream, str(here.dir))}`, resolve")
     head = rev_in(here.dir, "HEAD")
     assert head is not None and was is not None
     PENDING[sub.name, wb] = Pending(here, wb, was, head)

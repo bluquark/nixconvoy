@@ -25,7 +25,7 @@ from typing import IO, NamedTuple
 from . import config, proc
 from .config import CLAUDE_WORKTREES, CONFIG_FILE, MSG_FILE, ConfigError, cfg, load
 from .guard import decide
-from .proc import PERF, die, git, is_ancestor, ok, out, rev, run
+from .proc import PERF, die, git, is_ancestor, ok, out, rev, run, solve_with_mergiraf
 
 # Identity for machinery commits (snapshots, union merges); the fixed date
 # makes an unchanged union re-create the same commit hash.  Work-branch and
@@ -366,12 +366,13 @@ class GitQueries:
             empty = "--empty=keep" if ask.get("keep_empty") else "--empty=drop"
             where = self.where(ask)
             upstream = arg("upstream")
-            p = git("rebase", "--quiet", empty, upstream, cwd=where, check=False)
-            # Stopped on gitlinks alone, where main pins a submodule this
-            # branch pinned too (its landing elsewhere): the submodule follows.
+            p = git("rebase", "--quiet", empty, *rebase_range(upstream, where), cwd=where, check=False)
+            # Stopped: on text conflicts mergiraf solves, or on gitlinks,
+            # where main pins a submodule this branch pinned too (its
+            # landing elsewhere) - the submodule follows (solve_stop).
             why = ""
             while p.returncode != 0:
-                why = submodule.solve_rebase(Path(where or Path.cwd()).resolve(), Path.cwd().resolve(), upstream)
+                why = solve_stop(where, upstream)
                 if why is not None:
                     break
                 if ok(["git", "diff", "--cached", "--quiet"], cwd=where):
@@ -394,7 +395,7 @@ class GitQueries:
                 rest = "\n".join(ln for ln in (p.stderr or "").splitlines()
                                  if ln.strip() and not ln.startswith(noise) and not ln.startswith("hint:"))
                 return {"ran": False, "detail": why + (f"\n{rest}" if rest else "")}
-            there = f"git rebase {upstream.removeprefix('refs/remotes/')}" + (f" {self.aside_branch}" if where else "")
+            there = f"git {rebase_hint(upstream, where)}" + (f" {self.aside_branch}" if where else "")
             return {"ran": False, "detail": f"run `{there}` there, resolve, then re-run:\n{(p.stderr or '').strip()}"}
         if kind == "rebase_abort":
             return ran(git("rebase", "--abort", cwd=self.where(ask), check=False))
@@ -1158,6 +1159,89 @@ def held_targets(commits: str, cwd: str | None = None) -> set[str]:
 
 def summarize(ref: str) -> str:
     return out(["git", "log", "-1", "--format=%h %ad %s", "--date=format:%Y-%m-%d %H:%M", ref])
+
+
+def landed_prefix(upstream: str, cwd: str | None = None) -> str | None:
+    """The newest of HEAD's commits `upstream` lacks whose tree, less
+    MSG_FILE, is the tree of a commit `upstream` has since the fork: a
+    landing squashed it and all before it, so a rebase onto `upstream` has
+    only what follows to replay (`--onto upstream <it>`, rebase_range);
+    None when no landing matches.  The rebase core's tmp commits (the
+    state set aside, "tmp: " subjects atop HEAD) never count: its pops
+    after the rebase count on them being replayed."""
+    own = []
+    for ln in out(["git", "rev-list", "--format=%H %T %s", f"{upstream}..HEAD"], cwd=cwd).splitlines():
+        if ln.startswith("commit "):
+            continue
+        fields = ln.split(" ", 2)
+        if len(fields) < 3 or not fields[2].startswith("tmp: "):
+            own.append((fields[0], fields[1]))
+    if not own:
+        return None
+    landed = set(out(["git", "log", "--format=%T", f"HEAD..{upstream}"], cwd=cwd).split())
+    for sha, tree in own:  # newest first
+        if tree in landed:
+            return sha
+        if ok(["git", "cat-file", "-e", f"{tree}:{MSG_FILE}"], cwd=cwd) and tree_less_msg(sha, cwd) in landed:
+            return sha
+    return None
+
+
+def rebase_range(upstream: str, cwd: str | None = None) -> list[str]:
+    """`git rebase`'s arguments for HEAD onto `upstream`: past the landed
+    prefix (landed_prefix) when there is one."""
+    base = landed_prefix(upstream, cwd)
+    return ["--onto", upstream, base] if base else [upstream]
+
+
+def rebase_hint(upstream: str, cwd: str | None = None) -> str:
+    """The rebase to run by hand, as rebase_range would: `rebase [--onto]
+    origin/main [<base>]`."""
+    return "rebase " + " ".join(a.removeprefix("refs/remotes/") for a in rebase_range(upstream, cwd))
+
+
+def solve_stop(where: str | None, upstream: str) -> str | None:
+    """A stopped rebase's conflicts solved where nixconvoy can: the text
+    files both sides have (conflict markers) structurally (mergiraf), then
+    the gitlinks and pin files by the submodule's own rebase
+    (submodule.solve_rebase).  None once every conflict is solved; "" for
+    a file beyond both (a side's deletion, a language mergiraf lacks), a
+    hand's; else why a submodule could not follow."""
+    from . import submodule  # noqa: PLC0415 - submodule builds on this module
+
+    wt = Path(where or Path.cwd()).resolve()
+    stages: dict[str, set[int]] = {}
+    for ln in out(["git", "ls-files", "-u"], cwd=where).splitlines():
+        meta, _, path = ln.partition("\t")
+        stages.setdefault(path, set()).add(int(meta.split()[2]))
+    if not stages:
+        return ""
+    for f, had in stages.items():
+        if submodule.owner(wt, f) is not None:
+            continue
+        if not had >= {2, 3} or not solve_with_mergiraf(str(wt), f):
+            return ""
+        git("add", "--", f, cwd=where, check=False)
+    if not out(["git", "diff", "--name-only", "--diff-filter=U"], cwd=where).strip():
+        return None
+    return submodule.solve_rebase(wt, Path.cwd().resolve(), upstream)
+
+
+def rebase_solving(d: Path, upstream: str) -> bool:
+    """`git rebase upstream` in `d` (a submodule worktree), past the landed
+    prefix and through the conflicts solve_stop solves, a replayed commit
+    solved to nothing skipped; whether it went through - else aborted,
+    `d` as it was."""
+    p = git("rebase", "--quiet", *rebase_range(upstream, str(d)), cwd=str(d), check=False)
+    while p.returncode != 0 and solve_stop(str(d), upstream) is None:
+        if ok(["git", "diff", "--cached", "--quiet"], cwd=str(d)):
+            p = git("rebase", "--skip", cwd=str(d), env={"GIT_EDITOR": "true"}, check=False)
+        else:
+            p = git("rebase", "--continue", cwd=str(d), env={"GIT_EDITOR": "true"}, check=False)
+    if p.returncode != 0:
+        git("rebase", "--abort", cwd=str(d), check=False)
+        return False
+    return True
 
 
 def tree_less_msg(ref: str, cwd: str | None = None) -> str:

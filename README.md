@@ -400,8 +400,10 @@ commit.  From a checkout on a work branch:
   catch-up (a deploy, `pull`, the landing itself) brings its worktree
   onto the landed default branch as it brings the checkout onto main -
   fast-forwarded when it has nothing of its own, rebased with its staged
-  and unstaged state otherwise, pushed and pinned; one whose rebase is
-  not clean is reported and left as it was, to resolve by hand.  A
+  and unstaged state otherwise, pushed and pinned.  That rebase replays
+  only what no landing has squashed yet, and goes through the conflicts
+  mergiraf solves; one still not clean is reported and left as it was,
+  to resolve by hand.  A
   deploy refuses to pin a submodule still behind that branch, and a
   worktree reset below the work the tree deploys (`close <input>
   --force` drops it deliberately).

@@ -871,6 +871,78 @@ def reach_cases(d: Path) -> None:
     say("reach: ok")
 
 
+def landing_rebase_cases(d: Path) -> None:
+    """The rebase core past what a landing squashed and through the
+    conflicts mergiraf solves: a branch carrying another's commits that
+    main now holds as one squash replays its own alone; two imports added
+    at the same spot merge structurally."""
+    scratch_env()
+    wb, other = "work/tester/9", "work/other/1"
+    files = {"a.txt": "one\ntwo\nthree\n", "m.py": "import os\n"}
+    with scratch_origin(d, f"{wb}*\n{other}\n", files, wb=wb) as (_origin, seed, co):
+        # The other branch: two commits to one line, which this branch sits
+        # on; then landed on main as one squash.
+        sh(seed, "switch", "--quiet", "-c", other)
+        put(seed, "a.txt", "one\nTWO-x1\nthree\n", "x1")
+        put(seed, "a.txt", "one\nTWO-x2\nthree\n", "x2")
+        sh(seed, "push", "--quiet", "origin", other)
+        sh(co, "fetch", "--quiet")
+        sh(co, "rebase", "--quiet", f"origin/{other}")
+        put(co, "b.txt", "local\n", "local")
+        sh(seed, "switch", "--quiet", "main")
+        squash = sh(seed, "commit-tree", f"{other}^{{tree}}", "-p", "main", "-m", "landing of other")
+        sh(seed, "push", "--quiet", "origin", f"{squash}:main")
+        sh(seed, "reset", "--quiet", "--hard", squash)
+        sh(co, "fetch", "--quiet")
+        checkout.ensure_rebased()
+        assert sh(co, "rev-parse", "HEAD~1") == squash
+        assert sh(co, "log", "--format=%s", "origin/main..HEAD") == "local"
+        assert (co / "a.txt").read_text() == "one\nTWO-x2\nthree\n"
+
+        # An import added on each side at the same spot: git stops, mergiraf keeps both.
+        put(seed, "m.py", "import os\nimport re\n", "re")
+        sh(seed, "push", "--quiet", "origin", "HEAD:main")
+        sh(co, "fetch", "--quiet")
+        put(co, "m.py", "import os\nimport sys\n", "sys")
+        checkout.ensure_rebased()
+        assert (co / "m.py").read_text() == "import os\nimport re\nimport sys\n", (co / "m.py").read_text()
+        assert sh(co, "log", "--format=%s", "origin/main..HEAD") == "sys\nlocal"
+        assert checkout.git_op_in_progress() is None and not sh(co, "status", "--porcelain")
+
+        # A side's deletion is nobody's to solve: left as it was.
+        sh(seed, "rm", "--quiet", "m.py")
+        sh(seed, "commit", "--quiet", "-m", "gone")
+        sh(seed, "push", "--quiet", "origin", "HEAD:main")
+        sh(co, "fetch", "--quiet")
+        put(co, "m.py", "import os\nimport sys\nimport re\n", "still")
+        before = sh(co, "rev-parse", "HEAD")
+        assert "not clean" in dies(checkout.ensure_rebased)
+        assert sh(co, "rev-parse", "HEAD") == before and checkout.git_op_in_progress() is None
+        assert not sh(co, "status", "--porcelain")
+
+    # Sitting exactly on the other's tip, its state set aside as the core's
+    # tmp commits: those never pass for the landed prefix (the pops after
+    # the rebase would take main's own commits).
+    shutil.rmtree(d / "origin.git"), shutil.rmtree(d / "seed"), shutil.rmtree(d / "homelab9")
+    with scratch_origin(d, f"{wb}*\n{other}\n", files, wb=wb) as (_origin, seed, co):
+        sh(seed, "switch", "--quiet", "-c", other)
+        put(seed, "a.txt", "one\nTWO-x1\nthree\n", "x1")
+        put(seed, "a.txt", "one\nTWO-x2\nthree\n", "x2")
+        sh(seed, "push", "--quiet", "origin", other)
+        sh(co, "fetch", "--quiet")
+        sh(co, "rebase", "--quiet", f"origin/{other}")
+        put(co, "COMMIT_MSG.md", "mine\n")
+        (co / "a.txt").write_text("one\nTWO-x2\nTHREE\n")
+        sh(seed, "switch", "--quiet", "main")
+        squash = sh(seed, "commit-tree", f"{other}^{{tree}}", "-p", "main", "-m", "landing of other")
+        sh(seed, "push", "--quiet", "origin", f"{squash}:main")
+        sh(co, "fetch", "--quiet")
+        checkout.ensure_rebased()
+        assert sh(co, "rev-parse", "HEAD") == squash
+        assert sh(co, "diff", "--cached", "--name-only") == "COMMIT_MSG.md"
+        assert sh(co, "diff", "--name-only") == "a.txt" and (co / "a.txt").read_text() == "one\nTWO-x2\nTHREE\n"
+
+
 def git_cases(d: Path) -> None:
     """The rebase and union cores (switch-guard/src/plan/) driven through
     nixconvoy's git queries in scratch clones of a scratch origin; pull,
@@ -1670,6 +1742,22 @@ def submodule_cases(d: Path) -> None:
         # another branch is left where it is.
         assert sh(dep_repo, "rev-parse", "HEAD") == v1 and submodule.branch_at(dep_repo) == "main"
         (dep_repo / "scratch.txt").write_text("s\n")
+        # Prepared, then abandoned (main's push refused): the landing
+        # commit waited under a temporary ref, the default branch, the
+        # worktree and its message stayed, and the pin comes off again.
+        before, main_before = sh(co, "rev-parse", "HEAD"), dep_ref("refs/heads/main")
+        landings = submodule.prepare_all(wb, "dep v2 landed")
+        assert len(landings) == 1 and landings[0].pending is not None and landings[0].settle
+        pending = landings[0].pending
+        assert dep_ref(f"{submodule.PAST_REFS}/{wb}/{pending}") == pending
+        assert dep_ref("refs/heads/main") == main_before and sh(ax, "rev-parse", "HEAD") == v2
+        assert (ax / "COMMIT_MSG.md").exists() and pinned() == pending
+        assert sh(co, "log", "-1", "--format=%s").startswith("submodule dep:")
+        submodule.abandon_all(landings)
+        sh(co, "reset", "--quiet", "--keep", before)
+        assert not dep_ref(f"{submodule.PAST_REFS}/{wb}/{pending}")
+        assert sh(co, "rev-parse", "HEAD") == before and pinned() == v2
+        # The landing itself: main pushed (not here), then finished.
         submodule.finish_all(submodule.prepare_all(wb, "dep v2 landed"))
         assert not dep_ref(f"{submodule.PAST_REFS}/gone/*")
         assert dep_ref(f"{submodule.PAST_REFS}/keep/{b1}") == b1
@@ -2356,7 +2444,8 @@ if __name__ == "__main__":
             switch_cases(Path(d))
         for cases in (gate_cases, provenance_cases, target_cases, memo_cases):
             cases()
-        for scratch_cases in (guard_cases, reach_cases, git_cases, announce_cases, submodule_cases, open_cases,
+        for scratch_cases in (guard_cases, reach_cases, git_cases, landing_rebase_cases, announce_cases,
+                              submodule_cases, open_cases,
                               init_cases):
             with tempfile.TemporaryDirectory() as d:
                 scratch_cases(Path(d))
