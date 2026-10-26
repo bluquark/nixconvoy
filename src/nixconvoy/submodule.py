@@ -45,7 +45,6 @@ from typing import NamedTuple
 
 from . import proc
 from .checkout import (
-    DEPLOYING_REFS,
     MACHINE_ENV,
     PENDING_REFS,
     TMP_PREFIX,
@@ -348,9 +347,12 @@ def prefetch(top: Path, pool: ThreadPoolExecutor) -> None:
 def pinned_revs(sub: Sub) -> set[str]:
     """Every rev of the submodule pinned by a ref this repository's origin
     holds, as fetched: its branches (main, the work branches, the deploy
-    records') and the deploys' announcements and records under way."""
-    commits = set(out(["git", "for-each-ref", "--format=%(objectname)", "refs/remotes/origin/",
-                       PENDING_REFS, DEPLOYING_REFS]).split())
+    records') and the deploys' announcements under way with the records
+    they carry (their parents)."""
+    commits = set(out(["git", "for-each-ref", "--format=%(objectname)", "refs/remotes/origin/"]).split())
+    pending = out(["git", "for-each-ref", "--format=%(objectname)", PENDING_REFS]).split()
+    if pending:
+        commits.update(out(["git", "rev-list", "--no-walk", "--parents", *pending]).split())
     listing = run(["git", "cat-file", "--batch-check=%(objectname) %(objecttype)"],
                   input="".join(f"{c}:{sub.path}\n" for c in sorted(commits)), check=False).stdout
     return {sha for sha, typ in (ln.split() for ln in listing.splitlines() if len(ln.split()) == 2)

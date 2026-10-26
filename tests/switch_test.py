@@ -481,6 +481,17 @@ def memo_cases() -> None:
 def provenance_cases() -> None:
     """The drift core (switch-guard/src/plan/drift.rs, whose own tests hold
     the cases) on the provenances provenance_doc writes."""
+    # What deploy reads off a provenance itself: who wrote it, and the
+    # record it names (a target an earlier run here switched without its
+    # push: its record is pushed with this run's).
+    mine = ("tester", str(Path.cwd()))
+    assert deploy.by_me(provenance_line(NEW, by=mine), "tester") and not deploy.by_me(provenance_line(NEW), "tester")
+    assert not deploy.by_me(provenance_line(NEW, by=mine), "other") and not deploy.by_me("{", "tester")
+    assert deploy.previous_record(provenance_line(NEW)) == ""
+    doc = proc.load_json(provenance_line(NEW))
+    assert isinstance(doc, dict)
+    with_record = proc.dump_json({**doc, "record": "r" * 40})
+    assert deploy.previous_record(with_record) == "r" * 40
     line, died = report(provenance_line(NEW))
     assert line.startswith(f"side1: refused: runs an increment of {BRANCH}") and \
         f"{OTHER[0]}:{OTHER[1]} (pid 4242) at 13:46" in line, line
@@ -1285,7 +1296,8 @@ def announce_cases(d: Path) -> None:
 
         # The deploy records: the union's tree, chained on the target's
         # previous record first, then main, the branches and the increment;
-        # a parent not here is left out.  Pushed before the switch.
+        # a parent not here is left out.  Carried by the announcement from
+        # before the switch: parents of its commit, kept by the renewals.
         ann = checkout.Announce(wb, snap)
         assert ann.collect()
         committed = checkout.deployed_commit(snap, "two\n\nReaches: a\nDeployed: a")
@@ -1307,14 +1319,25 @@ def announce_cases(d: Path) -> None:
         assert sh(co, "log", "-1", "--format=%s%n%b", rec1) == 'deploy a: two\n{"doc": 1}'
         rec2 = checkout.record_commit("a", snap, [rec1, main, committed, main], "three", "{}")
         assert sh(co, "log", "-1", "--format=%P", rec2).split() == [rec1, main, committed]
-        assert checkout.push_records({"a": rec1, "b": rec2}) is None
-        assert checkout.push_records({}) is None
-        assert sh(seed, "ls-remote", "origin", f"{checkout.DEPLOYING_REFS}/a").split()[0] == rec1
-        sh(co, *checkout.fetch_args())
-        assert proc.rev(f"{checkout.DEPLOYING_REFS}/a") == rec1 and proc.rev(f"{checkout.PENDING_REFS}/{wb}")
-        # The push that ends the deploy: the work branch, then the records
-        # onto the history branches, then the announcement and the records'
-        # refs deleted.
+        assert ann.carry({"a": rec1, "b": rec2}) is None
+        carried = ann.sha
+        assert sh(co, "log", "-1", "--format=%P", carried).split() == [sh(co, "rev-parse", "HEAD"), rec1, rec2]
+        assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{wb}").split()[0] == carried
+        deadline = time.monotonic() + 10
+        while ann.sha == carried and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert ann.sha != carried and sh(co, "log", "-1", "--format=%P", ann.sha).split()[1:] == [rec1, rec2]
+        # A stage redone starts without records: the renewals drop them.
+        ann.retarget(snap)
+        assert ann.records == ()
+        last = ann.sha
+        deadline = time.monotonic() + 10
+        while ann.sha == last and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert ann.sha != last and sh(co, "log", "-1", "--format=%P", ann.sha).split() == [sh(co, "rev-parse", "HEAD")]
+        assert ann.carry({"a": rec1, "b": rec2}) is None
+        # The push that ends the deploy, atomic: the work branch, the
+        # records onto the history branches and the announcement deleted.
         checkout.adopt_commit(wb, committed)
         checkout.push_deployed(wb, ann, {"a": rec1, "b": rec2})
         checkout.await_background_push()
@@ -1323,9 +1346,9 @@ def announce_cases(d: Path) -> None:
         assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/a") == rec1
         assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/b") == rec2
         assert checkout.pending_announcements() == []
-        assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/*", f"{checkout.DEPLOYING_REFS}/*") == ""
-        # The local copies went with the fetch's prune.
-        assert proc.rev(f"{checkout.DEPLOYING_REFS}/a") is None and proc.rev(f"{checkout.PENDING_REFS}/{wb}") is None
+        assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/*") == ""
+        # The local copy went with the fetch's prune.
+        assert proc.rev(f"{checkout.PENDING_REFS}/{wb}") is None
         # A main checkout's deploy: the records alone.
         checkout.push_deployed(None, None, {"a": rec2})
         checkout.await_background_push()
@@ -1336,25 +1359,53 @@ def announce_cases(d: Path) -> None:
         checkout.push_deployed(wb, None, {})
         assert not Path(checkout.push_state("pid")).exists()
         # A main checkout's announcement (its HEAD origin lacks), under
-        # main@<machine>, is settled by the push that ends its deploy (over,
-        # not waited for) and cleared by the push of main that lands that
-        # HEAD, not by nixconvoy.
+        # main@<machine>-<checkout>, is settled by the push that ends its
+        # deploy (over, not waited for) and cleared by the push of main
+        # that lands that HEAD, not by nixconvoy.
+        key = checkout.announce_key("main")
+        assert key.startswith("main@tester-") and len(key) == len("main@tester-") + 8, key
         ann = checkout.Announce("main", "HEAD")
-        assert ann.collect() and ann.key == "main@tester"
+        assert ann.collect() and ann.key == key
         checkout.push_deployed(None, ann, {"a": rec2})
         checkout.await_background_push()
         sh(co, *checkout.fetch_args())
         (pend,) = checkout.pending_announcements()
-        assert (pend.key, pend.branch, pend.settled) == ("main@tester", "main", True), pend
+        assert (pend.key, pend.branch, pend.settled) == (key, "main", True), pend
         sh(co, "push", "--quiet", "origin", "HEAD:main")
         sh(co, *checkout.fetch_args())
         assert checkout.pending_announcements() == []
-        assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/main@tester") != ""
+        assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{key}") != ""
         # Cleared, it is swept by the next deploy's ending push.
         checkout.push_deployed(None, None, {"a": rec2})
         checkout.await_background_push()
         sh(co, *checkout.fetch_args())
-        assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/main@tester") == ""
+        assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{key}") == ""
+        # One announcing a HEAD main holds already (a deploy with nothing
+        # pending, announced for its records) is under way, not cleared,
+        # until settled.
+        ann = checkout.Announce("main", "HEAD")
+        assert ann.collect() and ann.carry({"a": rec2}) is None
+        sh(co, *checkout.fetch_args())
+        assert [p.key for p in checkout.pending_announcements()] == [key] and checkout.announcements()[1] == {}
+        checkout.push_deployed(None, ann, {"a": rec2})
+        checkout.await_background_push()
+        sh(co, *checkout.fetch_args())
+        assert checkout.pending_announcements() == [] and list(checkout.announcements()[1]) == [key]
+        # The sweep is not atomic: a cleared announcement renewed since the
+        # fetch (its lease stale) stays, the others go.
+        other = f"main@other-{'0' * 8}"
+        plain = out_at(co, sh(co, "rev-parse", "refs/remotes/origin/main"), "pending increment of main from other")
+        sh(co, "push", "--quiet", "origin", f"{plain}:{checkout.PENDING_REFS}/{other}")
+        sh(co, *checkout.fetch_args())
+        assert sorted(checkout.announcements()[1]) == sorted([key, other])
+        moved = out_at(co, plain, "renewed")
+        sh(co, "push", "--quiet", "--force", "origin", f"{moved}:{checkout.PENDING_REFS}/{key}")
+        checkout.push_deployed(None, None, {})
+        checkout.await_background_push()
+        assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{other}") == ""
+        assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{key}").split()[0] == moved
+        sh(co, "push", "--quiet", "origin", f":{checkout.PENDING_REFS}/{key}")
+        sh(co, *checkout.fetch_args())
         # The branch not pushed (its lease failed): the announcement stays,
         # so the deploy still counts as under way (dead, once its renewals
         # stop) until a push of the branch clears it.
@@ -1365,11 +1416,13 @@ def announce_cases(d: Path) -> None:
         sh(seed, "switch", "--quiet", wb)
         put(seed, "b.txt", "theirs\n", "theirs")
         sh(seed, "push", "--quiet", "origin", wb)
-        checkout.push_deployed(wb, ann, {})
+        checkout.push_deployed(wb, ann, {"a": rec1})
         err = warned(checkout.await_background_push)
         assert "background push failed" in err, err
         sh(co, *checkout.fetch_args())
         assert list(checkout.announced(None)) == [wb]
+        # Atomic: the history branch did not move either.
+        assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/a") == rec2
         assert checkout.clear_refspec(wb) == [f"--force-with-lease={checkout.PENDING_REFS}/{wb}:{ann.sha}",
                                               f":{checkout.PENDING_REFS}/{wb}"]
     say("announcements: ok")
@@ -1458,6 +1511,22 @@ def submodule_cases(d: Path) -> None:
         assert len(told) == 2 and "pushed" in told[0] and "pinned" in told[1], told
         assert sh(co, "diff", "--cached", "--name-only") == path
         assert pinned() == v2
+        # A record an announcement carries (a parent of its commit) pins
+        # what its tree names, for as long as the announcement stands.
+        fake = sh(ax, "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "on no branch")
+        env = {**os.environ, "GIT_INDEX_FILE": str(d / "record-index")}
+        for cmd in (["read-tree", "HEAD"], ["update-index", "--cacheinfo", f"160000,{fake},{path}"]):
+            subprocess.run(["git", *cmd], cwd=co, env=env, check=True)
+        tree = subprocess.run(["git", "write-tree"], cwd=co, env=env, check=True,
+                              capture_output=True, text=True).stdout.strip()
+        record = sh(co, "commit-tree", tree, "-p", "HEAD", "-m", "record")
+        ann = checkout.Announce(wb, "HEAD")
+        assert ann.collect() and ann.carry({"a": record}) is None
+        sh(co, *checkout.fetch_args())
+        assert fake in submodule.pinned_revs(dep())
+        ann.withdraw()
+        sh(co, *checkout.fetch_args())
+        assert fake not in submodule.pinned_revs(dep())
         assert submodule.sync(wb, "again") == []  # settled: nothing to do
         assert submodule.sync(wb, None, dry=True) == []  # deployed state: a dry run may carry it
         assert submodule.own(co)
@@ -1491,11 +1560,11 @@ def submodule_cases(d: Path) -> None:
 
         # A landing refuses what it would lose or never deployed.
         (ax / "tool.py").write_text("v2 edited\n")
-        assert "unstaged edits" in dies(lambda: submodule.land_one(dep(), wb, "m"))
+        assert "unstaged edits" in dies(lambda: submodule.prepare_one(dep(), wb, "m"))
         sh(ax, "checkout", "--", "tool.py")
         (ax / "loose.txt").write_text("x\n")  # untracked: harmless, the worktree stays
         put(ax, "tool.py", "v3\n", "hand commit, never deployed")
-        assert "not what the tree pins" in dies(lambda: submodule.land_one(dep(), wb, "m"))
+        assert "not what the tree pins" in dies(lambda: submodule.prepare_one(dep(), wb, "m"))
         assert "not deployed yet" in dies(lambda: submodule.sync(wb, None, dry=True))
         sh(ax, "reset", "--quiet", "--hard", v2)
 
@@ -1601,7 +1670,7 @@ def submodule_cases(d: Path) -> None:
         # another branch is left where it is.
         assert sh(dep_repo, "rev-parse", "HEAD") == v1 and submodule.branch_at(dep_repo) == "main"
         (dep_repo / "scratch.txt").write_text("s\n")
-        submodule.land_all(wb, "dep v2 landed")
+        submodule.finish_all(submodule.prepare_all(wb, "dep v2 landed"))
         assert not dep_ref(f"{submodule.PAST_REFS}/gone/*")
         assert dep_ref(f"{submodule.PAST_REFS}/keep/{b1}") == b1
         # The branch's deployed tip v2, pinned by nothing once the landing moved wb: not kept.
@@ -1630,7 +1699,7 @@ def submodule_cases(d: Path) -> None:
         assert (ax / "loose.txt").exists() and submodule.own(co)  # untracked: kept, and the worktree's own
         (ax / "loose.txt").unlink()
         assert not submodule.own(co)
-        submodule.land_all(wb, "dep v2 landed")  # a retry: nothing left to do
+        submodule.finish_all(submodule.prepare_all(wb, "dep v2 landed"))  # a retry: nothing left to do
         assert sh(co, "log", "-1", "--format=%s").startswith("submodule dep:")
 
         # Landed, the worktree stays on its branch at the landed commit, pushed so.

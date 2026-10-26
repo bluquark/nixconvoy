@@ -90,9 +90,14 @@ no work.
   out elsewhere by accident.
 - **Deploy records.**  Before a target is switched, its deploy record - a
   commit of the exact tree it will run, on its previous record, main, the
-  unioned branches and the increment - is pushed to origin, so no target
-  ever runs a state origin does not hold.  Once the target runs it,
-  `nixconvoy-history/<target>` points at it: `git log --first-parent
+  unioned branches and the increment - reaches origin as a parent of the
+  deploy's announcement, so no target ever runs a state origin does not
+  hold (a deploy with nothing pending announces once it has targets to
+  switch, for this alone).  Once the target runs it, the one atomic push
+  that ends the deploy moves the work branch, points
+  `nixconvoy-history/<target>` at the record and deletes the announcement
+  (a main checkout's is settled instead, cleared by the owner's push of
+  main): `git log --first-parent
   origin/nixconvoy-history/<target>` is the target's deploy history, and
   `git diff` between two such branches what two targets run differently.
 - **Confirmed switches.**  With the NixOS module, a switch activates the

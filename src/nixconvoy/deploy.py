@@ -15,6 +15,7 @@ from pathlib import Path
 
 from . import memo, proc, submodule, targets
 from .checkout import (
+    DEPLOYED_PREFIX,
     PENDING_REFS,
     WAIT_STALE,
     Announce,
@@ -36,7 +37,6 @@ from .checkout import (
     pending_announcements,
     pop_tmp_commits,
     push_deployed,
-    push_records,
     push_work_branch,
     record_commit,
     staged_differs,
@@ -64,6 +64,15 @@ def exit_on_signal(signum: int, _frame: object) -> None:
     raise SystemExit(128 + signum)
 
 
+class Run:
+    """What deploy() keeps of run_deploy past its end: the announcement,
+    which run_deploy makes itself for a deploy with nothing pending once
+    it has targets to switch, for their records to ride."""
+
+    def __init__(self, ann: Announce | None) -> None:
+        self.ann = ann
+
+
 def claims(provenance: str, me: str, branch: str) -> bool:
     """Whether a target's provenance is this checkout's announced, unpushed
     increment of `branch`."""
@@ -77,6 +86,17 @@ def claims(provenance: str, me: str, branch: str) -> bool:
     return (isinstance(pend, dict) and isinstance(by, dict) and bool(pend.get("announce"))
             and pend.get("branch") == branch
             and (by.get("machine"), by.get("checkout")) == (me, str(Path.cwd())))
+
+
+def by_me(provenance: str, me: str) -> bool:
+    """Whether a target's provenance was written by a deploy from this
+    checkout."""
+    try:
+        doc = load_json(provenance)
+    except ValueError:
+        return False
+    by = doc.get("by") if isinstance(doc, dict) else None
+    return isinstance(by, dict) and (by.get("machine"), by.get("checkout")) == (me, str(Path.cwd()))
 
 
 def previous_record(provenance: str) -> str:
@@ -235,12 +255,23 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, exit_on_signal)
     pushed = False
+    run = Run(ann)
     try:
         pushed = run_deploy(filter_targets, candidates, all_targets, msg, evict, dry, skip,
-                             me, main0, wb, snap, ann, fetch, probes)
+                             me, main0, wb, snap, run, fetch, probes)
     finally:
+        lazy = run.ann is not ann
+        ann = run.ann
         if ann is not None and not pushed:
-            if ann.claimed:
+            if ann.claimed and lazy:
+                # Those targets run (or may run) the records it carries:
+                # kept, for their history to chain on them.
+                ann.stop()
+                print(f"note: {', '.join(ann.claimed)} were switched (or a switch was started), so "
+                      f"this deploy's announcement stays, carrying their deploy records: re-run to "
+                      f"finish the deploy, or clear it (git push origin :{PENDING_REFS}/{ann.key})",
+                      file=sys.stderr)
+            elif ann.claimed:
                 # Those targets run the increment (or a switch onto it was
                 # started): the announcement stays, dead, so a deploy
                 # elsewhere is refused there rather than reverting it,
@@ -257,10 +288,11 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
 
 def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: list[str],
                msg: str | None, evict: bool, dry: bool, skip: bool, me: str,
-               main0: str | None, wb: str | None, snap: str, ann: Announce | None,
+               main0: str | None, wb: str | None, snap: str, run: Run,
                fetch: Future[subprocess.CompletedProcess[str]], probes: dict[str, Future[Probe]]) -> bool:
     """The deploy from its union on: whether its announcement is left to
     the push that ends it (push_deployed), rather than to withdraw."""
+    ann = run.ann
     running: dict[str, str | None] = {}
     probed: dict[str, Probe] = {}
 
@@ -393,7 +425,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         """Eval, precheck, build and copy for `union`, checked out in `wt`,
         from the branches `listed` in nixconvoy.toml's work_branches, `branches` the ones
         it merged: whether the deploy ends here."""
-        nonlocal plan, affected, left_alone, tops, committed, records, provenances
+        nonlocal plan, affected, left_alone, tops, committed, records, provenances, ann
         if skip:
             if dry:
                 print(f"NIXCONVOY_SKIP_SWITCH=1 --dry-activate: union {union}; nothing done")
@@ -469,9 +501,17 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                     f"re-arm the stub to retry it as is (sudo mv of the +0-N stub to +2 "
                     f"under /boot/EFI/Linux).")
 
+        # Nothing pending, but targets to switch: announced now, for the
+        # records to ride (and the provenance to name).
+        if ann is None and plan and not dry:
+            ann = run.ann = Announce(current_branch() or "main", "HEAD")
+            if not ann.collect():
+                die(f"announcing this deploy on origin failed; {NOTHING_DONE}:\n{ann.detail}")
+
         # The increment's commit and each target's record, before the
         # switch: the provenance the targets get names the commit origin will
-        # hold, and the records reach origin before anything runs them.
+        # hold, and the records reach origin before anything runs them
+        # (carried by the announcement).
         # The commit's trailers: Reaches, the targets the increment reaches
         # among those deployable from here; Deployed, the probed targets
         # running the branch's tip once this deploy is over (switched now,
@@ -508,6 +548,15 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                            *(t for _, t in branches), committed]
                 records[h] = record_commit(h, union, parents, subject, body)
                 provenances[h] = dump_json({**doc, "toplevel": tops[h].out, "record": records[h]})
+            # A target an earlier run from this checkout switched without
+            # its push landing (died, or its push failed) runs a record its
+            # history branch lacks: carried and pushed with this run's, so
+            # the branch chains on it - whether or not this run switches it.
+            for h, pr in probed.items():
+                r = previous_record(pr.provenance)
+                if h not in records and r and by_me(pr.provenance, me) and rev(f"{r}^{{commit}}") \
+                        and r != rev(f"refs/remotes/origin/{DEPLOYED_PREFIX}/{h}"):
+                    records[h] = r
 
         if plan:
             b = builder()
@@ -531,11 +580,12 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             print(f"dry-activating {', '.join(plan)}...")
         with ThreadPoolExecutor(2 + len(plan)) as pool:
             refetch = pool.submit(git, *fetch_args())
-            pushed = pool.submit(push_records, records)
+            # Carried, or a redone stage's stale records dropped.
+            pushed = pool.submit(ann.carry, records) if ann is not None and (records or ann.records) else None
             copies = [pool.submit(copy_then_dry, n, tops[n], len(plan) > 1) for n in plan]
             failures = [r for r in (cp.result() for cp in copies) if r]
             refetch.result()
-            unpushed = pushed.result()
+            unpushed = pushed.result() if pushed is not None else None
         if dry:
             if failures:
                 die(f"--dry-activate: {NOTHING_DONE}; a dry activation failed:\n"
@@ -551,7 +601,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                 print(f"--dry-activate: nothing drifts from the union ({union}); nothing to switch")
             return True
         if unpushed:
-            die(f"pushing the deploy records to origin failed; {NOTHING_DONE}:\n{unpushed}")
+            die(f"announcing the deploy records on origin failed; {NOTHING_DONE}:\n{unpushed}")
         return False
 
     queries = UnionQueries(lambda: snap or "HEAD", fetch, refresh, stage, await_pending)

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import os
 import re
 import shlex
@@ -40,23 +41,21 @@ MACHINE_ENV = {
 # A throwaway worktree of a run (the union's, a rebase aside): never a
 # checkout, whatever `git worktree list` says.
 TMP_PREFIX = "nixconvoy-"
-# Origin's refs beside the branches, pushed for a deploy under way and
-# deleted by the push that ends it: a deploy's announcement of its pending
-# state (PENDING_REFS/<branch>, pushed before anything is built; a main
-# checkout's, cleared by the push of main that lands its announced HEAD,
-# is swept by the next deploy's end) and each target's deploy record
-# (DEPLOYING_REFS/<target>, pushed before its switch, deleted once
-# refs/heads/<DEPLOYED_PREFIX>/<target> holds it).  A dead deploy's
-# announcement and a record whose switch failed stay until a deploy there
-# ends well.  Fetches prune, so a deletion reaches every clone; local
-# copies are never deleted by hand, since every worktree on the machine
-# reads the same refs.
+# Origin's ref beside the branches for a deploy under way, deleted by the
+# push that ends it: the deploy's announcement of its pending state
+# (PENDING_REFS/<branch>, pushed before anything is built - or, with
+# nothing pending, once there are targets to switch; a main checkout's,
+# cleared by the push of main that lands its announced HEAD, is swept by
+# the next deploy's end), which carries each target's deploy record as a
+# parent from before its switch until refs/heads/<DEPLOYED_PREFIX>/<target>
+# holds it.  A dead deploy's announcement stays, its records with it,
+# until a deploy there ends well.  Fetches prune, so a deletion reaches every clone; local copies
+# are never deleted by hand, since every worktree on the machine reads
+# the same refs.
 PENDING_REFS = "refs/nixconvoy/deploying/branch"
-DEPLOYING_REFS = "refs/nixconvoy/deploying/target"
 DEPLOYED_PREFIX = "nixconvoy-history"
 FETCH_REFSPECS = ("+refs/heads/*:refs/remotes/origin/*",
-                  f"+{PENDING_REFS}/*:{PENDING_REFS}/*",
-                  f"+{DEPLOYING_REFS}/*:{DEPLOYING_REFS}/*")
+                  f"+{PENDING_REFS}/*:{PENDING_REFS}/*")
 # A deploy renews its announcement every HEARTBEAT seconds while it runs; a
 # deploy waiting for it (deploy.await_pending) that has seen no renewal for
 # WAIT_STALE seconds takes it for dead and goes on without it - to be
@@ -789,10 +788,14 @@ def ensure_sole_writer(wb: str) -> str:
     return rev(f"refs/remotes/origin/{wb}") or ""
 
 
+def push_refspecs(wb: str, lease: str) -> list[str]:
+    """The work branch's local tip, CAS against `lease`: origin's tip as
+    ensure_sole_writer proved it this checkout's ("" for no branch)."""
+    return [f"{wb}:refs/heads/{wb}", f"--force-with-lease=refs/heads/{wb}:{lease}"]
+
+
 def push_cmd(wb: str, lease: str) -> list[str]:
-    """Push the work branch's local tip, CAS against `lease`: origin's tip
-    as ensure_sole_writer proved it this checkout's ("" for no branch)."""
-    return ["push", "--quiet", "origin", f"{wb}:refs/heads/{wb}", f"--force-with-lease=refs/heads/{wb}:{lease}"]
+    return ["push", "--quiet", "origin", *push_refspecs(wb, lease)]
 
 
 def push_work_branch(wb: str) -> None:
@@ -824,7 +827,11 @@ class Announce:
     changes reach a common target (deploy.await_pending), and takes it for
     dead once the renewals stop.  The author date is the deploy's start,
     its rank among the deploys under way (the older one is waited for);
-    the subject names this machine, checkout and pid.  The push that ends
+    the subject names this machine, checkout and pid.  Once the deploy
+    knows what each target will run, the renewals carry the targets'
+    deploy records as further parents (carry), so origin holds them before
+    any target is switched; a deploy with nothing pending announces then,
+    for that alone.  The push that ends
     the deploy clears it (push_deployed; for main, the owner's push of
     main does, landing the announced HEAD: pending_announcements);
     withdraw clears one whose deploy ended without switching anything."""
@@ -833,6 +840,8 @@ class Announce:
         self.branch = branch
         self.key = announce_key(branch)
         self.target = ("", "")
+        self.records: tuple[str, ...] = ()
+        self._lock = threading.Lock()
         self.retarget(base)
         # A re-run keeps the rank of the announcement it renews.
         prev = next((p for p in pending_announcements() if p.key == self.key), None)
@@ -853,25 +862,48 @@ class Announce:
         """What the renewals commit, resolved on the main thread: HEAD as
         the parent and `base`'s tree (the snapshot's, or HEAD's) - never
         read by the thread itself, since a rebase under way has temporary
-        commits on HEAD."""
-        self.target = (rev("HEAD") or "", rev(f"{base}^{{tree}}") or "")
+        commits on HEAD.  A stage redone has no records yet."""
+        target = (rev("HEAD") or "", rev(f"{base}^{{tree}}") or "")
+        with self._lock:
+            self.target = target
+            self.records = ()
 
-    def _push(self, settled: bool = False) -> bool:
-        # Off the main thread: nothing here may die().
+    def carry(self, records: dict[str, str]) -> str | None:
+        """Renew at once with each target's deploy record as a further
+        parent (the renewals keep them): what failed, or None once origin
+        holds them."""
+        self.records = tuple(records.values())
+        return None if self._push() else self.detail
+
+    def _commit(self, settled: bool) -> str:
+        """The announcement's commit as it stands: "" when it failed
+        (self.detail says why).  Under the lock."""
         parent, tree = self.target
         subject = (f"pending increment of {self.branch} from {proc.this_machine()}:{Path.cwd()} "
                    f"(pid {os.getpid()})" + (SETTLED if settled else ""))
-        commit = run(["git", "commit-tree", tree, "-p", parent, "-m", subject],
+        parents = [a for p in (parent, *self.records) for a in ("-p", p)]
+        commit = run(["git", "commit-tree", tree, *parents, "-m", subject],
                      env={**DATELESS_ENV, "GIT_AUTHOR_DATE": f"{self.since} +0000"}, check=False)
-        sha = commit.stdout.strip()
-        p = run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--force", "origin",
-                 f"{sha}:{PENDING_REFS}/{self.key}"], check=False, timeout=PUSH_TIMEOUT)
-        for step in (commit, p):
-            if step.returncode != 0:
-                self.detail = (step.stderr or "").strip() or f"{step.args[1]} failed"
+        if commit.returncode != 0:
+            self.detail = (commit.stderr or "").strip() or "commit-tree failed"
+            return ""
+        return commit.stdout.strip()
+
+    def _push(self) -> bool:
+        # Off the main thread: nothing here may die().  Serialised: a
+        # renewal and a carry at once would race for self.sha, the lease
+        # withdraw deletes on.
+        with self._lock:
+            sha = self._commit(settled=False)
+            if not sha:
                 return False
-        self.sha = sha
-        return True
+            p = run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--force", "origin",
+                     f"{sha}:{PENDING_REFS}/{self.key}"], check=False, timeout=PUSH_TIMEOUT)
+            if p.returncode != 0:
+                self.detail = (p.stderr or "").strip() or "push failed"
+                return False
+            self.sha = sha
+            return True
 
     def _beat(self) -> None:
         try:
@@ -899,20 +931,22 @@ class Announce:
         self._stop.set()
         self._thread.join(70)
 
-    def settle(self) -> None:
-        """A last renewal marked settled: the deploy is over, its push
-        pending (a main checkout's, which its owner makes), so nobody waits
-        for it or takes it for dead; its targets stay refused until then."""
+    def settled_commit(self) -> str:
+        """The renewals ended, a last one marked settled for the push that
+        ends the deploy to carry (push_deployed, with the rest of it): the
+        deploy is over, its push pending (a main checkout's, which its
+        owner makes), so nobody waits for it or takes it for dead; its
+        targets stay refused until then.  "" when the announcement never
+        reached origin."""
         self.stop()
-        if self._ok:
-            self._push(settled=True)
+        with self._lock:
+            return self._commit(settled=True) if self._ok else ""
 
     def withdraw(self) -> None:
         """Delete the announcement: the deploy ended without a switch, so
         the next deploy anywhere need not wait for it; after die() too.
-        Leased on the last renewal that landed (main@<machine> is shared
-        by the machine's main-keyed deploys); unleased when none did, since
-        a push that landed but timed out here must not strand it."""
+        Leased on the last renewal that landed; unleased when none did,
+        since a push that landed but timed out here must not strand it."""
         self.stop()
         with proc.finishing():
             run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "origin",
@@ -921,9 +955,14 @@ class Announce:
 
 def announce_key(branch: str) -> str:
     """The pending ref's name for `branch`'s announcement: the branch - its
-    one checkout is the ref's one writer - or, for main, main@<machine>:
-    every machine's main checkout has a pending state of its own."""
-    return branch if branch != "main" else f"main@{proc.this_machine()}"
+    one checkout is the ref's one writer - or, for main,
+    main@<machine>-<checkout> (the checkout by a hash of its path): every
+    main checkout has a pending state of its own, and two on one machine
+    (a nightly's and a hand deploy's) must not renew over each other's
+    carried records."""
+    if branch != "main":
+        return branch
+    return f"main@{proc.this_machine()}-{hashlib.sha256(str(Path.cwd()).encode()).hexdigest()[:8]}"
 
 
 class Pending(NamedTuple):
@@ -935,7 +974,7 @@ class Pending(NamedTuple):
     # committer date), by the announcing machine's clock.
     since: int
     at: int
-    # Its deploy is over, its push pending (Announce.settle).
+    # Its deploy is over, its push pending (Announce.settled_commit).
     settled: bool
 
 
@@ -947,20 +986,27 @@ def announcements() -> tuple[list[Pending], dict[str, str]]:
     ones (key -> commit) a deploy's ending push sweeps away: main's whose
     announced HEAD origin/main holds (a main checkout's push, outside
     nixconvoy, is what ends its pending state; a work branch's is deleted
-    by its own deploy's end)."""
+    by its own deploy's end), once settled or carrying no record - a main
+    checkout's deploy with nothing pending announces a HEAD main holds
+    already, for its records alone, and is under way until settled; one
+    that died carrying records keeps them on origin until the next deploy
+    from its checkout renews the key, pushing them to their history
+    branches."""
     depth = PENDING_REFS.count("/") + 1
     fmt = (f"%(refname:strip={depth})%09%(objectname)%09%(authordate:unix)"
-           "%09%(committerdate:unix)%09%(subject)")
+           "%09%(committerdate:unix)%09%(parent)%09%(subject)")
     listing = out(["git", "for-each-ref", f"--format={fmt}", PENDING_REFS])
     found = []
     cleared = {}
     for ln in listing.splitlines():
-        key, sha, since, at, subject = ln.split("\t", 4)
+        key, sha, since, at, parents, subject = ln.split("\t", 5)
         branch = key.partition("@")[0]
-        if branch == "main" and is_ancestor(f"{sha}^", "refs/remotes/origin/main"):
+        settled = subject.endswith(SETTLED)
+        if branch == "main" and (settled or " " not in parents) \
+                and is_ancestor(f"{sha}^", "refs/remotes/origin/main"):
             cleared[key] = sha
             continue
-        found.append(Pending(key, branch, sha, int(since), int(at), subject.endswith(SETTLED)))
+        found.append(Pending(key, branch, sha, int(since), int(at), settled))
     return found, cleared
 
 
@@ -1006,68 +1052,60 @@ def record_commit(target: str, union: str, parents: list[str], subject: str, doc
                env=DATELESS_ENV)
 
 
-def push_records(records: dict[str, str]) -> str | None:
-    """Push each target's record to DEPLOYING_REFS/<target> before its
-    switch: what failed, or None."""
-    if not records:
-        return None
-    p = git("push", "--quiet", "--force", "origin",
-            *(f"{sha}:{DEPLOYING_REFS}/{h}" for h, sha in records.items()), check=False)
-    return (p.stderr or "").strip() or "git push failed" if p.returncode != 0 else None
-
-
 def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str]) -> str | None:
-    """The push that ends a deploy, in the background: the work branch,
-    leased on origin's tip as fetched, and only once that landed - so a
-    deploy waiting on the announcement finds the branch moved when it
-    clears - each switched target's record onto
-    refs/heads/DEPLOYED_PREFIX/<target> and the branch's announcement
-    deleted (this run's, or an earlier run's whose push failed; unleased,
-    a missing one being nothing); then, once those landed, the records'
-    DEPLOYING_REFS entries and the cleared announcements as fetched are
-    deleted, each leased on what it held, a refusal tolerated (a hand
-    clear or another deploy got there first; what stays is retried by the
-    next deploy ending well there).  An announcement under another key
-    than the branch's (a work checkout parked on main) is settled like a
-    main checkout's.  A background push outlives this process, its outcome
-    collected by the next run (await_background_push).  Another writer
-    of the branch since the check before the switches (a later fetch
-    brought its tip) is the problem returned: the branch is not pushed
-    and its announcement is left to the caller, as for a deploy that
-    ended without its push; the records and the sweep go anyway."""
-    steps: list[list[str]] = []
+    """The push that ends a deploy, in the background, atomic - all of it
+    lands or none, so a deploy waiting on the announcement finds the
+    branch moved when it clears, and a settled announcement never outlives
+    records its history refs lack: the work branch, leased on origin's tip
+    as fetched; each switched target's record onto
+    refs/heads/DEPLOYED_PREFIX/<target>; the branch's announcement deleted
+    (this run's, or an earlier run's whose push failed; unleased, a
+    missing one being nothing) - or, under another key than the branch's
+    (a main checkout's, a work checkout parked on main), settled.  Then,
+    once that landed, the cleared announcements as fetched are deleted
+    (not atomically), each leased on what it held, a refusal tolerated (a
+    hand clear or another deploy got there first; what stays is swept by
+    the next deploy ending well).  A background push outlives this
+    process, its outcome collected by the next run
+    (await_background_push).  Another writer of the branch since the
+    check before the switches (a later fetch brought its tip) is the
+    problem returned: the branch is not pushed and its announcement is
+    left to the caller, as for a deploy that ended without its push; the
+    records and the sweep go anyway."""
+    refspecs: list[str] = []
     what: list[str] = []
     problem: str | None = None
+    pushed_note: list[str] = []
     head = rev(f"refs/heads/{wb}") if wb else None
     if wb and head and current_branch() == wb and rev(f"refs/remotes/origin/{wb}") != head:
         problem = sole_writer_problem(wb)
         if problem is None:
-            steps.append(["git", "-c", "core.hooksPath=/dev/null",
-                          *push_cmd(wb, rev(f"refs/remotes/origin/{wb}") or "")])
-            steps.append(["git", "update-ref", f"{PUSHED_REFS}/{wb}", head])
+            refspecs += push_refspecs(wb, rev(f"refs/remotes/origin/{wb}") or "")
+            pushed_note = ["git", "update-ref", f"{PUSHED_REFS}/{wb}", head]
             what.append(f"{wb} ({head[:12]})")
-    after = [f"+{sha}:refs/heads/{DEPLOYED_PREFIX}/{h}" for h, sha in records.items()]
+    refspecs += [f"+{sha}:refs/heads/{DEPLOYED_PREFIX}/{h}" for h, sha in records.items()]
     what += [f"{DEPLOYED_PREFIX}/{h}" for h in records]
     if ann is not None and ann.key == wb:
         if problem is None:
             ann.stop()
-            after.append(f":{PENDING_REFS}/{wb}")
+            refspecs.append(f":{PENDING_REFS}/{wb}")
     elif ann is not None:
-        ann.settle()
+        settled = ann.settled_commit()
+        if settled:
+            refspecs.append(f"+{settled}:{PENDING_REFS}/{ann.key}")
     elif wb and rev(f"{PENDING_REFS}/{wb}"):
-        after.append(f":{PENDING_REFS}/{wb}")
-    if after:
-        steps.append(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "origin", *after])
-    sweep = {f"{DEPLOYING_REFS}/{h}": sha for h, sha in records.items()}
-    sweep.update({f"{PENDING_REFS}/{k}": sha for k, sha in announcements()[1].items()})
-    if not steps and not sweep:
+        refspecs.append(f":{PENDING_REFS}/{wb}")
+    sweep = {f"{PENDING_REFS}/{k}": sha for k, sha in announcements()[1].items()}
+    if not refspecs and not sweep:
         return problem
     pidf, statusf, logf = (Path(push_state(k)) for k in ("pid", "status", "log"))
     hold = os.environ.get("NIXCONVOY_HOLD_PUSH", "")
-    script = (" && ".join(shlex.join(s) for s in steps) or "true") + "; rc=$?"
+    push = ["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "origin"]
+    script = (shlex.join([*push, "--atomic", *refspecs]) if refspecs else "true") + "; rc=$?"
+    if pushed_note:
+        script += f'; [ "$rc" = 0 ] && {shlex.join(pushed_note)}'
     if sweep:
-        cmd = ["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "origin", *delete_args(sweep)]
-        script += f'; [ "$rc" = 0 ] && {shlex.join(cmd)}'
+        script += f'; [ "$rc" = 0 ] && {shlex.join([*push, *delete_args(sweep)])}'
     script += '; echo "$rc" >"$0"'
     if hold:
         script = f"sleep {shlex.quote(hold)}; {script}"

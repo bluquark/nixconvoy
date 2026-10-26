@@ -56,7 +56,7 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      nightly's lock commit on main) - is announced: its tree as a commit
      of its own, pushed to origin's refs/nixconvoy/deploying/branch/<branch> and
      renewed there every 10 s for as long as this run lives (a main
-     checkout's under main@<machine>), so a deploy starting elsewhere sees
+     checkout's under main@<machine>-<checkout>), so a deploy starting elsewhere sees
      this one under way (step 4a) until the push that ends this deploy
      clears it (step 8; a main checkout's, the push of main by its owner
      that lands the announced HEAD) - or this run withdraws it, ending
@@ -125,9 +125,10 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      when a dry-run shows only trivial builders left.  Nothing drifting and
      no precheck to run means no build
   7. copy the closures over, concurrently, while re-fetching to check that
-     no work branch moved during the build and pushing the records to
-     origin's refs/nixconvoy/deploying/target/<target>, so no target ever runs a
-     state origin does not hold.  Then every
+     no work branch moved during the build and renewing the announcement
+     with the records as further parents of its commit, so no target ever
+     runs a state origin does not hold (a deploy with nothing pending
+     announces once it has targets to switch, for this alone).  Then every
      target not marked switch-last is switched at once and the switch-last
      ones alone after, activating the exact evaluated toplevel under a flock
      held ON THE TARGET that first re-verifies the target still runs what
@@ -146,12 +147,15 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      target, this machine must reach the internet too) are its profile and
      bootloader entry set - otherwise it is rolled back to the probed
      system, never rebooted
-  8. only now adopt the increment's commit onto the work branch and push it
-     in the background - then, once that landed, delete the announcement
-     and point each switched target's record at
-     refs/heads/nixconvoy-history/<target>, then delete its
-     refs/nixconvoy/deploying/target/<target> entry - the next run
-     collecting the result before its own fetch.  An increment that fails to eval, build or switch
+  8. only now adopt the increment's commit onto the work branch and push,
+     in the background and atomically (all of it lands or none), the
+     branch, each switched target's record onto
+     refs/heads/nixconvoy-history/<target> (and, with them, the record of
+     any target an earlier run from this checkout switched without its
+     push landing: its provenance names it) and the announcement's deletion
+     (a main checkout's is settled instead: over, awaiting the owner's push
+     of main) - the next run collecting the result before its own fetch.  An increment
+     that fails to eval, build or switch
      is never committed, so other checkouts cannot pull a broken commit and
      pushed tips never overestimate what is running; its changes stay staged
      for the re-run, and its announcement is withdrawn - unless a target
