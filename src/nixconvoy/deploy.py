@@ -390,7 +390,8 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         if ann is not None and not ann.collect():
             die(f"announcing this deploy on origin failed; {NOTHING_DONE}:\n{ann.detail}")
         PERF.mark("eval")
-        memo.memo_prune(memo.memo_dir())
+        with memo.memo_lock(memo.memo_dir()):
+            memo.memo_prune(memo.memo_dir())
         # The precheck gates the union, not the increment: a branch rebased
         # by pull/land, a skip-switch push or a merge of two passing
         # branches can each carry a violation no increment introduced.

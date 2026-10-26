@@ -6,14 +6,17 @@ union's tree."""
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import functools
 import hashlib
 import os
 import re
 import signal
 import sys
+import threading
 import time
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import NamedTuple
@@ -22,13 +25,18 @@ from urllib.parse import quote
 from .config import cfg, root
 from .proc import NOTHING_DONE, cache_dir, die, dump_json, is_ancestor, load_json, out, run
 
-# A precheck entry past this proves a tree nobody deploys any more.  A
-# target entry lives while its .drv does: unrooted once no checkout's last
-# deploy used it (memo_prune), the store's collector decides.
-MEMO_MAX_AGE = 30 * 86400
-# How long registering a root may wait on the daemon, which holds it while
-# a collection runs (minutes on a full disk).
-ROOT_TIMEOUT = 300
+# A target entry lives while its .drv does: unrooted once no checkout's
+# last deploy used it (memo_prune), the store's collector decides.
+# Registering a root takes well under 0.1 s; a daemon that keeps it
+# waiting is stuck, and the deploy says so.
+ROOT_TIMEOUT = 5
+# A file being written (<name>.tmp<pid>, or nix's <link>.tmp-<pid>-<rand>
+# under roots/, each renamed into place within milliseconds) is garbage
+# past this age: its writer died.
+TMP_MAX_AGE = 60
+# The flock excludes this process's own threads too; this lock in front
+# keeps the wait message for another process.
+MEMO_LOCK = threading.Lock()
 
 
 class Top(NamedTuple):
@@ -81,22 +89,36 @@ def memo_root(path: Path) -> Path:
 def root_drv(path: Path, drv: str) -> bool:
     """Whether `path`'s entry's .drv is rooted, registering the root when
     it is not: nix-instantiate's --add-root on the imported .drv (no
-    build), through the daemon, which holds it while a collection runs,
-    so on return the .drv closure is kept whole or gone - gone is False,
-    the entry stale.  A root already pointing at a .drv still there holds
-    without asking the daemon.  Any other failure is the deploy's."""
+    build), through the daemon, so on return the .drv closure is kept
+    whole or gone - gone is False, the entry stale.  A root already
+    pointing at a .drv still there holds without asking the daemon.  Any
+    other failure is the deploy's."""
     link = memo_root(path)
     try:
         if str(link.readlink()) == drv and Path(drv).exists():
             return True
     except OSError:
         pass
+    # Only a registration that returned 0 leaves a link: one nix-instantiate
+    # made but did not register (killed, interrupted, the daemon gone) would
+    # be trusted by the fast path while rooting nothing.  A link found
+    # holding another .drv (the key missed something) is left as it was.
+    prior = None
+    with contextlib.suppress(OSError):
+        prior = link.readlink() if Path(str(link.readlink())).exists() else None
+    rooted = False
     try:
         link.parent.mkdir(exist_ok=True)
         p = run(["nix-instantiate", "--add-root", str(link), "--indirect",
                  "-E", f'import "{drv}"'], check=False, timeout=ROOT_TIMEOUT)
+        rooted = p.returncode == 0 and Path(drv).exists()
     except FileNotFoundError:
         die("nix-instantiate is not on PATH: a memoized .drv cannot be rooted")
+    finally:
+        if not rooted:
+            with contextlib.suppress(OSError):
+                if prior is None or link.readlink() != prior:
+                    link.unlink()
     if p.returncode == -signal.SIGKILL:
         die(f"rooting {drv} timed out after {ROOT_TIMEOUT} s: is the daemon stuck?")
     if not Path(drv).exists():
@@ -106,11 +128,29 @@ def root_drv(path: Path, drv: str) -> bool:
     return True
 
 
+@contextlib.contextmanager
+def memo_lock(d: Path) -> Iterator[None]:
+    """The memo's lock, held by a prune, by a deploy from its record
+    (memo_use) through the hits it trusts, and around each fresh
+    evaluation's rooting: a prune reads the records once, so one running
+    beside a deploy could unroot an entry recorded and trusted after its
+    read, and two deploys rooting one entry would unlink each other's
+    link.  The lock file sits beside the memo dir, which holds entries,
+    records and roots alone."""
+    with MEMO_LOCK, d.with_name(f"{d.name}.lock").open("a") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("waiting for another deploy's turn at the eval memo...", flush=True)
+            fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
 def memo_use(d: Path, names: Collection[str]) -> None:
     """Record this checkout's use of the entries `names` under users/,
     replacing its last record: memo_prune keeps an entry rooted while some
-    checkout's record names it.  Written before the entries are read, so
-    a prune running beside this deploy keeps what it is about to use."""
+    checkout's record names it.  Written under memo_lock before the
+    entries are read, so a prune keeps what the deploy is about to use."""
     here = root().resolve()
     users = d / "users"
     try:
@@ -129,6 +169,8 @@ def memo_used(d: Path) -> set[str]:
     used: set[str] = set()
     users = d / "users"
     for rec in (users.iterdir() if users.is_dir() else ()):
+        if rec.suffix != ".json":
+            continue
         try:
             doc = load_json(rec.read_text())
             co = doc.get("checkout") if isinstance(doc, dict) else None
@@ -153,21 +195,28 @@ def memo_dir() -> Path:
 
 
 def memo_prune(d: Path) -> None:
-    """Drop a precheck entry past MEMO_MAX_AGE, a target entry whose .drv
-    is gone, and the root of an entry gone or of one no checkout's record
-    names (memo_use): an unrooted entry stays a hint until the store's
-    collector takes its .drv.  Under roots/, only *.drv links are
-    nixconvoy's; nix makes its new link under a temporary name first."""
-    now = time.time()
+    """Drop a target entry whose .drv is gone, and the root of an entry
+    gone or of one no checkout's record names (memo_use): an unrooted
+    entry stays a hint until the store's collector takes its .drv.  A
+    precheck entry proves a tree and is never rooted (one with a root
+    loses it).  The entries and records are the *.json files; what else
+    the dirs hold is another deploy's file being written, or nix's
+    temporary link under roots/, left alone until TMP_MAX_AGE says its
+    writer died.  A root is kept while a record names it, entry or no
+    entry.  Under memo_lock."""
     used = memo_used(d)
+    roots = d / "roots"
     for path in d.iterdir():
         if path.is_dir():
+            continue
+        if path.suffix != ".json":
+            drop_stale_tmp(path)
             continue
         ent = memo_read(path)
         try:
             if path.name.startswith("check-"):
                 memo_root(path).unlink(missing_ok=True)
-                if ent is None or now - path.stat().st_mtime > MEMO_MAX_AGE:
+                if ent is None:
                     path.unlink()
             elif ent is None or not Path(ent.drv).exists():
                 path.unlink()
@@ -176,13 +225,26 @@ def memo_prune(d: Path) -> None:
                 memo_root(path).unlink(missing_ok=True)
         except OSError:
             pass
-    roots = d / "roots"
+    for stray in ((d / "users").iterdir() if (d / "users").is_dir() else ()):
+        if stray.suffix != ".json":
+            drop_stale_tmp(stray)
     for link in (roots.iterdir() if roots.is_dir() else ()):
         try:
-            if link.suffix == ".drv" and not (d / f"{link.stem}.json").exists():
+            if link.suffix != ".drv":
+                drop_stale_tmp(link)
+            elif link.stem not in used and not (d / f"{link.stem}.json").exists():
                 link.unlink()
         except OSError:
             pass
+
+
+def drop_stale_tmp(path: Path) -> None:
+    """Drop `path`, a file being written, once it is TMP_MAX_AGE old."""
+    try:
+        if time.time() - path.lstat().st_mtime > TMP_MAX_AGE:
+            path.unlink()
+    except OSError:
+        pass
 
 
 # A Nix path literal inside a .nix file: ./x, ../files/x.py, ../lib (a
@@ -558,18 +620,19 @@ def eval_toplevels(wt: str, union: str, targets: list[str],
     d = memo_dir()
     keys = {h: target_eval_key(wt, union, h) for h in targets}
     paths = {h: d / f"{h}-{keys[h]}.json" for h in targets}
-    memo_use(d, [p.stem for p in paths.values()])
     tops: dict[str, Top] = {}
     stale: list[str] = []
-    for h in targets:
-        ent = memo_read(paths[h])
-        if ent is not None and not root_drv(paths[h], ent.drv):
-            paths[h].unlink(missing_ok=True)
-            ent = None
-        if ent is None:
-            stale.append(h)
-        else:
-            tops[h] = ent
+    with memo_lock(d):
+        memo_use(d, [p.stem for p in paths.values()])
+        for h in targets:
+            ent = memo_read(paths[h])
+            if ent is not None and not root_drv(paths[h], ent.drv):
+                paths[h].unlink(missing_ok=True)
+                ent = None
+            if ent is None:
+                stale.append(h)
+            else:
+                tops[h] = ent
     if not stale:
         return tops
     if len(stale) < len(targets):
@@ -590,9 +653,10 @@ def eval_toplevels(wt: str, union: str, targets: list[str],
         if ent is None:
             return f"nix eval returned no toplevel for {h}:\n{p.stdout[:500]}"
         memo_write(paths[h], ent)
-        if not root_drv(paths[h], ent.drv):
-            paths[h].unlink(missing_ok=True)
-            return f"{h}'s .drv was collected as soon as it was evaluated; re-run"
+        with memo_lock(d):
+            if not root_drv(paths[h], ent.drv):
+                paths[h].unlink(missing_ok=True)
+                return f"{h}'s .drv was collected as soon as it was evaluated; re-run"
         return ent
 
     with ThreadPoolExecutor(len(stale)) as pool:
