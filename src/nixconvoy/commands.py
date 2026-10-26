@@ -23,6 +23,7 @@ from .checkout import (
     WAIT_STALE,
     GitQueries,
     add_worktree,
+    adopt_origin_tip,
     allowed_branches,
     ancestor_pids,
     await_background_push,
@@ -36,7 +37,9 @@ from .checkout import (
     edit_message,
     editor,
     ensure_rebased,
+    ensure_sole_writer,
     fetch_args,
+    forget_pushed,
     git_common,
     git_op_in_progress,
     held_targets,
@@ -46,16 +49,19 @@ from .checkout import (
     lock_checkout,
     lock_live,
     lock_pid_alive,
+    note_pushed,
     on_origin,
     origin_tips,
     owned,
     pending_announcements,
     pop_tmp_commits,
     proc_stat,
+    push_cmd,
     push_state,
     ran,
     require_work_branch,
     sibling_checkouts,
+    sole_writer_problem,
     staged_differs,
     sub_dir,
     sub_parent,
@@ -149,6 +155,7 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
             f"{current_branch() or '(detached HEAD)'}")
     if staged_differs():
         die("staged but undeployed changes present; deploy or unstage them first")
+    lease = ensure_sole_writer(wb)  # origin's copy is reset at the end: it must be ours
     ensure_rebased()
     main = rev("refs/remotes/origin/main")
     if main is None or tree_less_msg("HEAD") == out(["git", "rev-parse", "origin/main^{tree}"]):
@@ -170,6 +177,8 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
             f"`nixconvoy close <input> --force` after it drops it")
     holds(wb, "HEAD", main, not_yet_deployed)
     msg = main_message(wb, message, main)
+    if rev(f"refs/remotes/origin/{wb}") != lease:  # the edit's fetch brought a tip
+        lease = ensure_sole_writer(wb)
     submodule.land_all(wb, msg)
     tree = tree_less_msg("HEAD")
 
@@ -186,7 +195,7 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
     kept_edit().unlink(missing_ok=True)
     print(f"landed on main: {summarize(commit)}")
     siblings = sibling_checkouts()  # the parent of a subagent worktree included
-    finish(wb)
+    finish(wb, lease)
     if not (catch_up(siblings) & submodule.catch_up_repos()):
         die("some checkouts could not be brought onto the new main (see above); "
             "fix them and `nixconvoy pull`")
@@ -254,7 +263,9 @@ def undeploy(back_to: str = "HEAD^") -> bool:
     deployed = deployed_targets(f"{target}..{prev}")
     # Every check before anything moves: the checkout's reset would lose
     # an unstaged edit to a file the increments changed (git reset --keep
-    # refuses it), and so would a submodule's.
+    # refuses it), and so would a submodule's; origin's copy, reset at the
+    # end, must be ours.
+    lease = ensure_sole_writer(wb)
     edited = lost_edits(target, prev)
     if edited:
         die("the increments' files have unstaged edits, which the reset would lose; "
@@ -270,7 +281,7 @@ def undeploy(back_to: str = "HEAD^") -> bool:
         print(f"deployed to {', '.join(deployed)}: deploying now to revert it")
     else:
         print("it reached no target: nothing to deploy")
-    finish(wb, "origin/main" if target == main else target[:12])
+    finish(wb, lease, "origin/main" if target == main else target[:12])
     return bool(deployed)
 
 
@@ -613,14 +624,14 @@ def transcript_cwd(path: Path, *, last: bool = False) -> Path | None:
     return Path(found).resolve() if found else None
 
 
-def finish(wb: str, onto: str = "origin/main") -> None:
+def finish(wb: str, lease: str, onto: str = "origin/main") -> None:
     """The checked-out work branch after a land or undeploy, now at `onto`
     (origin/main's commit, or an earlier increment), moved there on origin
-    too.  A subagent worktree left with nothing stays, idle: `close`
-    removes it (the session-exit sweep does so on its own)."""
-    old = rev(f"refs/remotes/origin/{wb}") or ""
-    git("push", "--quiet", "origin", f"{wb}:refs/heads/{wb}",
-        f"--force-with-lease=refs/heads/{wb}:{old}")
+    too, over `lease` (ensure_sole_writer's).  A subagent worktree left
+    with nothing stays, idle: `close` removes it (the session-exit sweep
+    does so on its own)."""
+    git(*push_cmd(wb, lease))
+    note_pushed(wb, rev(f"refs/heads/{wb}") or "")
     print(f"{wb} reset onto {onto}")
     here = Path.cwd().resolve()
     if sub_parent(here) is not None and rev("HEAD") == rev("refs/remotes/origin/main"):
@@ -668,11 +679,17 @@ def sub_branches(here: Path, cur: str | None, branches: list[str]) -> list[str]:
 
 
 def drop_branches(names: list[str]) -> list[str]:
-    """Delete `names` here and on origin: the origin deletions that failed."""
+    """Delete `names` here and on origin: the origin deletions that failed.
+    One origin holds commits of another checkout's (sole_writer_problem:
+    taken over by name elsewhere) stays there, that checkout's now."""
     gone = {b: rev(f"refs/remotes/origin/{b}") for b in names}
     failed = []
     for b in names:
+        if sole_writer_problem(b) is not None:
+            del gone[b]
+            print(f"note: {b} stays on origin, holding another checkout's increments", file=sys.stderr)
         git("branch", "--quiet", "-D", b, check=False)
+        forget_pushed(b)
     pushed = {b: old for b, old in gone.items() if old}
     if pushed:
         # One push, bounded: prune holds the worktree's name lock meanwhile.
@@ -968,9 +985,13 @@ def default_base(root: Path) -> str:
 def open_checkout(path: Path, branch: str | None) -> Path:
     """`nixconvoy open <path>`: an agent checkout - a worktree of this
     repository at `path`, outside every checkout, on a work branch of this
-    machine's: `branch`, else <branch_prefix><path's name>, listed.  The
-    branch is taken as this repository or origin holds it (a removed
-    checkout's), else new off origin's default branch; its upstream is
+    machine's: `branch`, else <branch_prefix><path's name>, refused when
+    origin holds that branch or a subagent branch under it (a removed
+    checkout's, or another machine's when the prefix is shared: `branch`
+    names it to take it over, or another).  A named branch is taken as
+    this repository or origin holds it (origin's copy over a stale local
+    one), else new off origin's default branch; a branch made here is
+    pushed at once, so origin holds it from then on.  Its upstream is
     origin/main as nixconvoy keeps it.  Prints the path."""
     here = Path.cwd().resolve()
     d = path.expanduser().resolve()
@@ -992,6 +1013,11 @@ def open_checkout(path: Path, branch: str | None) -> Path:
     prefix = this_prefix()
     if branch is None:
         branch = f"{prefix}{d.name}"
+        held = sorted(b for b in tips if b == branch or b.startswith(f"{branch}-"))
+        if held:
+            die(f"origin holds {', '.join(held)}: a removed checkout's, or another machine's (the prefix "
+                f"shared).  `--branch {branch}` makes it this checkout's, `--branch {prefix}<leaf>` opens "
+                f"another")
     if not owned(branch, pats):
         die(f"{branch} is not a work branch of this machine's: one named {prefix}... that "
             f"nixconvoy.toml's work_branches lists; name one with --branch")
@@ -1000,6 +1026,14 @@ def open_checkout(path: Path, branch: str | None) -> Path:
         die(f"{branch}: a checkout's branch is {prefix}<leaf> with a leaf that is not 'main' "
             f"and holds no '-'; name one with --branch")
     d.parent.mkdir(parents=True, exist_ok=True)
+    if branch in local and branch in tips and rev(f"refs/heads/{branch}") != tips[branch]:
+        # Origin's copy taken over a stale local one; a local one ahead
+        # of it (its push pending) stays.
+        if is_ancestor(branch, f"refs/remotes/origin/{branch}"):
+            git("branch", "--quiet", "-f", branch, tips[branch])
+        elif not is_ancestor(f"refs/remotes/origin/{branch}", branch):
+            die(f"{branch} here and on origin have diverged: `git branch -f {branch} origin/{branch}` takes "
+                f"origin's copy (or the other way round), then re-run")
     if branch in local:
         p = git("worktree", "add", "--quiet", str(d), branch, check=False)
     elif branch in tips:
@@ -1008,10 +1042,26 @@ def open_checkout(path: Path, branch: str | None) -> Path:
         p = git("worktree", "add", "--quiet", "-b", branch, str(d), default_base(here), check=False)
     if p.returncode != 0:
         die(f"git worktree add failed:\n{(p.stderr or '').strip()}")
+    if branch in tips and is_ancestor(f"refs/remotes/origin/{branch}", branch):
+        adopt_origin_tip(branch)
     git("branch", "--quiet", "--set-upstream-to=origin/main", branch, check=False)
+    if branch not in local and branch not in tips:
+        # A branch made here is reserved on origin: --force-with-lease
+        # against no branch at all loses to an open of the same name
+        # elsewhere since the fetch.  One this repository held already
+        # is pushed by its next deploy.
+        p = git(*push_cmd(branch, ""), check=False)
+        if p.returncode != 0:
+            git("worktree", "remove", "--force", str(d), check=False)
+            git("branch", "--quiet", "-D", branch, check=False)
+            err = (p.stderr or "").strip()
+            why = "origin holds one now: --branch says whether to take it over" if "stale info" in err \
+                else "origin unreachable?"
+            die(f"pushing {branch} failed ({why}); nothing opened:\n{err}")
+        note_pushed(branch, rev(f"refs/heads/{branch}") or "")
     print(d)
-    print(f"checkout {d.name} on {branch}" + (" (origin's copy)" if branch in tips and branch not in local
-                                               else ""), file=sys.stderr)
+    print(f"checkout {d.name} on {branch}" + (" (origin's copy: this checkout's now)"
+                                               if branch in tips and branch not in local else ""), file=sys.stderr)
     return d
 
 
@@ -1081,6 +1131,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
     wb = require_work_branch("land --with-children")
     if current_branch() != wb:
         die(f"land runs from the work branch ({wb}); currently on {current_branch() or '(detached HEAD)'}")
+    leases = {wb: ensure_sole_writer(wb)}  # every branch is reset on origin at the end: all must be ours
     if staged_differs():
         die("staged but undeployed changes present; deploy or unstage them first")
     ensure_rebased()
@@ -1117,6 +1168,11 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
         if not parts:
             die(f"no subagent worktree under {here.name} holds work to land; `nixconvoy land` "
                 f"lands this checkout alone")
+        for d, b in parts:
+            problem = sole_writer_problem(b)
+            if problem is not None:
+                die(f"{d.name}: {problem}")
+            leases[b] = rev(f"refs/remotes/origin/{b}") or ""
         # Each sub's MSG_FILE, as its branch carries it, appended in turn.
         sub_msgs = []
         for d, _ in parts:
@@ -1182,6 +1238,12 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
         clashes(merged_tree())
         msg = main_message(wb, message, main, "\n\n".join(sub_msgs),
                            [(here.name, "HEAD"), *((sub_label(d), f"refs/heads/{b}") for d, b in parts)])
+        for d, b in [(here, wb), *parts]:  # the edit's fetch may have brought a tip
+            if rev(f"refs/remotes/origin/{b}") != leases[b]:
+                problem = sole_writer_problem(b)
+                if problem is not None:
+                    die(f"{d.name}: {problem}")
+                leases[b] = rev(f"refs/remotes/origin/{b}") or ""
         for d, b in [(here, wb), *parts]:
             os.chdir(d)
             submodule.land_all(b, msg)
@@ -1208,7 +1270,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
                 print(f"note: {d.name}'s working tree kept as it was (a file in the way); "
                       f"`git checkout -- .` there brings it onto the landing", file=sys.stderr)
             Path(MSG_FILE).unlink(missing_ok=True)
-            finish(b)
+            finish(b, leases[b])
             os.chdir(here)
     finally:
         for lock in locks:

@@ -52,7 +52,8 @@ class Config:
     # ssh_address_template, over {target}; the builder is addressed through it too.
     ssh_template: str
     # A checkout owns "<prefix><leaf>", its subagent worktrees "<prefix><leaf>-<name>"
-    # (the main checkout's "<prefix>main-<name>"); {machine} is this machine's hostname.
+    # (the main checkout's "<prefix>main-<name>"); {machine}, when the
+    # template has it, is this machine's hostname.
     branch_prefix: str
     # The patterns of the work branches nixconvoy may union or own (`*`
     # spans anything, the one wildcard every matcher - here, the plan cores

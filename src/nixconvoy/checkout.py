@@ -364,7 +364,14 @@ class GitQueries:
         if kind == "fetch":
             return ran(git(*fetch_args("--no-auto-gc"), check=False))
         if kind == "push":
-            return ran(git(*push_cmd(arg("branch")), check=False))
+            problem = sole_writer_problem(arg("branch"))
+            if problem is not None:
+                return {"ran": False, "detail": problem}
+            head = rev(f"refs/heads/{arg('branch')}")
+            p = git(*push_cmd(arg("branch"), rev(f"refs/remotes/origin/{arg('branch')}") or ""), check=False)
+            if p.returncode == 0 and head:
+                note_pushed(arg("branch"), head)
+            return ran(p)
         if kind == "add_worktree":
             self.aside = tempfile.mkdtemp(prefix=f"{TMP_PREFIX}rebase-wt.", dir="/tmp")
             self.aside_branch = arg("branch")
@@ -680,23 +687,85 @@ def await_background_push() -> None:
               f"push retries it" + (f":\n{log}" if log else ""), file=sys.stderr)
 
 
-def push_cmd(wb: str) -> list[str]:
-    """Push the work branch's local tip, CAS against the tip we last fetched."""
-    old = rev(f"refs/remotes/origin/{wb}")
-    return ["push", "--quiet", "origin", f"{wb}:refs/heads/{wb}",
-            f"--force-with-lease=refs/heads/{wb}:{old or ''}"]
+# The tip this repository last pushed onto a work branch (or took from
+# origin's copy at open): the proof that origin's copy is ours to push over.
+PUSHED_REFS = "refs/nixconvoy/pushed"
+
+
+def pushed_tip(wb: str) -> str | None:
+    return rev(f"{PUSHED_REFS}/{wb}")
+
+
+def note_pushed(wb: str, sha: str) -> None:
+    git("update-ref", f"{PUSHED_REFS}/{wb}", sha, check=False)
+
+
+def forget_pushed(wb: str) -> None:
+    git("update-ref", "-d", f"{PUSHED_REFS}/{wb}", check=False)
+
+
+def adopt_origin_tip(wb: str) -> None:
+    """Origin's copy of the work branch, taken as this checkout's (open by
+    name), noted as pushed."""
+    up = rev(f"refs/remotes/origin/{wb}")
+    if up is not None:
+        note_pushed(wb, up)
+
+
+def sole_writer_problem(wb: str) -> str | None:
+    """Why origin's tip of the work branch is not this checkout's to push
+    over, or None: it is, when it is on origin/main (reset, landed or
+    undone from elsewhere), in the local branch, the tip this repository
+    last pushed or took from origin (PUSHED_REFS), or a tip the local
+    branch has held (its reflog: a push the note missed, from before the
+    note or cut off after the push).  Otherwise another checkout commits
+    onto it.  The deploy decides before its rebase moves the local
+    branch, so the message's remedy, which brings origin's commits into
+    it, is seen; after a rebase the note or the reflog decides."""
+    up = rev(f"refs/remotes/origin/{wb}")
+    local = rev(f"refs/heads/{wb}")
+    if up is None or local is None or is_ancestor(up, "refs/remotes/origin/main") or is_ancestor(up, local) \
+            or pushed_tip(wb) == up:
+        return None
+    held = run(["git", "reflog", "show", "--format=%H", f"refs/heads/{wb}"], check=False).stdout.split()
+    if not held or up in held:
+        return None
+    return (f"{wb} moved on origin ({up[:12]}): another checkout deployed on it, but a work branch has one "
+            f"writer.  `git log refs/heads/{wb}..refs/remotes/origin/{wb}` shows what it holds; in that "
+            f"branch's checkout, `git rebase --autostash refs/remotes/origin/{wb}` carries this checkout's "
+            f"increments onto it, or `git switch -c {this_prefix()}<leaf>` moves them to a branch of their "
+            f"own; then re-run")
+
+
+def ensure_sole_writer(wb: str) -> str:
+    """Die unless origin's tip of the work branch is this checkout's
+    (sole_writer_problem): before a deploy rebases or switches, a land
+    pushes main or an undeploy resets anything, and before every push of
+    the branch.  Returns that tip ("" for none), the lease the push takes
+    (push_cmd), so a fetch between the check and the push changes nothing."""
+    problem = sole_writer_problem(wb)
+    if problem is not None:
+        die(problem)
+    return rev(f"refs/remotes/origin/{wb}") or ""
+
+
+def push_cmd(wb: str, lease: str) -> list[str]:
+    """Push the work branch's local tip, CAS against `lease`: origin's tip
+    as ensure_sole_writer proved it this checkout's ("" for no branch)."""
+    return ["push", "--quiet", "origin", f"{wb}:refs/heads/{wb}", f"--force-with-lease=refs/heads/{wb}:{lease}"]
 
 
 def push_work_branch(wb: str) -> None:
     """Push the work branch (a deploy's end pushes in the background instead:
     push_deployed)."""
     head = rev(f"refs/heads/{wb}")
-    if rev(f"refs/remotes/origin/{wb}") == head:
+    if head is None or rev(f"refs/remotes/origin/{wb}") == head:
         return
-    p = git(*push_cmd(wb), check=False)
+    p = git(*push_cmd(wb, ensure_sole_writer(wb)), check=False)
     if p.returncode != 0:
         die(f"pushing {wb} failed - it moved on origin, but this checkout is its "
             f"only writer.  Investigate:\n{p.stderr.strip()}")
+    note_pushed(wb, head)
     clear = clear_refspec(wb)
     if clear:
         git("push", "--quiet", "origin", *clear, check=False)
@@ -907,7 +976,7 @@ def push_records(records: dict[str, str]) -> str | None:
     return (p.stderr or "").strip() or "git push failed" if p.returncode != 0 else None
 
 
-def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str]) -> None:
+def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str]) -> str | None:
     """The push that ends a deploy, in the background: the work branch,
     leased on origin's tip as fetched, and only once that landed - so a
     deploy waiting on the announcement finds the branch moved when it
@@ -921,18 +990,28 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str])
     next deploy ending well there).  An announcement under another key
     than the branch's (a work checkout parked on main) is settled like a
     main checkout's.  A background push outlives this process, its outcome
-    collected by the next run (await_background_push)."""
+    collected by the next run (await_background_push).  Another writer
+    of the branch since the check before the switches (a later fetch
+    brought its tip) is the problem returned: the branch is not pushed
+    and its announcement is left to the caller, as for a deploy that
+    ended without its push; the records and the sweep go anyway."""
     steps: list[list[str]] = []
     what: list[str] = []
+    problem: str | None = None
     head = rev(f"refs/heads/{wb}") if wb else None
     if wb and head and current_branch() == wb and rev(f"refs/remotes/origin/{wb}") != head:
-        steps.append(["git", "-c", "core.hooksPath=/dev/null", *push_cmd(wb)])
-        what.append(f"{wb} ({head[:12]})")
+        problem = sole_writer_problem(wb)
+        if problem is None:
+            steps.append(["git", "-c", "core.hooksPath=/dev/null",
+                          *push_cmd(wb, rev(f"refs/remotes/origin/{wb}") or "")])
+            steps.append(["git", "update-ref", f"{PUSHED_REFS}/{wb}", head])
+            what.append(f"{wb} ({head[:12]})")
     after = [f"+{sha}:refs/heads/{DEPLOYED_PREFIX}/{h}" for h, sha in records.items()]
     what += [f"{DEPLOYED_PREFIX}/{h}" for h in records]
     if ann is not None and ann.key == wb:
-        ann.stop()
-        after.append(f":{PENDING_REFS}/{wb}")
+        if problem is None:
+            ann.stop()
+            after.append(f":{PENDING_REFS}/{wb}")
     elif ann is not None:
         ann.settle()
     elif wb and rev(f"{PENDING_REFS}/{wb}"):
@@ -942,7 +1021,7 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str])
     sweep = {f"{DEPLOYING_REFS}/{h}": sha for h, sha in records.items()}
     sweep.update({f"{PENDING_REFS}/{k}": sha for k, sha in announcements()[1].items()})
     if not steps and not sweep:
-        return
+        return problem
     pidf, statusf, logf = (Path(push_state(k)) for k in ("pid", "status", "log"))
     hold = os.environ.get("NIXCONVOY_HOLD_PUSH", "")
     script = (" && ".join(shlex.join(s) for s in steps) or "true") + "; rc=$?"
@@ -957,6 +1036,7 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str])
                                  stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     pidf.write_text(str(child.pid))
     print(f"pushing {', '.join(what) or 'the cleared announcement'} in the background")
+    return problem
 
 
 def origin_tips(cwd: str | None = None) -> dict[str, str]:

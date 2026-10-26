@@ -28,8 +28,10 @@ from .checkout import (
     drop_worktree,
     ensure_on_work_branch,
     ensure_rebased,
+    ensure_sole_writer,
     fetch_args,
     held_targets,
+    note_pushed,
     origin_tips,
     pending_announcements,
     pop_tmp_commits,
@@ -156,7 +158,19 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     cur = current_branch()
     if wb is not None and cur not in (wb, "main", None):
         # A subagent worktree's fresh branch: the provenance must name wb.
+        had = rev(f"refs/heads/{wb}") is not None
+        up = rev(f"refs/remotes/origin/{wb}")
+        if not had and up is not None and not is_ancestor(up, "refs/remotes/origin/main"):
+            # Recovered from origin only while empty there (a removed
+            # worktree's): increments there are another worktree's of
+            # this name (a machine sharing the prefix).
+            die(f"origin holds {wb} with increments this worktree never pushed: another worktree of "
+                f"this name?  `git log refs/remotes/origin/main..refs/remotes/origin/{wb}` shows them; "
+                f"open this worktree under another name, or `git branch {wb} refs/remotes/origin/{wb}` "
+                f"to take them over")
         ensure_on_work_branch(wb)
+        if not had and (made := rev(f"refs/heads/{wb}")) is not None:
+            note_pushed(wb, made)  # the branch as taken from origin's empty copy, or fresh
     elif wb is None and cur not in ("main", None):
         die(f"on branch {cur}, which nixconvoy.toml's work_branches does not list; the "
             "main checkout deploys from main (a hand commit there is claimed as main's "
@@ -186,6 +200,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
         # A snapshot's tree is HEAD + staged, so one taken on a stale HEAD
         # would commit main's changes away.
         fetch.result()
+        ensure_sole_writer(wb)
         ensure_rebased()
         snap = staged_snapshot()
         # An increment that changes nothing any target's evaluation reads
@@ -201,6 +216,9 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     elif msg:
         die("nothing is staged; stage the change or drop -m")
     else:
+        if wb is not None and current_branch() == wb:  # parked on main, the branch is not pushed
+            fetch.result()
+            ensure_sole_writer(wb)
         ensure_rebased()
 
     # The pending state the targets' provenances will name - the increment, or
@@ -581,7 +599,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             adopt_commit(wb, committed)
         # A local main ahead of origin is pushed by its owner once every
         # target it affects has switched.
-        push_deployed(wb, ann, records)
+        problem = push_deployed(wb, ann, records)
 
         if plan:
             print(f"deployed {', '.join(plan)}: union {union}")
@@ -590,6 +608,8 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                   f"checkout's work this checkout's does not reach (union {union})")
         else:
             print(f"nothing drifts from the union ({union}); nothing to switch")
+        if problem is not None:
+            die(f"{wb} is not pushed (the targets run it; its announcement stays for the re-run): {problem}")
         return True
     finally:
         queries.drop()

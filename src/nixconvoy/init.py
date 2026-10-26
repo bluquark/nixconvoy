@@ -25,7 +25,7 @@ NIX_TIMEOUT = 60
 SYSTEM_RE = re.compile(r'"((?:x86_64|aarch64|i686|riscv64|armv7l|powerpc64le)-(?:linux|darwin))"')
 PLATFORM_LINE_RE = re.compile(r"hostPlatform|\bsystem\s*=")
 MAX_DEPTH = 3  # how deep under the root the flake and hosts directories are looked for
-DEFAULT_BRANCH_PREFIX = "nixconvoy/{machine}/"
+DEFAULT_BRANCH_PREFIX = "nixconvoy/"
 
 
 def main(flake_arg: str | None, start: Path) -> None:
@@ -223,11 +223,11 @@ def render(*, flake: str, hosts_dir: str, system: str, ssh: str, prefix: str, br
         f"targets_arch = {q(system)}",
         f"ssh_address_template = {q(ssh)}",
         "",
-        "# {machine} is this machine's hostname; it can be left out of the prefix if you only run nixconvoy on one machine",
-
+        "# A checkout's work branch is <branch_prefix><leaf>, `open <path>` naming it after the path.",
+        "# {machine} in the prefix is this machine's hostname, a namespace per machine when you want one.",
         f"branch_prefix = {q(prefix)}",
         "# The work branches nixconvoy may union into a deploy (and own, when named with the prefix) as",
-        "# patterns (* spans anything), one per machine deploying from here; a pushed branch none matches is ignored.",
+        "# patterns (* spans anything); a pushed branch none matches is ignored.",
         f"work_branches = [{', '.join(q(b) for b in branches)}]",
         "# Child worktrees are an optional feature of nixconvoy that can be used by hand if desired,",
         "# but is primarily intended to hook into worktrees that harnesses automatically create to isolate their subagents.",

@@ -1819,7 +1819,7 @@ def open_cases(d: Path) -> None:
     free listed work branch.  `land --with-children`: the checkout and its
     subagent worktree landed as one commit."""
     scratch_env()
-    with scratch_origin(d, "work/tester/*\n", {"a.txt": "one\n"}, wb="work/tester/9") as (origin, _seed, co):
+    with scratch_origin(d, "work/tester/*\n", {"a.txt": "one\n"}, wb="work/tester/9") as (origin, seed, co):
         w = commands.open_worktree("task", "claude agent task (pid 1 start 2) 3.4")
         assert w == co / ".claude/worktrees/task" and checkout.branch_at(w) == "worktree-task"
         # Nothing ignored the directory: open excluded it for the clone.
@@ -1910,17 +1910,77 @@ def open_cases(d: Path) -> None:
         assert shown.startswith(f"══ {co.name}/task ══\n") and "task done" in shown.partition("\n\n")[0] and "b.txt" in shown, shown
         assert "COMMIT_MSG.md" not in shown.partition("\n\n")[2]  # the diff leaves the message out
         sh(w, "reset", "--quiet", "--hard", "HEAD")
-        # An agent checkout beside the others, on the branch named after its path.
+        # An agent checkout beside the others, on the branch named after its
+        # path, pushed at once; one origin holds already (another checkout's,
+        # or its subagent's, say on a machine sharing the prefix) is refused
+        # until --branch takes it over or names another.
+        sh(seed, "push", "--quiet", "origin", "HEAD:refs/heads/work/tester/other", "HEAD:refs/heads/work/tester/x-task")
         five = commands.open_checkout(d / "homelab5", None)
-        one = commands.open_checkout(d / "other", None)
         assert five == d / "homelab5" and checkout.branch_at(five) == "work/tester/homelab5"
+        assert sh(co, "rev-parse", "origin/work/tester/homelab5") == sh(co, "rev-parse", "origin/main")
+        assert "origin holds work/tester/other" in dies(lambda: commands.open_checkout(d / "other", None))
+        assert "origin holds work/tester/x-task" in dies(lambda: commands.open_checkout(d / "x", None))
+        one = commands.open_checkout(d / "other", "work/tester/other")
         assert one == d / "other" and checkout.branch_at(one) == "work/tester/other"
+        assert sh(one, "rev-parse", "HEAD") == sh(co, "rev-parse", "origin/work/tester/other")
+        # The branch has one writer: origin's tip must be the one this
+        # repository last pushed or took from origin at open (noted under
+        # PUSHED_REFS; a rebase onto a moved main leaves it noted), be in
+        # the local branch, or be on origin/main (reset from elsewhere);
+        # anything else is another checkout's commit, refused before a
+        # switch and by every push.
+        assert checkout.pushed_tip("work/tester/other") == sh(co, "rev-parse", "origin/work/tester/other")
+        checkout.ensure_sole_writer("work/tester/other")
+        put(one, "d.txt", "d\n", "mine")
+        os.chdir(one)
+        checkout.push_work_branch("work/tester/other")
+        os.chdir(co)
+        assert checkout.pushed_tip("work/tester/other") == sh(one, "rev-parse", "HEAD")
+        checkout.ensure_sole_writer("work/tester/other")
+        put(seed, "m.txt", "m\n", "main moved")
+        sh(seed, "push", "--quiet", "origin", "HEAD:main")
+        sh(co, "fetch", "--quiet")
+        sh(one, "rebase", "--quiet", "origin/main")
+        assert sh(one, "rev-parse", "HEAD") != sh(co, "rev-parse", "origin/work/tester/other")
+        checkout.ensure_sole_writer("work/tester/other")
+        sh(seed, "push", "--quiet", "--force", "origin", "origin/main:refs/heads/work/tester/other")
+        sh(co, "fetch", "--quiet")
+        checkout.ensure_sole_writer("work/tester/other")
+        put(seed, "c.txt", "c\n", "other checkout's increment")
+        sh(seed, "push", "--quiet", "--force", "origin", "HEAD:refs/heads/work/tester/other")
+        sh(co, "fetch", "--quiet")
+        assert "moved on origin" in dies(lambda: checkout.ensure_sole_writer("work/tester/other"))
+        assert "moved on origin" in dies(lambda: checkout.push_work_branch("work/tester/other"))
+        # The message's remedy: this checkout's increments carried onto
+        # origin's copy, which the branch then contains - with a staged
+        # edit riding along, and still once a moved main rebases it again.
+        put(one, "e.txt", "e\n")
+        sh(one, "rebase", "--quiet", "--autostash", "origin/work/tester/other")
+        checkout.ensure_sole_writer("work/tester/other")
+        assert sh(one, "ls-tree", "--name-only", "HEAD", "c.txt", "d.txt").split() == ["c.txt", "d.txt"]
+        assert "A  e.txt" in sh(one, "status", "--porcelain")
+        sh(one, "reset", "--quiet", "--hard", "origin/work/tester/other")
+        checkout.ensure_sole_writer("work/tester/other")
+        # No note, or a stale one (a push the note missed): the reflog decides.
+        checkout.forget_pushed("work/tester/other")
+        checkout.ensure_sole_writer("work/tester/other")
+        checkout.note_pushed("work/tester/other", sh(co, "rev-parse", "origin/main"))
+        checkout.ensure_sole_writer("work/tester/other")
+        # A branch this repository held already is reused without a push.
+        sh(co, "branch", "--quiet", "work/tester/loc", "origin/main")
+        assert checkout.branch_at(commands.open_checkout(d / "loc", None)) == "work/tester/loc"
+        assert "work/tester/loc" not in checkout.origin_tips()
+        commands.close_checkout(d / "loc")
+        sh(seed, "reset", "--quiet", "--hard", "origin/main")
+        sh(one, "reset", "--quiet", "--hard", "origin/main")
+        sh(seed, "push", "--quiet", "--force", "origin", "origin/main:refs/heads/work/tester/other")
+        sh(co, "fetch", "--quiet")
         # A sibling whose tree cannot even be parsed as a configuration is
         # caught up on this checkout's listing, not its own.
         (one / "nixconvoy.toml").write_text("config_version = 1\n")
         assert checkout.catch_up([one]) and (one / "nixconvoy.toml").read_text() == "config_version = 1\n"
         sh(one, "checkout", "--", "nixconvoy.toml")
-        assert sh(five, "rev-parse", "HEAD") == sh(co, "rev-parse", "origin/main")
+        assert sh(five, "rev-parse", "HEAD") == sh(co, "rev-parse", "origin/main~1")  # opened before main moved
         assert sh(five, "config", "branch.work/tester/homelab5.merge") == "refs/heads/main"
         assert checkout.identity_of(five.resolve(), "work/tester/homelab5") == checkout.Checkout("agent", "work/tester/homelab5")
         assert "exists already" in dies(lambda: commands.open_checkout(d / "homelab5", None))
@@ -1933,6 +1993,8 @@ def open_cases(d: Path) -> None:
         commands.close_checkout(d / "other")
         assert not five.exists() and not one.exists()
         assert not sh(co, "branch", "--list", "work/tester/homelab5", "work/tester/other")
+        sh(co, "fetch", "--quiet", "--prune")
+        assert not {"work/tester/homelab5", "work/tester/other"} & set(checkout.origin_tips())
         assert "no worktree of this repository" in dies(lambda: commands.close_checkout(foreign))
         os.chdir(w)
         assert "primary worktree" in dies(lambda: commands.close_checkout(co))
@@ -1959,7 +2021,7 @@ def open_cases(d: Path) -> None:
         assert "landing with b not yet deployed:" in told
         assert not sh(co, "worktree", "list").count("deploy-wt")
         main = sh(co, "rev-parse", "origin/main")
-        assert sh(co, "ls-tree", "--name-only", main).split() == ["a.txt", "nixconvoy.toml", "p.txt", "s.txt"]
+        assert sh(co, "ls-tree", "--name-only", main).split() == ["a.txt", "m.txt", "nixconvoy.toml", "p.txt", "s.txt"]
         assert sh(co, "log", "-1", "--format=%B", main).strip() == (
             "the union\n\n- the sub's piece\n\nthe sub: s.txt\n- its detail")  # the sub's appended
         assert sh(co, "rev-parse", "HEAD") == main and checkout.branch_at(co) == "work/tester/9"
@@ -2179,8 +2241,8 @@ def init_cases(d: Path) -> None:
         run_cli(["init"])
         c = config.load(repo)
         assert (c.flake_dir, c.targets_dir, c.targets_arch) == ("nixos", "nixos/hosts", "aarch64-linux"), c
-        assert c.ssh_template == me + "@{target}" and c.branch_prefix == "nixconvoy/{machine}/", c
-        assert c.work_branches == ("nixconvoy/tester/*",), c
+        assert c.ssh_template == me + "@{target}" and c.branch_prefix == "nixconvoy/", c
+        assert c.work_branches == ("nixconvoy/*",), c
         assert c.child_worktrees == ".claude/worktrees" and c.parallel_eval is None and not c.precheck
         assert not c.submodules and not c.targets
         text = (repo / "nixconvoy.toml").read_text()
@@ -2191,7 +2253,7 @@ def init_cases(d: Path) -> None:
         # The flake named, relative to where init runs.
         run_cli(["init", ".."])
         c = config.load(repo)
-        assert (c.flake_dir, c.branch_prefix) == ("nixos", "nixconvoy/{machine}/"), c
+        assert (c.flake_dir, c.branch_prefix) == ("nixos", "nixconvoy/"), c
     finally:
         os.chdir(prev)
     # A flake at the root with no hosts directory yet.

@@ -213,7 +213,7 @@ fn sync(s: &mut Script, wb: Option<&str>) -> Run<Outcome> {
     }
     if rev(s, local)? != rev(s, format!("refs/remotes/origin/{wb}"))? {
         if let Err(detail) = s.ran(Query::Push { branch: wb.into() })? {
-            return Ok(Err(format!("pushing {wb} failed - it moved on origin, but this checkout is its only writer:\n{}", detail.trim())));
+            return Ok(Err(format!("pushing {wb} failed:\n{}", detail.trim())));
         }
         done.push(format!("pushed {wb}"));
     }

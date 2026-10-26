@@ -16,7 +16,10 @@ what is deployed.
 - **A work branch is where experiments live.**  Each checkout you deploy from
   owns one, listed by pattern in `nixconvoy.toml`'s `work_branches`.  A
   deploy commits the staged state onto it and pushes it; nothing else
-  writes there.
+  writes there: a deploy, land or undeploy that finds origin's copy
+  holding commits this checkout never pushed is refused before it
+  switches, pushes or resets anything (a writer arriving while a deploy
+  runs leaves the branch unpushed, the deploy failing at its end).
 - **The targets run the convoy: origin/main plus every open work branch.**
   Each deploy union-merges the pushed work branches (mergiraf resolves
   structural conflicts) and builds that.  Two checkouts changing unrelated
@@ -141,9 +144,10 @@ nix run .#nixconvoy -- deploy -m "describe this increment"
 
 `init` detects what it can (the flake directory, the hosts directory, the
 targets' system) and writes `nixconvoy.toml` - its optional sections as
-commented examples, the branch prefix `nixconvoy/{machine}/` and this
-machine's work-branch pattern; the ssh address template starts as
-`<you>@{target}`, for you to edit.
+commented examples, the branch prefix `nixconvoy/` and the work-branch
+pattern `nixconvoy/*` (a prefix `nixconvoy/{machine}/`, the hostname,
+namespaces each machine's branches when several deploy); the ssh address
+template starts as `<you>@{target}`, for you to edit.
 
 On a NixOS machine you deploy from, the package in
 `environment.systemPackages` puts `nixconvoy` (and `git review`) on PATH.
@@ -177,11 +181,12 @@ flake_dir = "nixos"               # directory holding flake.nix
 targets_dir = "nixos/hosts"       # one directory per nixosConfiguration: the targets
 targets_arch = "x86_64-linux"     # the targets' system
 ssh_address_template = "me@{target}.lan"   # a target's ssh address; the builder's too
-branch_prefix = "nixconvoy/{machine}/"   # {machine}: this machine's hostname: a checkout owns
-                                     # "<prefix><leaf>", a subagent worktree "<checkout's branch>-<name>"
-                                     # ("<prefix>main-<name>" under a plain checkout)
-work_branches = ["nixconvoy/laptop/*"]     # the work branches nixconvoy may union or own, as patterns (`*` the
-                                            # wildcard): one per machine; a pushed branch none matches is ignored
+branch_prefix = "nixconvoy/"       # a checkout owns "<prefix><leaf>" (`open <path>`: the path's name), a
+                                   # subagent worktree "<checkout's branch>-<name>" ("<prefix>main-<name>"
+                                   # under a plain checkout); "{machine}" in it is this machine's hostname,
+                                   # a namespace per machine ("nixconvoy/{machine}/")
+work_branches = ["nixconvoy/*"]    # the work branches nixconvoy may union or own, as patterns (`*` the
+                                   # wildcard); a pushed branch none matches is ignored
 child_worktrees = ".claude/worktrees"   # where `open --child <worktree>` puts a child (subagent) worktree, under the
                                         # checkout (Claude Code's own place; excluded through .git/info/exclude)
 
@@ -266,7 +271,7 @@ nixconvoy close [<path> ... | <worktree> ... | <submodule> ...] [--force]   remo
 nixconvoy pull                 rebase every checkout on this machine onto origin/main
 nixconvoy status               every checkout on this machine, and origin's other branches
 nixconvoy hook <event>         the Claude Code plugin's hook of that event (session-start, subagent-stop, worktree-create, worktree-remove, worktree-resume), run by its hooks/run.sh <event> with the hook's input on stdin
-nixconvoy open <path> [--branch <work-branch>]   an agent checkout at that path on a work branch of this machine's
+nixconvoy open <path> [--branch <work-branch>]   an agent checkout at that path on a work branch of this machine's, named after the path (refused when origin holds it: --branch takes it over or names another)
 nixconvoy open --child <worktree>   a child (subagent) worktree <checkout>/<child_worktrees>/<worktree> (what the plugin's create hook makes)
 nixconvoy open --submodule <input>   the flake input developed in place under this checkout (see Submodules)
 
@@ -308,8 +313,10 @@ under the parent's COMMIT_MSG.md with each sub's appended (`review
 --with-children` shows each,
 `undeploy --with-children --back-to origin/main` discards each).  `nixconvoy open <path>` makes a
 further agent checkout beside the others instead - a worktree at that
-path on a listed work branch of this machine's, named after the path -
-and `close <path>` removes one holding nothing of its own.
+path on a listed work branch of this machine's, named after the path
+(when origin already holds that branch, a removed checkout's or another
+machine's, `--branch` says whether to take it over or open another) - and
+`close <path>` removes one holding nothing of its own.
 `integrations/claude-code/` is a Claude Code plugin holding the hooks
 that create an isolated subagent's worktree under the spawning checkout,
 close it when its agent stops and recreate it for its resume, beside

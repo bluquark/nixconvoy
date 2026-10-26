@@ -9,10 +9,16 @@ Model:
   - A work branch, listed by pattern in nixconvoy.toml's work_branches and
     named with this machine's branch_prefix, is owned by the checkout that
     has it checked out; nixconvoy is its only writer: it commits the staged
-    state onto it and pushes it after a successful deploy.  A checkout on
-    main (or any other branch, another machine's work branch included) is a
-    main checkout: it deploys main plus the pushed work branches and owns
-    nothing.  A subagent worktree - one nested in a checkout,
+    state onto it and pushes it after a successful deploy.  A deploy, land
+    or undeploy finding origin's copy holding commits this checkout never
+    pushed (nor took at open) is refused before it switches, pushes or
+    resets anything: some other checkout writes it (one arriving while a
+    deploy runs leaves the branch unpushed, the deploy failing at its end).  A checkout on
+    main (or any other branch; another machine's work branch too, when
+    branch_prefix has {machine}) is a main checkout: it deploys main plus
+    the pushed work branches and owns nothing.  Without {machine}, every
+    listed branch is this machine's to own: read another checkout's with
+    `nixconvoy review`, never by checking it out.  A subagent worktree - one nested in a checkout,
     <checkout>/<child_worktrees>/<name> by `open` - owns <parent's branch>-<name>
     (<branch_prefix>main-<name> under a main checkout) from its first deploy.
     After a land, or an undeploy back to origin/main, a checkout stays on
@@ -286,9 +292,13 @@ subagent worktree wherever it was made.  <path> (for close, written as
 one or with a / in it and no branch here): an agent checkout beside the
 others - a worktree of this repository at that path,
 outside every checkout, on a work branch of this machine's: --branch, else
-<branch_prefix><path's name> (lab5 -> nixconvoy/<machine>/lab5), listed;
-this repository's or origin's copy of the branch when one has it (a
-checkout removed before), else new off origin's default branch.  --submodule:
+<branch_prefix><path's name> (lab5 -> nixconvoy/lab5), refused when origin
+holds that branch or a subagent branch under it - a checkout removed
+before, or another machine's with the prefix shared - so that --branch
+says which: the same name takes the branch over (origin's copy), another
+opens a fresh one.  A branch open makes is pushed at once, so origin
+holds it from then on and an open of the same name elsewhere is refused
+(one this repository held already is pushed by its next deploy).  --submodule:
 the flake input <input> developed in place - a git submodule of this
 repository named after the input, taken by flake.nix as a relative path
 input with inputs.self.submodules = true, so the gitlink in the tree is
@@ -362,8 +372,9 @@ best match the nixosConfigurations' names (`nix eval`, best effort within
 the one system literal the hosts' .nix files agree on, else the first
 target's evaluated hostPlatform, else this machine's architecture as a
 guess the file says to verify; ssh_address_template, "<this
-user>@{target}", to edit; branch_prefix nixconvoy/{machine}/ and
-work_branches, this machine's pattern; child_worktrees
+user>@{target}", to edit; branch_prefix nixconvoy/ ({machine} in it, the
+hostname, namespaces one machine's branches) and work_branches, its
+pattern; child_worktrees
 .claude/worktrees; eval.parallel "auto".  The optional sections follow as
 commented examples filled with what was found: the flake's checks for
 eval.precheck, the targets' names.  git is only read: what it wrote is
