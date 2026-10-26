@@ -16,7 +16,6 @@ from . import names, submodule
 from .checkout import (
     DEPLOYED_TRAILER,
     KEPT_EDIT,
-    LOCK_FILE,
     MACHINE_ENV,
     PENDING_REFS,
     SESSIONLESS,
@@ -39,10 +38,12 @@ from .checkout import (
     ensure_rebased,
     ensure_sole_writer,
     fetch_args,
+    flock_holder,
     forget_pushed,
     git_common,
     git_op_in_progress,
     held_targets,
+    holder_of,
     identity_of,
     landing_message,
     listed,
@@ -79,6 +80,31 @@ from .config import MSG_FILE
 from .guard import binary, decide
 from .names import label as sub_label
 from .proc import Fail, die, failure, git, is_ancestor, ok, out, painter, rev, run, solve_with_mergiraf
+from .wire import (
+    Alive,
+    Dirty,
+    DropBranches,
+    Fetch,
+    Flag,
+    Lock,
+    Nested,
+    Occupied,
+    OwnBranch,
+    PlanQuery,
+    PlanReply,
+    PruneParams,
+    PushInFlight,
+    Ran,
+    ReleaseDeployLock,
+    ReleaseNameLock,
+    Removed,
+    RemoveWorktree,
+    Stopped,
+    TakeDeployLock,
+    TakeNameLock,
+    Text,
+    Unpushed,
+)
 
 
 def holds(wb: str, tip: str, main: str, not_yet_deployed: bool = False) -> None:
@@ -324,7 +350,7 @@ def close_worktrees(names: list[str], *, force: bool = False) -> None:
                 else sorted(d for d in sibling_checkouts() if sub_parent(d) == top))
         if not subs:
             print(f"no subagent worktree under {top}", flush=True)
-        fetched: list[dict[str, object]] = []
+        fetched: list[PlanReply] = []
         for d in subs:
             label = sub_label(d)
             try:
@@ -379,9 +405,9 @@ class Stop(NamedTuple):
 
 
 def prune_one(d: Path, *, named: bool, own_session_ends: bool = False,
-              fetched: list[dict[str, object]] | None = None, prefetched: bool = False,
+              fetched: list[PlanReply] | None = None, prefetched: bool = False,
               deploy_held: bool = False, dropped_failed: list[str] | None = None,
-              stopped: Stop | None = None) -> str | None:
+              stopped: Stop | None = None, wait_name: bool | None = None) -> str | None:
     """nixconvoy-plan's prune core on the subagent worktree `d`: None once
     removed (the process then in its parent), else why it was kept.
     `fetched` shares one fetch across a run (`prefetched`: the caller
@@ -389,25 +415,23 @@ def prune_one(d: Path, *, named: bool, own_session_ends: bool = False,
     `dropped_failed` collects the origin branch deletions that failed.
     `own_session_ends`: the session the lock names ends for it - this
     one's, a named close (the invoking command no occupant).
-    `stopped`: a stop's prune.  A worktree named waits for its name lock, a
-    sweep does not."""
+    `stopped`: a stop's prune.  `wait_name` (a worktree named waits for its
+    name lock, hold_lock, a sweep does not): the stop's prune, holding the
+    repository's prune lock, is kept instead."""
     os.chdir(d)
-    memo: list[dict[str, object]] = [] if fetched is None else fetched
+    memo: list[PlanReply] = [] if fetched is None else fetched
     if prefetched and not memo:
-        memo.append({"ran": True, "detail": ""})
+        memo.append(Ran(True, ""))
     perform = PruneQueries(d, memo, deploy_held=deploy_held, invoker=own_session_ends,
-                           stop=stopped, name_wait=60 if named else 0)
+                           stop=stopped, name_wait=named if wait_name is None else wait_name)
     try:
-        done = decide("prune", perform=perform, name=d.name, named=named, own_session_ends=own_session_ends,
-                      stopped=None if stopped is None else {"pid": stopped.pid, "lock": stopped.lock})
+        done = decide(PruneParams(d.name, named, own_session_ends,
+                                  None if stopped is None else Stopped(stopped.pid, stopped.lock)), perform)
     finally:
         perform.close()
     if dropped_failed is not None:
         dropped_failed.extend(perform.dropped_failed)
-    assert isinstance(done, dict)
-    if done.get("removed"):
-        return None
-    return str(done.get("kept"))
+    return None if isinstance(done, Removed) else done.value
 
 
 def name_lock_path(d: Path) -> Path:
@@ -418,23 +442,53 @@ def name_lock_path(d: Path) -> Path:
     return common / "nixconvoy-worktree-locks" / f"{str(d).replace('/', '%')}.lock"
 
 
-def hold_lock(path: Path, wait: float = 0) -> IO[str] | None:
-    """The lock file `path`, waiting up to `wait` seconds; None when
-    another holds it still."""
+# How long a lock may stay held by no process found holding it: the next
+# holder has taken the flock but not yet written its line.
+HOLDER_GONE_GRACE = 5
+
+
+def hold_lock(path: Path, *, wait: bool = False, what: str = "") -> IO[str] | None:
+    """The lock file `path` (`what`, for the messages), with this run's
+    holder line written in it (write_holder); None when another holds it.
+    `wait`: for as long as the holder's run is alive, or, once it is gone,
+    the process holding the flock (a child it was passed to; flock_holder)
+    - a flock goes with its last process, so no fixed deadline - dying
+    naming the holder when the lock outlives both by HOLDER_GONE_GRACE."""
     path.parent.mkdir(exist_ok=True)
     f = path.open("a")
-    deadline = time.monotonic() + wait
+    gone: float | None = None
+    told: int | None = None
     while True:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            if time.monotonic() >= deadline:
+            if not wait:
                 f.close()
                 return None
+            try:
+                held = holder_of(path.read_text())
+            except OSError:
+                held = None
+            if held is not None and held[1]:
+                by, pid = held[0], held[2]
+            elif (pid := flock_holder(path)) is not None:
+                by = f"pid {pid}" + (f", a child of {held[0]}" if held is not None else "")
+            else:
+                by = None
+            if by is not None:
+                gone = None
+                if told != pid:
+                    print(f"{what or path}: locked by {by}; waiting for it", file=sys.stderr, flush=True)
+                    told = pid
+            elif gone is None:
+                gone = time.monotonic()
+            elif time.monotonic() - gone >= HOLDER_GONE_GRACE:
+                f.close()
+                die(f"{what or path} stays locked, its holder gone: "
+                    f"{held[0] if held is not None else 'a run that named none'}")
             time.sleep(0.2)
         else:
-            if path.name == LOCK_FILE:
-                write_holder(f)
+            write_holder(f)
             return f
 
 
@@ -492,9 +546,9 @@ class PruneQueries(GitQueries):
     named close's, its processes in `d` no occupants; `stop`: a stop's
     prune, its agent's ignored files counted as its own."""
 
-    def __init__(self, d: Path, fetched: list[dict[str, object]], *, deploy_held: bool = False,
+    def __init__(self, d: Path, fetched: list[PlanReply], *, deploy_held: bool = False,
                  invoker: bool = False, stop: Stop | None = None,
-                 name_wait: float = 0) -> None:
+                 name_wait: bool = False) -> None:
         super().__init__()
         self.d = d
         self.invoker = invoker
@@ -516,8 +570,8 @@ class PruneQueries(GitQueries):
             f.close()
         self.held.clear()
 
-    def take(self, path: Path, wait: float = 0) -> IO[str] | None:
-        f = hold_lock(path, wait)
+    def take(self, path: Path, *, wait: bool = False, what: str = "") -> IO[str] | None:
+        f = hold_lock(path, wait=wait, what=what)
         if f is not None:
             self.held.append(f)
         return f
@@ -529,84 +583,82 @@ class PruneQueries(GitQueries):
         except FileNotFoundError:
             return None
 
-    def __call__(self, ask: dict[str, object]) -> dict[str, object]:
-        kind = ask.get("ask")
-        done: dict[str, object] = {"ran": True, "detail": ""}
-        if kind == "take_name_lock":
-            f = self.take(name_lock_path(self.d), self.name_wait)
-            if f is None:
-                return {"flag": False}
-            self.name_fd = f.fileno()
-            return {"flag": True}
-        if kind in ("release_name_lock", "release_deploy_lock"):
-            return done  # close() releases both once the core is done
-        if kind == "take_deploy_lock":
-            if self.deploy_held:
-                return {"flag": True}
-            return {"flag": self.take(Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path",
-                                                "nixconvoy-deploy.lock"]))) is not None}
-        if kind == "lock":
-            return {"text": self.read(self.locked)}
-        if kind == "alive":
-            start = ask.get("start")
-            reason = f"pid {ask.get('pid')}" + (f" start {start}" if start is not None else "")
-            alive = lock_live(reason) if ask.get("own_ends") else lock_pid_alive(reason) is not False
-            return {"flag": alive}
-        if kind == "push_in_flight":
-            return {"flag": Path(push_state("pid")).exists()}
-        if kind == "nested":
-            inside = [Path(ln[len("worktree "):]).resolve() for ln in out(
-                ["git", "worktree", "list", "--porcelain"]).splitlines() if ln.startswith("worktree ")]
-            return {"flag": any(w != self.d and self.d in w.parents for w in inside)}
-        if kind == "own_branch":
-            return {"text": identity_of(self.d, current_branch()).wb}
-        if kind == "unpushed":
-            return {"flag": bool(out(["git", "rev-list", "-n", "1", str(ask.get("sha")), "--not", "--remotes=origin"]))}
-        if kind == "dirty":
-            # An agent that stopped may be resumed: what git ignores (its
-            # builds, notes) is kept for it too.
-            ignored = ["--ignored"] if self.stop is not None else []
-            return {"flag": bool(out(["git", "status", "--porcelain", *ignored])) or submodule.own(self.d)}
-        if kind == "occupied":
-            return {"flag": occupied(self.d, invoker=self.invoker)}
-        if kind == "fetch":
-            if not self.fetched:
-                self.fetched.append(super().__call__(ask))
-            return self.fetched[0]
-        if kind == "remove_worktree":
-            submodule.remove_all(self.d)  # nested in it: their registrations go first
-            # Under the name lock, which every relock takes too: the lock
-            # judged is the one lifted.
-            try:
-                lock: bytes | None = self.locked.read_bytes()
-            except FileNotFoundError:
-                lock = None
-            self.locked.unlink(missing_ok=True)
-            try:
-                os.chdir(self.parent)
-                # git holds the name lock too, so a prune killed meanwhile
-                # leaves it deleting under the lock.
-                removed = git("worktree", "remove", str(self.d), check=False,
-                              pass_fds=() if self.name_fd is None else (self.name_fd,))
-            finally:
-                # Still there (refused, or interrupted): locked as it was,
-                # unless a hand lock took its place meanwhile.
-                if lock is not None and self.d.is_dir() and not self.locked.exists():
-                    with contextlib.suppress(FileNotFoundError):
-                        self.locked.write_bytes(lock)
-            if removed.returncode != 0 and self.d.is_dir():
-                os.chdir(self.d)
-                return ran(removed)
-            if removed.returncode != 0:
-                # The tree went but not its registration.
-                git("worktree", "prune", check=False)
-            return done
-        if kind == "drop_branches":
-            cur = ask.get("cur")
-            failed = drop_branches(sub_branches(self.d, cur if isinstance(cur, str) else None, [str(ask.get("wb"))]))
-            self.dropped_failed = failed
-            return {"ran": not failed, "detail": "\n".join(failed)}
-        return super().__call__(ask)
+    def __call__(self, ask: PlanQuery) -> PlanReply:
+        done = Ran(True, "")
+        match ask:
+            case TakeNameLock():
+                f = self.take(name_lock_path(self.d), wait=self.name_wait, what=str(self.d))
+                if f is None:
+                    return Flag(False)
+                self.name_fd = f.fileno()
+                return Flag(True)
+            case ReleaseNameLock() | ReleaseDeployLock():
+                return done  # close() releases both once the core is done
+            case TakeDeployLock():
+                if self.deploy_held:
+                    return Flag(True)
+                return Flag(self.take(Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path",
+                                                "nixconvoy-deploy.lock"]))) is not None)
+            case Lock():
+                return Text(self.read(self.locked))
+            case Alive(pid, start, own_ends):
+                reason = f"pid {pid}" + (f" start {start}" if start is not None else "")
+                return Flag(lock_live(reason) if own_ends else lock_pid_alive(reason) is not False)
+            case PushInFlight():
+                return Flag(Path(push_state("pid")).exists())
+            case Nested():
+                inside = [Path(ln[len("worktree "):]).resolve() for ln in out(
+                    ["git", "worktree", "list", "--porcelain"]).splitlines() if ln.startswith("worktree ")]
+                return Flag(any(w != self.d and self.d in w.parents for w in inside))
+            case OwnBranch():
+                return Text(identity_of(self.d, current_branch()).wb)
+            case Unpushed(sha):
+                return Flag(bool(out(["git", "rev-list", "-n", "1", sha, "--not", "--remotes=origin"])))
+            case Dirty():
+                # An agent that stopped may be resumed: what git ignores (its
+                # builds, notes) is kept for it too.
+                ignored = ["--ignored"] if self.stop is not None else []
+                return Flag(bool(out(["git", "status", "--porcelain", *ignored])) or submodule.own(self.d))
+            case Occupied():
+                return Flag(occupied(self.d, invoker=self.invoker))
+            case Fetch():
+                if not self.fetched:
+                    self.fetched.append(super().__call__(ask))
+                return self.fetched[0]
+            case RemoveWorktree():
+                submodule.remove_all(self.d)  # nested in it: their registrations go first
+                # Under the name lock, which every relock takes too: the lock
+                # judged is the one lifted.
+                try:
+                    lock: bytes | None = self.locked.read_bytes()
+                except FileNotFoundError:
+                    lock = None
+                self.locked.unlink(missing_ok=True)
+                try:
+                    os.chdir(self.parent)
+                    # git holds the name lock too, so a prune killed meanwhile
+                    # leaves it deleting under the lock.
+                    removed = git("worktree", "remove", str(self.d), check=False,
+                                  pass_fds=() if self.name_fd is None else (self.name_fd,))
+                finally:
+                    # Still there (refused, or interrupted): locked as it was,
+                    # unless a hand lock took its place meanwhile.
+                    if lock is not None and self.d.is_dir() and not self.locked.exists():
+                        with contextlib.suppress(FileNotFoundError):
+                            self.locked.write_bytes(lock)
+                if removed.returncode != 0 and self.d.is_dir():
+                    os.chdir(self.d)
+                    return ran(removed)
+                if removed.returncode != 0:
+                    # The tree went but not its registration.
+                    git("worktree", "prune", check=False)
+                return done
+            case DropBranches(wb, cur):
+                failed = drop_branches(sub_branches(self.d, cur, [wb]))
+                self.dropped_failed = failed
+                return Ran(not failed, "\n".join(failed))
+            case _:
+                return super().__call__(ask)
 
 
 def outermost(d: Path) -> Path:
@@ -663,9 +715,8 @@ def remove_sub(here: Path, branches: list[str]) -> None:
     names = sub_branches(here, branch_at(here), [b for b in branches if b])
     # Under the name lock, so no create reuses it between the check and the
     # removal; git holds it too, through a kill of this process.
-    held = hold_lock(name_lock_path(here), wait=60)
-    if held is None:
-        die(f"{here} stayed locked for 60s by a create or a close; re-run")
+    held = hold_lock(name_lock_path(here), wait=True, what=str(here))
+    assert held is not None
     if worktree_lock(here) is not None:
         git("worktree", "unlock", str(here))
     submodule.remove_all(here)
@@ -940,9 +991,8 @@ def open_worktree(name: str, lock_reason: str | None) -> Path:
     branch = f"worktree-{name}"
     base = default_base(root)
     reason = lock_reason or f"nixconvoy open --child {name} {SESSIONLESS}"
-    held = hold_lock(name_lock_path(d), wait=60)
-    if held is None:
-        die(f"{d} stayed locked for 60s by a close or another open; re-run")
+    held = hold_lock(name_lock_path(d), wait=True, what=str(d))
+    assert held is not None
     try:
         for attempt in range(3):
             if attempt:

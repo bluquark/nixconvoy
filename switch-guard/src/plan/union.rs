@@ -18,6 +18,7 @@
 //! run (a wait is another deploy's progress, not a move, and counts for
 //! nothing).
 use super::{failed, listed, Halt, Query, Run, Script, BRANCHES_KEY, MAIN, MSG_FILE};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub const ATTEMPTS: usize = 3;
@@ -25,7 +26,7 @@ pub const ATTEMPTS: usize = 3;
 /// another deploy's progress, so this many means something is wrong.
 pub const WAITS: usize = 10;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Params {
     /// This checkout's work branch.
     pub wb: String,
@@ -35,7 +36,7 @@ pub struct Params {
     pub main0: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Outcome {
     pub union: String,
     /// The branches merged into it and their tips.

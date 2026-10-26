@@ -98,11 +98,11 @@ fn answer(o: &mut Origin, t: &mut Trace, q: &Query) -> Reply {
             let files = o.conflicts.get(sha).cloned().unwrap_or_default();
             if files.is_empty() {
                 t.merged.push(name.clone());
-                return Reply::Merge { ok: true, files: vec![], detail: String::new() };
+                return Reply::Merged { ok: true, files: vec![], detail: String::new() };
             }
             t.pending = Some(files.iter().map(|(f, ok)| (f.clone(), *ok, false)).collect());
             t.merged.push(name.clone());
-            Reply::Merge { ok: false, files: files.into_iter().map(|f| f.0).collect(), detail: "CONFLICT".into() }
+            Reply::Merged { ok: false, files: files.into_iter().map(|f| f.0).collect(), detail: "CONFLICT".into() }
         }
         Query::DropFile { file } | Query::Add { file } => {
             assert!(matches!(q, Query::DropFile { .. }) == (file == MSG_FILE));
@@ -368,7 +368,7 @@ fn a_merge_failing_without_conflicts_dies() {
         Reply::Flag(false),
         Reply::Ran { ok: true, detail: String::new() },
         Reply::Text(Some("s1 summary".into())),
-        Reply::Merge { ok: false, files: vec![], detail: "fatal: refusing to merge unrelated histories".into() },
+        Reply::Merged { ok: false, files: vec![], detail: "fatal: refusing to merge unrelated histories".into() },
     ]
     .into_iter();
     let (_, _, out) = drive(Replay::new(params(false), program), 20, |_| replies.next().unwrap());

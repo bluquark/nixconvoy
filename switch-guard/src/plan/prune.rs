@@ -19,8 +19,9 @@
 //! refuses; a process working in it without its lock (a shell cd'd there)
 //! keeps it too.
 use super::{Query, Run, Script, MAIN};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Params {
     /// The worktree's directory name.
     pub name: String,
@@ -37,12 +38,14 @@ pub struct Params {
 /// that session counts as ended for it while the lock is still that one.
 /// A resume relocks it, and each lock the create hook writes naming a
 /// session carries a token of its own.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Stopped {
     pub pid: u32,
     pub lock: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Outcome {
     Removed,

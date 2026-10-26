@@ -25,6 +25,40 @@ from . import config, proc
 from .config import CLAUDE_WORKTREES, CONFIG_FILE, MSG_FILE, ConfigError, cfg, load
 from .guard import decide
 from .proc import PERF, die, git, is_ancestor, ok, out, rev, run, solve_with_mergiraf
+from .wire import (
+    AddAll,
+    AddWorktree,
+    Commit,
+    Contains,
+    CurrentBranch,
+    Detach,
+    DropWorktree,
+    EnsureRebased,
+    Fate,
+    Fetch,
+    Flag,
+    HeadSubject,
+    Ok,
+    OnOrigin,
+    OnWorkBranch,
+    OpInProgress,
+    PlanQuery,
+    PlanReply,
+    Pop,
+    PopTmp,
+    Push,
+    Pushed,
+    Ran,
+    Rebase,
+    RebaseAbort,
+    Rev,
+    SetUpstream,
+    StagedDiffers,
+    Switch,
+    Sync,
+    Text,
+    Upstream,
+)
 
 # Identity for machinery commits (snapshots, union merges); the fixed date
 # makes an unchanged union re-create the same commit hash.  Work-branch and
@@ -261,8 +295,9 @@ def lock_checkout() -> IO[str] | None:
 
 
 def write_holder(f: IO[str]) -> None:
-    """This run as the deploy lock's holder line: pid, start time, the
-    pid's /proc start time (0 without /proc) and the arguments."""
+    """This run as a lock's holder line (the deploy lock's, a worktree name
+    lock's): pid, start time, the pid's /proc start time (0 without /proc)
+    and the arguments."""
     stat = proc_stat(os.getpid())
     start = stat.split()[19] if stat is not None else "0"
     f.seek(0)
@@ -279,19 +314,55 @@ def lock_holder(d: Path | None = None) -> str:
     older build wrote nothing."""
     where = d or Path.cwd()
     try:
-        line = (where / out(["git", "rev-parse", "--git-path", LOCK_FILE], cwd=str(where))).read_text().strip()
+        line = (where / out(["git", "rev-parse", "--git-path", LOCK_FILE], cwd=str(where))).read_text()
     except OSError:
         line = ""
-    fields = line.split(" ", 3)
-    if len(fields) < 3 or not all(x.isdigit() for x in fields[:3]):
+    held = holder_of(line)
+    if held is None:
         return "another nixconvoy"
+    what, alive, _ = held
+    return what if alive else f"a child of {what}"
+
+
+def flock_holder(path: Path) -> int | None:
+    """A live process other than this one with `path` open - a child the
+    lock was passed to, once the run that wrote the holder line is gone:
+    the one /proc/locks names as the flock's holder where it lists it (not
+    in WSL2's pid namespace), else the first found with the descriptor (a
+    waiter's counts: it waits on a live holder in turn).  None without
+    /proc, or when none has it."""
+    try:
+        target, ino = str(path.resolve()), str(path.stat().st_ino)
+        pids = [int(p.name) for p in Path("/proc").iterdir() if p.name.isdigit()]
+        locks = Path("/proc/locks").read_text().splitlines()
+    except OSError:
+        return None
+    named = [int(f[4]) for f in map(str.split, locks)
+             if len(f) >= 6 and f[1] == "FLOCK" and f[4].isdigit() and f[5].rsplit(":", 1)[-1] == ino]
+    for pid in [*named, *pids]:
+        if pid <= 0 or pid == os.getpid():
+            continue
+        with contextlib.suppress(OSError):
+            if any(str(fd.readlink()) == target for fd in Path(f"/proc/{pid}/fd").iterdir()):
+                return pid
+    return None
+
+
+def holder_of(line: str) -> tuple[str, bool, int] | None:
+    """The run a write_holder line names, as the refusals say it (its
+    arguments, pid and age), whether its pid is alive (by /proc start
+    time, so a reused pid does not pass), and the pid; None for no such
+    line."""
+    fields = line.strip().split(" ", 3)
+    if len(fields) < 3 or not all(x.isdigit() for x in fields[:3]):
+        return None
     pid, started, start = int(fields[0]), int(fields[1]), fields[2]
     age = max(0, int(time.time()) - started)
     for_ = f"{age} s" if age < 90 else f"{round(age / 60)} min" if age < 5400 else f"{age / 3600:.1f} h"
     what = f"`nixconvoy {fields[3]}`" if len(fields) == 4 and fields[3] else "`nixconvoy`"
     if lock_pid_alive(f"pid {pid}" + (f" start {start}" if start != "0" else "")) is False:
-        return f"a child of {what} (pid {pid}, gone; started {for_} ago)"
-    return f"{what} (pid {pid}, running for {for_})"
+        return f"{what} (pid {pid}, gone; started {for_} ago)", False, pid
+    return f"{what} (pid {pid}, running for {for_})", True, pid
 
 
 def deploy_running(d: Path) -> bool:
@@ -321,8 +392,8 @@ def git_op_in_progress(cwd: Path | None = None) -> str | None:
     return None
 
 
-def ran(p: subprocess.CompletedProcess[str]) -> dict[str, object]:
-    return {"ran": p.returncode == 0, "detail": (p.stderr or "").strip()}
+def ran(p: subprocess.CompletedProcess[str]) -> Ran:
+    return Ran(p.returncode == 0, (p.stderr or "").strip())
 
 
 class GitQueries:
@@ -334,126 +405,116 @@ class GitQueries:
         self.aside = ""
         self.aside_branch = ""
 
-    def where(self, ask: dict[str, object]) -> str | None:
-        return self.aside if ask.get("aside") else None
-
-    def __call__(self, ask: dict[str, object]) -> dict[str, object]:
-        def arg(k: str) -> str:
-            return str(ask.get(k))
-
-        kind = ask.get("ask")
-        if kind == "contains":
-            return {"flag": is_ancestor(arg("a"), arg("b"))}
-        if kind == "op_in_progress":
-            return {"text": git_op_in_progress()}
-        if kind == "current_branch":
-            return {"text": current_branch()}
-        if kind == "staged_differs":
-            return {"flag": staged_differs()}
-        if kind == "commit":
-            return ran(git("commit", "--quiet", "-m", arg("msg"), check=False))
-        if kind == "add_all":
-            return ran(git("add", "-A", check=False))
-        if kind == "pop":
-            mode = "--mixed" if ask.get("mixed") else "--soft"
-            return ran(git("reset", "--quiet", mode, "HEAD~1", check=False))
-        if kind == "head_subject":
-            return {"text": git("log", "-1", "--format=%s", check=False).stdout.strip() or None}
-        if kind == "rebase":
-            from . import submodule  # noqa: PLC0415 - submodule builds on this module
-
-            empty = "--empty=keep" if ask.get("keep_empty") else "--empty=drop"
-            where = self.where(ask)
-            upstream = arg("upstream")
-            p = git("rebase", "--quiet", empty, *rebase_range(upstream, where), cwd=where, check=False)
-            # Stopped: on text conflicts mergiraf solves, or on gitlinks,
-            # where main pins a submodule this branch pinned too (its
-            # landing elsewhere) - the submodule follows (solve_stop).
-            why = ""
-            while p.returncode != 0:
-                why = solve_stop(where, upstream)
-                if why is not None:
-                    break
-                if ok(["git", "diff", "--cached", "--quiet"], cwd=where):
-                    # Resolved to what HEAD has already (a pin whose
-                    # counterpart HEAD pins: a submodule commit its rebase
-                    # dropped): kept as an empty commit where the core
-                    # counts on its commits (its tmp commits), else skipped.
-                    if not ask.get("keep_empty"):
-                        p = git("rebase", "--skip", cwd=where, env={"GIT_EDITOR": "true"}, check=False)
-                        continue
-                    stopped = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path",
-                                        "rebase-merge/stopped-sha"], cwd=where)).read_text().strip()
-                    git("commit", "--quiet", "--allow-empty", "--no-verify", "-C", stopped, cwd=where)
-                p = git("rebase", "--continue", cwd=where, env={"GIT_EDITOR": "true"}, check=False)
-            if p.returncode == 0:
-                submodule.push_pending()
+    def __call__(self, ask: PlanQuery) -> PlanReply:
+        match ask:
+            case Contains(a, b):
+                return Flag(is_ancestor(a, b))
+            case OpInProgress():
+                return Text(git_op_in_progress())
+            case CurrentBranch():
+                return Text(current_branch())
+            case StagedDiffers():
+                return Flag(staged_differs())
+            case Commit(msg):
+                return ran(git("commit", "--quiet", "-m", msg, check=False))
+            case AddAll():
+                return ran(git("add", "-A", check=False))
+            case Pop(mixed):
+                return ran(git("reset", "--quiet", "--mixed" if mixed else "--soft", "HEAD~1", check=False))
+            case HeadSubject():
+                return Text(git("log", "-1", "--format=%s", check=False).stdout.strip() or None)
+            case Rebase(keep_empty, aside, upstream):
+                return self.rebase(keep_empty, self.aside if aside else None, upstream)
+            case RebaseAbort(aside):
+                return ran(git("rebase", "--abort", cwd=self.aside if aside else None, check=False))
+            case Rev(name):
+                return Text(rev(name))
+            case Fetch():
+                return ran(git(*fetch_args("--no-auto-gc"), check=False))
+            case Push(branch):
+                problem = sole_writer_problem(branch)
+                if problem is not None:
+                    return Ran(False, problem)
+                head = rev(f"refs/heads/{branch}")
+                p = git(*push_cmd(branch, rev(f"refs/remotes/origin/{branch}") or ""), check=False)
+                if p.returncode == 0 and head:
+                    note_pushed(branch, head)
                 return ran(p)
-            submodule.undo_pending()
-            if why:  # a gitlink the submodule could not follow: the failure explained, git's noise dropped
-                noise = ("error: Could not read ", "error: could not apply ", "Could not apply ")
-                rest = "\n".join(ln for ln in (p.stderr or "").splitlines()
-                                 if ln.strip() and not ln.startswith(noise) and not ln.startswith("hint:"))
-                return {"ran": False, "detail": why + (f"\n{rest}" if rest else "")}
-            there = f"git {rebase_hint(upstream, where)}" + (f" {self.aside_branch}" if where else "")
-            return {"ran": False, "detail": f"run `{there}` there, resolve, then re-run:\n{(p.stderr or '').strip()}"}
-        if kind == "rebase_abort":
-            return ran(git("rebase", "--abort", cwd=self.where(ask), check=False))
-        if kind == "rev":
-            return {"text": rev(arg("name"))}
-        if kind == "fetch":
-            return ran(git(*fetch_args("--no-auto-gc"), check=False))
-        if kind == "push":
-            problem = sole_writer_problem(arg("branch"))
-            if problem is not None:
-                return {"ran": False, "detail": problem}
-            head = rev(f"refs/heads/{arg('branch')}")
-            p = git(*push_cmd(arg("branch"), rev(f"refs/remotes/origin/{arg('branch')}") or ""), check=False)
-            if p.returncode == 0 and head:
-                note_pushed(arg("branch"), head)
+            case AddWorktree(branch):
+                self.aside = tempfile.mkdtemp(prefix=f"{TMP_PREFIX}rebase-wt.", dir="/tmp")
+                self.aside_branch = branch
+                return ran(git("worktree", "add", "--quiet", self.aside, branch, check=False))
+            case DropWorktree():
+                if self.aside:
+                    git("worktree", "remove", "--force", self.aside, check=False)
+                    shutil.rmtree(self.aside, ignore_errors=True)
+                    self.aside = ""
+                return Ran(True, "")
+            case Detach(upstream):
+                return ran(git("switch", "--quiet", "--detach", upstream, check=False))
+            case Pushed():
+                return Flag(any(is_ancestor("HEAD", t) for t in listed_tips(allowed_branches()).values()))
+            case OnOrigin():
+                return Flag(on_origin())
+            case Switch(branch, start):
+                return ran(git("switch", "--quiet", *(["-c", branch, start] if start else [branch]), check=False))
+            case Upstream(branch):
+                return Text(git("config", f"branch.{branch}.merge", check=False).stdout.strip() or None)
+            case SetUpstream(branch):
+                return ran(git("branch", "--set-upstream-to=origin/main", branch, check=False))
+            case Fate(branch, tip, union, checkout):
+                return Text(increment_fate(branch, tip, union, checkout))
+            case _:
+                raise ValueError(f"nixconvoy-plan asked {ask!r}")
+
+    def rebase(self, keep_empty: bool, where: str | None, upstream: str) -> Ran:
+        from . import submodule  # noqa: PLC0415 - submodule builds on this module
+
+        empty = "--empty=keep" if keep_empty else "--empty=drop"
+        p = git("rebase", "--quiet", empty, *rebase_range(upstream, where), cwd=where, check=False)
+        # Stopped: on text conflicts mergiraf solves, or on gitlinks,
+        # where main pins a submodule this branch pinned too (its
+        # landing elsewhere) - the submodule follows (solve_stop).
+        why = ""
+        while p.returncode != 0:
+            why = solve_stop(where, upstream)
+            if why is not None:
+                break
+            if ok(["git", "diff", "--cached", "--quiet"], cwd=where):
+                # Resolved to what HEAD has already (a pin whose
+                # counterpart HEAD pins: a submodule commit its rebase
+                # dropped): kept as an empty commit where the core
+                # counts on its commits (its tmp commits), else skipped.
+                if not keep_empty:
+                    p = git("rebase", "--skip", cwd=where, env={"GIT_EDITOR": "true"}, check=False)
+                    continue
+                stopped = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path",
+                                    "rebase-merge/stopped-sha"], cwd=where)).read_text().strip()
+                git("commit", "--quiet", "--allow-empty", "--no-verify", "-C", stopped, cwd=where)
+            p = git("rebase", "--continue", cwd=where, env={"GIT_EDITOR": "true"}, check=False)
+        if p.returncode == 0:
+            submodule.push_pending()
             return ran(p)
-        if kind == "add_worktree":
-            self.aside = tempfile.mkdtemp(prefix=f"{TMP_PREFIX}rebase-wt.", dir="/tmp")
-            self.aside_branch = arg("branch")
-            return ran(git("worktree", "add", "--quiet", self.aside, arg("branch"), check=False))
-        if kind == "drop_worktree":
-            if self.aside:
-                git("worktree", "remove", "--force", self.aside, check=False)
-                shutil.rmtree(self.aside, ignore_errors=True)
-                self.aside = ""
-            return {"ran": True, "detail": ""}
-        if kind == "detach":
-            return ran(git("switch", "--quiet", "--detach", arg("upstream"), check=False))
-        if kind == "pushed":
-            return {"flag": any(is_ancestor("HEAD", t) for t in listed_tips(allowed_branches()).values())}
-        if kind == "on_origin":
-            return {"flag": on_origin()}
-        if kind == "switch":
-            start = ask.get("start")
-            where = ["-c", arg("branch"), str(start)] if start else [arg("branch")]
-            return ran(git("switch", "--quiet", *where, check=False))
-        if kind == "upstream":
-            merge = git("config", f"branch.{arg('branch')}.merge", check=False).stdout.strip()
-            return {"text": merge or None}
-        if kind == "set_upstream":
-            return ran(git("branch", "--set-upstream-to=origin/main", arg("branch"), check=False))
-        if kind == "fate":
-            checkout = ask.get("checkout")
-            return {"text": increment_fate(arg("branch"), arg("tip"), arg("union"),
-                                           str(checkout) if checkout else None)}
-        raise ValueError(f"nixconvoy-plan asked {ask!r}")
+        submodule.undo_pending()
+        if why:  # a gitlink the submodule could not follow: the failure explained, git's noise dropped
+            noise = ("error: Could not read ", "error: could not apply ", "Could not apply ")
+            rest = "\n".join(ln for ln in (p.stderr or "").splitlines()
+                             if ln.strip() and not ln.startswith(noise) and not ln.startswith("hint:"))
+            return Ran(False, why + (f"\n{rest}" if rest else ""))
+        there = f"git {rebase_hint(upstream, where)}" + (f" {self.aside_branch}" if where else "")
+        return Ran(False, f"run `{there}` there, resolve, then re-run:\n{(p.stderr or '').strip()}")
 
 
 def pop_tmp_commits() -> None:
     """Unwind the tmp commits a run that died mid-rebase left on the
     checked-out branch (never pushed)."""
-    decide("rebase", mode="pop_tmp")
+    decide(PopTmp())
 
 
 def ensure_rebased() -> None:
     """Make HEAD contain origin/main, its staged and unstaged changes intact,
     or die leaving the checkout as it was."""
-    decide("rebase", mode="ensure_rebased")
+    decide(EnsureRebased())
 
 
 def sibling_checkouts(here: Path | None = None) -> list[Path]:
@@ -502,9 +563,8 @@ def update_checkout(path: Path) -> tuple[bool, str]:
             return False, f"skipped: {lock_holder()} is running there"
         try:
             wb = work_branch_name()
-            done = decide("rebase", mode="sync", wb=wb)
-            assert isinstance(done, dict)
-            good, status = done.get("ok") is True, str(done.get("status"))
+            done = decide(Sync(wb))
+            good, status = isinstance(done, Ok), done.value
             if good and wb is not None:
                 problems = submodule.catch_up(path, wb)
                 if problems:
@@ -537,7 +597,7 @@ def catch_up(paths: list[Path]) -> bool:
 
 def ensure_on_work_branch(wb: str) -> None:
     prev = current_branch()
-    decide("rebase", mode="on_work_branch", wb=wb)
+    decide(OnWorkBranch(wb))
     note_branch(Path.cwd().resolve(), wb)
     if (prev is not None and prev not in (wb, "main") and current_branch() == wb
             and checkout_identity().kind == "sub"):
@@ -1349,6 +1409,21 @@ def proc_stat(pid: int) -> str | None:
         return Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2]
     except OSError:
         return None
+
+
+def pid_started(pid: int) -> float | None:
+    """When the process `pid` started, in epoch seconds to within a second
+    (/proc/stat's btime is whole seconds); None without /proc (macOS) or
+    for a pid that is gone."""
+    stat = proc_stat(pid)
+    if stat is None:
+        return None
+    try:
+        btime = next(int(ln.split()[1]) for ln in Path("/proc/stat").read_text().splitlines()
+                     if ln.startswith("btime "))
+    except (OSError, StopIteration, ValueError):
+        return None
+    return btime + int(stat.split()[19]) / os.sysconf("SC_CLK_TCK")
 
 
 def lock_pid_alive(reason: str) -> bool | None:

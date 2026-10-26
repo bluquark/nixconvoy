@@ -168,13 +168,13 @@ fn advance(w: &mut World, d: usize, reply: CReply) {
             finish(w, d, false)
         }
         CNext::Ask(q) => {
-            if let CQuery::Helper(args) = &q {
+            if let CQuery::Helper { args } = &q {
                 if args.len() == 2 && args[0] == "confirm" {
                     w.confirm_sent = Some(w.clock);
                 }
             }
             let wait = match &q {
-                CQuery::Arm | CQuery::Helper(_) => Wait::Sending(q, w.clock),
+                CQuery::Arm | CQuery::Helper { .. } => Wait::Sending(q, w.clock),
                 _ => Wait::Local(q, w.clock),
             };
             if let Status::Active { wait: wt, .. } = &mut w.deploys[d] {
@@ -386,7 +386,7 @@ impl Model for Composed {
                     router: true,
                     fail_verify: false,
                 };
-                w.deploys[d] = Status::Active { m: Control::new(p), wait: Wait::Local(CQuery::Now, 0) };
+                w.deploys[d] = Status::Active { m: Control::new(p), wait: Wait::Local(CQuery::Clock, 0) };
                 advance(&mut w, d, CReply::Start);
             }
             Act::Answer(d, fail) => {
@@ -402,7 +402,7 @@ impl Model for Composed {
                     }
                 }
                 let reply = match (q, fail) {
-                    (CQuery::Guard, false) => {
+                    (CQuery::TakeGuard, false) => {
                         if w.guard.is_some() {
                             return None;
                         }
@@ -416,12 +416,12 @@ impl Model for Composed {
                     (CQuery::ProbeHelper, false) => CReply::Code(0),
                     (CQuery::ProbeHelper, true) if w.fault() => CReply::Code(255),
                     (CQuery::Deadline, false) => CReply::Text(DEADLINE.to_string()),
-                    (CQuery::Now, false) => CReply::Now(w.clock * 1000),
-                    (CQuery::Running { .. }, false) => CReply::Running(Some(SYS[w.target.running].into())),
-                    (CQuery::Running { timeout_ms }, true) if timeout_ms.is_none_or(timed_out) => CReply::Running(None),
+                    (CQuery::Clock, false) => CReply::Now(w.clock * 1000),
+                    (CQuery::Running { .. }, false) => CReply::System(Some(SYS[w.target.running].into())),
+                    (CQuery::Running { timeout_ms }, true) if timeout_ms.is_none_or(timed_out) => CReply::System(None),
                     // The target's own checks pass or not, at any moment.
-                    (CQuery::Check { .. }, false) => CReply::Check { code: 0, last: None },
-                    (CQuery::Check { .. }, true) => CReply::Check { code: 1, last: Some("x".into()) },
+                    (CQuery::Check { .. }, false) => CReply::Checked { code: 0, last: None },
+                    (CQuery::Check { .. }, true) => CReply::Checked { code: 1, last: Some("x".into()) },
                     (CQuery::Internet { .. }, false) => CReply::Flag(true),
                     (CQuery::Internet { timeout_ms }, true) if timed_out(timeout_ms) => CReply::Flag(false),
                     (CQuery::Sleep { ms }, false) if timed_out(ms) => CReply::Done,
@@ -434,7 +434,7 @@ impl Model for Composed {
                 let Wait::Sending(q, _) = std::mem::replace(wait, Wait::Remote) else { return None };
                 match q {
                     CQuery::Arm => spawn(&mut w, Owner::Deploy(d), Verb::Arm, false),
-                    CQuery::Helper(args) => {
+                    CQuery::Helper { args } => {
                         let confirm = args.len() == 2 && args[0] == "confirm";
                         spawn(&mut w, Owner::Deploy(d), verb_of(&args), confirm);
                     }

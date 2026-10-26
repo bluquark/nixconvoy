@@ -15,7 +15,6 @@ import re
 import signal
 import sys
 import threading
-import time
 from collections.abc import Collection, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
@@ -23,6 +22,7 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote
 
+from .checkout import lock_pid_alive, pid_started
 from .config import cfg, root
 from .proc import NOTHING_DONE, cache_dir, die, dump_json, is_ancestor, load_json, out, run
 
@@ -31,10 +31,11 @@ from .proc import NOTHING_DONE, cache_dir, die, dump_json, is_ancestor, load_jso
 # Registering a root takes well under 0.1 s; a daemon that keeps it
 # waiting is stuck, and the deploy says so.
 ROOT_TIMEOUT = 5
-# A file being written (<name>.tmp<pid>, or nix's <link>.tmp-<pid>-<rand>
-# under roots/, each renamed into place within milliseconds) is garbage
-# past this age: its writer died.
-TMP_MAX_AGE = 60
+# A file being written, named after its writer: <name>.tmp<pid>, or nix's
+# <link>.tmp-<pid>-<rand> under roots/.
+TMP_WRITER = re.compile(r"\.tmp-?(\d+)(?:-\d+)?$")
+# pid_started's rounding: a writer starts before its file, never after.
+START_SLACK = 2
 # The flock excludes this process's own threads too; this lock in front
 # keeps the wait message for another process.
 MEMO_LOCK = threading.Lock()
@@ -202,9 +203,9 @@ def memo_prune(d: Path) -> None:
     entry stays a hint until the store's collector takes its .drv.  The
     entries and records are the *.json files, the proof logs the *.jsonl;
     what else the dirs hold is another deploy's file being written, or
-    nix's temporary link under roots/, left alone until TMP_MAX_AGE says
-    its writer died.  A root is kept while a record names it, entry or no
-    entry.  Under memo_lock."""
+    nix's temporary link under roots/, left alone while its writer runs
+    (drop_stale_tmp).  A root is kept while a record names it, entry or
+    no entry.  Under memo_lock."""
     used = memo_used(d)
     roots = d / "roots"
     for path in d.iterdir():
@@ -236,10 +237,16 @@ def memo_prune(d: Path) -> None:
 
 
 def drop_stale_tmp(path: Path) -> None:
-    """Drop `path`, a file being written, once it is TMP_MAX_AGE old."""
+    """Drop `path`, a file being written, unless the writer its name
+    carries (TMP_WRITER) runs: a pid alive yet started after the file was
+    written is another process's, the writer's reused."""
+    m = TMP_WRITER.search(path.name)
     try:
-        if time.time() - path.lstat().st_mtime > TMP_MAX_AGE:
-            path.unlink()
+        if m is not None and lock_pid_alive(f"pid {m.group(1)}"):
+            started = pid_started(int(m.group(1)))
+            if started is None or started <= path.lstat().st_mtime + START_SLACK:
+                return
+        path.unlink()
     except OSError:
         pass
 

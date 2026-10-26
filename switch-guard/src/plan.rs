@@ -10,6 +10,8 @@
 //! none yet.  `Replay` re-runs the program from the start on every reply, so
 //! the program reads like the procedure it decides and holds no state of its
 //! own; it is pure, so each re-run retraces the same queries.
+use serde::{Deserialize, Serialize};
+
 pub mod drift;
 pub mod prune;
 pub mod rebase;
@@ -25,6 +27,8 @@ pub fn listed<'a>(prefixes: impl IntoIterator<Item = &'a str>, name: &str) -> bo
     prefixes.into_iter().any(|p| name.starts_with(p))
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Effect {
     Print(String),
@@ -36,6 +40,8 @@ pub enum Effect {
 
 /// What nixconvoy does for the cores: git in the checkout (or in the
 /// worktree a query names), and the union core's callbacks into the deploy.
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Query {
     /// Whether `a` is an ancestor of `b` (or equal) -> Flag.
@@ -141,7 +147,7 @@ pub enum Query {
     Summary {
         sha: String,
     },
-    /// Merge `sha` into the union worktree -> Merge.
+    /// Merge `sha` into the union worktree -> Merged.
     Merge {
         name: String,
         sha: String,
@@ -241,6 +247,8 @@ pub enum Query {
     },
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Reply {
     Flag(bool),
@@ -253,7 +261,7 @@ pub enum Reply {
     Refs(Vec<(String, String)>),
     Names(Vec<String>),
     /// A merge's success, its conflicted files and its stderr.
-    Merge {
+    Merged {
         ok: bool,
         files: Vec<String>,
         detail: String,
@@ -335,8 +343,8 @@ impl Script<'_> {
     /// A merge's conflicted files and stderr when it failed.
     pub fn merge(&mut self, q: Query) -> Run<Result<(), (Vec<String>, String)>> {
         match self.ask(q.clone())? {
-            Reply::Merge { ok: true, .. } => Ok(Ok(())),
-            Reply::Merge { ok: false, files, detail } => Ok(Err((files, detail))),
+            Reply::Merged { ok: true, .. } => Ok(Ok(())),
+            Reply::Merged { ok: false, files, detail } => Ok(Err((files, detail))),
             r => Err(mismatch(&q, &r)),
         }
     }
@@ -371,6 +379,8 @@ pub fn no_hints(detail: &str) -> String {
     detail.trim().lines().filter(|l| !l.starts_with("hint:")).collect::<Vec<_>>().join("\n")
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Next<O> {
     Ask(Query),
@@ -378,7 +388,7 @@ pub enum Next<O> {
     Die(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Step<O> {
     pub effects: Vec<Effect>,
     pub next: Next<O>,

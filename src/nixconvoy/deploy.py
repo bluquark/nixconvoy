@@ -50,6 +50,7 @@ from .proc import NOTHING_DONE, PERF, die, dump_json, git, is_ancestor, load_jso
 from .switch import provenance_record, switch
 from .targets import Probe, expand_targets, flake_target_names
 from .union import UnionQueries
+from .wire import Context, DriftParams, UnionParams
 
 # Seconds between the looks at origin while waiting for a deploy under way.
 WAIT_POLL = 5
@@ -469,22 +470,17 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                     continue
                 held.setdefault(h, []).append(name)
         last = [h for h in sorted(tops) if tops[h].last]
-        verdict = decide(
-            "drift", me=[me, str(Path.cwd())], union=union,
-            listed=sorted(listed), tips=origin_tips(),
-            tz_offset=time.localtime().tm_gmtoff, router=last[0] if last else "",
-            targets=all_targets, candidates=candidates, evict=evict, named=bool(filter_targets),
-            work_branch=wb is not None, reached=sorted(reached), running=running,
-            built={h: t.out for h, t in tops.items()},
-            provenances={h: p.provenance for h, p in probed.items()},
+        cx = Context(me=(me, str(Path.cwd())), listed=sorted(listed), tips=origin_tips(),
+                     in_flight=announced(ann.key if ann is not None else None), dead=sorted(dead),
+                     tz_offset=time.localtime().tm_gmtoff)
+        verdict = decide(DriftParams(
+            cx=cx, union=union, router=last[0] if last else "", targets=all_targets, candidates=candidates,
+            evict=evict, named=bool(filter_targets), work_branch=wb is not None, reached=sorted(reached),
+            running=running, built={h: t.out for h, t in tops.items()},
             held={h: sorted(bs) for h, bs in held.items()},
-            in_flight=announced(ann.key if ann is not None else None), dead=sorted(dead))
-        assert isinstance(verdict, dict)
-        plan = [str(h) for h in verdict["plan"]]
-        affected = [str(h) for h in verdict["affected"]]
-        drift = verdict["drift"]
-        assert isinstance(drift, dict)
-        left_alone = [str(h) for h, v in drift.items() if v[0] == "left-alone"]
+            provenances={h: p.provenance for h, p in probed.items()}))
+        plan, affected = verdict.plan, verdict.affected
+        left_alone = [h for h, (kind, _) in verdict.drift.items() if kind == "left-alone"]
 
         # The target fell back from this very toplevel: switching onto it
         # would run a configuration known not to boot.
@@ -606,11 +602,10 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
 
     queries = UnionQueries(lambda: snap or "HEAD", fetch, refresh, stage, await_pending)
     try:
-        done = decide("union", queries, wb=wb or "", evict=evict, main0=main0)
+        done = decide(UnionParams(wb or "", evict, main0), queries)
         if skip or dry:
             return False
-        assert isinstance(done, dict)
-        union = str(done["union"])
+        union = done.union
         nixconvoy_switch = binary("nixconvoy-switch") if plan else ""
 
         # The switch-last targets alone, one by one, once everything else has

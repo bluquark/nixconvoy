@@ -57,6 +57,7 @@ from nixconvoy import (
     targets,
 )
 from nixconvoy.union import UnionQueries
+from nixconvoy.wire import Context, DriftParams, Ran, RemoveWorktree, UnionOutcome, UnionParams
 
 PROGRESS = sys.stderr
 
@@ -339,14 +340,13 @@ def report(text: str, *, tips: dict[str, str] | None = None,
     def drift() -> None:
         nonlocal died
         try:
-            guard.decide(
-                "drift", me=list(ME), union="u" * 40, listed=sorted(LISTED),
-                tips={BRANCH: BASE} if tips is None else tips, in_flight=in_flight or {},
-                dead=dead or [], tz_offset=0, router="choko", targets=["side1"], candidates=["side1"],
+            cx = Context(me=ME, listed=sorted(LISTED), tips={BRANCH: BASE} if tips is None else tips,
+                         in_flight=in_flight or {}, dead=dead or [], tz_offset=0)
+            guard.decide(DriftParams(
+                cx=cx, union="u" * 40, router="choko", targets=["side1"], candidates=["side1"],
                 evict=evict, named=named, work_branch=True, reached=["side1"] if reached else [],
-                running={"side1": running},
-                built={"side1": "/nix/store/union-system"}, held=held or {},
-                provenances={"side1": text})
+                running={"side1": running}, built={"side1": "/nix/store/union-system"}, held=held or {},
+                provenances={"side1": text}))
         except proc.Fail as e:
             died = str(e).strip()
     return printed(drift).strip(), died
@@ -1068,27 +1068,24 @@ def git_cases(d: Path) -> None:
             staged.append(sorted(p.name for p in Path(wt).iterdir()))
             return False
 
-        def union(main0: str | None = None) -> dict[str, object]:
+        def union(main0: str | None = None) -> tuple[UnionOutcome, str]:
             q = UnionQueries(lambda: "HEAD", fetched, lambda: refreshes.append("r"), stage)
             try:
                 with contextlib.redirect_stdout(io.StringIO()) as said:
-                    done = guard.decide("union", q, wb=wb, evict=False,
-                                         main0=main0 or proc.rev("refs/remotes/origin/main"))
+                    done = guard.decide(UnionParams(wb, False, main0 or proc.rev("refs/remotes/origin/main")), q)
             finally:
                 q.drop()
-            assert isinstance(done, dict)
-            done["printed"] = said.getvalue()
-            return done
+            return done, said.getvalue()
 
-        done = union()
-        assert done["branches"] == [["work/other/1", proc.rev("refs/remotes/origin/work/other/1")]], done
-        assert sh(co, "rev-parse", f"{done['union']}^") == proc.rev("refs/remotes/origin/main")
+        done, _ = union()
+        assert done.branches == [("work/other/1", proc.rev("refs/remotes/origin/work/other/1"))], done
+        assert sh(co, "rev-parse", f"{done.union}^") == proc.rev("refs/remotes/origin/main")
         assert staged == [[".git", "a.txt", "b.txt", "nixconvoy.toml", "o.txt"]], staged
         # A fetch that moved origin/main redoes the union on the refreshed
         # checkout.
-        redo = union(main0="0" * 40)
-        assert refreshes == ["r"] and redo["union"] == done["union"], (refreshes, redo)
-        assert "redoing the union" in str(redo["printed"]), redo
+        redo, said = union(main0="0" * 40)
+        assert refreshes == ["r"] and redo.union == done.union, (refreshes, redo)
+        assert "redoing the union" in said, said
 
         # A conflict mergiraf cannot solve names the branch's checkout.
         put(seed, "b.txt", "theirs\n", "their b")
@@ -1216,11 +1213,11 @@ def git_cases(d: Path) -> None:
             os.chdir(rv)
             queries = commands.PruneQueries(rv.resolve(), [])
             try:
-                refused = queries({"ask": "remove_worktree"})
+                refused = queries(RemoveWorktree())
             finally:
                 queries.close()
                 os.chdir(co)
-            assert refused.get("ran") is False and rv.exists(), refused
+            assert isinstance(refused, Ran) and not refused.ok and rv.exists(), refused
             assert checkout.worktree_lock(rv) == held
             (rv / "u.txt").unlink()
             assert commands.prune_one(rv.resolve(), named=True, stopped=commands.Stop(parent, held)) is None
@@ -1766,21 +1763,20 @@ def submodule_cases(d: Path) -> None:
         settled: Future[subprocess.CompletedProcess[str]] = Future()
         settled.set_result(subprocess.CompletedProcess([], 0))
 
-        def union() -> dict[str, object]:
+        def union() -> UnionOutcome:
             q = UnionQueries(lambda: "HEAD", settled, lambda: None, lambda *_: False)
             try:
-                done = guard.decide("union", q, wb=wb, evict=False, main0=proc.rev("refs/remotes/origin/main"))
+                done = guard.decide(UnionParams(wb, False, proc.rev("refs/remotes/origin/main")), q)
             finally:
                 q.drop()
-            assert isinstance(done, dict)
             return done
 
         done = union()
-        u = sh(co, "rev-parse", f"{done['union']}:{path}")
+        u = sh(co, "rev-parse", f"{done.union}:{path}")
         assert dep_ref(f"{submodule.UNION_REFS}/dep/{u}") == u
         assert sh(dep_repo, "rev-parse", f"{u}^1") == v2 and sh(dep_repo, "rev-parse", f"{u}^2") == b1
         assert sh(dep_repo, "show", f"{u}:tool.py") == "v2" and sh(dep_repo, "show", f"{u}:tool2.py") == "b"
-        assert union()["union"] == done["union"]  # deterministic
+        assert union().union == done.union  # deterministic
         assert not sh(dep_repo, "worktree", "list", "--porcelain").count("submodule-merge")
         # The branches conflicting is the other branch's conflict.
         put(ax8, "tool.py", "vB\n", "dep: vB")
@@ -1798,11 +1794,11 @@ def submodule_cases(d: Path) -> None:
         sh(co8, "reset", "--quiet", "--hard", "HEAD~1")
         sh(co8, "push", "--quiet", "--force", "origin", wb8)
         sh(co, "fetch", "--quiet")
-        assert union()["union"] == done["union"]
+        assert union().union == done.union
         # Union refs are kept, pinned or not.
         sh(dep_repo, "push", "--quiet", "origin", f"{v1}:{submodule.UNION_REFS}/dep/{v1}")
         submodule.FETCHED.clear()
-        assert union()["union"] == done["union"]
+        assert union().union == done.union
         assert sh(dep_seed, "ls-remote", str(dep_origin), f"{submodule.UNION_REFS}/dep/*").split()[1::2] == sorted(
             [f"{submodule.UNION_REFS}/dep/{u}", f"{submodule.UNION_REFS}/dep/{v1}"])
 

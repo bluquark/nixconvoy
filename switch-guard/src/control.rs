@@ -13,6 +13,8 @@
 mod model;
 pub mod wire;
 
+use serde::{Deserialize, Serialize};
+
 /// No verification round starts, nor pause ends, within this long of the
 /// target's deadline: the confirm need only take the helper's lock before the
 /// timer's rollback does.
@@ -31,7 +33,7 @@ pub const VERIFY_PAUSE_MS: u64 = 3_000;
 /// The rollback exit code that means the confirm landed after all.
 pub const ALREADY_CONFIRMED: i32 = crate::switch::core::ALREADY_CONFIRMED;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Params {
     pub target: String,
     pub toplevel: String,
@@ -46,6 +48,8 @@ pub struct Params {
     pub fail_verify: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Guard {
     Locked,
@@ -54,11 +58,13 @@ pub enum Guard {
     Failed(String),
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Query {
     /// Take the on-target switch guard (compare-and-swap on the running
     /// system) -> Guard.
-    Guard,
+    TakeGuard,
     /// Whether the toplevel carries /confirmed-switch -> Code (0/1).
     ProbeHelper,
     /// nix-env --set of the toplevel -> Code.
@@ -72,15 +78,17 @@ pub enum Query {
     Arm,
     /// The helper with these arguments, detached -> Code, or Said for a
     /// rollback.
-    Helper(Vec<String>),
+    Helper {
+        args: Vec<String>,
+    },
     /// Monotonic milliseconds -> Now.
-    Now,
+    Clock,
     /// /run/current-system, over a new ssh connection: the proof that sshd
-    /// admits one -> Running.
+    /// admits one -> System.
     Running {
         timeout_ms: Option<u64>,
     },
-    /// The helper's `check` -> Check.
+    /// The helper's `check` -> Checked.
     Check {
         timeout_ms: u64,
     },
@@ -93,8 +101,12 @@ pub enum Query {
     },
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Reply {
+    /// Never on the wire: the machine's first step answers it.
+    #[serde(skip)]
     Start,
     Guard(Guard),
     Code(i32),
@@ -106,9 +118,9 @@ pub enum Reply {
     },
     Text(String),
     Now(u64),
-    Running(Option<String>),
+    System(Option<String>),
     /// `code` < 0: timed out.  `last`: its last stderr line.
-    Check {
+    Checked {
         code: i32,
         last: Option<String>,
     },
@@ -116,6 +128,8 @@ pub enum Reply {
     Done,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Effect {
     Print(String),
@@ -126,6 +140,8 @@ pub enum Effect {
     Mark(String),
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Next {
     Ask(Query),
@@ -133,7 +149,7 @@ pub enum Next {
     Die(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Step {
     pub effects: Vec<Effect>,
     pub next: Next,
@@ -213,7 +229,7 @@ impl Machine {
     }
 
     fn helper(&self, args: &[&str]) -> Query {
-        Query::Helper(args.iter().map(|a| a.to_string()).collect())
+        Query::Helper { args: args.iter().map(|a| a.to_string()).collect() }
     }
 
     pub fn decide(&mut self, reply: Reply) -> Step {
@@ -231,7 +247,7 @@ impl Machine {
     fn transition(&mut self, pc: Pc, reply: Reply, fx: &mut Vec<Effect>) -> Next {
         let target = self.p.target.clone();
         match (pc, reply) {
-            (Pc::Start, Reply::Start) => self.ask(Pc::Guarding, Query::Guard),
+            (Pc::Start, Reply::Start) => self.ask(Pc::Guarding, Query::TakeGuard),
             (Pc::Guarding, Reply::Guard(g)) => match g {
                 Guard::Locked => self.ask(Pc::Probing, Query::ProbeHelper),
                 Guard::Moved(cur) => Next::Die(format!(
@@ -273,7 +289,7 @@ impl Machine {
                 Next::Done
             }
             (Pc::ReadingDeadline, Reply::Text(t)) => match t.trim().parse::<u64>() {
-                Ok(secs) => self.ask(Pc::Clocking { deadline_ms: secs * 1000 }, Query::Now),
+                Ok(secs) => self.ask(Pc::Clocking { deadline_ms: secs * 1000 }, Query::Clock),
                 Err(_) => Next::Die(format!("{target}'s confirmed-switch helper gave no deadline ({t:?})")),
             },
             // Taken before arming, so the target's timer, started later, is
@@ -314,7 +330,7 @@ impl Machine {
                 if self.p.fail_verify {
                     return self.verify_failed("DEPLOY_FAIL_VERIFY=1".to_string(), fx);
                 }
-                self.ask(Pc::VerifyNow { w, rc }, Query::Now)
+                self.ask(Pc::VerifyNow { w, rc }, Query::Clock)
             }
             (Pc::Staging, Reply::Code(c)) => {
                 fx.push(Effect::Disarmed);
@@ -339,7 +355,7 @@ impl Machine {
                     Some(tmo) => self.ask(Pc::VerifyRunning { w, rc, tmo }, Query::Running { timeout_ms: Some(tmo) }),
                 }
             }
-            (Pc::VerifyRunning { w, rc, tmo }, Reply::Running(cur)) => {
+            (Pc::VerifyRunning { w, rc, tmo }, Reply::System(cur)) => {
                 if cur.is_none() && tmo < PROBE_TIMEOUT_MS {
                     self.cut = true;
                 }
@@ -350,13 +366,13 @@ impl Machine {
                     );
                     return self.verify_internet(w, rc, vec![problem]);
                 }
-                self.ask(Pc::CheckNow { w, rc }, Query::Now)
+                self.ask(Pc::CheckNow { w, rc }, Query::Clock)
             }
             (Pc::CheckNow { w, rc }, Reply::Now(now)) => match self.budget(w, now) {
                 None => self.out_of_time_end(w, rc, Vec::new()),
                 Some(tmo) => self.ask(Pc::VerifyCheck { w, rc, tmo }, Query::Check { timeout_ms: tmo }),
             },
-            (Pc::VerifyCheck { w, rc, tmo }, Reply::Check { code, last }) => {
+            (Pc::VerifyCheck { w, rc, tmo }, Reply::Checked { code, last }) => {
                 let mut problems = Vec::new();
                 if code < 0 {
                     self.cut |= tmo < PROBE_TIMEOUT_MS;
@@ -389,7 +405,7 @@ impl Machine {
                 }
                 self.ask(Pc::VerifyPause { w, rc }, Query::Sleep { ms: VERIFY_PAUSE_MS })
             }
-            (Pc::VerifyPause { w, rc }, Reply::Done) => self.ask(Pc::VerifyNow { w, rc }, Query::Now),
+            (Pc::VerifyPause { w, rc }, Reply::Done) => self.ask(Pc::VerifyNow { w, rc }, Query::Clock),
 
             (Pc::RollingBack { problem }, Reply::Code(c)) => {
                 fx.push(Effect::Disarmed);
@@ -429,7 +445,7 @@ impl Machine {
                 let pc = Pc::Reporting { fallout: Fallout::ConfirmFailed, problem: String::new() };
                 self.ask(pc, Query::Running { timeout_ms: None })
             }
-            (Pc::Reporting { fallout, problem }, Reply::Running(cur)) => {
+            (Pc::Reporting { fallout, problem }, Reply::System(cur)) => {
                 let cur = cur.unwrap_or_else(|| "nothing reachable".to_string());
                 Next::Die(match fallout {
                     Fallout::VerifyFailed => format!(
@@ -457,7 +473,7 @@ impl Machine {
 
     fn verify_internet(&mut self, w: Window, rc: i32, problems: Vec<String>) -> Next {
         if self.p.router {
-            return self.ask(Pc::InternetNow { w, rc, problems }, Query::Now);
+            return self.ask(Pc::InternetNow { w, rc, problems }, Query::Clock);
         }
         self.verify_end(w, rc, problems)
     }
@@ -476,7 +492,7 @@ impl Machine {
         if !self.cut {
             self.last = problems.clone();
         }
-        self.ask(Pc::VerifyEnd { w, rc, problems }, Query::Now)
+        self.ask(Pc::VerifyEnd { w, rc, problems }, Query::Clock)
     }
 
     fn verify_failed(&mut self, problem: String, fx: &mut Vec<Effect>) -> Next {

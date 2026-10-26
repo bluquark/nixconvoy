@@ -1,76 +1,28 @@
 //! The JSON-lines protocol nixconvoy-switch (control/wire.rs) and
-//! nixconvoy-plan (plan/wire.rs) speak with nixconvoy: nixconvoy writes the
-//! parameters, then one reply per query; the binary answers each with one
-//! line until it asks nothing more.
-use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+//! nixconvoy-plan (plan/wire.rs) speak with nixconvoy: every line is the
+//! serde default encoding of one of this crate's types (an enum externally
+//! tagged by its variant's snake_case name, a struct by field, Option as
+//! null, tuples and sets as lists), which src/nixconvoy/wire.py mirrors
+//! class for type.  nixconvoy writes the parameters, then one reply per
+//! query; the binary answers each with one step until
+//! it asks nothing more.
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::io::{BufRead, Write};
 
-pub fn field<'a>(v: &'a Value, k: &str) -> Result<&'a Value, String> {
-    v.get(k).ok_or_else(|| format!("missing {k} in {v}"))
+/// The parameters line.
+pub fn params<P: DeserializeOwned>(line: &str) -> Result<P, String> {
+    serde_json::from_str(line).map_err(|e| e.to_string())
 }
 
-pub fn text(v: &Value, k: &str) -> Result<String, String> {
-    field(v, k)?.as_str().map(str::to_string).ok_or_else(|| format!("{k} is not a string"))
+/// A reply line.
+pub fn reply<R: DeserializeOwned>(line: &str) -> Result<R, String> {
+    serde_json::from_str(line).map_err(|e| e.to_string())
 }
 
-pub fn opt_text(v: &Value) -> Result<Option<String>, String> {
-    match v {
-        Value::Null => Ok(None),
-        Value::String(s) => Ok(Some(s.clone())),
-        _ => Err(format!("{v} is not a string or null")),
-    }
-}
-
-pub fn flag(v: &Value, k: &str) -> Result<bool, String> {
-    field(v, k)?.as_bool().ok_or_else(|| format!("{k} is not a boolean"))
-}
-
-pub fn int(v: &Value, k: &str) -> Result<i64, String> {
-    field(v, k)?.as_i64().ok_or_else(|| format!("{k} is not an integer"))
-}
-
-fn string_list(v: &Value, k: &str) -> Result<Vec<String>, String> {
-    v.as_array()
-        .ok_or_else(|| format!("{k} is not a list"))?
-        .iter()
-        .map(|x| x.as_str().map(str::to_string).ok_or_else(|| format!("{k} holds a non-string")))
-        .collect()
-}
-
-pub fn strings(v: &Value, k: &str) -> Result<Vec<String>, String> {
-    string_list(field(v, k)?, k)
-}
-
-/// The object `v[k]` with each value read by `each`.
-pub fn map_of<T>(v: &Value, k: &str, each: impl Fn(&Value) -> Result<T, String>) -> Result<BTreeMap<String, T>, String> {
-    let o: &Map<String, Value> = field(v, k)?.as_object().ok_or_else(|| format!("{k} is not an object"))?;
-    o.iter().map(|(n, x)| Ok((n.clone(), each(x)?))).collect()
-}
-
-pub fn string_map(v: &Value, k: &str) -> Result<BTreeMap<String, String>, String> {
-    map_of(v, k, |x| x.as_str().map(str::to_string).ok_or_else(|| format!("{k} holds a non-string")))
-}
-
-pub fn string_lists(v: &Value, k: &str) -> Result<BTreeMap<String, Vec<String>>, String> {
-    map_of(v, k, |x| string_list(x, k))
-}
-
-/// A line of the protocol, which is an object: the parameters or a reply.
-pub fn object(line: &str, what: &str) -> Result<Value, String> {
-    let v: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
-    if !v.is_object() {
-        return Err(format!("{what} is not an object: {line}"));
-    }
-    Ok(v)
-}
-
-pub fn params(line: &str) -> Result<Value, String> {
-    object(line, "the parameters")
-}
-
-pub fn reply(line: &str) -> Result<Value, String> {
-    object(line, "a reply")
+/// A step's line.
+pub fn line<T: Serialize>(step: &T) -> String {
+    serde_json::to_string(step).expect("a step serializes")
 }
 
 /// A binary's stdin/stdout loop: `start` reads the parameters line, `decide`

@@ -17,6 +17,39 @@ from .checkout import current_branch
 from .guard import drive
 from .proc import Fail, out, rev, run, stream
 from .targets import PROBE_TIMEOUT, control_opts, provenance_digest
+from .wire import (
+    Activate,
+    Arm,
+    Armed,
+    Check,
+    Checked,
+    Clock,
+    Code,
+    Deadline,
+    Disarmed,
+    Done,
+    Effect,
+    Failed,
+    Flag,
+    Guard,
+    Helper,
+    Internet,
+    Locked,
+    Moved,
+    Now,
+    ProbeHelper,
+    Running,
+    Said,
+    SetProfile,
+    Sleep,
+    SwitchParams,
+    SwitchQuery,
+    SwitchReply,
+    System,
+    TakeGuard,
+    Text,
+    encode,
+)
 
 
 def provenance_doc(*, union: str, main: str | None, branches: dict[str, str | None],
@@ -127,99 +160,96 @@ def switch(target: str, expected: str, toplevel: str, nixconvoy_switch: str,
         found = [m.group(1) for ln in lines if (m := re.search(pattern, ln))]
         return found[-1] if found else None
 
-    def secs(ms: object) -> float:
-        return ms / 1000 if isinstance(ms, int) else float(PROBE_TIMEOUT)
+    def secs(ms: int | None) -> float:
+        return ms / 1000 if ms is not None else float(PROBE_TIMEOUT)
 
-    def perform(ask: dict[str, object]) -> dict[str, object]:
+    def perform(ask: SwitchQuery) -> SwitchReply:
         nonlocal guard
-        kind = ask.get("ask")
-        if kind == "guard":
-            guard = subprocess.Popen(switch_guard_cmd(target, expected, toplevel, digest),
-                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-            assert guard.stdin is not None and guard.stdout is not None
-            line = guard.stdout.readline().strip()
-            if line == "LOCKED":
+        match ask:
+            case TakeGuard():
+                guard = subprocess.Popen(switch_guard_cmd(target, expected, toplevel, digest),
+                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+                assert guard.stdin is not None and guard.stdout is not None
+                line = guard.stdout.readline().strip()
+                if line == "LOCKED":
+                    try:
+                        guard.stdin.write(provenance + "\n")
+                        guard.stdin.flush()
+                        claimed = guard.stdout.readline().strip()
+                    except OSError:
+                        claimed = ""
+                    if provenance and claimed != "WROTE":
+                        print(f"note: could not claim {target}'s provenance in {targets.PROVENANCE_FILE}; until "
+                              f"its next switch, other deploys treat its system as untracked",
+                              file=sys.stderr)
+                    return Guard(Locked())
+                if line.startswith("MOVED"):
+                    return Guard(Moved(line.removeprefix("MOVED").strip() or "nothing readable"))
+                return Guard(Failed(line))
+            case ProbeHelper():
+                return Code(run(targets.target_cmd(target, ["test", "-e", helper]), check=False,
+                                timeout=PROBE_TIMEOUT).returncode)
+            case SetProfile():
+                return Code(stream(targets.target_cmd(target, ["nix-env", "-p", targets.SYSTEM_PROFILE,
+                                                               "--set", toplevel], sudo=True), held_as=held))
+            case Activate():
+                return Code(detached([f"{toplevel}/bin/switch-to-configuration", "switch"],
+                                     unit="nixconvoy-switch-to-configuration"))
+            case Deadline():
+                return Text(out(targets.target_cmd(target, [helper, "deadline"])))
+            case Arm():
+                lines: list[str] = []
+                rc = stream(targets.target_cmd(target, [helper, "arm"], sudo=True), held_as=held, sink=lines)
+                return Said(rc, said(lines, r"armed, rolling back to (\S+) in "))
+            case Helper(args):
+                if args != ["rollback"]:
+                    return Code(detached([helper, *args]))
+                rb_lines: list[str] = []
+                rc = detached([helper, "rollback"], sink=rb_lines)
+                return Said(rc, said(rb_lines, r"rolled back to (\S+)$"))
+            case Clock():
+                return Now(proc.monotonic_ms())
+            # A verification probe killed by another target's die() is a failed
+            # round, retried until the deadline.
+            case Running(timeout_ms):
                 try:
-                    guard.stdin.write(provenance + "\n")
-                    guard.stdin.flush()
-                    claimed = guard.stdout.readline().strip()
-                except OSError:
-                    claimed = ""
-                if provenance and claimed != "WROTE":
-                    print(f"note: could not claim {target}'s provenance in {targets.PROVENANCE_FILE}; until "
-                          f"its next switch, other deploys treat its system as untracked",
-                          file=sys.stderr)
-                return {"guard": "locked"}
-            if line.startswith("MOVED"):
-                now_running = line.removeprefix("MOVED").strip() or "nothing readable"
-                return {"guard": "moved", "running": now_running}
-            return {"guard": "failed", "line": line}
-        if kind == "probe_helper":
-            return {"code": run(targets.target_cmd(target, ["test", "-e", helper]), check=False,
-                                timeout=PROBE_TIMEOUT).returncode}
-        if kind == "set_profile":
-            return {"code": stream(targets.target_cmd(target, ["nix-env", "-p", targets.SYSTEM_PROFILE,
-                                                              "--set", toplevel], sudo=True), held_as=held)}
-        if kind == "activate":
-            return {"code": detached([f"{toplevel}/bin/switch-to-configuration", "switch"],
-                                     unit="nixconvoy-switch-to-configuration")}
-        if kind == "deadline":
-            return {"text": out(targets.target_cmd(target, [helper, "deadline"]))}
-        if kind == "arm":
-            lines: list[str] = []
-            rc = stream(targets.target_cmd(target, [helper, "arm"], sudo=True), held_as=held, sink=lines)
-            return {"code": rc, "to": said(lines, r"armed, rolling back to (\S+) in ")}
-        if kind == "helper":
-            args = ask.get("args")
-            assert isinstance(args, list)
-            if args != ["rollback"]:
-                return {"code": detached([helper, *map(str, args)])}
-            rb_lines: list[str] = []
-            rc = detached([helper, "rollback"], sink=rb_lines)
-            return {"code": rc, "to": said(rb_lines, r"rolled back to (\S+)$")}
-        if kind == "now":
-            return {"now": proc.monotonic_ms()}
-        # A verification probe killed by another target's die() is a failed
-        # round, retried until the deadline.
-        if kind == "running":
-            try:
-                return {"running": targets.running_system(target, timeout=secs(ask.get("timeout_ms")),
-                                                        fresh=True)}
-            except Fail:
-                return {"running": None}
-        if kind == "check":
-            t = secs(ask.get("timeout_ms"))
-            try:
-                p = run(targets.target_cmd(target, [helper, "check"], sudo=True), check=False, timeout=t)
-            except Fail as e:
-                return {"check": 1, "last": f"check interrupted: {e}"}
-            lines = (p.stderr or "").strip().splitlines()
-            return {"check": p.returncode, "last": lines[-1] if lines else None}
-        if kind == "internet":
-            return {"flag": targets.internet_reachable(secs(ask.get("timeout_ms")))}
-        if kind == "sleep":
-            time.sleep(secs(ask.get("ms")))
-            return {"done": True}
-        raise ValueError(f"nixconvoy-switch asked {ask!r}")
+                    return System(targets.running_system(target, timeout=secs(timeout_ms), fresh=True))
+                except Fail:
+                    return System(None)
+            case Check(timeout_ms):
+                t = secs(timeout_ms)
+                try:
+                    p = run(targets.target_cmd(target, [helper, "check"], sudo=True), check=False, timeout=t)
+                except Fail as e:
+                    return Checked(1, f"check interrupted: {e}")
+                lines = (p.stderr or "").strip().splitlines()
+                return Checked(p.returncode, lines[-1] if lines else None)
+            case Internet(timeout_ms):
+                return Flag(targets.internet_reachable(secs(timeout_ms)))
+            case Sleep(ms):
+                time.sleep(secs(ms))
+                return Done()
+            case _:
+                raise ValueError(f"nixconvoy-switch asked {ask!r}")
 
-    def effect(e: dict[str, object]) -> None:
-        if e.get("armed") is True:
-            # Armed, it is confirmed or rolled back on its own merits
-            # whatever fails elsewhere.
-            proc.set_finishing(True)
-            proc.ARMED.add(target)
-        elif e.get("armed") is False:
-            proc.ARMED.discard(target)
+    def effect(e: Effect) -> None:
+        match e:
+            case Armed():
+                # Armed, it is confirmed or rolled back on its own merits
+                # whatever fails elsewhere.
+                proc.set_finishing(True)
+                proc.ARMED.add(target)
+            case Disarmed():
+                proc.ARMED.discard(target)
+            case _:
+                pass
 
     was_finishing = proc.set_finishing(False)
     try:
-        drive(nixconvoy_switch, {
-            "target": target, "toplevel": toplevel,
-            "expected": expected,
-            "place": "local" if local else targets.ssh_address(target),
-            "quiet": quiet, "router": needs_internet,
-            "fail_verify": os.environ.get("NIXCONVOY_FAIL_VERIFY") == "1"},
-            perform, "nixconvoy-switch", f" while switching {target}", effect)
+        params = SwitchParams(target, toplevel, expected, "local" if local else targets.ssh_address(target), quiet,
+                              needs_internet, os.environ.get("NIXCONVOY_FAIL_VERIFY") == "1")
+        drive(nixconvoy_switch, encode(params), perform, SwitchQuery, type(None),
+              "nixconvoy-switch", f" while switching {target}", effect)
     finally:
         proc.set_finishing(was_finishing)
         if guard is not None:

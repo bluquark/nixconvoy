@@ -19,10 +19,13 @@
 //! and the restore leaves the tmp commits behind (never pushed); the next
 //! run pops them first.
 use super::{failed, no_hints, Halt, Query, Run, Script, MAIN};
+use serde::Deserialize;
 
 pub const TMP_STAGED: &str = "tmp: staged (ensure_rebased)";
 pub const TMP_UNSTAGED: &str = "tmp: unstaged (ensure_rebased)";
 
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Params {
     /// Unwind a dead run's tmp commits.

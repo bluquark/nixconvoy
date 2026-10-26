@@ -54,6 +54,7 @@
 //! other branch, so nothing is held under it: the target gets this
 //! checkout's view alone, the hold standing.
 use super::{listed, Halt, Query, Run, Script, BRANCHES_KEY};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -144,6 +145,8 @@ pub fn parse(text: &str) -> Option<Provenance> {
     })
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Kind {
     /// No provenance for the system it runs: as before provenances.
@@ -190,7 +193,7 @@ impl Kind {
 }
 
 /// What the deploy knows when it classifies.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Deserialize, Clone, Debug, PartialEq)]
 pub struct Context {
     /// This checkout: (machine, checkout directory).
     pub me: (String, String),
@@ -297,7 +300,7 @@ pub fn switch_order(names: &[String], router: &str) -> Vec<String> {
     v
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Deserialize, Clone, Debug, PartialEq)]
 pub struct Params {
     pub cx: Context,
     /// The union commit this deploy builds.
@@ -328,7 +331,7 @@ pub struct Params {
     pub provenances: BTreeMap<String, String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct Outcome {
     /// Targets whose running system differs from the union.
     pub affected: Vec<String>,

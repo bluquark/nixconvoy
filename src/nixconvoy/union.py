@@ -23,6 +23,36 @@ from .checkout import (
 )
 from .config import MSG_FILE, cfg
 from .proc import git, ok, out, rev, run, solve_with_mergiraf
+from .wire import (
+    AbortMerge,
+    Add,
+    AwaitPending,
+    Branches,
+    Checkout,
+    CollectFetch,
+    CommitMerge,
+    CommitUnion,
+    DropFile,
+    Flag,
+    Head,
+    HeadTree,
+    Listed,
+    Merge,
+    Merged,
+    Names,
+    PlanQuery,
+    PlanReply,
+    Ran,
+    Refresh,
+    Refs,
+    Solve,
+    Stage,
+    StripTree,
+    Summary,
+    Text,
+    Unchanged,
+    Worktree,
+)
 
 
 class UnionQueries(GitQueries):
@@ -40,81 +70,73 @@ class UnionQueries(GitQueries):
         while self.wts:
             drop_worktree(self.wts.pop())
 
-    def __call__(self, ask: dict[str, object]) -> dict[str, object]:
-        def arg(k: str) -> str:
-            return str(ask.get(k))
-
-        kind, wt = ask.get("ask"), self.wt
-        if kind == "listed":
-            return {"names": sorted(allowed_branches())}
-        if kind == "branches":
-            # Every work-branch-shaped ref: the listed ones, and the ones
-            # shaped like this machine's (any machine's), so the core can warn
-            # of a pushed work branch nobody registered.
-            shape = cfg().branch_prefix.replace("{machine}", "*") + "*"
-            pats = allowed_branches()
-            listing = out(["git", "for-each-ref", "--format=%(refname:strip=3)%09%(objectname)",
-                           "refs/remotes/origin/"])
-            refs = [ln.split("\t", 1) for ln in listing.splitlines()]
-            return {"refs": [r for r in refs if listed(r[0], pats) or fnmatchcase(r[0], shape)]}
-        if kind == "unchanged":
-            base = out(["git", "merge-base", "origin/main", arg("sha")])
-            return {"flag": ok(["git", "diff", "--quiet", base, arg("sha"), "--", ".",
-                                f":(exclude){MSG_FILE}"])}
-        if kind == "worktree":
-            self.drop()
-            self.wt = add_worktree(self.base())
-            self.wts.append(self.wt)
-            return {"ran": True, "detail": ""}
-        if kind == "summary":
-            return {"text": summarize(arg("sha"))}
-        if kind == "merge":
-            p = git("merge", "--quiet", "--no-edit", "-m", f"union {arg('name')}", arg("sha"),
-                    cwd=wt, env=MACHINE_ENV, check=False)
-            files: list[str] = [] if p.returncode == 0 else out(
-                ["git", "diff", "--name-only", "--diff-filter=U"], cwd=wt).splitlines()
-            return {"merge": p.returncode == 0, "files": files,
-                    "detail": (p.stderr or "").strip()}
-        if kind == "drop_file":
-            return ran(git("rm", "--quiet", "-f", arg("file"), cwd=wt, check=False))
-        if kind == "solve":
-            if submodule.owner(Path(wt), arg("file")) is not None:
-                return {"flag": submodule.solve_union(Path(wt), arg("file"))}
-            return {"flag": solve_with_mergiraf(wt, arg("file"))}
-        if kind == "add":
-            return ran(git("add", "--", arg("file"), cwd=wt, check=False))
-        if kind == "abort_merge":
-            return ran(git("merge", "--abort", cwd=wt, check=False))
-        if kind == "commit_merge":
-            return ran(git("commit", "--quiet", "--no-edit", "--no-verify", cwd=wt,
-                           env=MACHINE_ENV, check=False))
-        if kind == "strip_tree":
-            git("rm", "--quiet", "--ignore-unmatch", "-f", MSG_FILE, cwd=wt)
-            p = run(["git", "write-tree"], cwd=wt, check=False)
-            return {"text": p.stdout.strip() if p.returncode == 0 else None}
-        if kind == "head":
-            return {"text": out(["git", "rev-parse", "HEAD"], cwd=wt)}
-        if kind == "head_tree":
-            return {"text": out(["git", "rev-parse", "HEAD^{tree}"], cwd=wt)}
-        if kind == "commit_union":
-            p = run(["git", "commit-tree", arg("tree"), "-p", rev("refs/remotes/origin/main") or "HEAD",
-                     "-m", "deploy union of work branches"], env=MACHINE_ENV, check=False)
-            return {"text": p.stdout.strip() if p.returncode == 0 else None}
-        if kind == "checkout":
-            return ran(git("reset", "--hard", "--quiet", arg("union"), cwd=wt, check=False))
-        if kind == "collect_fetch":
-            self.fetch.result()
-            return {"ran": True, "detail": ""}
-        if kind == "refresh":
-            self.refresh()
-            return {"ran": True, "detail": ""}
-        if kind == "await_pending":
-            if self.await_pending is None:
-                return {"flag": False}
-            return {"flag": self.await_pending(wt, arg("union"))}
-        if kind == "stage":
-            names, branches = ask.get("listed"), ask.get("branches")
-            assert isinstance(names, list) and isinstance(branches, list)
-            return {"flag": self.stage(wt, arg("union"), [str(b) for b in names],
-                                       [(str(n), str(t)) for n, t in branches])}
-        return super().__call__(ask)
+    def __call__(self, ask: PlanQuery) -> PlanReply:
+        wt = self.wt
+        match ask:
+            case Listed():
+                return Names(sorted(allowed_branches()))
+            case Branches():
+                # Every work-branch-shaped ref: the listed ones, and the ones
+                # shaped like this machine's (any machine's), so the core can warn
+                # of a pushed work branch nobody registered.
+                shape = cfg().branch_prefix.replace("{machine}", "*") + "*"
+                pats = allowed_branches()
+                listing = out(["git", "for-each-ref", "--format=%(refname:strip=3)%09%(objectname)",
+                               "refs/remotes/origin/"])
+                refs = [(n, t) for n, t in (ln.split("\t", 1) for ln in listing.splitlines())]
+                return Refs([r for r in refs if listed(r[0], pats) or fnmatchcase(r[0], shape)])
+            case Unchanged(sha):
+                base = out(["git", "merge-base", "origin/main", sha])
+                return Flag(ok(["git", "diff", "--quiet", base, sha, "--", ".", f":(exclude){MSG_FILE}"]))
+            case Worktree():
+                self.drop()
+                self.wt = add_worktree(self.base())
+                self.wts.append(self.wt)
+                return Ran(True, "")
+            case Summary(sha):
+                return Text(summarize(sha))
+            case Merge(name, sha):
+                p = git("merge", "--quiet", "--no-edit", "-m", f"union {name}", sha, cwd=wt, env=MACHINE_ENV, check=False)
+                files: list[str] = [] if p.returncode == 0 else out(
+                    ["git", "diff", "--name-only", "--diff-filter=U"], cwd=wt).splitlines()
+                return Merged(p.returncode == 0, files, (p.stderr or "").strip())
+            case DropFile(file):
+                return ran(git("rm", "--quiet", "-f", file, cwd=wt, check=False))
+            case Solve(file):
+                if submodule.owner(Path(wt), file) is not None:
+                    return Flag(submodule.solve_union(Path(wt), file))
+                return Flag(solve_with_mergiraf(wt, file))
+            case Add(file):
+                return ran(git("add", "--", file, cwd=wt, check=False))
+            case AbortMerge():
+                return ran(git("merge", "--abort", cwd=wt, check=False))
+            case CommitMerge():
+                return ran(git("commit", "--quiet", "--no-edit", "--no-verify", cwd=wt, env=MACHINE_ENV, check=False))
+            case StripTree():
+                git("rm", "--quiet", "--ignore-unmatch", "-f", MSG_FILE, cwd=wt)
+                p = run(["git", "write-tree"], cwd=wt, check=False)
+                return Text(p.stdout.strip() if p.returncode == 0 else None)
+            case Head():
+                return Text(out(["git", "rev-parse", "HEAD"], cwd=wt))
+            case HeadTree():
+                return Text(out(["git", "rev-parse", "HEAD^{tree}"], cwd=wt))
+            case CommitUnion(tree):
+                p = run(["git", "commit-tree", tree, "-p", rev("refs/remotes/origin/main") or "HEAD",
+                         "-m", "deploy union of work branches"], env=MACHINE_ENV, check=False)
+                return Text(p.stdout.strip() if p.returncode == 0 else None)
+            case Checkout(union):
+                return ran(git("reset", "--hard", "--quiet", union, cwd=wt, check=False))
+            case CollectFetch():
+                self.fetch.result()
+                return Ran(True, "")
+            case Refresh():
+                self.refresh()
+                return Ran(True, "")
+            case AwaitPending(union):
+                if self.await_pending is None:
+                    return Flag(False)
+                return Flag(self.await_pending(wt, union))
+            case Stage(union, names, branches):
+                return Flag(self.stage(wt, union, names, branches))
+            case _:
+                return super().__call__(ask)

@@ -60,6 +60,7 @@ from .checkout import (
 from .config import MSG_FILE, cfg
 from .guard import decide
 from .proc import NOTHING_DONE, Fail, die, git, is_ancestor, ok, out, run, solve_with_mergiraf
+from .wire import Ok, Onto
 
 # On a submodule's origin: every tip a branch left behind (a reset, a
 # rebase, its removal) as refs/nixconvoy/past/<branch>/<sha>, since nix
@@ -845,11 +846,10 @@ def onto(d: Path, upstream: str) -> tuple[bool, str]:
     prev = Path.cwd()
     os.chdir(d)
     try:
-        done = decide("rebase", mode="onto", upstream=upstream)
+        done = decide(Onto(upstream))
     finally:
         os.chdir(prev)
-    assert isinstance(done, dict)
-    return done.get("ok") is True, str(done.get("status"))
+    return isinstance(done, Ok), done.value
 
 
 def catch_up_one(sub: Sub, wb: str, top: Path) -> str | None:

@@ -168,7 +168,9 @@ def worktree_remove(path: str) -> None:
     branch unless removal_keeps keeps it or, in a nixconvoy repository,
     the prune core does (named, the exiting session's lock ended for it,
     its branches dropped here and on origin): a failure, which leaves it
-    on disk."""
+    on disk.  Its name lock is waited for while its holder runs, within
+    the hook's timeout (hooks.json): a kill meanwhile leaves nothing
+    taken."""
     if not path:
         return
     d = Path(path).resolve()
@@ -177,9 +179,8 @@ def worktree_remove(path: str) -> None:
         return
     os.chdir(top)
     nixconvoy = Path(CONFIG_FILE).is_file()
-    held = hold_lock(name_lock_path(d), wait=60)
-    if held is None:
-        die(f"hook worktree-remove: {d} stayed locked for 60s by a close or a create, kept")
+    held = hold_lock(name_lock_path(d), wait=True, what=str(d))
+    assert held is not None
     try:
         if not d.is_dir():
             return
@@ -338,7 +339,7 @@ def subagent_stop(session: int, stop: dict[str, object]) -> None:
             with (common / "nixconvoy-prune.lock").open("w") as serial:
                 fcntl.flock(serial, fcntl.LOCK_EX)
                 gone = not d.is_dir()
-                why = None if gone else prune_one(d, named=True, stopped=Stop(session, stop_lock))
+                why = None if gone else prune_one(d, named=True, stopped=Stop(session, stop_lock), wait_name=False)
             verdict = "removed meanwhile" if gone else "empty, removed" if why is None else f"kept, {why}"
     except Exception as e:  # noqa: BLE001 - reported in the log
         verdict = f"kept, its check failed: {failure(e)}"
