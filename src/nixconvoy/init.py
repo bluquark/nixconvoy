@@ -1,6 +1,6 @@
 """`nixconvoy init`: nixconvoy.toml for a fresh install.  Every required
 key is detected from the repository - the flake directory, the hosts
-directory, the targets' system, this machine's work-branch pattern - or
+directory, the targets' system, this machine's work-branch prefix - or
 starts from this machine (the ssh address template, as this user); the
 optional sections are written as commented examples filled with what was
 found (the flake's checks, the targets).  git is only read: nothing is
@@ -62,7 +62,7 @@ def main(flake_arg: str | None, start: Path) -> None:
     check_names = sorted(c for c in checks if isinstance(c, str)) if isinstance(checks, list) else []
     ssh = f"{this_user()}@{{target}}"
     text = render(flake=flake, hosts_dir=hosts_dir, system=system, ssh=ssh, prefix=prefix,
-                  branches=[prefix.format(machine=proc.this_machine()) + "*"], checks=check_names, targets=targets)
+                  branches=[prefix.format(machine=proc.this_machine())], checks=check_names, targets=targets)
     try:
         config.parse(text)
     except config.ConfigError as e:  # a bug in render, never the user's
@@ -226,8 +226,8 @@ def render(*, flake: str, hosts_dir: str, system: str, ssh: str, prefix: str, br
         "# A checkout's work branch is <branch_prefix><leaf>, `open <path>` naming it after the path.",
         "# {machine} in the prefix is this machine's hostname, a namespace per machine when you want one.",
         f"branch_prefix = {q(prefix)}",
-        "# The work branches nixconvoy may union into a deploy (and own, when named with the prefix) as",
-        "# patterns (* spans anything); a pushed branch none matches is ignored.",
+        "# The work branches nixconvoy may union into a deploy (and own, when named with the prefix), by",
+        "# the prefixes of their names; a pushed branch starting with none is ignored.",
         f"work_branches = [{', '.join(q(b) for b in branches)}]",
         "# Child worktrees are an optional feature of nixconvoy that can be used by hand if desired,",
         "# but is primarily intended to hook into worktrees that harnesses automatically create to isolate their subagents.",

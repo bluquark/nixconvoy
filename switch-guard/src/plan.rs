@@ -20,17 +20,9 @@ pub const MSG_FILE: &str = "COMMIT_MSG.md";
 pub const BRANCHES_KEY: &str = "nixconvoy.toml's work_branches";
 pub const MAIN: &str = "refs/remotes/origin/main";
 
-/// Whether `name` matches one of work_branches' patterns, where `*`
-/// spans anything.
-pub fn listed<'a>(patterns: impl IntoIterator<Item = &'a str>, name: &str) -> bool {
-    fn glob(p: &[u8], n: &[u8]) -> bool {
-        match p.split_first() {
-            None => n.is_empty(),
-            Some((b'*', rest)) => (0..=n.len()).any(|i| glob(rest, &n[i..])),
-            Some((c, rest)) => n.first() == Some(c) && glob(rest, &n[1..]),
-        }
-    }
-    patterns.into_iter().any(|p| glob(p.as_bytes(), name.as_bytes()))
+/// Whether `name` starts with one of work_branches' prefixes.
+pub fn listed<'a>(prefixes: impl IntoIterator<Item = &'a str>, name: &str) -> bool {
+    prefixes.into_iter().any(|p| name.starts_with(p))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -135,7 +127,7 @@ pub enum Query {
 
     /// work_branches as the checkout now has it -> Names.
     Listed,
-    /// origin's work branches (the listed patterns and this prefix's shape) and their tips, in ref order -> Refs.
+    /// origin's work branches (the listed prefixes and this prefix's shape) and their tips, in ref order -> Refs.
     Branches,
     /// Whether `sha` changes nothing but MSG_FILE since its merge base with
     /// origin/main -> Flag.

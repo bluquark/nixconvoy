@@ -14,7 +14,7 @@ what is deployed.
 ## The model in git terms
 
 - **A work branch is where experiments live.**  Each checkout you deploy from
-  owns one, listed by pattern in `nixconvoy.toml`'s `work_branches`.  A
+  owns one, listed by prefix in `nixconvoy.toml`'s `work_branches`.  A
   deploy commits the staged state onto it and pushes it; nothing else
   writes there: a deploy, land or undeploy that finds origin's copy
   holding commits this checkout never pushed is refused before it
@@ -149,9 +149,9 @@ nix run .#nixconvoy -- deploy -m "describe this increment"
 
 `init` detects what it can (the flake directory, the hosts directory, the
 targets' system) and writes `nixconvoy.toml` - its optional sections as
-commented examples, the branch prefix `nixconvoy/` and the work-branch
-pattern `nixconvoy/*` (a prefix `nixconvoy/{machine}/`, the hostname,
-namespaces each machine's branches when several deploy); the ssh address
+commented examples, the branch prefix `nixconvoy/`, listed as the one
+work-branch prefix (`nixconvoy/{machine}/`, the hostname, namespaces each
+machine's branches when several deploy); the ssh address
 template starts as `<you>@{target}`, for you to edit.
 
 On a NixOS machine you deploy from, the package in
@@ -190,8 +190,8 @@ branch_prefix = "nixconvoy/"       # a checkout owns "<prefix><leaf>" (`open <pa
                                    # subagent worktree "<checkout's branch>-<name>" ("<prefix>main-<name>"
                                    # under a plain checkout); "{machine}" in it is this machine's hostname,
                                    # a namespace per machine ("nixconvoy/{machine}/")
-work_branches = ["nixconvoy/*"]    # the work branches nixconvoy may union or own, as patterns (`*` the
-                                   # wildcard); a pushed branch none matches is ignored
+work_branches = ["nixconvoy/"]     # the work branches nixconvoy may union or own, by the prefixes of
+                                   # their names; a pushed branch starting with none is ignored
 child_worktrees = ".claude/worktrees"   # where `open --child <worktree>` puts a child (subagent) worktree, under the
                                         # checkout (Claude Code's own place; excluded through .git/info/exclude)
 

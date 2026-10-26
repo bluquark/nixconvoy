@@ -18,7 +18,6 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterator
-from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import IO, NamedTuple
 
@@ -75,10 +74,10 @@ def fetch_args(*flags: str) -> list[str]:
 
 
 def allowed_branches() -> set[str]:
-    """The patterns of the work branches nixconvoy may union or own: the
+    """The prefixes of the work branches nixconvoy may union or own: the
     invoking checkout's working-tree copy of nixconvoy.toml's
     work_branches (config.root(), wherever the run has moved to), read
-    afresh each time (a rebase may have brought a pattern)."""
+    afresh each time (a rebase may have brought a prefix)."""
     try:
         return set(load(config.root()).work_branches)
     except ConfigError as e:
@@ -86,7 +85,7 @@ def allowed_branches() -> set[str]:
 
 
 def listed(name: str, pats: set[str] | None = None) -> bool:
-    return any(fnmatchcase(name, p) for p in (allowed_branches() if pats is None else pats))
+    return any(name.startswith(p) for p in (allowed_branches() if pats is None else pats))
 
 
 def this_prefix() -> str:
@@ -218,8 +217,8 @@ def work_branch_name() -> str | None:
 def work_branch() -> str | None:
     wb = work_branch_name()
     if wb is not None and not listed(wb):
-        die(f"this checkout's work branch {wb} matches no pattern in {CONFIG_FILE}'s work_branches; "
-            "add this machine's pattern there (and land it on main so other "
+        die(f"this checkout's work branch {wb} starts with no prefix in {CONFIG_FILE}'s work_branches; "
+            "add this machine's prefix there (and land it on main so other "
             "checkouts union its branches) before deploying")
     return wb
 
@@ -1129,7 +1128,7 @@ def origin_tips(cwd: str | None = None) -> dict[str, str]:
 def listed_tips(pats: set[str], cwd: str | None = None) -> dict[str, str]:
     """origin_tips narrowed to main and the work branches `pats` list."""
     return {b: t for b, t in origin_tips(cwd).items()
-            if b == "main" or any(fnmatchcase(b, p) for p in pats)}
+            if b == "main" or listed(b, pats)}
 
 
 # The Deployed: trailer's value in a git log format; Applied: is the same

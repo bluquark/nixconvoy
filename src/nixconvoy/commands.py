@@ -9,7 +9,6 @@ import os
 import re
 import sys
 import time
-from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import IO, NamedTuple
 
@@ -46,6 +45,7 @@ from .checkout import (
     held_targets,
     identity_of,
     landing_message,
+    listed,
     listed_tips,
     lock_checkout,
     lock_holder,
@@ -788,7 +788,7 @@ def status() -> None:
         # A subagent's commits of its own: beyond main and beyond the parent's
         # (any listed branch's) pushed tip it forked from.
         beyond = ["origin/main"] + ([f"refs/remotes/origin/{b}" for b in tips
-                                     if b != cur and any(fnmatchcase(b, p) for p in pats)]
+                                     if b != cur and listed(b, pats)]
                                     if ident.kind == "sub" else [])
         ahead = int(g(d, "rev-list", "--count", "HEAD", "--not", *beyond) or 0)
         behind = int(g(d, "rev-list", "--count", "HEAD..origin/main") or 0)
@@ -886,7 +886,7 @@ def status() -> None:
     local |= set(out(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/"]).splitlines())
     elsewhere = []
     for name, tip in sorted(tips.items()):
-        if name == "main" or name in local or not any(fnmatchcase(name, p) for p in pats):
+        if name == "main" or name in local or not listed(name, pats):
             continue
         if main and is_ancestor(tip, main):
             continue
@@ -1000,10 +1000,11 @@ def default_base(root: Path) -> str:
 def open_checkout(path: Path, branch: str | None) -> Path:
     """`nixconvoy open <path>`: an agent checkout - a worktree of this
     repository at `path`, outside every checkout, on a work branch of this
-    machine's: `branch`, else <branch_prefix><path's name>, refused when
-    origin holds that branch or a subagent branch under it (a removed
-    checkout's, or another machine's when the prefix is shared: `branch`
-    names it to take it over, or another).  A named branch is taken as
+    machine's: `branch` (a leaf, or the whole name under this machine's
+    prefix), else <branch_prefix><path's name>, refused when origin holds
+    that branch or a subagent branch under it (a removed checkout's, or
+    another machine's when the prefix is shared: `branch` names it to take
+    it over, or another).  A named branch is taken as
     this repository or origin holds it (origin's copy over a stale local
     one), else new off origin's default branch; a branch made here is
     pushed at once, so origin holds it from then on.  Its upstream is
@@ -1031,15 +1032,16 @@ def open_checkout(path: Path, branch: str | None) -> Path:
         held = sorted(b for b in tips if b == branch or b.startswith(f"{branch}-"))
         if held:
             die(f"origin holds {', '.join(held)}: a removed checkout's, or another machine's (the prefix "
-                f"shared).  `--branch {branch}` makes it this checkout's, `--branch {prefix}<leaf>` opens "
-                f"another")
+                f"shared).  `--branch {d.name}` makes it this checkout's, `--branch <leaf>` opens another")
+    elif not branch.startswith(prefix) and "/" not in branch:
+        branch = f"{prefix}{branch}"
     if not owned(branch, pats):
-        die(f"{branch} is not a work branch of this machine's: one named {prefix}... that "
-            f"nixconvoy.toml's work_branches lists; name one with --branch")
+        die(f"{branch} is not a work branch of this machine's: one named {prefix}<leaf> that "
+            f"nixconvoy.toml's work_branches lists; `--branch <leaf>` names one")
     if branch.removeprefix(prefix) == "main" or "-" in branch.removeprefix(prefix):
         # "<leaf>-<name>" is a subagent worktree's branch, "main-<name>" the main checkout's.
         die(f"{branch}: a checkout's branch is {prefix}<leaf> with a leaf that is not 'main' "
-            f"and holds no '-'; name one with --branch")
+            f"and holds no '-'; name one with --branch <leaf>")
     d.parent.mkdir(parents=True, exist_ok=True)
     if branch in local and branch in tips and rev(f"refs/heads/{branch}") != tips[branch]:
         # Origin's copy taken over a stale local one; a local one ahead

@@ -471,7 +471,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         last = [h for h in sorted(tops) if tops[h].last]
         verdict = decide(
             "drift", me=[me, str(Path.cwd())], union=union,
-            listed=sorted({*listed, "main"}), tips=origin_tips(),
+            listed=sorted(listed), tips=origin_tips(),
             tz_offset=time.localtime().tm_gmtoff, router=last[0] if last else "",
             targets=all_targets, candidates=candidates, evict=evict, named=bool(filter_targets),
             work_branch=wb is not None, reached=sorted(reached), running=running,

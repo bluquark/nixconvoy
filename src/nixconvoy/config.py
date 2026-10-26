@@ -55,9 +55,9 @@ class Config:
     # (the main checkout's "<prefix>main-<name>"); {machine}, when the
     # template has it, is this machine's hostname.
     branch_prefix: str
-    # The patterns of the work branches nixconvoy may union or own (`*`
-    # spans anything, the one wildcard every matcher - here, the plan cores
-    # - agrees on): a pushed branch none matches is ignored with a warning.
+    # The prefixes of the work branches' names nixconvoy may union or own
+    # (every matcher - here, the plan cores - takes a name starting with
+    # one): a pushed branch none matches is ignored with a warning.
     work_branches: tuple[str, ...]
     # Where `open --child <name>` puts a child (subagent) worktree, relative
     # to the checkout.  A nested worktree must be ignored (open writes it
@@ -185,15 +185,17 @@ def parse(text: str) -> Config:
     ssh_template = _template(doc, "ssh_address_template", "target")
     branch_prefix = _template(doc, "branch_prefix", "machine")
     if "work_branches" not in doc:
-        raise ConfigError(f"{CONFIG_FILE}: work_branches is required: the patterns of the work branches "
-                          f"(`*` the wildcard), e.g. [\"{branch_prefix}*\"]")
+        raise ConfigError(f"{CONFIG_FILE}: work_branches is required: the prefixes of the work branches' "
+                          f"names, e.g. [\"{branch_prefix}\"]")
     pats = doc["work_branches"]
     if not isinstance(pats, list) or not all(isinstance(s, str) for s in pats) or not pats:
         raise ConfigError(f"{CONFIG_FILE}: work_branches must be a non-empty list of strings")
-    bad = [p for p in pats if not re.fullmatch(r"[\w.*/-]+", p)]
+    # A trailing `*` is the glob this once was, read as the prefix before it.
+    pats = [p.removesuffix("*") for p in pats]
+    bad = [p for p in pats if not re.fullmatch(r"[\w./-]+", p)]
     if bad:
-        raise ConfigError(f"{CONFIG_FILE}: work_branches: a pattern may hold letters, digits, '.', '-', '_', '/' "
-                          f"and '*' only: {', '.join(bad)}")
+        raise ConfigError(f"{CONFIG_FILE}: work_branches: a prefix may hold letters, digits, '.', '-', '_' "
+                          f"and '/' only: {', '.join(repr(p) for p in bad)}")
     children = _str(doc, "child_worktrees", CONFIG_FILE, None).strip("/")
     if not children or ".." in children.split("/"):
         raise ConfigError(f"{CONFIG_FILE}: child_worktrees is a directory inside the checkout")

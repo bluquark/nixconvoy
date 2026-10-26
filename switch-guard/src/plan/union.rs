@@ -58,7 +58,7 @@ struct Seen {
 }
 
 /// The other listed branches on origin that still declare changes not in
-/// HEAD.  An unlisted one is skipped aloud: the checked-in patterns, not
+/// HEAD.  An unlisted one is skipped aloud: the checked-in prefixes, not
 /// the branch name, are the credential.  The list is read on every pass, since
 /// a refresh may bring a new one; the stage's drift verdicts get the same.
 fn select(s: &mut Script, p: &Params, seen: &mut Seen) -> Run<Vec<(String, String)>> {

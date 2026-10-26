@@ -6,7 +6,7 @@ one tree silently reverts what another tree already deployed.
 
 Model:
   - main: mirror of origin/main; only finished (landed) commits.
-  - A work branch, listed by pattern in nixconvoy.toml's work_branches and
+  - A work branch, listed by prefix in nixconvoy.toml's work_branches and
     named with this machine's branch_prefix, is owned by the checkout that
     has it checked out; nixconvoy is its only writer: it commits the staged
     state onto it and pushes it after a successful deploy.  A deploy, land
@@ -282,7 +282,7 @@ in (as for land), each in turn; --with-children: every subagent worktree holding
 increments, then this checkout - one deploy for all, run here.  A
 worktree never deployed has nothing to undeploy: close --force discards it.
 
-Open (nixconvoy open <path> [--branch <work-branch>] | --child <worktree>
+Open (nixconvoy open <path> [--branch <leaf>] | --child <worktree>
 | --submodule <input>): a worktree.  --child <worktree>: a subagent
 worktree of that name, <root>/<child_worktrees>/<worktree> (the directory
 nixconvoy.toml's `child_worktrees` names; .claude/worktrees, Claude
@@ -298,7 +298,8 @@ until `close <worktree>` names it.  A worktree nested in a checkout is its
 subagent worktree wherever it was made.  <path> (for close, written as
 one or with a / in it and no branch here): an agent checkout beside the
 others - a worktree of this repository at that path,
-outside every checkout, on a work branch of this machine's: --branch, else
+outside every checkout, on a work branch of this machine's: --branch (a
+leaf, or the whole name under this machine's prefix), else
 <branch_prefix><path's name> (lab5 -> nixconvoy/lab5), refused when origin
 holds that branch or a subagent branch under it - a checkout removed
 before, or another machine's with the prefix shared - so that --branch
@@ -382,8 +383,8 @@ the one system literal the hosts' .nix files agree on, else the first
 target's evaluated hostPlatform, else this machine's architecture as a
 guess the file says to verify; ssh_address_template, "<this
 user>@{target}", to edit; branch_prefix nixconvoy/ ({machine} in it, the
-hostname, namespaces one machine's branches) and work_branches, its
-pattern; child_worktrees
+hostname, namespaces one machine's branches) and work_branches, that
+prefix; child_worktrees
 .claude/worktrees; eval.parallel "auto".  The optional sections follow as
 commented examples filled with what was found: the flake's checks for
 eval.precheck, the targets' names.  git is only read: what it wrote is
@@ -466,7 +467,7 @@ SYNOPSIS = """\
 = Setting up a repository
 init [<flake-dir>]
 = Managing worktrees
-open <path> [--branch <work-branch>]
+open <path> [--branch <leaf>]
 open --child <worktree>
 open --submodule <input>
 close [<path> ... | <worktree> ... | <submodule> ...] [--force]

@@ -302,16 +302,15 @@ proptest! {
 }
 
 #[test]
-fn patterns_match_whole_names() {
-    let pats = ["haswell-wsl-deploys*", "M3-Air-deploys1", "main"];
+fn prefixes_match_names_starting_with_them() {
+    let pats = ["work/haswell-wsl/", "main"];
     let listed = |n| crate::plan::listed(pats.iter().copied(), n);
-    assert!(listed("haswell-wsl-deploys4"));
-    assert!(listed("haswell-wsl-deploys4-fix-kettle"));
-    assert!(listed("haswell-wsl-deploys"));
-    assert!(listed("M3-Air-deploys1"));
+    assert!(listed("work/haswell-wsl/4"));
+    assert!(listed("work/haswell-wsl/4-fix-kettle"));
+    assert!(listed("work/haswell-wsl/"));
     assert!(listed("main"));
-    assert!(!listed("M3-Air-deploys12"));
-    assert!(!listed("xhaswell-wsl-deploys4"));
+    assert!(!listed("work/M3-Air/1"));
+    assert!(!listed("xwork/haswell-wsl/4"));
     assert!(!listed("(detached)"));
     assert!(!crate::plan::listed([], "main"));
 }

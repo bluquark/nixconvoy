@@ -194,8 +194,8 @@ impl Kind {
 pub struct Context {
     /// This checkout: (machine, checkout directory).
     pub me: (String, String),
-    /// The branches its union may contain: work_branches' patterns plus
-    /// main.
+    /// The branches its union may contain besides main: work_branches'
+    /// prefixes.
     pub listed: BTreeSet<String>,
     /// This run's fetched origin tip of each branch.
     pub tips: BTreeMap<String, String>,
@@ -225,7 +225,8 @@ pub fn classify(lin: Option<&Provenance>, running: &str, cx: &Context) -> (Kind,
         return (Kind::ThisBranch, format!("over this checkout's deploy of {when}"));
     }
     let who = format!("{}:{} (pid {}) at {when}", lin.machine, lin.checkout, lin.pid);
-    let unknown: Vec<&str> = lin.branches.iter().filter(|b| !listed(cx.listed.iter().map(String::as_str), b)).map(String::as_str).collect();
+    let unknown: Vec<&str> =
+        lin.branches.iter().filter(|b| *b != "main" && !listed(cx.listed.iter().map(String::as_str), b)).map(String::as_str).collect();
     if !unknown.is_empty() {
         return (
             Kind::Unlisted,

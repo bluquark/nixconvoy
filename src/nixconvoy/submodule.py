@@ -40,7 +40,6 @@ import sys
 import tempfile
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import NamedTuple
 
@@ -49,11 +48,11 @@ from .checkout import (
     MACHINE_ENV,
     PENDING_REFS,
     TMP_PREFIX,
-    allowed_branches,
     fold_subject,
     index_tree,
     landed_prefix,
     landing_message,
+    listed,
     rebase_hint,
     rebase_solving,
     tree_less_msg,
@@ -1258,7 +1257,7 @@ def remove_one(sub: Sub) -> None:
     shutil.rmtree(sub.dir, ignore_errors=True)
     sub.dir.mkdir(parents=True, exist_ok=True)
     git("worktree", "prune", cwd=str(sub.repo), check=False)
-    if cur is not None and not any(fnmatchcase(cur, p) for p in allowed_branches()):
+    if cur is not None and not listed(cur):
         print(f"submodule {sub.name}: {cur} is no work branch of this machine's; kept")
         cur = None
     if cur is not None:

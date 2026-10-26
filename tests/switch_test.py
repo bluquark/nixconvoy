@@ -393,6 +393,7 @@ def target_cases() -> None:
             pass
         else:
             raise AssertionError(bad)
+    assert config.parse(toml(branches=("work/tester/*", "work/x/"))).work_branches == ("work/tester/", "work/x/")
     for bad_cfg, hint in ((toml('[targets.a]\ntag = ["vps"]\n'), "unknown key targets.a.tag"),
                           (toml('[build]\nbuilder = { big = 3 }\n'), "build.builder.big must be a string"),
                           (toml('[build]\nbuilder = 3\n'), "build.builder is a machine name"),
@@ -408,8 +409,9 @@ def target_cases() -> None:
                           (toml().replace('targets_arch = "x86_64-linux"\n', ""), "targets_arch is required"),
                           (toml().replace('ssh_address_template = "{target}"\n', ""), "ssh_address_template is required"),
                           (toml().replace('branch_prefix = "work/{machine}/"\n', ""), "branch_prefix is required"),
-                          (toml().replace('work_branches = ["work/tester/*"]\n', ""), "work_branches is required"),
-                          (toml(branches=("work/tester/*", "bad branch")), "work_branches: a pattern may hold"),
+                          (toml().replace('work_branches = ["work/tester/"]\n', ""), "work_branches is required"),
+                          (toml(branches=("work/tester/", "bad branch")), "work_branches: a prefix may hold"),
+                          (toml(branches=("work/tester/", "a*b")), "work_branches: a prefix may hold"),
                           (toml().replace('child_worktrees = ".claude/worktrees"\n', ""), "child_worktrees is required"),
                           (toml().replace('[eval]\nparallel = "auto"\n', ""), "eval is required"),
                           (toml().replace('parallel = "auto"\n', ""), "eval.parallel is required"),
@@ -681,7 +683,7 @@ def guard_cases(d: Path) -> None:
     say("switch guard: ok")
 
 
-def toml(extra: str = "", precheck: str = "", branches: tuple[str, ...] = ("work/tester/*",), **over: str) -> str:
+def toml(extra: str = "", precheck: str = "", branches: tuple[str, ...] = ("work/tester/",), **over: str) -> str:
     """A nixconvoy.toml with every required key (the defaults the scratch
     repos use, `over` overriding, `branches` the work_branches), `extra`
     appended before the [eval] table and `precheck` in it."""
@@ -724,7 +726,7 @@ def clear_memo() -> None:
 def scratch_origin(d: Path, branches: str, files: dict[str, str], *, wb: str | None = None,
                    seeded: Callable[[Path], object] = lambda _seed: None) -> Iterator[tuple[Path, Path, Path]]:
     """(origin, seed, co): a bare origin whose main holds a nixconvoy.toml
-    listing `branches` (patterns, one per line), `files` and what `seeded`
+    listing `branches` (prefixes, one per line), `files` and what `seeded`
     adds in the seed clone, and the checkout co cloned from it, on `wb`
     when given and the cwd throughout."""
     origin, seed, co = d / "origin.git", d / "seed", d / "homelab9"
@@ -779,7 +781,7 @@ def reach_cases(d: Path) -> None:
         "nixos/modules/y.nix": "{ ... }: { }\n",
         "README.md": "docs\n",
     }
-    with scratch_origin(d, f"{wb}*\n", files, wb=wb) as (_origin, _seed, co):
+    with scratch_origin(d, "work/tester/\n", files, wb=wb) as (_origin, _seed, co):
         targets = ["a", "b"]
 
         def reached(provenances: dict[str, str] | None = None) -> set[str]:
@@ -899,7 +901,7 @@ def landing_rebase_cases(d: Path) -> None:
     scratch_env()
     wb, other = "work/tester/9", "work/other/1"
     files = {"a.txt": "one\ntwo\nthree\n", "m.py": "import os\n"}
-    with scratch_origin(d, f"{wb}*\n{other}\n", files, wb=wb) as (_origin, seed, co):
+    with scratch_origin(d, f"work/tester/\n{other}\n", files, wb=wb) as (_origin, seed, co):
         # The other branch: two commits to one line, which this branch sits
         # on; then landed on main as one squash.
         sh(seed, "switch", "--quiet", "-c", other)
@@ -944,7 +946,7 @@ def landing_rebase_cases(d: Path) -> None:
     # tmp commits: those never pass for the landed prefix (the pops after
     # the rebase would take main's own commits).
     shutil.rmtree(d / "origin.git"), shutil.rmtree(d / "seed"), shutil.rmtree(d / "homelab9")
-    with scratch_origin(d, f"{wb}*\n{other}\n", files, wb=wb) as (_origin, seed, co):
+    with scratch_origin(d, f"work/tester/\n{other}\n", files, wb=wb) as (_origin, seed, co):
         sh(seed, "switch", "--quiet", "-c", other)
         put(seed, "a.txt", "one\nTWO-x1\nthree\n", "x1")
         put(seed, "a.txt", "one\nTWO-x2\nthree\n", "x2")
@@ -1004,7 +1006,7 @@ def git_cases(d: Path) -> None:
                 sh(where, "status", "--porcelain"))
 
     wb = "work/tester/9"
-    with scratch_origin(d, f"{wb}*\nwork/other/1\n", {"a.txt": "one\ntwo\nthree\n"}, wb=wb) as (origin, seed, co):
+    with scratch_origin(d, "work/tester/\nwork/other/1\n", {"a.txt": "one\ntwo\nthree\n"}, wb=wb) as (origin, seed, co):
         assert checkout.current_branch() == wb
         assert sh(co, "config", f"branch.{wb}.merge") == "refs/heads/main"
         put(co, "b.txt", "local\n", "local")
@@ -1058,7 +1060,7 @@ def git_cases(d: Path) -> None:
 
         def stage(wt: str, union: str, listed: list[str], branches: list[tuple[str, str]]) -> bool:
             assert sh(Path(wt), "rev-parse", "HEAD") == union
-            assert listed == ["work/other/1", f"{wb}*"], listed
+            assert listed == ["work/other/1", "work/tester/"], listed
             assert [b for b, _ in branches] == ["work/other/1"], branches
             staged.append(sorted(p.name for p in Path(wt).iterdir()))
             return False
@@ -1376,7 +1378,7 @@ def announce_cases(d: Path) -> None:
     # each renewal below is driven on this thread, dated after the first and
     # after each other (a new commit each), so no assertion waits on the
     # thread or races it.
-    with scratch_origin(d, f"{wb}*\nwork/other/1\n", {"a.txt": "one\n"}, wb=wb) as (_origin, seed, co):
+    with scratch_origin(d, "work/tester/\nwork/other/1\n", {"a.txt": "one\n"}, wb=wb) as (_origin, seed, co):
         put(co, "a.txt", "one\ntwo\n")
         snap = checkout.staged_snapshot()
         t0 = int(time.time())
@@ -1632,7 +1634,7 @@ def submodule_cases(d: Path) -> None:
 
     files = {".gitmodules": f'[submodule "dep"]\n\tpath = {path}\n\turl = {dep_origin}\n',
              "nixos/flake.lock": proc.dump_json(lock) + "\n"}
-    with scratch_origin(d, "work/tester/*\n", files,
+    with scratch_origin(d, "work/tester/\n", files,
                         seeded=lambda seed: sh(seed, "update-index", "--add", "--cacheinfo", f"160000,{v1},{path}")) \
             as (origin, _seed, co):
         assert (co / path).is_dir() and not any((co / path).iterdir())  # unpopulated, as cloned
@@ -2060,7 +2062,7 @@ def open_cases(d: Path) -> None:
     free listed work branch.  `land --with-children`: the checkout and its
     subagent worktree landed as one commit."""
     scratch_env()
-    with scratch_origin(d, "work/tester/*\n", {"a.txt": "one\n"}, wb="work/tester/9") as (origin, seed, co):
+    with scratch_origin(d, "work/tester/\n", {"a.txt": "one\n"}, wb="work/tester/9") as (origin, seed, co):
         w = commands.open_worktree("task", "claude agent task (pid 1 start 2) 3.4")
         assert w == co / ".claude/worktrees/task" and checkout.branch_at(w) == "worktree-task"
         # Nothing ignored the directory: open excluded it for the clone.
@@ -2161,7 +2163,7 @@ def open_cases(d: Path) -> None:
         assert sh(co, "rev-parse", "origin/work/tester/homelab5") == sh(co, "rev-parse", "origin/main")
         assert "origin holds work/tester/other" in dies(lambda: commands.open_checkout(d / "other", None))
         assert "origin holds work/tester/x-task" in dies(lambda: commands.open_checkout(d / "x", None))
-        one = commands.open_checkout(d / "other", "work/tester/other")
+        one = commands.open_checkout(d / "other", "other")  # --branch <leaf>
         assert one == d / "other" and checkout.branch_at(one) == "work/tester/other"
         assert sh(one, "rev-parse", "HEAD") == sh(co, "rev-parse", "origin/work/tester/other")
         # The branch has one writer: origin's tip must be the one this
@@ -2212,6 +2214,10 @@ def open_cases(d: Path) -> None:
         assert checkout.branch_at(commands.open_checkout(d / "loc", None)) == "work/tester/loc"
         assert "work/tester/loc" not in checkout.origin_tips()
         commands.close_checkout(d / "loc")
+        whole = commands.open_checkout(d / "whole", "work/tester/whole")  # --branch <whole name>
+        assert checkout.branch_at(whole) == "work/tester/whole" and "work/tester/whole" in checkout.origin_tips()
+        commands.close_checkout(d / "whole")
+        assert "work/tester/whole" not in checkout.origin_tips()
         sh(seed, "reset", "--quiet", "--hard", "origin/main")
         sh(one, "reset", "--quiet", "--hard", "origin/main")
         sh(seed, "push", "--quiet", "--force", "origin", "origin/main:refs/heads/work/tester/other")
@@ -2483,7 +2489,7 @@ def init_cases(d: Path) -> None:
         c = config.load(repo)
         assert (c.flake_dir, c.targets_dir, c.targets_arch) == ("nixos", "nixos/hosts", "aarch64-linux"), c
         assert c.ssh_template == me + "@{target}" and c.branch_prefix == "nixconvoy/", c
-        assert c.work_branches == ("nixconvoy/*",), c
+        assert c.work_branches == ("nixconvoy/",), c
         assert c.child_worktrees == ".claude/worktrees" and c.parallel_eval is None and not c.precheck
         assert not c.submodules and not c.targets
         text = (repo / "nixconvoy.toml").read_text()

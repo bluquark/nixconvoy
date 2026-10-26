@@ -21,12 +21,11 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import IO
 
 from . import names, submodule
-from .checkout import sub_parent
+from .checkout import listed, sub_parent
 from .config import MSG_FILE, ConfigError, load
 from .proc import die, painter, run
 from .submodule import Sub
@@ -91,7 +90,7 @@ def listed_in(top: Path, branch: str) -> bool:
         pats = load(top).work_branches
     except (OSError, ConfigError):
         return False
-    return any(fnmatchcase(branch, p) for p in pats)
+    return listed(branch, set(pats))
 
 
 def base_of(d: Path, all_wts: dict[Path, str | None]) -> str | None:

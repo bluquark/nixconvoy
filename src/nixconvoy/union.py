@@ -11,7 +11,16 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 
 from . import submodule
-from .checkout import MACHINE_ENV, GitQueries, add_worktree, allowed_branches, drop_worktree, ran, summarize
+from .checkout import (
+    MACHINE_ENV,
+    GitQueries,
+    add_worktree,
+    allowed_branches,
+    drop_worktree,
+    listed,
+    ran,
+    summarize,
+)
 from .config import MSG_FILE, cfg
 from .proc import git, ok, out, rev, run, solve_with_mergiraf
 
@@ -43,11 +52,11 @@ class UnionQueries(GitQueries):
             # shaped like this machine's (any machine's), so the core can warn
             # of a pushed work branch nobody registered.
             shape = cfg().branch_prefix.replace("{machine}", "*") + "*"
-            pats = {*allowed_branches(), shape}
+            pats = allowed_branches()
             listing = out(["git", "for-each-ref", "--format=%(refname:strip=3)%09%(objectname)",
                            "refs/remotes/origin/"])
             refs = [ln.split("\t", 1) for ln in listing.splitlines()]
-            return {"refs": [r for r in refs if any(fnmatchcase(r[0], p) for p in pats)]}
+            return {"refs": [r for r in refs if listed(r[0], pats) or fnmatchcase(r[0], shape)]}
         if kind == "unchanged":
             base = out(["git", "merge-base", "origin/main", arg("sha")])
             return {"flag": ok(["git", "diff", "--quiet", base, arg("sha"), "--", ".",
@@ -104,8 +113,8 @@ class UnionQueries(GitQueries):
                 return {"flag": False}
             return {"flag": self.await_pending(wt, arg("union"))}
         if kind == "stage":
-            listed, branches = ask.get("listed"), ask.get("branches")
-            assert isinstance(listed, list) and isinstance(branches, list)
-            return {"flag": self.stage(wt, arg("union"), [str(b) for b in listed],
+            names, branches = ask.get("listed"), ask.get("branches")
+            assert isinstance(names, list) and isinstance(branches, list)
+            return {"flag": self.stage(wt, arg("union"), [str(b) for b in names],
                                        [(str(n), str(t)) for n, t in branches])}
         return super().__call__(ask)
