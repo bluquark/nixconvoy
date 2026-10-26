@@ -6,13 +6,19 @@ use crate::config::Config;
 use crate::proc;
 use crate::record::Record;
 use std::fs::{File, OpenOptions};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub const UNIT: &str = "confirmed-switch-rollback";
 pub const PROFILE: &str = "/nix/var/nix/profiles/system";
 const SWITCH_LOCK: &str = "/run/nixos/switch-to-configuration.lock";
-const SWITCH_LOCK_WAIT: Duration = Duration::from_secs(600);
+/// How long a lock no live process is seen holding is waited for before
+/// rolling back anyway (switch-to-configuration then refuses if it is still held).
+const UNSEEN_HOLDER_WAIT: Duration = Duration::from_secs(5);
+const LOCK_POLL: Duration = Duration::from_millis(200);
+/// A wait on a live holder is uncapped; this often, the journal says it goes on.
+const HELD_REMINDER: Duration = Duration::from_secs(60);
 
 /// Runs `m` to completion against `host`: its exit code.
 pub fn drive(host: &mut System<'_>, mut m: Machine<String>) -> i32 {
@@ -112,6 +118,25 @@ impl<'a> System<'a> {
     }
 }
 
+/// The pid /proc/locks names as holding a flock on the file `(major, minor,
+/// inode)`; it may have exited, the lock living on in a child that inherited
+/// the descriptor (never switch-to-configuration's own, opened close-on-exec).
+fn flock_holder(locks: &str, id: (u32, u32, u64)) -> Option<i32> {
+    locks.lines().find_map(|l| {
+        let [_, "FLOCK", _, _, pid, file, ..] = l.split_whitespace().collect::<Vec<_>>()[..] else { return None };
+        let mut f = file.split(':');
+        let file = (u32::from_str_radix(f.next()?, 16).ok()?, u32::from_str_radix(f.next()?, 16).ok()?, f.next()?.parse().ok()?);
+        pid.parse().ok().filter(|p| file == id && *p > 0)
+    })
+}
+
+/// Whether `pid` has the file `id` open: /proc/locks keeps naming a holder
+/// that exited while a child keeps the descriptor, and its pid may be reused.
+fn has_open(pid: i32, id: (u32, u32, u64)) -> bool {
+    let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else { return false };
+    fds.flatten().any(|e| std::fs::metadata(e.path()).is_ok_and(|m| (libc::major(m.dev()), libc::minor(m.dev()), m.ino()) == id))
+}
+
 /// The generation number of a `system-<n>-link` name.
 pub fn link_generation(name: &str) -> Option<u64> {
     name.strip_prefix("system-")?.strip_suffix("-link")?.parse().ok()
@@ -186,17 +211,40 @@ impl System<'_> {
         proc::run(&format!("{system}/bin/switch-to-configuration"), &[action.as_str()])
     }
 
+    /// Before each rollback attempt (the timer's, or a failed confirm's): as
+    /// long as a live process holds the lock, since a switch outlasting any
+    /// fixed bound would otherwise have this one refused and an attempt wasted.
     fn wait_switch_lock(&mut self) {
         let _ = std::fs::create_dir_all("/run/nixos");
         let Ok(f) = OpenOptions::new().create(true).truncate(false).write(true).open(SWITCH_LOCK) else {
             return;
         };
+        let id = f.metadata().ok().map(|m| (libc::major(m.dev()), libc::minor(m.dev()), m.ino()));
         let start = Instant::now();
-        while start.elapsed() < SWITCH_LOCK_WAIT {
-            if f.try_lock().is_ok() {
+        let (mut seen, mut unseen_since, mut reminded) = (None, None, Instant::now());
+        while f.try_lock().is_err() {
+            let holder = id.and_then(|id| {
+                flock_holder(&std::fs::read_to_string("/proc/locks").unwrap_or_default(), id).filter(|pid| has_open(*pid, id))
+            });
+            if let Some(pid) = holder {
+                unseen_since = None;
+                let comm = || std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default().trim().to_owned();
+                if seen != Some(pid) {
+                    self.say(&format!("confirmed-switch: waiting for switch-to-configuration's lock, held by pid {pid} ({})", comm()));
+                    seen = Some(pid);
+                    reminded = Instant::now();
+                } else if reminded.elapsed() >= HELD_REMINDER {
+                    self.say(&format!("confirmed-switch: still waiting for pid {pid} ({}), {:.0}s", comm(), start.elapsed().as_secs_f64()));
+                    reminded = Instant::now();
+                }
+            } else if unseen_since.get_or_insert_with(Instant::now).elapsed() >= UNSEEN_HOLDER_WAIT {
+                self.warn("confirmed-switch: switch-to-configuration's lock is held, by no live process /proc/locks identifies; rolling back anyway");
                 return;
             }
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(LOCK_POLL);
+        }
+        if seen.is_some() {
+            self.say(&format!("confirmed-switch: switch-to-configuration's lock released after {:.1}s", start.elapsed().as_secs_f64()));
         }
     }
 
@@ -294,4 +342,29 @@ pub fn main(args: &[String]) -> i32 {
         }
     };
     drive(&mut System::new(&s), Machine::new(verb, s.deadline))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flock_holder;
+
+    const LOCKS: &str = "\
+1: POSIX  ADVISORY  WRITE 577 00:1b:42 0 EOF
+2: FLOCK  ADVISORY  WRITE 4105054 00:1b:1256931 0 EOF
+2: -> FLOCK  ADVISORY  WRITE 99 00:1b:1256931 0 EOF
+3: OFDLCK ADVISORY  WRITE -1 00:1b:7 0 EOF
+4: FLOCK  ADVISORY  WRITE 0 00:1b:8 0 EOF
+5: FLOCK  ADVISORY  WRITE 31 08:30:9 0 EOF
+6: FLOCK
+";
+
+    #[test]
+    fn names_the_flock_holder_not_its_waiters() {
+        assert_eq!(flock_holder(LOCKS, (0, 0x1b, 1256931)), Some(4105054));
+        assert_eq!(flock_holder(LOCKS, (0, 0x1c, 1256931)), None);
+        assert_eq!(flock_holder(LOCKS, (0, 0x1b, 42)), None);
+        assert_eq!(flock_holder(LOCKS, (0, 0x1b, 7)), None);
+        assert_eq!(flock_holder(LOCKS, (0, 0x1b, 8)), None);
+        assert_eq!(flock_holder(LOCKS, (8, 0x30, 9)), Some(31));
+    }
 }

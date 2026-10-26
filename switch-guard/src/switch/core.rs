@@ -78,7 +78,7 @@ pub enum Query<S> {
     SetProfile(S),
     /// `<system>/bin/switch-to-configuration <action>` -> Code.
     Switch(S, Action),
-    /// Wait (bounded) for switch-to-configuration's own lock -> Done.
+    /// Wait for switch-to-configuration's own lock while a live process holds it -> Done.
     WaitSwitchLock,
     Sleep(u64),
     /// -> Flag.
