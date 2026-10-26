@@ -234,8 +234,8 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool,
                 print(f"note: {', '.join(ann.claimed)} run this checkout's unpushed increment "
                       f"(or a switch onto it was started), so its announcement stays: re-run "
                       f"to finish the deploy, or clear it to have the increment reverted by the "
-                      f"next deploy there (git push --force origin "
-                      f"origin/main:{PENDING_REFS}/{ann.key})", file=sys.stderr)
+                      f"next deploy there (git push origin :{PENDING_REFS}/{ann.key})",
+                      file=sys.stderr)
             else:
                 ann.withdraw()
 

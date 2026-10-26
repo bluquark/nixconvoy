@@ -18,6 +18,7 @@ from .checkout import (
     DEPLOYED_TRAILER,
     KEPT_EDIT,
     MACHINE_ENV,
+    PENDING_REFS,
     SESSIONLESS,
     WAIT_STALE,
     GitQueries,
@@ -673,14 +674,11 @@ def drop_branches(names: list[str]) -> list[str]:
     for b in names:
         git("branch", "--quiet", "-D", b, check=False)
     pushed = {b: old for b, old in gone.items() if old}
-    # A gone branch's announcement is cleared with it (never deleted: a
-    # deleted ref lingers uncleared in every other clone).
-    clears = [spec for b in names for spec in clear_refspec(b)]
-    if pushed or clears:
+    if pushed:
         # One push, bounded: prune holds the worktree's name lock meanwhile.
         # Retried once: origin has rejected a deletion out of the blue.
         cmd = ["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "origin",
-               *(f":refs/heads/{b}" for b in pushed), *clears,
+               *(f":refs/heads/{b}" for b in pushed),
                *(f"--force-with-lease=refs/heads/{b}:{old}" for b, old in pushed.items())]
         p = run(cmd, check=False, timeout=30)
         if p.returncode != 0:
@@ -688,6 +686,19 @@ def drop_branches(names: list[str]) -> list[str]:
             p = run(cmd, check=False, timeout=30)
         if p.returncode != 0:
             failed.append(f"deleting {', '.join(pushed)} on origin failed: "
+                          f"{(p.stderr or '').strip() or 'timed out'}")
+    # The gone branches' announcements, on their own: a stale lease (origin
+    # moved since the fetch) must not count as a branch deletion failed.
+    clears = [spec for b in names for spec in clear_refspec(b)]
+    if clears:
+        cmd = ["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "origin", *clears]
+        p = run(cmd, check=False, timeout=30)
+        if p.returncode != 0:
+            time.sleep(2)
+            p = run(cmd, check=False, timeout=30)
+        if p.returncode != 0:
+            failed.append(f"deleting the announcements of {', '.join(names)} on origin failed "
+                          f"(git push origin :{PENDING_REFS}/<branch> clears one by hand): "
                           f"{(p.stderr or '').strip() or 'timed out'}")
     return failed
 

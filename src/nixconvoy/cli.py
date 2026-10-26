@@ -48,7 +48,7 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      change as ready to deploy.  Nothing is committed.
      The pending state - the increment, or a HEAD origin lacks (the
      nightly's lock commit on main) - is announced: its tree as a commit
-     of its own, pushed to origin's refs/nixconvoy/pending/<branch> and
+     of its own, pushed to origin's refs/nixconvoy/deploying/branch/<branch> and
      renewed there every 10 s for as long as this run lives (a main
      checkout's under main@<machine>), so a deploy starting elsewhere sees
      this one under way (step 4a) until the push that ends this deploy
@@ -97,7 +97,7 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      under --evict, when this work reaches it or the target was named.
      A dead deploy's announcement stays up, so its increment stays
      refused: the refusal names the deploy and the clear that ends it
-     (git push --force origin origin/main:refs/nixconvoy/pending/<branch>),
+     (git push origin :refs/nixconvoy/deploying/branch/<branch>),
      or the push of its branch that keeps it.  Work of a branch
      work_branches does not list stays refused until listed.  When the configuration
      names a precheck (a flake check), it runs on a thread beside the evals
@@ -120,7 +120,7 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      no precheck to run means no build
   7. copy the closures over, concurrently, while re-fetching to check that
      no work branch moved during the build and pushing the records to
-     origin's refs/nixconvoy/deploying/<target>, so no target ever runs a
+     origin's refs/nixconvoy/deploying/target/<target>, so no target ever runs a
      state origin does not hold.  A target with protected units
      (nixconvoy.protected.<name>) is dry-activated once its closure has
      landed: if the switch would stop, restart or reload one of them, the
@@ -146,10 +146,11 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      bootloader entry set - otherwise it is rolled back to the probed
      system, never rebooted
   8. only now adopt the increment's commit onto the work branch and push it
-     in the background - then, once that landed, point the announcement at
-     origin/main and each switched target's record at
-     refs/heads/deployed/<target> - the next run collecting the result
-     before its own fetch.  An increment that fails to eval, build or switch
+     in the background - then, once that landed, delete the announcement
+     and point each switched target's record at
+     refs/heads/nixconvoy-history/<target>, then delete its
+     refs/nixconvoy/deploying/target/<target> entry - the next run
+     collecting the result before its own fetch.  An increment that fails to eval, build or switch
      is never committed, so other checkouts cannot pull a broken commit and
      pushed tips never overestimate what is running; its changes stay staged
      for the re-run, and its announcement is withdrawn - unless a target

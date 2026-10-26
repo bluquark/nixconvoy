@@ -207,10 +207,7 @@ fn refusal_advice() {
     let a = refusal(&[("side1".into(), Kind::InFlight, Some(BRANCH.into())), ("side6".into(), Kind::InFlight, Some(BRANCH.into()))]);
     assert!(a.starts_with(&format!("nothing switched or committed: side1, side6 run another checkout's work this union lacks, and this checkout's work reaches them too (see above).  The deploy of {BRANCH} looks dead")), "{a}");
     assert_eq!(a.matches("looks dead").count(), 1);
-    assert!(
-        a.contains(&format!("git push --force origin origin/main:{PENDING_REFS}/{BRANCH} - or push {BRANCH} from its checkout")),
-        "{a}"
-    );
+    assert!(a.contains(&format!("git push origin :{PENDING_REFS}/{BRANCH} - or push {BRANCH} from its checkout")), "{a}");
     assert!(!a.contains("Re-run once"), "{a}");
     let a = refusal(&[("side1".into(), Kind::InFlight, Some("main@chikuwa".into())), ("side6".into(), Kind::InFlight, None)]);
     assert!(

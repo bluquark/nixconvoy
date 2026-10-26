@@ -59,7 +59,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const EVICT_FLAG: &str = "--evict";
 /// Origin's announcements, by branch (nixconvoy's PENDING_REFS).
-pub const PENDING_REFS: &str = "refs/nixconvoy/pending";
+pub const PENDING_REFS: &str = "refs/nixconvoy/deploying/branch";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Provenance {
@@ -362,7 +362,7 @@ pub fn refusal(refused: &[(String, Kind, Option<String>)]) -> String {
     for key in dead {
         let branch = key.split('@').next().unwrap_or(key);
         fixes.push(format!(
-            "the deploy of {branch} looks dead (its announcement is no longer renewed): clear it to have the next deploy revert its increment - git push --force origin origin/main:{PENDING_REFS}/{key} - or push {branch} from its checkout to keep it"
+            "the deploy of {branch} looks dead (its announcement is no longer renewed): clear it to have the next deploy revert its increment - git push origin :{PENDING_REFS}/{key} - or push {branch} from its checkout to keep it"
         ));
     }
     if refused.iter().any(|(_, k, _)| *k == Kind::Unlisted) {

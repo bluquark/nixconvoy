@@ -62,8 +62,9 @@ no work.
   what it pushed - instead of building without it to be refused once it
   switched.  One whose announcement goes 30 seconds without a renewal is
   taken for dead and no longer waited for.  The push that ends the deploy
-  clears the announcement (a main checkout's: the push of main that lands
-  its HEAD, by its owner); a deploy ending without a switch withdraws it.
+  deletes the announcement (a main checkout's is cleared by the push of
+  main that lands its HEAD, by its owner, and swept by the next deploy);
+  a deploy ending without a switch withdraws it.
 - **Provenance.**  Every target records where its system came from: the union,
   each branch's tip, and the machine and checkout that deployed it.  A
   deploy that would overwrite another checkout's not-yet-pushed increment
@@ -88,9 +89,9 @@ no work.
   commit of the exact tree it will run, on its previous record, main, the
   unioned branches and the increment - is pushed to origin, so no target
   ever runs a state origin does not hold.  Once the target runs it,
-  `deployed/<target>` points at it: `git log --first-parent
-  origin/deployed/<target>` is the target's deploy history, and `git diff`
-  between two such branches what two targets run differently.
+  `nixconvoy-history/<target>` points at it: `git log --first-parent
+  origin/nixconvoy-history/<target>` is the target's deploy history, and
+  `git diff` between two such branches what two targets run differently.
 - **Confirmed switches.**  With the NixOS module, a switch activates the
   new system with `switch-to-configuration test` under a dead-man timer,
   verifies it from the deploying machine (a new ssh connection - a direct

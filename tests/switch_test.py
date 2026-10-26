@@ -533,7 +533,7 @@ def provenance_cases() -> None:
     line, died = report(announced, in_flight={BRANCH: "q" * 40}, dead=[BRANCH])
     assert "that deploy looks dead" in line and \
         f"The deploy of {BRANCH} looks dead" in died and \
-        f"git push --force origin origin/main:{checkout.PENDING_REFS}/{BRANCH}" in died, (line, died)
+        f"git push origin :{checkout.PENDING_REFS}/{BRANCH}" in died, (line, died)
     line, died = report(announced)
     assert line.startswith("side1: will switch, reverting it: ") and "its deploy is over" in line and \
         not died, (line, died)
@@ -1303,12 +1303,13 @@ def announce_cases(d: Path) -> None:
         again = checkout.Announce(wb, snap)
         assert again.collect() and again.since == pend.since
         again.stop()
-        # Withdrawn (the deploy ended without a switch): cleared onto
-        # origin/main, the renewals over.
+        # Withdrawn (the deploy ended without a switch): deleted, the
+        # renewals over.
         ann.withdraw()
         sh(co, *checkout.fetch_args())
         assert checkout.pending_announcements() == []
-        assert sh(co, "rev-parse", f"{checkout.PENDING_REFS}/{wb}") == proc.rev("refs/remotes/origin/main")
+        assert proc.rev(f"{checkout.PENDING_REFS}/{wb}") is None
+        assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{wb}") == ""
         time.sleep(0.5)
         sh(co, *checkout.fetch_args())
         assert checkout.pending_announcements() == []
@@ -1340,8 +1341,11 @@ def announce_cases(d: Path) -> None:
         assert checkout.push_records({"a": rec1, "b": rec2}) is None
         assert checkout.push_records({}) is None
         assert sh(seed, "ls-remote", "origin", f"{checkout.DEPLOYING_REFS}/a").split()[0] == rec1
+        sh(co, *checkout.fetch_args())
+        assert proc.rev(f"{checkout.DEPLOYING_REFS}/a") == rec1 and proc.rev(f"{checkout.PENDING_REFS}/{wb}")
         # The push that ends the deploy: the work branch, then the records
-        # onto refs/heads/deployed/<target> and the announcement cleared.
+        # onto the history branches, then the announcement and the records'
+        # refs deleted.
         checkout.adopt_commit(wb, committed)
         checkout.push_deployed(wb, ann, {"a": rec1, "b": rec2})
         checkout.await_background_push()
@@ -1350,6 +1354,9 @@ def announce_cases(d: Path) -> None:
         assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/a") == rec1
         assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/b") == rec2
         assert checkout.pending_announcements() == []
+        assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/*", f"{checkout.DEPLOYING_REFS}/*") == ""
+        # The local copies went with the fetch's prune.
+        assert proc.rev(f"{checkout.DEPLOYING_REFS}/a") is None and proc.rev(f"{checkout.PENDING_REFS}/{wb}") is None
         # A main checkout's deploy: the records alone.
         checkout.push_deployed(None, None, {"a": rec2})
         checkout.await_background_push()
@@ -1373,6 +1380,12 @@ def announce_cases(d: Path) -> None:
         sh(co, "push", "--quiet", "origin", "HEAD:main")
         sh(co, *checkout.fetch_args())
         assert checkout.pending_announcements() == []
+        assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/main@tester") != ""
+        # Cleared, it is swept by the next deploy's ending push.
+        checkout.push_deployed(None, None, {"a": rec2})
+        checkout.await_background_push()
+        sh(co, *checkout.fetch_args())
+        assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/main@tester") == ""
         # The branch not pushed (its lease failed): the announcement stays,
         # so the deploy still counts as under way (dead, once its renewals
         # stop) until a push of the branch clears it.
@@ -1388,7 +1401,8 @@ def announce_cases(d: Path) -> None:
         assert "background push failed" in err, err
         sh(co, *checkout.fetch_args())
         assert list(checkout.announced(None)) == [wb]
-        assert checkout.clear_refspec(wb) == [f"+{proc.rev('refs/remotes/origin/main')}:{checkout.PENDING_REFS}/{wb}"]
+        assert checkout.clear_refspec(wb) == [f"--force-with-lease={checkout.PENDING_REFS}/{wb}:{ann.sha}",
+                                              f":{checkout.PENDING_REFS}/{wb}"]
     say("announcements: ok")
 
 

@@ -40,14 +40,20 @@ MACHINE_ENV = {
 # A throwaway worktree of a run (the union's, a rebase aside): never a
 # checkout, whatever `git worktree list` says.
 TMP_PREFIX = "nixconvoy-"
-# Origin's refs beside the branches: a deploy's announcement of its
-# pending state (PENDING_REFS/<branch>, pushed before anything is built and
-# pointed at origin/main once the deploy ends) and each target's deploy
-# record (DEPLOYING_REFS/<target>, pushed before its switch; then
-# refs/heads/<DEPLOYED_PREFIX>/<target> once the target runs it).
-PENDING_REFS = "refs/nixconvoy/pending"
-DEPLOYING_REFS = "refs/nixconvoy/deploying"
-DEPLOYED_PREFIX = "deployed"
+# Origin's refs beside the branches, pushed for a deploy under way and
+# deleted by the push that ends it: a deploy's announcement of its pending
+# state (PENDING_REFS/<branch>, pushed before anything is built; a main
+# checkout's, cleared by the push of main that lands its announced HEAD,
+# is swept by the next deploy's end) and each target's deploy record
+# (DEPLOYING_REFS/<target>, pushed before its switch, deleted once
+# refs/heads/<DEPLOYED_PREFIX>/<target> holds it).  A dead deploy's
+# announcement and a record whose switch failed stay until a deploy there
+# ends well.  Fetches prune, so a deletion reaches every clone; local
+# copies are never deleted by hand, since every worktree on the machine
+# reads the same refs.
+PENDING_REFS = "refs/nixconvoy/deploying/branch"
+DEPLOYING_REFS = "refs/nixconvoy/deploying/target"
+DEPLOYED_PREFIX = "nixconvoy-history"
 FETCH_REFSPECS = ("+refs/heads/*:refs/remotes/origin/*",
                   f"+{PENDING_REFS}/*:{PENDING_REFS}/*",
                   f"+{DEPLOYING_REFS}/*:{DEPLOYING_REFS}/*")
@@ -66,7 +72,7 @@ PUSH_TIMEOUT = 15
 
 def fetch_args(*flags: str) -> list[str]:
     """`git fetch origin` of the branches and nixconvoy's own refs."""
-    return ["fetch", "--quiet", *flags, "origin", *FETCH_REFSPECS]
+    return ["fetch", "--quiet", "--prune", *flags, "origin", *FETCH_REFSPECS]
 
 
 def allowed_branches() -> set[str]:
@@ -793,16 +799,15 @@ class Announce:
             self._push(settled=True)
 
     def withdraw(self) -> None:
-        """Point the announcement at origin/main: the deploy ended without
-        a switch, so the next deploy anywhere need not wait for it; after
-        die() too."""
+        """Delete the announcement: the deploy ended without a switch, so
+        the next deploy anywhere need not wait for it; after die() too.
+        Leased on the last renewal that landed (main@<machine> is shared
+        by the machine's main-keyed deploys); unleased when none did, since
+        a push that landed but timed out here must not strand it."""
         self.stop()
         with proc.finishing():
-            main = run(["git", "rev-parse", "-q", "--verify", "refs/remotes/origin/main"],
-                       check=False).stdout.strip()
-            if main:
-                run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--force", "origin",
-                     f"{main}:{PENDING_REFS}/{self.branch}"], check=False, timeout=60)
+            run(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "origin",
+                 *delete_args({f"{PENDING_REFS}/{self.key}": self.sha})], check=False, timeout=60)
 
 
 def announce_key(branch: str) -> str:
@@ -828,22 +833,31 @@ class Pending(NamedTuple):
 SETTLED = " settled"
 
 
-def pending_announcements() -> list[Pending]:
-    """Origin's announcements as fetched, the cleared ones left out: one on
-    origin/main, or main's whose announced HEAD origin/main holds (a main
-    checkout's push, outside nixconvoy, is what ends its pending state)."""
-    fmt = "%(refname:strip=3)%09%(objectname)%09%(authordate:unix)%09%(committerdate:unix)%09%(subject)"
+def announcements() -> tuple[list[Pending], dict[str, str]]:
+    """Origin's announcements as fetched: the pending ones, and the cleared
+    ones (key -> commit) a deploy's ending push sweeps away: main's whose
+    announced HEAD origin/main holds (a main checkout's push, outside
+    nixconvoy, is what ends its pending state; a work branch's is deleted
+    by its own deploy's end)."""
+    depth = PENDING_REFS.count("/") + 1
+    fmt = (f"%(refname:strip={depth})%09%(objectname)%09%(authordate:unix)"
+           "%09%(committerdate:unix)%09%(subject)")
     listing = out(["git", "for-each-ref", f"--format={fmt}", PENDING_REFS])
     found = []
+    cleared = {}
     for ln in listing.splitlines():
         key, sha, since, at, subject = ln.split("\t", 4)
         branch = key.partition("@")[0]
-        if is_ancestor(sha, "refs/remotes/origin/main"):
-            continue
         if branch == "main" and is_ancestor(f"{sha}^", "refs/remotes/origin/main"):
+            cleared[key] = sha
             continue
         found.append(Pending(key, branch, sha, int(since), int(at), subject.endswith(SETTLED)))
-    return found
+    return found, cleared
+
+
+def pending_announcements() -> list[Pending]:
+    """Origin's announcements as fetched, the cleared ones left out."""
+    return announcements()[0]
 
 
 def announced(own: str | None) -> dict[str, str]:
@@ -855,14 +869,18 @@ def announced(own: str | None) -> dict[str, str]:
     return {p.key: p.sha for p in pending_announcements() if p.key != own}
 
 
+def delete_args(refs: dict[str, str]) -> list[str]:
+    """`git push origin` arguments deleting `refs` there, each leased on
+    the commit it held as fetched ("" for no lease)."""
+    return [*(f"--force-with-lease={ref}:{sha}" for ref, sha in refs.items() if sha),
+            *(f":{ref}" for ref in refs)]
+
+
 def clear_refspec(wb: str) -> list[str]:
-    """The (forced) push refspec clearing `wb`'s announcement, when one is
-    uncleared as fetched here (a retry of a failed push clears it too)."""
-    main = rev("refs/remotes/origin/main")
+    """The push arguments deleting `wb`'s announcement, when one is here
+    as fetched (a retry of a failed push clears it too)."""
     sha = rev(f"{PENDING_REFS}/{wb}")
-    if main and sha and not is_ancestor(sha, "refs/remotes/origin/main"):
-        return [f"+{main}:{PENDING_REFS}/{wb}"]
-    return []
+    return delete_args({f"{PENDING_REFS}/{wb}": sha}) if sha else []
 
 
 def record_commit(target: str, union: str, parents: list[str], subject: str, doc: str) -> str:
@@ -893,36 +911,45 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str])
     """The push that ends a deploy, in the background: the work branch,
     leased on origin's tip as fetched, and only once that landed - so a
     deploy waiting on the announcement finds the branch moved when it
-    clears - the branch's announcement pointed at origin/main (this run's
-    or an earlier run's, whose push failed) and each switched target's
-    record onto refs/heads/DEPLOYED_PREFIX/<target>.  A background push
-    outlives this process, its outcome collected by the next run
-    (await_background_push)."""
+    clears - each switched target's record onto
+    refs/heads/DEPLOYED_PREFIX/<target> and the branch's announcement
+    deleted (this run's, or an earlier run's whose push failed; unleased,
+    a missing one being nothing); then, once those landed, the records'
+    DEPLOYING_REFS entries and the cleared announcements as fetched are
+    deleted, each leased on what it held, a refusal tolerated (a hand
+    clear or another deploy got there first; what stays is retried by the
+    next deploy ending well there).  An announcement under another key
+    than the branch's (a work checkout parked on main) is settled like a
+    main checkout's.  A background push outlives this process, its outcome
+    collected by the next run (await_background_push)."""
     steps: list[list[str]] = []
     what: list[str] = []
     head = rev(f"refs/heads/{wb}") if wb else None
     if wb and head and current_branch() == wb and rev(f"refs/remotes/origin/{wb}") != head:
         steps.append(["git", "-c", "core.hooksPath=/dev/null", *push_cmd(wb)])
         what.append(f"{wb} ({head[:12]})")
-    after = [f"{sha}:refs/heads/{DEPLOYED_PREFIX}/{h}" for h, sha in records.items()]
+    after = [f"+{sha}:refs/heads/{DEPLOYED_PREFIX}/{h}" for h, sha in records.items()]
     what += [f"{DEPLOYED_PREFIX}/{h}" for h in records]
-    if ann is not None:
-        if wb:
-            ann.stop()
-        else:
-            ann.settle()
-    if wb:
-        main = rev("refs/remotes/origin/main")
-        after += ([f"{main}:{PENDING_REFS}/{wb}"] if ann is not None and main
-                  else clear_refspec(wb))
+    if ann is not None and ann.key == wb:
+        ann.stop()
+        after.append(f":{PENDING_REFS}/{wb}")
+    elif ann is not None:
+        ann.settle()
+    elif wb and rev(f"{PENDING_REFS}/{wb}"):
+        after.append(f":{PENDING_REFS}/{wb}")
     if after:
-        steps.append(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "--force",
-                      "origin", *after])
-    if not steps:
+        steps.append(["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "origin", *after])
+    sweep = {f"{DEPLOYING_REFS}/{h}": sha for h, sha in records.items()}
+    sweep.update({f"{PENDING_REFS}/{k}": sha for k, sha in announcements()[1].items()})
+    if not steps and not sweep:
         return
     pidf, statusf, logf = (Path(push_state(k)) for k in ("pid", "status", "log"))
     hold = os.environ.get("NIXCONVOY_HOLD_PUSH", "")
-    script = " && ".join(shlex.join(s) for s in steps) + '; echo $? >"$0"'
+    script = (" && ".join(shlex.join(s) for s in steps) or "true") + "; rc=$?"
+    if sweep:
+        cmd = ["git", "-c", "core.hooksPath=/dev/null", "push", "--quiet", "origin", *delete_args(sweep)]
+        script += f'; [ "$rc" = 0 ] && {shlex.join(cmd)}'
+    script += '; echo "$rc" >"$0"'
     if hold:
         script = f"sleep {shlex.quote(hold)}; {script}"
     with logf.open("w") as log:
