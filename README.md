@@ -263,7 +263,10 @@ checkout records which entries its last deploy used (`users/`), and a
 deploy's prune unroots the entries no record names - a landing or the
 nightly lock update moves every checkout's keys - so the roots pin no
 tree nobody deploys; an unrooted entry stays a hint until the collector
-takes its .drv.
+takes its .drv.  The precheck's passes are proofs about trees, not
+derivations: one line each (the check, the tree, when, which checkout,
+the check's out and drv) appended to `eval-memo/prechecks.jsonl`, kept
+for good.
 
 ## Commands
 

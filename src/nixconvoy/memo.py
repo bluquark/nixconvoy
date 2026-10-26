@@ -18,6 +18,7 @@ import threading
 import time
 from collections.abc import Collection, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote
@@ -136,7 +137,7 @@ def memo_lock(d: Path) -> Iterator[None]:
     beside a deploy could unroot an entry recorded and trusted after its
     read, and two deploys rooting one entry would unlink each other's
     link.  The lock file sits beside the memo dir, which holds entries,
-    records and roots alone."""
+    records, roots and the proof logs alone."""
     with MEMO_LOCK, d.with_name(f"{d.name}.lock").open("a") as f:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -187,8 +188,9 @@ def memo_used(d: Path) -> set[str]:
 def memo_dir() -> Path:
     """One JSON file per (target, key) under the XDG cache, shared by every
     checkout on the machine (keys are content-addressed), so checkouts
-    alternating different trees do not evict each other.  Per-entry files
-    written by atomic rename make concurrent deploys safe."""
+    alternating different trees do not evict each other, beside the
+    prechecks' proof log (precheck_log).  Per-entry files written by
+    atomic rename make concurrent deploys safe."""
     d = cache_dir() / "eval-memo"
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -197,28 +199,23 @@ def memo_dir() -> Path:
 def memo_prune(d: Path) -> None:
     """Drop a target entry whose .drv is gone, and the root of an entry
     gone or of one no checkout's record names (memo_use): an unrooted
-    entry stays a hint until the store's collector takes its .drv.  A
-    precheck entry proves a tree and is never rooted (one with a root
-    loses it).  The entries and records are the *.json files; what else
-    the dirs hold is another deploy's file being written, or nix's
-    temporary link under roots/, left alone until TMP_MAX_AGE says its
-    writer died.  A root is kept while a record names it, entry or no
+    entry stays a hint until the store's collector takes its .drv.  The
+    entries and records are the *.json files, the proof logs the *.jsonl;
+    what else the dirs hold is another deploy's file being written, or
+    nix's temporary link under roots/, left alone until TMP_MAX_AGE says
+    its writer died.  A root is kept while a record names it, entry or no
     entry.  Under memo_lock."""
     used = memo_used(d)
     roots = d / "roots"
     for path in d.iterdir():
-        if path.is_dir():
+        if path.is_dir() or path.suffix == ".jsonl":
             continue
         if path.suffix != ".json":
             drop_stale_tmp(path)
             continue
         ent = memo_read(path)
         try:
-            if path.name.startswith("check-"):
-                memo_root(path).unlink(missing_ok=True)
-                if ent is None:
-                    path.unlink()
-            elif ent is None or not Path(ent.drv).exists():
+            if ent is None or not Path(ent.drv).exists():
                 path.unlink()
                 memo_root(path).unlink(missing_ok=True)
             elif path.stem not in used:
@@ -677,13 +674,64 @@ def eval_toplevels(wt: str, union: str, targets: list[str],
     return tops
 
 
-def precheck_memo_path(rev: str) -> Path:
-    """The precheck memo entry for `rev`'s tree.  Keyed on the whole tree
-    (so nothing declares what the check reads; nix's own hash of the
-    check's inputs spares the build when a changed tree left those alone),
-    written only once the check passed, so presence is the proof."""
-    tree = out(["git", "rev-parse", rev + "^{tree}"])
-    return memo_dir() / f"check-{cfg().precheck}-{tree}.json"
+def precheck_log() -> Path:
+    """The prechecks' proof log: one JSON line per tree a check passed on
+    - the `check`, the `tree`, `at` (UTC), the `checkout` that proved it,
+    the check's `out` and `drv` - appended by prove_tree, never pruned (a
+    line per distinct tree is nothing).  Keyed on the whole tree, so
+    nothing declares what the check reads; nix's own hash of the check's
+    inputs spares the build when a changed tree left those alone."""
+    return memo_dir() / "prechecks.jsonl"
+
+
+def precheck_tree(rev: str) -> str:
+    return out(["git", "rev-parse", rev + "^{tree}"])
+
+
+def tree_proven(log: Path, check: str, tree: str) -> bool:
+    """Whether `log` holds a line for `check` passing on `tree`.  Only the
+    lines naming the tree are parsed (the log is read whole on every
+    deploy).  A line another deploy is appending at this moment may read
+    torn: skipped, like any line that is not a proof."""
+    try:
+        text = log.read_text()
+    except OSError:
+        return False
+    for line in text.splitlines():
+        if tree not in line:
+            continue
+        try:
+            doc = load_json(line)
+        except ValueError:
+            continue
+        if isinstance(doc, dict) and doc.get("check") == check and doc.get("tree") == tree:
+            return True
+    return False
+
+
+def prove_tree(log: Path, check: str, tree: str, ent: Top) -> None:
+    """Append `check`'s pass on `tree` to `log` in one write under
+    O_APPEND, so concurrent deploys' lines never interleave.  A last line
+    left unterminated (a write cut short: the disk full) is ended first,
+    or every proof after it would be glued to it; another deploy's line
+    half-landed at that moment earns a blank line, which no reader
+    minds.  A write that fails costs the next deploy the check again,
+    said on stderr."""
+    doc = {"check": check, "tree": tree, "at": datetime.now(UTC).isoformat(timespec="seconds"),
+           "checkout": str(root().resolve()), "out": ent.out, "drv": ent.drv}
+    data = (dump_json(doc) + "\n").encode()
+    try:
+        fd = os.open(log, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            if os.lseek(fd, 0, os.SEEK_END) and os.pread(fd, 1, os.lseek(fd, -1, os.SEEK_END)) != b"\n":
+                data = b"\n" + data
+            if os.write(fd, data) != len(data):
+                raise OSError("short write")
+        finally:
+            os.close(fd)
+    except OSError as e:
+        print(f"eval memo: recording the precheck's pass in {log} failed ({e}); "
+              "the next deploy runs it again", file=sys.stderr)
 
 
 def precheck_gate(wt: str, rev: str) -> str | None:
@@ -697,8 +745,8 @@ def precheck_gate(wt: str, rev: str) -> str | None:
     from .targets import build_drvs  # noqa: PLC0415 - targets imports this module
 
     c = cfg()
-    path = precheck_memo_path(rev)
-    if memo_read(path) is not None:
+    log, tree = precheck_log(), precheck_tree(rev)
+    if tree_proven(log, c.precheck, tree):
         return None
     flake = f"{wt}/{c.flake_path}" if c.flake_path != "." else wt
     p = run(["nix", "eval", "--json", f"{flake}#checks.{c.targets_arch}.{c.precheck}",
@@ -710,9 +758,10 @@ def precheck_gate(wt: str, rev: str) -> str | None:
         return f"nix eval returned no derivation for the precheck:\n{p.stdout[:500]}"
     err = build_drvs([ent.drv], f"precheck {c.precheck}", ("-L",), capture=True)
     if err is None:
-        memo_write(path, ent)
+        prove_tree(log, c.precheck, tree, ent)
     return err
 
 
 def precheck_unproven(rev: str) -> bool:
-    return bool(cfg().precheck) and memo_read(precheck_memo_path(rev)) is None
+    check = cfg().precheck
+    return bool(check) and not tree_proven(precheck_log(), check, precheck_tree(rev))

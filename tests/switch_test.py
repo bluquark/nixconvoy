@@ -463,12 +463,26 @@ def gate_cases() -> None:
 def memo_cases() -> None:
     """A memo entry round-trips through its file, an entry with keys this
     version does not know (an older one's) still loads, one missing its
-    toplevel is no entry; and the dry activation's report is parsed."""
+    toplevel is no entry; a tree's proof is found in the log once appended,
+    past a torn line, and a prune leaves the log alone; and the dry
+    activation's report is parsed."""
     top = memo.Top("/nix/store/new", "/nix/store/new.drv", True, False)
     with tempfile.TemporaryDirectory() as d:
         memo.memo_write(Path(d) / "e", top)
         assert memo.memo_read(Path(d) / "e") == top
         assert memo.memo_read(Path(d) / "missing") is None
+        log = Path(d) / "prechecks.jsonl"
+        assert not memo.tree_proven(log, "lint", "a" * 40)
+        memo.prove_tree(log, "lint", "a" * 40, top)
+        log.write_text(log.read_text() + '{"check": "lint", "tree": "b')
+        memo.prove_tree(log, "lint", "c" * 40, top)
+        assert memo.tree_proven(log, "lint", "a" * 40) and memo.tree_proven(log, "lint", "c" * 40)
+        assert not memo.tree_proven(log, "lint", "b" * 40) and not memo.tree_proven(log, "other", "a" * 40)
+        doc = json.loads(log.read_text().splitlines()[0])
+        assert doc["checkout"] == str(Path.cwd().resolve()) and doc["drv"] == top.drv and "T" in doc["at"]
+        (Path(d) / "e").unlink()
+        memo.memo_prune(Path(d))
+        assert log.exists() and memo.tree_proven(log, "lint", "c" * 40)
     assert memo.memo_entry({"out": "o", "drv": "d", "protected": {}}) == memo.Top("o", "d", False, False)
     assert memo.memo_entry({"out": "o"}) is None
     assert targets.unit_changes("would restart the following units: nftables.service, nginx.service\n"
