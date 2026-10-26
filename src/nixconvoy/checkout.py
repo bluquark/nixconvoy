@@ -228,7 +228,7 @@ def require_work_branch(what: str) -> str:
     wb = work_branch()
     if wb is None:
         die(f"{what} needs a work branch, and this checkout has none: "
-            f"`git switch -c {this_prefix()}<leaf>` (a branch {CONFIG_FILE}'s work_branches lists) and re-run")
+            f"`git checkout -b {this_prefix()}<leaf>` (a branch {CONFIG_FILE}'s work_branches lists) and re-run")
     return wb
 
 
@@ -773,7 +773,7 @@ def sole_writer_problem(wb: str) -> str | None:
     return (f"{wb} moved on origin ({up[:12]}): another checkout deployed on it, but a work branch has one "
             f"writer.  `git log refs/heads/{wb}..refs/remotes/origin/{wb}` shows what it holds; in that "
             f"branch's checkout, `git rebase --autostash refs/remotes/origin/{wb}` carries this checkout's "
-            f"increments onto it, or `git switch -c {this_prefix()}<leaf>` moves them to a branch of their "
+            f"increments onto it, or `git checkout -b {this_prefix()}<leaf>` moves them to a branch of their "
             f"own; then re-run")
 
 
