@@ -242,18 +242,58 @@ def staged_differs() -> bool:
     return not ok(["git", "diff", "--cached", "--quiet"])
 
 
+LOCK_FILE = "nixconvoy-deploy.lock"
+
+
 def lock_checkout() -> IO[str] | None:
     """The current checkout's deploy lock: a flock on a file in its git dir,
     held by the returned open file, or None when another run holds it.  It
     serialises nixconvoy runs in one checkout: a deploy commits the snapshot tree
-    onto HEAD at its end, so `pull` must not rebase HEAD under it."""
-    f = Path(out(["git", "rev-parse", "--git-path", "nixconvoy-deploy.lock"])).open("w")  # noqa: SIM115
+    onto HEAD at its end, so `pull` must not rebase HEAD under it.  The
+    holder's pid, start time and arguments go in the file, for lock_holder."""
+    # "a+", so that a contender does not truncate the holder's line.
+    f = Path(out(["git", "rev-parse", "--git-path", LOCK_FILE])).open("a+")  # noqa: SIM115
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         f.close()
         return None
+    write_holder(f)
     return f
+
+
+def write_holder(f: IO[str]) -> None:
+    """This run as the deploy lock's holder line: pid, start time, the
+    pid's /proc start time (0 without /proc) and the arguments."""
+    stat = proc_stat(os.getpid())
+    start = stat.split()[19] if stat is not None else "0"
+    f.seek(0)
+    f.truncate()
+    f.write(f"{os.getpid()} {int(time.time())} {start} {shlex.join(sys.argv[1:])}\n")
+    f.flush()
+
+
+def lock_holder(d: Path | None = None) -> str:
+    """The run holding the checkout's (`d`, else the current one) lock, for
+    the refusal: its arguments, pid and age as write_holder wrote them.  A
+    recorded pid that is gone (or reused, by its /proc start time) left the
+    lock to a child of its own (a finished run's background push); an
+    older build wrote nothing."""
+    where = d or Path.cwd()
+    try:
+        line = (where / out(["git", "rev-parse", "--git-path", LOCK_FILE], cwd=str(where))).read_text().strip()
+    except OSError:
+        line = ""
+    fields = line.split(" ", 3)
+    if len(fields) < 3 or not all(x.isdigit() for x in fields[:3]):
+        return "another nixconvoy"
+    pid, started, start = int(fields[0]), int(fields[1]), fields[2]
+    age = max(0, int(time.time()) - started)
+    for_ = f"{age} s" if age < 90 else f"{round(age / 60)} min" if age < 5400 else f"{age / 3600:.1f} h"
+    what = f"`nixconvoy {fields[3]}`" if len(fields) == 4 and fields[3] else "`nixconvoy`"
+    if lock_pid_alive(f"pid {pid}" + (f" start {start}" if start != "0" else "")) is False:
+        return f"a child of {what} (pid {pid}, gone; started {for_} ago)"
+    return f"{what} (pid {pid}, running for {for_})"
 
 
 def deploy_running(d: Path) -> bool:
@@ -459,7 +499,7 @@ def update_checkout(path: Path) -> tuple[bool, str]:
     try:
         lock = lock_checkout()
         if lock is None:
-            return False, "skipped: an nixconvoy is running there"
+            return False, f"skipped: {lock_holder()} is running there"
         try:
             wb = work_branch_name()
             done = decide("rebase", mode="sync", wb=wb)

@@ -922,17 +922,68 @@ def sync(wb: str | None, msg: str | None, *, dry: bool = False) -> list[str]:
     return told
 
 
-def land_all(wb: str, fallback_msg: str) -> None:
-    """Each present submodule landed (land_one); run by land before main's
-    commit, so a landing retried finds nothing left to do here."""
-    for sub in present(Path.cwd()):
-        land_one(sub, wb, fallback_msg)
+class Landing(NamedTuple):
+    sub: Sub
+    wb: str
+    default: str
+    landed: str  # the rev the work branch now pins
+    pending: str | None  # `landed` as a commit for the default branch, once main is pushed
+    settle: bool  # the worktree and the branch still to move onto `landed`
 
 
-def land_one(sub: Sub, wb: str, fallback_msg: str) -> None:
-    """The submodule landed on its repository's default branch as one
-    commit (the MSG_FILE in its worktree - tracked or not, it is read here
-    alone - else `fallback_msg`) and pinned there, as a commit on `wb`."""
+def prepare_all(wb: str, fallback_msg: str, earlier: list[Landing] | None = None) -> list[Landing]:
+    """Each present submodule's landing prepared (prepare_one), for land to
+    finish (finish_all) once main is pushed, or abandon (abandon_all); one
+    that fails abandons the ones before it.  `earlier`: the landings of
+    the other participants of a land --with-children, which a repository
+    among them is landed on top of."""
+    landings: list[Landing] = []
+    try:
+        for sub in present(Path.cwd()):
+            base = next((e.landed for e in earlier or [] if e.sub.repo == sub.repo), None)
+            landings.append(prepare_one(sub, wb, fallback_msg, base))
+    except Fail:
+        abandon_all(landings)
+        raise
+    return landings
+
+
+def finish_all(landings: list[Landing]) -> None:
+    """Main is pushed: each landing finished, a failure said and the rest
+    carried on (the pin is on main either way)."""
+    for landing in landings:
+        try:
+            finish_one(landing)
+        except Fail as e:
+            print(f"warning: submodule {landing.sub.name}: finishing its landing failed: {e}; main pins "
+                  f"{landing.landed[:12]}; bring its worktree and {landing.wb} onto that rev by hand "
+                  f"(in {landing.sub.dir})", file=sys.stderr)
+
+
+def abandon_all(landings: list[Landing]) -> None:
+    """The landing commits' temporary refs dropped: nothing else moved on
+    any origin, and the caller resets the pin commits of its branch."""
+    for landing in landings:
+        if landing.pending is not None:
+            git("push", "--quiet", "origin", f":{landing_ref(landing)}", cwd=str(landing.sub.dir), check=False)
+
+
+def landing_ref(landing: Landing) -> str:
+    """Where the landing commit waits on its origin for main's push (a
+    PAST_REFS entry: pruned like any once nothing pins it)."""
+    return f"{PAST_REFS}/{landing.wb}/{landing.pending}"
+
+
+def prepare_one(sub: Sub, wb: str, fallback_msg: str, base: str | None = None) -> Landing:
+    """The submodule's landing on its repository's default branch (`base`:
+    on an earlier participant's landing of the same repository instead) as
+    one commit (the MSG_FILE in its worktree - tracked or not, it is read
+    here alone - else `fallback_msg`), pinned as a commit on `wb`; the
+    commit itself waits under a temporary ref on its origin, so that the
+    push of main, which the pin makes depend on it, goes first and a
+    refused one leaves the default branch as it was.  A branch with
+    nothing of its own just follows the pin, worktree and branch moved
+    at once (nothing of that reaches the default branch)."""
     top = Path.cwd()
     cur = branch_at(sub.dir)
     if cur != wb:
@@ -949,7 +1000,7 @@ def land_one(sub: Sub, wb: str, fallback_msg: str) -> None:
         die(f"submodule {sub.name}: cannot land it unfetched")
     refuse_dropped(sub, wb, top)
     default = default_branch(sub.repo)
-    main = rev_in(sub.dir, f"refs/remotes/origin/{default}")
+    main = base or rev_in(sub.dir, f"refs/remotes/origin/{default}")
     head = rev_in(sub.dir, "HEAD")
     assert main is not None and head is not None
     # The branch's own commits squashed onto the default branch - its
@@ -957,6 +1008,8 @@ def land_one(sub: Sub, wb: str, fallback_msg: str) -> None:
     # conflicts); one with none follows the pin, when a landing elsewhere
     # put that ahead of it on the default branch, else keeps its rev.
     landed = head
+    pending = None
+    settle = False
     pinned = pin(sub, top)
     if is_ancestor(head, main, cwd=str(sub.dir)):
         if pinned is not None and pinned != head and is_ancestor(pinned, main, cwd=str(sub.dir)):
@@ -965,6 +1018,7 @@ def land_one(sub: Sub, wb: str, fallback_msg: str) -> None:
             push_branch(sub, wb)
             landed = pinned
     else:
+        settle = True
         deployed = pinned
         if deployed != head:
             die(f"submodule {sub.name}'s HEAD ({head[:12]}) is not what the tree pins "
@@ -982,21 +1036,41 @@ def land_one(sub: Sub, wb: str, fallback_msg: str) -> None:
         if tree == out(["git", "rev-parse", f"{main}^{{tree}}"], cwd=str(sub.dir)):
             landed = main
         else:
-            landed = out(["git", "commit-tree", tree, "-p", main, "-m", msg], cwd=str(sub.dir))
-            p = git("push", "--quiet", "origin", f"{landed}:refs/heads/{default}",
+            landed = pending = out(["git", "commit-tree", tree, "-p", main, "-m", msg], cwd=str(sub.dir))
+            p = git("push", "--quiet", "origin", f"{landed}:{PAST_REFS}/{wb}/{landed}",
                     cwd=str(sub.dir), check=False)
             if p.returncode != 0:
-                die(f"pushing submodule {sub.name}'s {default} failed (moved since fetch?); "
-                    f"re-run:\n{(p.stderr or '').strip()}")
-            print(f"submodule {sub.name}: landed on {default} ({landed[:12]})")
+                die(f"pushing submodule {sub.name}'s landing commit to its origin failed:\n"
+                    f"{(p.stderr or '').strip()}")
+    if pin(sub, top) != landed:
+        set_pin(sub, landed, top)
+        git("commit", "--quiet", "-m", f"submodule {sub.name}: pinned on {default}")
+    return Landing(sub, wb, default, landed, pending, settle)
+
+
+def finish_one(landing: Landing) -> None:
+    """After main's push: the default branch onto the landing commit, the
+    worktree and the branch onto the landing.  A default branch that moved
+    meanwhile is left as it is, said with the repair: main pins the commit
+    all the same, which its temporary ref keeps fetchable."""
+    sub, wb, default, landed, pending, settle = landing
+    if pending is not None:
+        p = git("push", "--quiet", "origin", f"{pending}:refs/heads/{default}", cwd=str(sub.dir), check=False)
+        if p.returncode != 0:
+            print(f"warning: submodule {sub.name}: pushing {default} failed (moved since fetch?); main pins "
+                  f"{pending[:12]}, kept on its origin as {landing_ref(landing)} until a landing carries it: "
+                  f"in {sub.dir}, fetch and merge origin/{default}, deploy, then land again:\n"
+                  f"{(p.stderr or '').strip()}", file=sys.stderr)
+        else:
+            print(f"submodule {sub.name}: landed on {default} ({pending[:12]})")
+            git("push", "--quiet", "origin", f":{landing_ref(landing)}", cwd=str(sub.dir), check=False)
+            git("update-ref", "-d", landing_ref(landing), cwd=str(sub.repo), check=False)
+    if settle:
         # The worktree onto the landing; its tree is clean of edits.
         if git("reset", "--quiet", "--keep", landed, cwd=str(sub.dir), check=False).returncode != 0:
             git("reset", "--quiet", "--hard", landed, cwd=str(sub.dir))
         (sub.dir / MSG_FILE).unlink(missing_ok=True)
         push_branch(sub, wb)
-    if pin(sub, top) != landed:
-        set_pin(sub, landed, top)
-        git("commit", "--quiet", "-m", f"submodule {sub.name}: pinned on {default}")
     prune_past_refs(sub)
 
 

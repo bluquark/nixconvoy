@@ -323,10 +323,12 @@ brings the checkout onto main (see Pull).  A deploy refuses a submodule
 still behind that branch, and a worktree reset below the work the tree
 deploys (nothing of its own left: a hand reset; a rebase or amend keeps
 work of its own and passes, the deployed commits it leaves behind named):
-put it back, or `close <input> --force` drops it deliberately.  land lands
-each submodule first - its tip squashed onto the default branch as one
-commit (the COMMIT_MSG.md in the worktree, tracked or not, else the
-checkout's) - and pins that commit on the work branch, then lands main;
+put it back, or `close <input> --force` drops it deliberately.  land
+squashes each submodule's tip onto its default branch as one commit (the
+COMMIT_MSG.md in the worktree, tracked or not, else the checkout's), pins
+that commit on the work branch and lands main, then moves the default
+branch onto the commit - main's push goes first, so refused, it leaves
+every default branch as it was;
 `close <input> --force` drops one, the pin put back to
 origin/main's and staged for the next deploy to revert it.  status
 lists the configured submodules.  A submodule repository's own checkout
@@ -446,7 +448,7 @@ from pathlib import Path
 from typing import IO, NoReturn
 
 from . import commands, config, hooks, init, names, proc, review, submodule
-from .checkout import lock_checkout, require_work_branch, sub_parent
+from .checkout import lock_checkout, lock_holder, require_work_branch, sub_parent
 from .deploy import deploy
 from .proc import PERF, TOOL, Fail, die, ok, out, painter
 
@@ -696,7 +698,7 @@ def dispatch() -> None:
             os.chdir(d)
             lock = lock_checkout()
             if lock is None:
-                die(f"another nixconvoy is running in {name}'s worktree")
+                die(f"{lock_holder()} is running in {name}'s worktree")
             if subcmd == "land":
                 commands.land(msg, not_yet_deployed)
             else:
@@ -764,7 +766,7 @@ def take_lock() -> None:
     """The current checkout's deploy lock, held until exit."""
     lock = lock_checkout()
     if lock is None:
-        die("another nixconvoy is running in this checkout")
+        die(f"{lock_holder()} is running in this checkout")
     proc.HELD.append(lock)
 
 

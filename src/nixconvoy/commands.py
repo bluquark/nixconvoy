@@ -17,6 +17,7 @@ from . import names, submodule
 from .checkout import (
     DEPLOYED_TRAILER,
     KEPT_EDIT,
+    LOCK_FILE,
     MACHINE_ENV,
     PENDING_REFS,
     SESSIONLESS,
@@ -47,6 +48,7 @@ from .checkout import (
     landing_message,
     listed_tips,
     lock_checkout,
+    lock_holder,
     lock_live,
     lock_pid_alive,
     note_pushed,
@@ -71,6 +73,7 @@ from .checkout import (
     tree_less_msg,
     work_branch_name,
     worktree_lock,
+    write_holder,
 )
 from .config import MSG_FILE
 from .guard import binary, decide
@@ -179,16 +182,26 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
     msg = main_message(wb, message, main)
     if rev(f"refs/remotes/origin/{wb}") != lease:  # the edit's fetch brought a tip
         lease = ensure_sole_writer(wb)
-    submodule.land_all(wb, msg)
-    tree = tree_less_msg("HEAD")
-
-    commit = out(["git", "commit-tree", tree, "-p", main, "-m", msg])
-
-    p = git("push", "--quiet", "origin", f"{commit}:refs/heads/main", check=False)
-    if p.returncode != 0:
-        die(f"pushing main failed (moved since fetch?); re-run:\n{p.stderr.strip()}")
+    before = rev("HEAD")
+    assert before is not None
+    landings: list[submodule.Landing] = []
+    # The one push that can be refused goes first: until it is in, nothing
+    # has moved on any origin, and a failure anywhere here takes the pin
+    # commits off the branch again (prepare_all drops its own temporary refs).
+    try:
+        landings = submodule.prepare_all(wb, msg)
+        tree = tree_less_msg("HEAD")
+        commit = out(["git", "commit-tree", tree, "-p", main, "-m", msg])
+        p = git("push", "--quiet", "origin", f"{commit}:refs/heads/main", check=False)
+        if p.returncode != 0:
+            die(f"pushing main failed (moved since fetch?); re-run:\n{p.stderr.strip()}")
+    except Fail:
+        submodule.abandon_all(landings)
+        git("reset", "--quiet", "--keep", before, check=False)
+        raise
     # Refused where main is checked out (the main worktree): catch_up moves it.
     git("branch", "-f", "main", commit, check=False)
+    submodule.finish_all(landings)
 
     git("reset", "--quiet", commit)  # move wb to main; working tree untouched
     Path(MSG_FILE).unlink(missing_ok=True)  # now main's commit message
@@ -420,6 +433,8 @@ def hold_lock(path: Path, wait: float = 0) -> IO[str] | None:
                 return None
             time.sleep(0.2)
         else:
+            if path.name == LOCK_FILE:
+                write_holder(f)
             return f
 
 
@@ -1088,7 +1103,7 @@ def close_checkout(path: Path, *, force: bool = False) -> None:
     lock = lock_checkout()
     os.chdir(here)
     if lock is None:
-        die(f"a nixconvoy is running in {d}")
+        die(f"{lock_holder(d)} is running in {d}")
     cur = branch_at(d)
     wb = identity_of(d, cur).wb
     head = out(["git", "rev-parse", "HEAD"], cwd=str(d))
@@ -1162,7 +1177,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
             lock = lock_checkout()
             os.chdir(here)
             if lock is None:
-                die(f"another nixconvoy is running in {label}")
+                die(f"{lock_holder(d)} is running in {label}")
             locks.append(lock)
             parts.append((d, ident.wb))
         if not parts:
@@ -1244,20 +1259,31 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
                 if problem is not None:
                     die(f"{d.name}: {problem}")
                 leases[b] = rev(f"refs/remotes/origin/{b}") or ""
-        for d, b in [(here, wb), *parts]:
-            os.chdir(d)
-            submodule.land_all(b, msg)
+        befores = {d: out(["git", "rev-parse", "HEAD"], cwd=str(d)) for d, _ in [(here, wb), *parts]}
+        landings: list[submodule.Landing] = []
+        # As in land: nothing moves on any origin before main's push is in,
+        # and a failure up to it takes every pin commit off again.
+        try:
+            for d, b in [(here, wb), *parts]:
+                os.chdir(d)
+                landings += submodule.prepare_all(b, msg, landings)
+                os.chdir(here)
+            tree = merged_tree()
+            if tree == main_tree:
+                die("no changes vs origin/main to land")
+            clashes(tree)
+            commit = out(["git", "commit-tree", tree, "-p", main, "-m", msg])
+            p = git("push", "--quiet", "origin", f"{commit}:refs/heads/main", check=False)
+            if p.returncode != 0:
+                die(f"pushing main failed (moved since fetch?); re-run:\n{p.stderr.strip()}")
+        except Fail:
             os.chdir(here)
-        tree = merged_tree()
-        if tree == main_tree:
-            die("no changes vs origin/main to land")
-        clashes(tree)
-
-        commit = out(["git", "commit-tree", tree, "-p", main, "-m", msg])
-        p = git("push", "--quiet", "origin", f"{commit}:refs/heads/main", check=False)
-        if p.returncode != 0:
-            die(f"pushing main failed (moved since fetch?); re-run:\n{p.stderr.strip()}")
+            submodule.abandon_all(landings)
+            for d, _ in [(here, wb), *parts]:
+                git("reset", "--quiet", "--keep", befores[d], cwd=str(d), check=False)
+            raise
         git("branch", "-f", "main", commit, check=False)
+        submodule.finish_all(landings)
         print(f"landed on main: {summarize(commit)}")
         kept_edit().unlink(missing_ok=True)
         for d, b in [(here, wb), *parts]:

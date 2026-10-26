@@ -400,11 +400,14 @@ commit.  From a checkout on a work branch:
   deploy refuses to pin a submodule still behind that branch, and a
   worktree reset below the work the tree deploys (`close <input>
   --force` drops it deliberately).
-- **`land` lands the submodule first:** its tip merged onto the default
+- **`land` lands the submodule with main:** its tip merged onto the default
   branch as the union merges it and squashed there as one commit (the
   `COMMIT_MSG.md` in the worktree, tracked or not, else the checkout's),
-  that commit pinned as a commit of the work branch, then main; a
-  submodule whose HEAD is not what the tree pins is refused.  `undeploy`
+  that commit pinned as a commit of the work branch and pushed under a
+  temporary ref, then main, then the default branch moved onto the commit
+  - the push of main, the one that can be refused, goes first, and refused
+  it leaves every default branch as it was and the pins off the work
+  branch; a submodule whose HEAD is not what the tree pins is refused.  `undeploy`
   resets it onto the pin of the rev the checkout goes back to (its
   default branch, for a landed pin).  Either leaves the worktree in
   place.  `close <input>`
