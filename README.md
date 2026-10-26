@@ -280,6 +280,7 @@ nixconvoy init [<flake-dir>]   write nixconvoy.toml for a fresh install: the fla
 nixconvoy close [<path> ... | <worktree> ... | <submodule> ...] [--force]   remove agent checkouts by path (with their work branch), subagent worktrees, or submodule worktrees (with their branch), holding nothing of their own (--force: whatever they hold)
 nixconvoy pull                 rebase every checkout on this machine onto origin/main
 nixconvoy status               every checkout on this machine, and origin's other branches
+nixconvoy orphans              this machine's subagent branches on origin holding commits that no live worktree or claude session holds, one tab-separated line each: branch, worktree or "(no worktree)", COMMIT_MSG.md subject
 nixconvoy hook <event>         the Claude Code plugin's hook of that event (session-start, subagent-stop, worktree-create, worktree-remove, worktree-resume), run by its hooks/run.sh <event> with the hook's input on stdin
 nixconvoy open <path> [--branch <work-branch>]   an agent checkout at that path on a work branch of this machine's, named after the path (refused when origin holds it: --branch takes it over or names another)
 nixconvoy open --child <worktree>   a child (subagent) worktree <checkout>/<child_worktrees>/<worktree> (what the plugin's create hook makes)
