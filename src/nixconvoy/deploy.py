@@ -43,7 +43,7 @@ from .checkout import (
     staged_snapshot,
     work_branch,
 )
-from .config import builder
+from .config import store_host
 from .guard import binary, decide
 from .memo import Top
 from .proc import NOTHING_DONE, PERF, die, dump_json, git, is_ancestor, load_json, out, rev
@@ -128,7 +128,7 @@ def commit_unreached(wb: str, msg: str, snap: str) -> None:
     started are dropped unread: the targets have nothing to catch up on
     from it."""
     if memo.precheck_unproven(snap):
-        targets.check_builder()
+        targets.check_store()
         wt = add_worktree(snap)
         try:
             print("running the precheck...")
@@ -314,7 +314,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
     if not skip:
         PERF.mark("probe")
         collect_probes()
-        targets.check_builder()
+        targets.check_store()
 
     plan: list[str] = []
     affected: list[str] = []
@@ -559,7 +559,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                     records[h] = r
 
         if plan:
-            b = builder()
+            b = store_host()
             where = f" on {b}" if b else ""
             PERF.mark("build")
             print(f"building {', '.join(plan)}{where}...")

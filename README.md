@@ -185,7 +185,7 @@ config_version = 1
 flake_dir = "nixos"               # directory holding flake.nix
 targets_dir = "nixos/hosts"       # one directory per nixosConfiguration: the targets
 targets_arch = "x86_64-linux"     # the targets' system
-ssh_address_template = "me@{target}.lan"   # a target's ssh address; the builder's too
+ssh_address_template = "me@{target}.lan"   # a target's ssh address; the store host's too
 branch_prefix = "nixconvoy/"       # a checkout owns "<prefix><leaf>" (`open <path>`: the path's name), a
                                    # subagent worktree "<checkout's branch>-<name>" ("<prefix>main-<name>"
                                    # under a plain checkout); "{machine}" in it is this machine's hostname,
@@ -201,9 +201,11 @@ precheck = "repo-lint"       # optional: checks.<targets_arch>.<name>, a flake c
                              # (a pass memoized on the union's tree)
 
 [build]
-builder = { "*" = "bigbox", laptop = "laptop" }   # realise closures there, by the hostname nixconvoy runs on
-                                     # ("*": any other); a machine mapped to itself builds locally
-skip_substituters = ["https://slow.cachix.org"]   # left out of deploy builds; the caches are the builder's nix.conf's
+store = { "*" = "bigbox", laptop = "laptop" }   # realise closures in that machine's store, by the hostname
+                                     # nixconvoy runs on ("*": any other); a machine mapped to itself
+                                     # realises locally.  Where they build is that store's nix daemon's
+                                     # call: its own remote builders (nix.conf's builders) or itself
+skip_substituters = ["https://slow.cachix.org"]   # left out of deploy builds; the caches are the store host's nix.conf's
 
 [targets.laptop]
 ssh_address = "root@10.0.0.9"   # overrides the template
@@ -487,7 +489,7 @@ deploying unmerged work to the same targets, each safe from the others.
 | | nixos-rebuild | deploy-rs | colmena | nixconvoy |
 |---|:-:|:-:|:-:|:-:|
 | Build locally | ✓ | ✓ | ✓ | ✓ |
-| Build on a designated builder | ✓ |   |   | ✓ |
+| Build on a designated machine | ✓ |   |   | ✓ |
 | Each target builds its own closures | ✓ | ✓ | ✓ |   |
 
 ### Performance

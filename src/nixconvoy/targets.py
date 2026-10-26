@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from . import proc
-from .config import _bare_url, builder, cfg
+from .config import _bare_url, cfg, store_host
 from .proc import NOTHING_DONE, die, load_json, ok, run
 
 # Seconds one probe of a target may take, so a stalled ssh session holds
@@ -44,7 +44,7 @@ UNSANDBOXED = ("--option", "sandbox", "false")
 # Seconds a dry-activate may take: it only computes the unit diff, so a
 # longer wait means a stalled connection, not work.
 DRY_ACTIVATE_TIMEOUT = 120
-# Seconds `nix config show` may take on the builder (well under 0.1 s): a
+# Seconds `nix config show` may take on the store host (well under 0.1 s): a
 # longer wait means a stuck daemon or connection.
 SUBSTITUTERS_TIMEOUT = 10
 
@@ -215,9 +215,9 @@ def kept_substituters(shown: str, skip: tuple[str, ...]) -> str:
 
 
 @functools.cache
-def builder_substituters(via: tuple[str, ...]) -> tuple[bool, str]:
+def store_substituters(via: tuple[str, ...]) -> tuple[bool, str]:
     """The substituter list `nix config show` prints through `via`, or
-    False and the failure text; once per builder for the run (the precheck
+    False and the failure text; once per store host for the run (the precheck
     and the build both ask)."""
     cmd = [*via, "nix", "config", "show", "substituters"]
     p = run(cmd, check=False, timeout=SUBSTITUTERS_TIMEOUT)
@@ -230,50 +230,50 @@ def builder_substituters(via: tuple[str, ...]) -> tuple[bool, str]:
 
 def build_cmd(opts: tuple[str, ...], via: list[str]) -> list[str] | str:
     """The `nix build` prefix the .drvs follow, run through `via` (the ssh
-    prefix reaching the builder, empty here), or the failure text.  With
-    skip_substituters set it passes the builder's own substituter list
-    (builder_substituters; its failure is the build's) less
-    those: the caches stay the builder's nix.conf's business, this only
+    prefix reaching the store host, empty here), or the failure text.  With
+    skip_substituters set it passes the store host's own substituter list
+    (store_substituters; its failure is the build's) less
+    those: the caches stay the store host's nix.conf's business, this only
     trims the probes a deploy makes."""
     nix = ["nix", "build", "--no-link", *BUILD_OPTS, *opts]
     skip = cfg().skip_substituters
     if not skip:
         return nix
-    good, shown = builder_substituters(tuple(via))
+    good, shown = store_substituters(tuple(via))
     if not good:
         return shown
     return [*nix, "--option", "substituters", kept_substituters(shown, skip)]
 
 
-def build_on(builder: str, drvs: list[str], what: str,
+def build_on(host: str, drvs: list[str], what: str,
              opts: tuple[str, ...], capture: bool) -> str | None:
-    """Realise `drvs` on `builder`.  A .drv closure is self-authenticating,
+    """Realise `drvs` in `host`'s store.  A .drv closure is self-authenticating,
     so the copy needs no signing or trusted user there."""
-    tgt = ssh_address(builder)
+    tgt = ssh_address(host)
     sshopts = " ".join(["-o", "BatchMode=yes", *control_opts()])
     p = run(["nix", "copy", "--derivation", "--to", f"ssh://{tgt}", *drvs],
             env={"NIX_SSHOPTS": sshopts}, check=False, capture=capture, merged=True)
     if p.returncode != 0:
-        return f"copying derivations to {builder} failed" + (f":\n{p.stdout}" if capture else "")
+        return f"copying derivations to {host} failed" + (f":\n{p.stdout}" if capture else "")
     via = ["ssh", "-o", "BatchMode=yes", *control_opts(), tgt]
     cmd = build_cmd(opts, via)
     if isinstance(cmd, str):
-        return f"{what} failed on {builder}: {cmd}"
+        return f"{what} failed on {host}: {cmd}"
     build = [*via, shlex.join(cmd)]
     p = run([*build, *sandbox_opts(build, drvs), *(f"{d}^out" for d in drvs)],
             check=False, capture=capture, merged=True)
     if p.returncode != 0:
-        return f"{what} failed on {builder}" + (f":\n{p.stdout}" if capture else "")
+        return f"{what} failed on {host}" + (f":\n{p.stdout}" if capture else "")
     return None
 
 
 def build_drvs(drvs: list[str], what: str, opts: tuple[str, ...] = (),
                capture: bool = False) -> str | None:
-    """Realise `drvs` on the builder when set, else here.  The failure
+    """Realise `drvs` in the store host's store when set, else here.  The failure
     text (naming `what`, with the build output when `capture` kept it off
     the terminal) or None; the caller dies, since this also runs on the
     precheck thread."""
-    b = builder()
+    b = store_host()
     if b:
         return build_on(b, drvs, what, opts, capture)
     build = build_cmd(opts, [])
@@ -302,14 +302,14 @@ def copy_closure(target: str, toplevel: str, quiet: bool = False) -> None:
     """Copy `toplevel`'s closure to `target`, outside the switch lock (a union
     rebuilt after it merely leaves a few extra paths there).  `quiet` keeps
     nix's progress output for the failure message."""
-    b = builder()
+    b = store_host()
     sshopts = " ".join(["-o", "BatchMode=yes", *control_opts()])
     if target == b:
         return  # built there
     if target == proc.this_machine():
         if not b:
             return
-        # The outputs live on the builder: fetched for the local switch.
+        # The outputs live on the store host: fetched for the local switch.
         print(f"fetching the closure from {b}...")
         p = run(["nix", "copy", "--no-check-sigs", "--from", f"ssh://{ssh_address(b)}", toplevel],
                 env={"NIX_SSHOPTS": sshopts}, check=False, capture=quiet, merged=True)
@@ -324,7 +324,7 @@ def copy_closure(target: str, toplevel: str, quiet: bool = False) -> None:
     # LAN a straight copy beats any download and per-path probe.
     subst = ["-s"] if off_lan(tgt) else []
     if b:
-        # The outputs live on the builder, not here.
+        # The outputs live on the store host, not here.
         p = run(["ssh", "-o", "BatchMode=yes", *control_opts(), ssh_address(b),
                  ("NIX_SSHOPTS='-o BatchMode=yes' "
                   f"nix copy {' '.join(subst)} --to ssh://{tgt} {toplevel}")],
@@ -337,13 +337,13 @@ def copy_closure(target: str, toplevel: str, quiet: bool = False) -> None:
             + (f"\n{p.stdout.strip()}" if p.stdout else ""))
 
 
-def check_builder() -> None:
-    """Fail before any nix work when a builder is set but unreachable,
+def check_store() -> None:
+    """Fail before any nix work when a store host is set but unreachable,
     rather than on ssh's own timeout deep in a build."""
-    b = builder()
+    b = store_host()
     if b and not ok(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
                       *control_opts(), ssh_address(b), "true"]):
-        die(f"builder {b} unreachable; {NOTHING_DONE}")
+        die(f"store host {b} unreachable; {NOTHING_DONE}")
 
 
 def rejected_generation(target: str, toplevel: str) -> str | None:

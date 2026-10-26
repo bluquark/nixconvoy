@@ -49,7 +49,7 @@ class Config:
     # The targets' system (checks.<targets_arch>.<precheck> is the precheck).
     targets_arch: str
     # A target's ssh address (user@name): nixconvoy.toml's
-    # ssh_address_template, over {target}; the builder is addressed through it too.
+    # ssh_address_template, over {target}; the store host is addressed through it too.
     ssh_template: str
     # A checkout owns "<prefix><leaf>", its subagent worktrees "<prefix><leaf>-<name>"
     # (the main checkout's "<prefix>main-<name>"); {machine}, when the
@@ -70,13 +70,15 @@ class Config:
     # eval.precheck: a flake check (checks.<targets_arch>.<precheck>) proven
     # before any build; empty is none.
     precheck: str = ""
-    # The builder the closures are realised on, by the hostname nixconvoy
-    # runs on ("*": any other); a machine mapped to itself, or to nothing,
-    # builds here.  The builder is addressed as a target (ssh_address).
-    builder: dict[str, str] = field(default_factory=dict)
-    # Substituters a deploy build leaves out of the builder's own configured
-    # list (targets.build_cmd): the caches themselves are each builder's
-    # nix.conf's business.
+    # The machine whose store the closures are realised in, by the hostname
+    # nixconvoy runs on ("*": any other); a machine mapped to itself, or to
+    # nothing, realises them here.  Its nix daemon builds them or hands them
+    # on to its own remote builders (nix.conf's builders), and the closures
+    # are copied to the targets from it.  Addressed as a target (ssh_address).
+    store: dict[str, str] = field(default_factory=dict)
+    # Substituters a deploy build leaves out of the store host's own
+    # configured list (targets.build_cmd): the caches themselves are each
+    # store host's nix.conf's business.
     skip_substituters: tuple[str, ...] = ()
     targets: dict[str, TargetConfig] = field(default_factory=dict)
     # The flake inputs developed in place (submodule.py), by input name.
@@ -205,20 +207,24 @@ def parse(text: str) -> Config:
             raise ConfigError(f"{CONFIG_FILE}: unknown key eval.{k}")
     build = _table(doc.get("build", {}), "build")
     for k in build:
-        if k not in ("builder", "skip_substituters"):
+        if k not in ("store", "builder", "skip_substituters"):
             raise ConfigError(f"{CONFIG_FILE}: unknown key build.{k}")
-    raw_builder = build.get("builder", {})
-    if isinstance(raw_builder, str):
-        builder = {"*": raw_builder}
-    elif not isinstance(raw_builder, dict):
-        raise ConfigError(f"{CONFIG_FILE}: build.builder is a machine name, or a table of them keyed by "
+    # `builder` is the key's older name, still read.
+    if "store" in build and "builder" in build:
+        raise ConfigError(f"{CONFIG_FILE}: build.store and build.builder are the same setting; keep build.store")
+    key = "builder" if "builder" in build else "store"
+    raw_store = build.get(key, {})
+    if isinstance(raw_store, str):
+        store = {"*": raw_store}
+    elif not isinstance(raw_store, dict):
+        raise ConfigError(f"{CONFIG_FILE}: build.{key} is a machine name, or a table of them keyed by "
                           "the hostname nixconvoy runs on")
     else:
-        builder = {}
-        for k, v in raw_builder.items():
+        store = {}
+        for k, v in raw_store.items():
             if not isinstance(v, str):
-                raise ConfigError(f"{CONFIG_FILE}: build.builder.{k} must be a string")
-            builder[k] = v
+                raise ConfigError(f"{CONFIG_FILE}: build.{key}.{k} must be a string")
+            store[k] = v
     skip = []
     for s in _strs(build, "skip_substituters", "build"):
         if s.split() != [s]:
@@ -255,7 +261,7 @@ def parse(text: str) -> Config:
         child_worktrees=children,
         precheck=_str(ev, "precheck", "eval"),
         parallel_eval=_auto_bool(ev, "parallel", "eval"),
-        builder=builder,
+        store=store,
         skip_substituters=tuple(skip),
         targets=targets,
         submodules=submodules,
@@ -302,12 +308,12 @@ def set_cfg(c: Config) -> None:
     _CFG = c
 
 
-def builder() -> str:
-    """Where the closures are realised: NIXCONVOY_BUILDER, else the config's
-    entry for this machine; empty means here."""
-    env = os.environ.get("NIXCONVOY_BUILDER")
+def store_host() -> str:
+    """The machine whose store the closures are realised in: NIXCONVOY_STORE,
+    else the config's entry for this machine; empty means here."""
+    env = os.environ.get("NIXCONVOY_STORE")
     if env is not None:
         return env
     me = proc.this_machine()
-    b = cfg().builder.get(me, cfg().builder.get("*", ""))
+    b = cfg().store.get(me, cfg().store.get("*", ""))
     return "" if b == me else b

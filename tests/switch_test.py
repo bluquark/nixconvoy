@@ -354,7 +354,7 @@ def report(text: str, *, tips: dict[str, str] | None = None,
 
 def target_cases() -> None:
     """expand_targets: names and @tags from nixconvoy.toml, once each; the
-    builder by the machine nixconvoy runs on."""
+    store host by the machine nixconvoy runs on."""
     config.set_cfg(config.parse(toml(
         '[targets.a]\ntags = ["vps"]\n[targets.b]\ntags = ["vps", "lab"]\n'
         '[targets.c]\ntags = ["lab"]\n')))
@@ -363,28 +363,29 @@ def target_cases() -> None:
     assert targets.expand_targets(["@vps"], inv) == ["a", "b"]
     assert targets.expand_targets(["b", "@vps"], inv) == ["b", "a"]
     assert targets.expand_targets(["@lab", "c"], inv) == ["b", "c"]
-    env_builder = os.environ.pop("NIXCONVOY_BUILDER", None)
+    env_store = os.environ.pop("NIXCONVOY_STORE", None)
     try:
-        for build, want in (('[build]\nbuilder = "big"\n', "big"),
-                            ('[build]\nbuilder = "tester"\n', ""),
-                            ('[build]\nbuilder = ""\n', ""),
-                            ('[build]\nbuilder = { }\n', ""),
+        for build, want in (('[build]\nstore = "big"\n', "big"),
+                            ('[build]\nstore = "tester"\n', ""),
+                            ('[build]\nstore = ""\n', ""),
+                            ('[build]\nstore = { }\n', ""),
                             ("", ""),
-                            ('[build]\nbuilder = { "*" = "big" }\n', "big"),
-                            ('[build]\nbuilder = { "*" = "big", tester = "tester" }\n', ""),
-                            ('[build]\nbuilder = { "*" = "big", tester = "other" }\n', "other"),
-                            ('[build]\nbuilder = { other = "big" }\n', "")):
+                            ('[build]\nstore = { "*" = "big" }\n', "big"),
+                            ('[build]\nstore = { "*" = "big", tester = "tester" }\n', ""),
+                            ('[build]\nstore = { "*" = "big", tester = "other" }\n', "other"),
+                            ('[build]\nstore = { other = "big" }\n', ""),
+                            ('[build]\nbuilder = { "*" = "big", tester = "other" }\n', "other")):
             config.set_cfg(config.parse(toml(build)))
-            assert config.builder() == want, (build, config.builder())
-        config.set_cfg(config.parse(toml('[build]\nbuilder = { "*" = "big" }\n')))
-        os.environ["NIXCONVOY_BUILDER"] = ""
-        assert config.builder() == ""
-        os.environ["NIXCONVOY_BUILDER"] = "env"
-        assert config.builder() == "env"
+            assert config.store_host() == want, (build, config.store_host())
+        config.set_cfg(config.parse(toml('[build]\nstore = { "*" = "big" }\n')))
+        os.environ["NIXCONVOY_STORE"] = ""
+        assert config.store_host() == ""
+        os.environ["NIXCONVOY_STORE"] = "env"
+        assert config.store_host() == "env"
     finally:
-        os.environ.pop("NIXCONVOY_BUILDER", None)
-        if env_builder is not None:
-            os.environ["NIXCONVOY_BUILDER"] = env_builder
+        os.environ.pop("NIXCONVOY_STORE", None)
+        if env_store is not None:
+            os.environ["NIXCONVOY_STORE"] = env_store
     config.set_cfg(config.parse(toml('[targets.a]\ntags = ["vps"]\n[targets.zz]\ntags = ["vps"]\n')))
     for bad in (["@nope"], ["zz"], ["@vps"]):
         try:
@@ -395,8 +396,10 @@ def target_cases() -> None:
             raise AssertionError(bad)
     assert config.parse(toml(branches=("work/tester/*", "work/x/"))).work_branches == ("work/tester/", "work/x/")
     for bad_cfg, hint in ((toml('[targets.a]\ntag = ["vps"]\n'), "unknown key targets.a.tag"),
-                          (toml('[build]\nbuilder = { big = 3 }\n'), "build.builder.big must be a string"),
+                          (toml('[build]\nstore = { big = 3 }\n'), "build.store.big must be a string"),
+                          (toml('[build]\nstore = 3\n'), "build.store is a machine name"),
                           (toml('[build]\nbuilder = 3\n'), "build.builder is a machine name"),
+                          (toml('[build]\nstore = "a"\nbuilder = "a"\n'), "the same setting"),
                           (toml().replace("config_version = 1", "config_version = true"), "not supported"),
                           (toml('[build]\nunreachable_hint = "zzz"\n'), "unknown key build.unreachable_hint"),
                           (toml('[targets.a]\nlocal_only = true\n'), "unknown key targets.a.local_only"),
@@ -429,7 +432,7 @@ def target_cases() -> None:
             assert "nixconvoy init" in str(e), e
         else:
             raise AssertionError("loaded without a file")
-    # The builder's substituters less the skipped ones, each cache once.
+    # The store host's substituters less the skipped ones, each cache once.
     assert targets.kept_substituters(
         "https://a/ https://slow.cachix.org/?priority=40 https://a?priority=1 https://b\n",
         ("https://slow.cachix.org",)) == "https://a/ https://b"

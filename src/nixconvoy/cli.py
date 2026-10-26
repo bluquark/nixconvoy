@@ -120,8 +120,9 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      evaluation reads, or a lock entry it names); Deployed:, the candidates running the branch's tip once the
      deploy is over
   6. build the drifting candidates' closures straight from the evaluated
-     .drvs (no re-eval), on the configured builder if any (build.builder,
-     by the machine deploying), unsandboxed
+     .drvs (no re-eval), in the configured store host's store if any
+     (build.store, by the machine deploying; its nix daemon may hand the
+     builds on to its own remote builders), unsandboxed
      when a dry-run shows only trivial builders left.  Nothing drifting and
      no precheck to run means no build
   7. copy the closures over, concurrently, while re-fetching to check that
@@ -169,8 +170,8 @@ COMMIT_MSG.md) is committed onto the work branch and pushed without a
 deploy - nothing evaluated, built or switched, step 2's probes dropped
 unread, the commit's trailers Reaches: none and Deployed: none - after
 the precheck unless
-its tree has a proven pass; the precheck needs the builder when one is
-set.  The targets' drift
+its tree has a proven pass; the precheck needs the store host when one
+is set.  The targets' drift
 (another branch's work, main's) waits for the next deploy reaching one, or
 for a deploy naming targets, which never takes that shortcut; a deploy
 with nothing staged converges every target on the union.  The scan sees the staged
@@ -440,9 +441,10 @@ need no -m; a dry activation that fails fails the run.
 
 Env: NIXCONVOY_SKIP_SWITCH=1 exercises only the branch/union machinery: no
 probe, eval, build or switch.  NIXCONVOY_FAIL_VERIFY=1 fails a confirmed
-switch's verification, exercising the rollback.  NIXCONVOY_BUILDER
-overrides the builder ("" builds locally).  NIXCONVOY_HOLD_PUSH=N delays
-the background push N seconds, keeping the switched increment in flight."""
+switch's verification, exercising the rollback.  NIXCONVOY_STORE
+overrides the store host ("" realises locally).  NIXCONVOY_HOLD_PUSH=N delays
+the background push N seconds, keeping the switched increment in flight.
+"""
 
 from __future__ import annotations
 
