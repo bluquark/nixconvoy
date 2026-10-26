@@ -13,8 +13,7 @@
 //! would sweep through; until the log reaches back far enough, a tier falls
 //! back to the generation active at that cutoff.  An anchor past the fill is
 //! reinstalled with a fresh counter; when its tier moves on, the boot log
-//! still marks it proven, so only its stub goes - the generation stays for
-//! the prune.
+//! still marks it proven, so only its stub goes.
 //!
 //! Generic over the store path type `P` and file identity `F`, so the tests
 //! can use small integers.
@@ -155,8 +154,8 @@ pub fn anchors<P: Eq>(profile: &Profile<P>, boots: &[Boot], stubs: &[Stub], now:
 /// the running one or the one a confirmed switch is replacing when older
 /// than the target (after a rollback it is the newer one being backed out,
 /// and keeping it would have systemd-boot pick it again), the anchors, and
-/// anything the boot log has seen boot (a re-stubbed former anchor, worth
-/// the prune's grace).  systemd-boot sorts counted entries newest first and
+/// anything the boot log has seen boot (a re-stubbed former anchor).
+/// systemd-boot sorts counted entries newest first and
 /// spent ones last, so a failed newest falls to the previous deploy, then
 /// to the last proven generation instead of each in-between one.
 pub fn drops<P: Eq>(profile: &Profile<P>, boots: &[Boot], stubs: &[Stub], ctx: &Ctx<P>, anchors: &[Gen]) -> Vec<usize> {
@@ -275,20 +274,23 @@ pub fn fits(size: u64, used: u64, new: u64, reserve: u64) -> bool {
     used.saturating_add(new).saturating_add(reserve) <= size
 }
 
-/// The prune's victims: generations older than `days`, except the anchors,
-/// and those pointing at the profile's, the booted, the running or the
-/// newest blessed system.  Spares what the failover needs, which a plain
-/// `--delete-older-than` would not.
-pub fn prune<P: Eq>(profile: &Profile<P>, boots: &[Boot], stubs: &[Stub], keep: &[&P], now: i64, tiers: &[u64], days: u64) -> Vec<Gen> {
-    let newest_blessed = blessed(stubs).into_iter().find_map(|g| profile.path(g));
-    let anchors = anchors(profile, boots, stubs, now, tiers);
-    let cutoff = now.saturating_sub((days as i64).saturating_mul(86400));
+/// The prune's victims: every generation outside the bootable set an
+/// install for `ctx` would choose (before the fit check's shedding), not
+/// stubbed on the ESP (a stub left from an earlier install, a former
+/// anchor's say, must keep booting until the next install takes it off),
+/// not pointing at a system `ctx` names (nix-env refuses to delete the
+/// current generation, an older duplicate included) and not among the
+/// newest `keep_newest`, which a rollback by hand reaches for whether or
+/// not they ever booted.
+pub fn prune<P: Eq>(profile: &Profile<P>, boots: &[Boot], stubs: &[Stub], ctx: &Ctx<P>, policy: &Policy, keep_newest: usize) -> Vec<Gen> {
+    let anchors = anchors(profile, boots, stubs, ctx.now, &policy.tiers);
+    let set = choose(profile, ctx, &anchors, stubs, policy.bootable).chosen;
+    let named = |p: &P| *p == ctx.target || [&ctx.booted, &ctx.running, &ctx.previous].iter().any(|x| x.as_ref() == Some(p));
     profile
         .gens()
         .iter()
-        .filter(|x| x.mtime < cutoff)
-        .filter(|x| !anchors.contains(&x.num))
-        .filter(|x| !keep.contains(&&x.path) && Some(&x.path) != newest_blessed)
+        .skip(keep_newest)
+        .filter(|x| !set.contains(&x.num) && !stubs.iter().any(|s| s.gen == x.num) && !named(&x.path))
         .map(|x| x.num)
         .collect()
 }

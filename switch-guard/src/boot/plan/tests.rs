@@ -253,21 +253,61 @@ proptest! {
         }
     }
 
+    /// The prune keeps exactly the install's bootable set and the newest
+    /// generations: what the failover needs survives it, and nothing else.
     #[test]
-    fn prune_spares(c in case()) {
+    fn prune_keeps_the_bootable_set(c in case(), keep_newest in 0usize..6) {
         let profile = Profile::new(c.esp.gens.clone());
-        let keep: Vec<&P> = [Some(&c.target), c.booted.as_ref(), c.running.as_ref()].into_iter().flatten().collect();
-        let anchors = anchors(&profile, &c.boots, &c.esp.stubs, c.now, &[1, 7, 30]);
-        let dropped = prune(&profile, &c.boots, &c.esp.stubs, &keep, c.now, &[1, 7, 30], 30);
-        let newest_blessed = blessed(&c.esp.stubs).into_iter().find_map(|g| profile.path(g));
-        for g in dropped {
-            let x = profile.gens().iter().find(|x| x.num == g).unwrap();
-            prop_assert!(x.mtime < c.now - 30 * DAY);
-            prop_assert!(!anchors.contains(&g));
-            prop_assert!(!keep.contains(&&x.path));
-            prop_assert!(Some(&x.path) != newest_blessed);
+        let ctx = Ctx { target: c.target, booted: c.booted, running: c.running, previous: c.previous, now: c.now };
+        let pol = policy(c.reserve);
+        let anchors = anchors(&profile, &c.boots, &c.esp.stubs, c.now, &pol.tiers);
+        let set = choose(&profile, &ctx, &anchors, &c.esp.stubs, pol.bootable).chosen;
+        let dropped = prune(&profile, &c.boots, &c.esp.stubs, &ctx, &pol, keep_newest);
+        let newest: Vec<Gen> = profile.gens().iter().take(keep_newest).map(|x| x.num).collect();
+        let named = [Some(&ctx.target), ctx.booted.as_ref(), ctx.running.as_ref(), ctx.previous.as_ref()];
+        for x in profile.gens() {
+            let kept = set.contains(&x.num) || newest.contains(&x.num)
+                || c.esp.stubs.iter().any(|s| s.gen == x.num) || named.contains(&Some(&x.path));
+            prop_assert_eq!(dropped.contains(&x.num), !kept, "generation {}", x.num);
+        }
+        for a in &anchors {
+            prop_assert!(set.len() == pol.bootable || !dropped.contains(a), "dropped anchor {}", a);
+        }
+        if let Some(b) = blessed(&c.esp.stubs).into_iter().find(|g| profile.has(*g)) {
+            prop_assert!(set.len() == pol.bootable || !dropped.contains(&b), "dropped the newest blessed {}", b);
         }
     }
+}
+
+#[test]
+fn prune_ignores_age() {
+    // The oldest, 1, is the 30-day anchor; 3 is booted, blessed and the
+    // other tiers' anchor; 6 is the target.  The youngest, 7, is kept only
+    // as one of the newest.
+    let now = 100 * DAY;
+    let profile = Profile::new((1..=7).map(|n| gen(n, now - (60 - n as i64 * 5) * DAY, n as P)).collect());
+    let stubs = [Stub { gen: 1, tries_left: None }, Stub { gen: 3, tries_left: None }, Stub { gen: 6, tries_left: Some(2) }];
+    let boots = [Boot { time: now - 40 * DAY, gen: Some(1) }, Boot { time: now - 20 * DAY, gen: Some(3) }];
+    let ctx = Ctx { target: 6, booted: Some(3), running: Some(6), previous: None, now };
+    let pol = policy(0);
+    assert_eq!(anchors(&profile, &boots, &stubs, now, &pol.tiers), vec![3, 3, 1]);
+    assert_eq!(prune(&profile, &boots, &stubs, &ctx, &pol, 0), vec![7, 5, 4, 2]);
+    assert_eq!(prune(&profile, &boots, &stubs, &ctx, &pol, 2), vec![5, 4, 2]);
+    assert!(prune(&profile, &boots, &stubs, &ctx, &pol, 7).is_empty());
+    // A stub outside the chosen set (a former anchor's, re-stubbed, spent
+    // or not) keeps its generation until an install takes the stub off.
+    let stubs = [stubs[0], stubs[1], stubs[2], Stub { gen: 4, tries_left: Some(0) }, Stub { gen: 2, tries_left: Some(1) }];
+    assert_eq!(prune(&profile, &boots, &stubs, &ctx, &pol, 0), vec![7, 5]);
+}
+
+#[test]
+fn prune_keeps_every_generation_of_a_named_system() {
+    // 1 and 3 are the same system; the profile points at 1 (a rollback by
+    // hand), which nix-env refuses to delete, and 3 is its newest duplicate.
+    let now = 100 * DAY;
+    let profile = Profile::new(vec![gen(1, now - 3 * DAY, 1), gen(2, now - 2 * DAY, 2), gen(3, now - DAY, 1), gen(4, now, 4)]);
+    let ctx = Ctx { target: 1, booted: Some(1), running: Some(1), previous: None, now };
+    assert_eq!(prune(&profile, &[], &[], &ctx, &policy(0), 0), vec![4, 2]);
 }
 
 #[test]
