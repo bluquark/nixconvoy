@@ -1,7 +1,7 @@
 {
   "name": "nixconvoy",
   "description": "Subagent worktrees under the spawning checkout, each owning a nixconvoy work branch",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": {
     "name": "bluquark"
   },

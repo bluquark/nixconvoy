@@ -1,7 +1,7 @@
 {
   "name": "nixconvoy-isolate",
   "description": "Every subagent spawned inside a git repository given its own worktree (isolation: worktree), for the nixconvoy plugin's hooks to place",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": {
     "name": "bluquark"
   },
