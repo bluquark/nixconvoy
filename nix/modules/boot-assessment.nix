@@ -16,6 +16,10 @@ let
   panicSec = 30;
   bootable = 15;
   tiers = [ 1 7 30 ];
+  # The newest generations the prune spares beside the bootable set, for a
+  # rollback by hand to a never-booted one: the agent checkouts and the
+  # nightly make several deploys a day, so this is about a day's.
+  keepNewest = 10;
   bootLog = "/var/lib/boot-assessment/boots";
   reported = "/run/boot-assessment/reported";
 
@@ -55,13 +59,14 @@ let
   # counted boot's judgement.
   # - reserve: kept free on the ESP by the fit check: systemd-boot, the
   #   stubs, slack.
-  # - prune_days: a time-based nix.gc would drop the blessed fallback once
-  #   it is old, whatever the newer generations' state: the prune spares
-  #   the anchors and what the failover needs instead.
-  # - deadline: seconds since stage 2 began: an initrd that waited for a
-  #   manual LUKS unlock (or a slow fsck) must not eat into it.
-  # - grace: the watch reboots on the gate's verdict; its own deadline,
-  #   this much later, only covers a gate that never ran.
+  # - keep_newest: the prune keeps the bootable set an install would choose
+  #   for the profile's generation, and this many newest generations.
+  # - deadline: the gate fails as soon as nothing is left starting (each
+  #   job is bounded by its own start timeout), so this only bounds a boot
+  #   held up by a unit with an infinite one.  Seconds since stage 2 began:
+  #   an initrd that waited for a manual LUKS unlock (or a slow fsck) must
+  #   not eat into it.  The watch reboots on the gate unit's failure, and on
+  #   the deadline only while the gate has not started.
   # - switch_check: what a switch must prove, a boot must too: the very
   #   program the confirmed-switch helper's `check` verb runs, reporting its
   #   last stderr line.
@@ -73,7 +78,7 @@ let
     bootable = ${toString bootable}
     tiers = ${toString tiers}
     reserve = ${toString (32 * 1024 * 1024)}
-    prune_days = ${toString (lib.last tiers)}
+    keep_newest = ${toString keepNewest}
     lzbt = ${lib.getExe lzbt}
     nix_env = ${config.nix.package}/bin/nix-env
     systemctl = ${config.systemd.package}/bin/systemctl
@@ -82,8 +87,7 @@ let
     notice = ${lib.getExe cfg.notice}
     notice_timeout = ${toString noticeTimeout}
     hostname = ${config.networking.hostName}
-    deadline = 300
-    grace = 60
+    deadline = ${toString cfg.deadline}
     runtime_watchdog = 60
     panic = ${toString panicSec}
     status_file = /run/boot-assessment/status
@@ -129,6 +133,11 @@ in
       defaultText = lib.literalExpression "a no-op";
       description = "The command the judge and the report raise the boot-assessment, boot-failover and esp-full notices through, under a ${toString noticeTimeout} s timeout: `set <name>` with the body on stdin, `clear <name>`.  The default discards them; point it at whatever reaches you (an ntfy push, a login banner).";
     };
+    deadline = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 900;
+      description = "Seconds after stage 2 began by which a counted boot whose checks still fail is rebooted even though a unit is still starting: the backstop for units with an infinite start timeout.  Checks still failing once nothing is left starting fail the boot at once.";
+    };
     noticeEnvironmentFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
@@ -153,6 +162,8 @@ in
     boot.lanzaboote.bootCounting.initialTries = initialTries;
     boot.lanzaboote.configurationLimit = bootable;
 
+    # The prune (`prune --dry-run` shows it) decides which profile
+    # generations go, on nix.gc's timer.
     nix.gc.options = lib.mkForce "";
     systemd.services.nix-gc.serviceConfig.ExecStartPre = run "prune";
 
@@ -176,13 +187,13 @@ in
     };
 
     # The judge: arms the hardware watchdog and reboot-on-panic as soon as
-    # D-Bus is up, reboots when the gate fails (or never runs), and disarms
+    # D-Bus is up, reboots when the gate fails or will never run, and disarms
     # once systemd-bless-boot has removed the counter - the target being
     # reached is not enough, as a failed rename would leave the tries to be
     # spent.  Independent of the rest of the boot, so a unit that hangs
     # before the gate still meets the deadline.
     systemd.services.boot-assessment-watch = {
-      description = "Reboot a counted boot that is not blessed within the deadline";
+      description = "Reboot a counted boot that fails its assessment";
       wantedBy = [ "multi-user.target" ];
       wants = [ "dbus.service" ];
       after = [ "dbus.service" ];
@@ -218,6 +229,10 @@ in
         Type = "oneshot";
         RemainAfterExit = true;
         ExecStart = run "gate";
+        # A check that hangs must still fail the unit, which the watch
+        # reboots on: past the gate's own deadline, as it starts after
+        # stage 2 does.
+        TimeoutStartSec = cfg.deadline;
       };
     };
 
