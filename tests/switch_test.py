@@ -1856,7 +1856,10 @@ def submodule_cases(d: Path) -> None:
                                          flake_dir="nixos", targets_dir="nixos/hosts")))
         s = submodule.sub_of("dep", submodule.entries(co)["dep"], co)
         pin_json = co / "nixos/submodules/dep.json"
-        date = lambda rev: int(sh(dep_repo, "show", "-s", "--format=%ct", rev))
+
+        def date(rev: str) -> int:
+            return int(sh(dep_repo, "show", "-s", "--format=%ct", rev))
+
         submodule.set_pin(s, new_main, co)
         assert json.loads(pin_json.read_text()) == {"committed": date(new_main), "rev": new_main}
         assert "nixos/submodules/dep.json" in sh(co, "diff", "--cached", "--name-only").split()

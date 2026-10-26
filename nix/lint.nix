@@ -16,7 +16,9 @@ let
       --python-interpreter-path ${pkgs.python3}/bin/python3
     touch $out
   '';
-  switchTest = pkgs.runCommandLocal "nixconvoy-switch-test" { } ''
+  # Not runCommandLocal: a real test, which keeps the sandbox wherever it
+  # is built.
+  switchTest = pkgs.runCommand "nixconvoy-switch-test" { } ''
     cd ${pySources}
     PATH=${lib.makeBinPath [ pkgs.util-linux pkgs.git pkgs.mergiraf ]}:$PATH HOME=$TMPDIR \
       NIXCONVOY_GUARD_DIR=${switch-guard}/bin NIXCONVOY_GUARD_SRC=${switch-guard.src} PYTHONPATH=src \
