@@ -442,9 +442,7 @@ Env: NIXCONVOY_SKIP_SWITCH=1 exercises only the branch/union machinery: no
 probe, eval, build or switch.  NIXCONVOY_FAIL_VERIFY=1 fails a confirmed
 switch's verification, exercising the rollback.  NIXCONVOY_BUILDER
 overrides the builder ("" builds locally).  NIXCONVOY_HOLD_PUSH=N delays
-the background push N seconds, keeping the switched increment in flight.
-NIXCONVOY_GUARD_DIR names the directory holding nixconvoy-plan and
-nixconvoy-switch (the nix package sets it)."""
+the background push N seconds, keeping the switched increment in flight."""
 
 from __future__ import annotations
 

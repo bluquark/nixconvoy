@@ -16,12 +16,13 @@ let
       --python-interpreter-path ${pkgs.python3}/bin/python3
     touch $out
   '';
-  # Not runCommandLocal: a real test, which keeps the sandbox wherever it
-  # is built.
+  # Against the built package, the cores it carries included.  Not
+  # runCommandLocal: a real test, which keeps the sandbox wherever it is
+  # built.
   switchTest = pkgs.runCommand "nixconvoy-switch-test" { } ''
     cd ${pySources}
     PATH=${lib.makeBinPath [ pkgs.util-linux pkgs.git pkgs.mergiraf ]}:$PATH HOME=$TMPDIR \
-      NIXCONVOY_GUARD_DIR=${switch-guard}/bin NIXCONVOY_GUARD_SRC=${switch-guard.src} PYTHONPATH=src \
+      PYTHONPATH=${nixconvoy}/${pkgs.python3.sitePackages} \
       ${pkgs.python3}/bin/python3 tests/switch_test.py
     touch $out
   '';

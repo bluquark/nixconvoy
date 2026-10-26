@@ -6,8 +6,6 @@ this module runs one to its end, performing what it asks."""
 from __future__ import annotations
 
 import contextlib
-import os
-import shutil
 import subprocess
 import sys
 from collections.abc import Callable
@@ -17,23 +15,16 @@ from typing import NoReturn
 from . import proc
 from .proc import die, dump_json, load_json
 
-PLAN_PROTOCOL = 11
-CONTROL_PROTOCOL = 2
-
 Perform = Callable[[dict[str, object]], dict[str, object]]
 
 
 def binary(name: str) -> str:
-    """nixconvoy-plan or nixconvoy-switch: under NIXCONVOY_GUARD_DIR (the nix
-    wrapper sets it to the crate build this package was made with), else on
-    PATH."""
-    d = os.environ.get("NIXCONVOY_GUARD_DIR")
-    if d:
-        return str(Path(d) / name)
-    found = shutil.which(name)
-    if found is None:
-        die(f"{name} not found: run nixconvoy through its nix package (or set NIXCONVOY_GUARD_DIR)")
-    return found
+    """nixconvoy-plan or nixconvoy-switch: the crate build this package
+    carries (nix/package.nix links them under bin/ here), nowhere else."""
+    exe = Path(__file__).resolve().parent / "bin" / name
+    if not exe.is_file():
+        die(f"{exe} is missing: nixconvoy runs from its nix package (nix run .#nixconvoy)")
+    return str(exe)
 
 
 def drive(exe: str, params: dict[str, object], perform: Perform, name: str,
@@ -103,5 +94,5 @@ def decide(core: str, perform: Perform | None = None, **params: object) -> objec
     performed in the current checkout unless `perform` says otherwise."""
     from .checkout import GitQueries  # noqa: PLC0415 - the queries decide through here too
 
-    return drive(binary("nixconvoy-plan"), {"protocol": PLAN_PROTOCOL, "core": core, **params},
+    return drive(binary("nixconvoy-plan"), {"core": core, **params},
                  perform or GitQueries(), "nixconvoy-plan", f" deciding {core}")

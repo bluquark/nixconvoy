@@ -5,12 +5,8 @@ use super::{Effect, Guard, Next, Params, Query, Reply};
 use crate::wire::{field, flag, int, opt_text, text};
 use serde_json::{json, Map, Value};
 
-/// Bumped on any change of the messages below; nixconvoy sends the version
-/// it speaks.
-pub const PROTOCOL: u64 = 2;
-
 pub fn params(line: &str) -> Result<Params, String> {
-    let v = crate::wire::params(line, "nixconvoy-switch", PROTOCOL)?;
+    let v = crate::wire::params(line)?;
     Ok(Params {
         target: text(&v, "target")?,
         toplevel: text(&v, "toplevel")?,
@@ -116,12 +112,10 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let p = params(
-            r#"{"protocol":2,"target":"h","toplevel":"/t","expected":"/e","place":"local","quiet":false,"router":true,"fail_verify":false}"#,
-        )
-        .unwrap();
+        let p = params(r#"{"target":"h","toplevel":"/t","expected":"/e","place":"local","quiet":false,"router":true,"fail_verify":false}"#)
+            .unwrap();
         assert!(p.router && p.place == "local");
-        assert!(params(r#"{"protocol":0}"#).is_err());
+        assert!(params(r#"{}"#).is_err() && params("[]").is_err() && reply("1").is_err());
         assert_eq!(reply(r#"{"guard":"moved","running":"/x"}"#).unwrap(), Reply::Guard(Guard::Moved("/x".into())));
         assert_eq!(reply(r#"{"check":-9,"last":null}"#).unwrap(), Reply::Check { code: -9, last: None });
         assert_eq!(reply(r#"{"running":null}"#).unwrap(), Reply::Running(None));

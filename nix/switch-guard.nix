@@ -33,10 +33,5 @@ pkgs.rustPlatform.buildRustPackage {
   dontUseCargoParallelTests = true;
   # Cargo.toml's `checked` profile: overflow fails a test.
   checkType = "checked";
-  # The source this build is of, for tests/switch_test.py to refuse a build
-  # of another tree (sha256 over `sha256sum` of every source file, sorted).
-  postInstall = ''
-    (cd $src && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1) > $out/source-hash
-  '';
   meta.mainProgram = "nixconvoy-confirmed-switch";
 }

@@ -56,23 +56,21 @@ pub fn string_lists(v: &Value, k: &str) -> Result<BTreeMap<String, Vec<String>>,
     map_of(v, k, |x| string_list(x, k))
 }
 
-/// The parameters line, refused unless nixconvoy speaks `protocol`.
-pub fn params(line: &str, binary: &str, protocol: u64) -> Result<Value, String> {
+/// A line of the protocol, which is an object: the parameters or a reply.
+pub fn object(line: &str, what: &str) -> Result<Value, String> {
     let v: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
-    let theirs = field(&v, "protocol")?.as_u64();
-    if theirs != Some(protocol) {
-        return Err(format!("{binary} speaks protocol {protocol}, nixconvoy {theirs:?}"));
+    if !v.is_object() {
+        return Err(format!("{what} is not an object: {line}"));
     }
     Ok(v)
 }
 
-/// A reply line, which is an object.
+pub fn params(line: &str) -> Result<Value, String> {
+    object(line, "the parameters")
+}
+
 pub fn reply(line: &str) -> Result<Value, String> {
-    let v: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
-    if !v.is_object() {
-        return Err("a reply is an object".into());
-    }
-    Ok(v)
+    object(line, "a reply")
 }
 
 /// A binary's stdin/stdout loop: `start` reads the parameters line, `decide`

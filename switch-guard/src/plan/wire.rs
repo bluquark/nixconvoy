@@ -6,10 +6,6 @@ use super::{drift, prune, rebase, union, Effect, Next, Query, Replay, Reply, Ste
 use crate::wire::{field, flag, int, map_of, opt_text, string_lists, string_map, strings, text};
 use serde_json::{json, Map, Value};
 
-/// Bumped on any change of the messages below; nixconvoy sends the version
-/// it speaks.
-pub const PROTOCOL: u64 = 11;
-
 fn pairs(v: &Value) -> Result<Vec<(String, String)>, String> {
     v.as_array()
         .ok_or("refs is not a list")?
@@ -193,7 +189,7 @@ pub enum Core {
 }
 
 pub fn start(line: &str) -> Result<Core, String> {
-    let v = crate::wire::params(line, "nixconvoy-plan", PROTOCOL)?;
+    let v = crate::wire::params(line)?;
     Ok(match text(&v, "core")?.as_str() {
         "drift" => Core::Drift(Box::new(Replay::new(drift_params(&v)?, drift::program))),
         "rebase" => Core::Rebase(Replay::new(rebase_params(&v)?, rebase::program)),
@@ -233,8 +229,8 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        assert!(start(r#"{"protocol":0,"core":"rebase","mode":"pop_tmp"}"#).is_err());
-        let mut c = start(r#"{"protocol":11,"core":"rebase","mode":"pop_tmp"}"#).unwrap();
+        assert!(start(r#"{"core":"nope"}"#).is_err());
+        let mut c = start(r#"{"core":"rebase","mode":"pop_tmp"}"#).unwrap();
         assert_eq!(c.decide(None), (r#"{"effects":[],"next":{"ask":"head_subject"}}"#.to_string(), true));
         assert_eq!(reply(r#"{"text":null}"#).unwrap(), Reply::Text(None));
         let (line, more) = c.decide(Some(Reply::Text(None)));
@@ -256,16 +252,15 @@ mod tests {
         );
         assert_eq!(reply(r#"{"ran":true,"detail":""}"#).unwrap(), Reply::Ran { ok: true, detail: String::new() });
         assert_eq!(query(&Query::Switch { branch: "b".into(), start: None }).to_string(), r#"{"ask":"switch","branch":"b","start":null}"#);
-        let mut d = start(r#"{"protocol":11,"core":"drift","me":["h","/c"],"union":"u","listed":["main"],"tips":{},"in_flight":{},"dead":[],"tz_offset":0,"router":"choko","targets":["a"],"candidates":["a"],"evict":false,"named":false,"work_branch":true,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"provenances":{"a":""},"held":{}}"#).unwrap();
+        let mut d = start(r#"{"core":"drift","me":["h","/c"],"union":"u","listed":["main"],"tips":{},"in_flight":{},"dead":[],"tz_offset":0,"router":"choko","targets":["a"],"candidates":["a"],"evict":false,"named":false,"work_branch":true,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"provenances":{"a":""},"held":{}}"#).unwrap();
         let (line, _) = d.decide(None);
         assert_eq!(
             line,
             r#"{"effects":[{"print":"  a: will switch"}],"next":{"done":{"affected":["a"],"drift":{"a":["untracked",""]},"plan":["a"]}}}"#
         );
-        let mut u = start(r#"{"protocol":11,"core":"union","wb":"w","evict":true,"main0":null}"#).unwrap();
+        let mut u = start(r#"{"core":"union","wb":"w","evict":true,"main0":null}"#).unwrap();
         assert_eq!(u.decide(None).0, r#"{"effects":[{"mark":"union"}],"next":{"ask":"listed"}}"#);
-        let mut p =
-            start(r#"{"protocol":11,"core":"prune","name":"agent-x","named":false,"own_session_ends":false,"stopped":null}"#).unwrap();
+        let mut p = start(r#"{"core":"prune","name":"agent-x","named":false,"own_session_ends":false,"stopped":null}"#).unwrap();
         assert_eq!(p.decide(None).0, r#"{"effects":[],"next":{"ask":"lock"}}"#);
         assert_eq!(
             p.decide(Some(Reply::Text(Some("pid 7".into())))).0,

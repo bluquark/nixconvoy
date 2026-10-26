@@ -1,5 +1,5 @@
 """nixconvoy's test suite, run by the flake's lint check (nix/lint.nix)
-against $NIXCONVOY_GUARD_DIR's build of this tree's switch-guard:
+against the built package, the switch-guard cores it carries included:
 
 - the switch step end to end against a fake target: the real
   nixconvoy-switch binary decides, the switch module's effects loop
@@ -2429,33 +2429,6 @@ def open_cases(d: Path) -> None:
     say("open: ok")
 
 
-def require_guard_of_this_tree() -> None:
-    """Die unless $NIXCONVOY_GUARD_DIR holds nix/switch-guard.nix's build of
-    this tree's switch-guard/ ($NIXCONVOY_GUARD_SRC where the lint copies
-    it apart), by its source-hash: a build of another tree fails cases on
-    wording or protocol in ways that look like bugs."""
-    crate = Path(os.environ.get("NIXCONVOY_GUARD_SRC") or Path(__file__).resolve().parent.parent / "switch-guard")
-    tracked = subprocess.run(["git", "-C", str(crate), "ls-files", "-z", "--", "Cargo.toml", "Cargo.lock", "src"],
-                             capture_output=True, check=False)
-    if tracked.returncode == 0:  # a checkout: what a flake build copies, no stray file
-        files = [Path(f.decode()) for f in tracked.stdout.split(b"\0") if f]
-    else:  # the build's source as nix copied it
-        files = [p.relative_to(crate) for p in [crate / "Cargo.toml", crate / "Cargo.lock", *(crate / "src").rglob("*")]]
-    files = sorted(f"./{f}" for f in files if (crate / f).is_file() and not (crate / f).is_symlink())
-    listing = "".join(f"{hashlib.sha256((crate / f).read_bytes()).hexdigest()}  {f}\n" for f in files)
-    expected = hashlib.sha256(listing.encode()).hexdigest()
-    where = os.environ.get("NIXCONVOY_GUARD_DIR")
-    if not where:
-        sys.exit("switch_test: set NIXCONVOY_GUARD_DIR to `nix build .#switch-guard`'s bin/ for this tree")
-    try:
-        built = (Path(where).parent / "source-hash").read_text().strip()
-    except OSError:
-        built = None
-    if built != expected:
-        sys.exit(f"switch_test: NIXCONVOY_GUARD_DIR ({where}) is {'no nix build of switch-guard' if built is None else 'a build of another tree'}: "
-                 f"point it at `nix build .#switch-guard`'s bin/ for this tree")
-
-
 def init_cases(d: Path) -> None:
     """`nixconvoy init`: nixconvoy.toml detected from the repository (the
     flake under nixos/, its hosts directory, the one system literal), the
@@ -2523,7 +2496,6 @@ if __name__ == "__main__":
         sys.exit(fake_target(sys.argv[2:]))
     if sys.argv[1:2] == ["--fake-guard"]:
         sys.exit(fake_guard(sys.argv[2], sys.argv[3]))
-    require_guard_of_this_tree()
     proc.this_machine = lambda: "tester"
     config.set_cfg(config.parse(toml()))
     # No announcement renews on its timer: announce_cases drives the renewals.

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import proc, targets
 from .checkout import current_branch
-from .guard import CONTROL_PROTOCOL, drive
+from .guard import drive
 from .proc import Fail, out, rev, run, stream
 from .targets import PROBE_TIMEOUT, control_opts, provenance_digest
 
@@ -214,7 +214,7 @@ def switch(target: str, expected: str, toplevel: str, nixconvoy_switch: str,
     was_finishing = proc.set_finishing(False)
     try:
         drive(nixconvoy_switch, {
-            "protocol": CONTROL_PROTOCOL, "target": target, "toplevel": toplevel,
+            "target": target, "toplevel": toplevel,
             "expected": expected,
             "place": "local" if local else targets.ssh_address(target),
             "quiet": quiet, "router": needs_internet,

@@ -217,7 +217,7 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
 def pull() -> None:
     """This checkout and its siblings onto origin/main (cli docstring)."""
     await_background_push()
-    binary("nixconvoy-plan")  # resolved before update_checkout moves into the others
+    binary("nixconvoy-plan")  # dies here rather than once a checkout moved
     if not (catch_up([Path.cwd(), *sibling_checkouts()]) & submodule.catch_up_repos()):
         die("pull left some checkouts or submodule repositories as they were (above)")
 
