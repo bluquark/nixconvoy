@@ -254,6 +254,15 @@ whether they are pushed, staged/unstaged/untracked counts, the
 COMMIT_MSG.md subject, a deploy or git operation in progress - then the
 work branches only origin holds (other machines' checkouts).
 
+Orphans (nixconvoy orphans): after a fetch, this machine's subagent work
+branches on origin that still union into every deploy while nobody holds
+them: commits beyond origin/main and every other listed branch, and no
+worktree here owning the branch, or one whose lock names a claude session
+that is gone (a hand lock, a sessionless `open --child` and an unlocked
+one are a person's, held).  One line per orphan, tab-separated: the
+branch, the worktree's path or "(no worktree)", its COMMIT_MSG.md subject;
+nothing when there is none.  Land or undeploy each.
+
 Review (nixconvoy review [<worktree> | <submodule> | <branch> ... | --with-children]
 [<diff-arg> ...]): the review of the pending landing (review.py; `git
 review`, in the package's bin, is the same): COMMIT_MSG.md, then the diff
@@ -454,7 +463,7 @@ import sys
 from pathlib import Path
 from typing import IO, NoReturn
 
-from . import commands, config, hooks, init, names, proc, review, submodule
+from . import commands, config, hooks, init, names, orphans, proc, review, submodule
 from .checkout import lock_checkout, lock_holder, require_work_branch, sub_parent
 from .deploy import deploy
 from .proc import PERF, TOOL, Fail, die, ok, out, painter
@@ -472,6 +481,7 @@ open --submodule <input>
 close [<path> ... | <worktree> ... | <submodule> ...] [--force]
 pull
 status
+orphans
 hook <event> < <hook-input>
 = Deploying and committing changes
 deploy [<target> | @<tag> ...] [-m <msg>] [--evict] [--dry-activate]
@@ -583,7 +593,8 @@ def dispatch() -> None:
         print(usage())
         print(USAGE_NOTES)
         return
-    if args[0] not in ("deploy", "land", "undeploy", "close", "pull", "status", "review", "open", "hook", "init"):
+    if args[0] not in ("deploy", "land", "undeploy", "close", "pull", "status", "review", "open", "hook", "init",
+                       "orphans"):
         bad_usage()
     subcmd = args.pop(0)
     if subcmd == "hook":
@@ -602,6 +613,14 @@ def dispatch() -> None:
     if subcmd == "review":
         os.chdir(start)  # its paths are the caller's
         sys.exit(review.main(args))
+    if subcmd == "orphans":
+        if args == ["-h"] or args == ["--help"]:
+            print(usage())
+            return
+        if args:
+            bad_usage()
+        orphans.main()
+        return
     if subcmd not in ("status", "close", "open"):
         atexit.register(PERF.write, Path.cwd())
     takes, positionals = FLAGS[subcmd]
