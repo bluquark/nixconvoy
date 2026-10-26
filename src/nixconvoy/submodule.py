@@ -25,7 +25,8 @@ repository, the merge pushed to the origin's refs/nixconvoy/union/<input>/<sha>
 and pinned - a derived value like the union commit, deterministic across
 retries; and once one of them lands, the other's rebase onto main meets
 the landed gitlink, which rebases its branch onto the landed default
-branch (solve_rebase)."""
+branch, each replayed commit pinned on the rebase of its own pin
+(solve_rebase)."""
 
 from __future__ import annotations
 
@@ -51,6 +52,7 @@ from .checkout import (
     allowed_branches,
     fold_subject,
     index_tree,
+    landed_prefix,
     landing_message,
     rebase_hint,
     rebase_solving,
@@ -309,6 +311,13 @@ class Pending(NamedTuple):
     wb: str
     was: str
     head: str
+    # Each replayed commit's rewrite (old -> new), the commits of the
+    # landed prefix it skipped and the default branch's commit that landed
+    # them, and the default branch's tip it went onto.
+    rewritten: dict[str, str]
+    landed: frozenset[str]
+    landing: str
+    onto: str
 
 
 # Per run: the submodule repositories fetched, the fetches under way beside
@@ -501,8 +510,9 @@ def solve_rebase(wt: Path, checkout: Path, upstream: str) -> str | None:
     worktree a branch not checked out is rebased in) because `upstream`
     pins a submodule elsewhere (its landing) that a replayed commit pinned
     on this branch: the worktree here is rebased onto the default branch
-    (once per run: every later replayed commit pins the same tip) and
-    pinned on its tip, staged for `git rebase --continue`; the push waits
+    (once per run) and
+    each replayed commit pinned on the rebased counterpart of its own pin
+    (counterpart), staged for `git rebase --continue`; the push waits
     for the rebase's end (push_pending, else undo_pending).  None once
     resolved; "" when the stop is not on gitlinks alone (nothing here to
     solve); else why the submodule could not follow, as the rebase's
@@ -538,26 +548,67 @@ def solve_rebase(wt: Path, checkout: Path, upstream: str) -> str | None:
         if 3 not in stages:  # mine (stage 3) is the replayed commit's pin
             return why + f"one side deleted the pin: resolve the rebase by hand (`git rebase {upstream}` there)"
         pending = PENDING.get((sub.name, wb))
-        if pending is not None:
-            head = pending.head
-        else:
-            head, problem = rebase_sub(sub, wb, stages[3], wt, checkout)
-            if head is None:
+        if pending is None:
+            pending, problem = rebase_sub(sub, wb, stages[3], wt, checkout)
+            if pending is None:
                 return why + f"{problem}; then `nixconvoy pull`"
-        set_pin(sub, head, wt)
+        set_pin(sub, counterpart(pending, stages[3], stages.get(2)), wt)
     return None
 
 
-def rebase_sub(sub: Sub, wb: str, mine: str, wt: Path, checkout: Path) -> tuple[str | None, str]:
+def counterpart(pending: Pending, pinned: str, floor: str | None) -> str:
+    """The rev of the rebased branch standing for `pinned`, a replayed
+    commit's pin: its own rewrite, else its nearest first-parent
+    ancestor's (a commit the rebase dropped, solved to nothing, is in the
+    one before it); a commit of the landed prefix stands for the commit
+    that landed it, one the rebased branch holds for itself, one the
+    rebase dropped with nothing replayed before it (its change upstream
+    already) for the default branch's tip.  Never behind `floor`, the pin
+    the rebase has at this commit (a pin older than main's would revert a
+    landing).  The rebased tip for a pin unknown here."""
+    d = str(pending.sub.dir)
+    chain = run(["git", "rev-list", "--first-parent", pinned, f"^{pending.head}"], cwd=d, check=False)
+    if chain.returncode != 0:
+        return pending.head
+    found = pinned
+    for c in chain.stdout.split():
+        if c in pending.rewritten:
+            found = pending.rewritten[c]
+            break
+        if c in pending.landed:
+            found = pending.landing
+            break
+    else:
+        if chain.stdout.strip():
+            found = pending.onto
+    if floor and found != floor and is_ancestor(found, floor, cwd=d):
+        return floor
+    return found
+
+
+def landing_of(base: str, upstream: str, d: str) -> str | None:
+    """The default branch's commit that landed the prefix ending at
+    `base` (landed_prefix's): the oldest past it with its tree, MSG_FILE
+    aside."""
+    trees = {out(["git", "rev-parse", f"{base}^{{tree}}"], cwd=d), tree_less_msg(base, d)}
+    for ln in reversed(out(["git", "log", "--format=%H %T", f"{base}..{upstream}"], cwd=d).splitlines()):
+        sha, tree = ln.split()
+        if tree in trees:
+            return sha
+    return None
+
+
+def rebase_sub(sub: Sub, wb: str, mine: str, wt: Path, checkout: Path) -> tuple[Pending | None, str]:
     """solve_rebase for one submodule: its worktree under `checkout` on
     `wb` rebased onto the default branch as fetched (the push pending),
-    its new tip - or None and why it cannot be, with what to do."""
+    as recorded in PENDING - or None and why it cannot be, with what to do."""
     found = [s for s in present(checkout) if s.name == sub.name]
     if not found or branch_at(found[0].dir) != wb:
         return None, (f"no worktree of it on {wb} is under {checkout} to rebase: "
                       f"`nixconvoy open --submodule {sub.name}` there")
     here = found[0]
-    if out(["git", "status", "--porcelain", "-uno"], cwd=str(here.dir)):
+    d = str(here.dir)
+    if out(["git", "status", "--porcelain", "-uno"], cwd=d):
         return None, f"its worktree ({here.dir}) has edits, which that rebase cannot keep: stash or commit them"
     tip_pinned = tip_pin(wt, sub.path) or mine
     gone = reset_below_deployed(here, tip_pinned)
@@ -572,14 +623,26 @@ def rebase_sub(sub: Sub, wb: str, mine: str, wt: Path, checkout: Path) -> tuple[
     was = rev_in(here.dir, "HEAD")
     default = default_branch(here.repo)
     upstream = f"refs/remotes/origin/{default}"
-    if not rebase_solving(here.dir, upstream):
+    onto = rev_in(here.dir, upstream)
+    assert was is not None and onto is not None
+    base = landed_prefix(upstream, d)
+    landed = frozenset(out(["git", "rev-list", base, f"^{upstream}"], cwd=d).split()) if base else frozenset()
+    landing = (landing_of(base, upstream, d) if base else None) or onto
+    rewritten: dict[str, str] = {}
+    if not rebase_solving(here.dir, upstream, base, rewritten):
         return None, (f"its {wb} does not rebase cleanly onto origin/{default}: "
-                      f"`git -C {here.dir} {rebase_hint(upstream, str(here.dir))}`, resolve")
+                      f"`git -C {here.dir} {rebase_hint(upstream, d)}`, resolve")
     head = rev_in(here.dir, "HEAD")
-    assert head is not None and was is not None
-    PENDING[sub.name, wb] = Pending(here, wb, was, head)
+    assert head is not None
+    if not rewritten and head != was and out(["git", "rev-list", "-n", "1", f"{upstream}..HEAD"], cwd=d):
+        # Commits replayed and none reported: pinning by the fallbacks
+        # alone would collapse the increments' pins.
+        git("reset", "--quiet", "--hard", was, cwd=d)
+        return None, ("its rebase reported no rewritten commits (git's post-rewrite hook did not run): "
+                      f"rebase it by hand, `git -C {here.dir} {rebase_hint(upstream, d)}`")
+    pending = PENDING[sub.name, wb] = Pending(here, wb, was, head, rewritten, landed, landing, onto)
     print(f"submodule {sub.name}: {wb} rebased onto origin/{default} ({head[:12]})")
-    return head, ""
+    return pending, ""
 
 
 def push_pending() -> None:

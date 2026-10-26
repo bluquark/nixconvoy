@@ -403,7 +403,9 @@ commit.  From a checkout on a work branch:
   catch-up (a deploy, `pull`, the landing itself) brings its worktree
   onto the landed default branch as it brings the checkout onto main -
   fast-forwarded when it has nothing of its own, rebased with its staged
-  and unstaged state otherwise, pushed and pinned.  That rebase replays
+  and unstaged state otherwise, pushed and pinned - each of the checkout's
+  replayed commits on the rebased counterpart of its own pin, so every
+  increment keeps the pin move it made.  That rebase replays
   only what no landing has squashed yet, and goes through the conflicts
   mergiraf solves; one still not clean is reported and left as it was,
   to resolve by hand.  A

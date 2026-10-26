@@ -376,9 +376,10 @@ class GitQueries:
                 if why is not None:
                     break
                 if ok(["git", "diff", "--cached", "--quiet"], cwd=where):
-                    # Resolved to what HEAD has already (a later pin of
-                    # the same submodule): kept as an empty commit where the
-                    # core counts on its commits (its tmp commits), else skipped.
+                    # Resolved to what HEAD has already (a pin whose
+                    # counterpart HEAD pins: a submodule commit its rebase
+                    # dropped): kept as an empty commit where the core
+                    # counts on its commits (its tmp commits), else skipped.
                     if not ask.get("keep_empty"):
                         p = git("rebase", "--skip", cwd=where, env={"GIT_EDITOR": "true"}, check=False)
                         continue
@@ -1227,20 +1228,38 @@ def solve_stop(where: str | None, upstream: str) -> str | None:
     return submodule.solve_rebase(wt, Path.cwd().resolve(), upstream)
 
 
-def rebase_solving(d: Path, upstream: str) -> bool:
+def rebase_solving(d: Path, upstream: str, base: str | None, rewritten: dict[str, str]) -> bool:
     """`git rebase upstream` in `d` (a submodule worktree), past the landed
-    prefix and through the conflicts solve_stop solves, a replayed commit
-    solved to nothing skipped; whether it went through - else aborted,
-    `d` as it was."""
-    p = git("rebase", "--quiet", *rebase_range(upstream, str(d)), cwd=str(d), check=False)
-    while p.returncode != 0 and solve_stop(str(d), upstream) is None:
-        if ok(["git", "diff", "--cached", "--quiet"], cwd=str(d)):
-            p = git("rebase", "--skip", cwd=str(d), env={"GIT_EDITOR": "true"}, check=False)
-        else:
-            p = git("rebase", "--continue", cwd=str(d), env={"GIT_EDITOR": "true"}, check=False)
-    if p.returncode != 0:
-        git("rebase", "--abort", cwd=str(d), check=False)
-        return False
+    prefix (`base`, landed_prefix's) and through the conflicts solve_stop
+    solves, a replayed commit solved to nothing skipped; whether it went
+    through - else aborted, `d` as it was.  `rewritten` gets each replayed
+    commit's rewrite, old -> new, as git's post-rewrite hook reports them:
+    the one hook run, as no user hook runs under git()."""
+    where = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path", "nixconvoy-rewrite"],
+                     cwd=str(d)))
+    shutil.rmtree(where, ignore_errors=True)
+    where.mkdir(parents=True)
+    try:
+        log = where / "rewritten"
+        hook = where / "post-rewrite"
+        # Builtins alone: the rebase's PATH may lack coreutils.
+        hook.write_text(f'#!/bin/sh\nwhile read -r old new _; do printf \'%s %s\\n\' "$old" "$new"; done >> "{log}"\n')
+        hook.chmod(0o755)
+        hooked = ["-c", f"core.hooksPath={where}"]
+        onto = ["--onto", upstream, base] if base else [upstream]
+        p = git(*hooked, "rebase", "--quiet", *onto, cwd=str(d), check=False)
+        while p.returncode != 0 and solve_stop(str(d), upstream) is None:
+            step = "--skip" if ok(["git", "diff", "--cached", "--quiet"], cwd=str(d)) else "--continue"
+            p = git(*hooked, "rebase", step, cwd=str(d), env={"GIT_EDITOR": "true"}, check=False)
+        if p.returncode != 0:
+            git("rebase", "--abort", cwd=str(d), check=False)
+            return False
+        if log.exists():
+            for ln in log.read_text().splitlines():
+                old, new = ln.split()
+                rewritten[old] = new
+    finally:
+        shutil.rmtree(where, ignore_errors=True)
     return True
 
 

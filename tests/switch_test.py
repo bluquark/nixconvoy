@@ -24,6 +24,7 @@ import contextlib
 import getpass
 import hashlib
 import io
+import itertools
 import json
 import os
 import shutil
@@ -33,6 +34,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future
 from pathlib import Path
@@ -617,7 +619,11 @@ def guard_cases(d: Path) -> None:
     def until_eof(g: subprocess.Popen[str]) -> str:
         assert g.stdin is not None and g.stdout is not None
         g.stdin.close()
-        g.wait(10)
+        try:
+            g.wait(2)
+        except subprocess.TimeoutExpired:
+            g.kill()
+            raise
         return g.stdout.read().strip()
 
     def lock(g: subprocess.Popen[str], line: str) -> str:
@@ -955,6 +961,36 @@ def landing_rebase_cases(d: Path) -> None:
         assert sh(co, "rev-parse", "HEAD") == squash
         assert sh(co, "diff", "--cached", "--name-only") == "COMMIT_MSG.md"
         assert sh(co, "diff", "--name-only") == "a.txt" and (co / "a.txt").read_text() == "one\nTWO-x2\nTHREE\n"
+
+
+def counterpart_cases(d: Path) -> None:
+    """A replayed commit's pin after its submodule's rebase onto a landing
+    (submodule.counterpart): its own rewrite; for a commit the rebase
+    dropped, the rewrite of the one before it, or the default branch's
+    tip with none before it; for one of the landed prefix, the commit that
+    landed it; one the rebased branch holds, itself; one unknown here, the
+    rebased tip; never behind the pin the rebase has there."""
+    scratch_env()
+    from nixconvoy import submodule  # noqa: PLC0415 - after scratch_env's config
+    r = d / "dep"
+    sh(d, "init", "--quiet", "-b", "main", str(r))
+
+    def commit(name: str) -> str:
+        put(r, f"{name}.txt", f"{name}\n", name)
+        return sh(r, "rev-parse", "HEAD")
+    base = commit("base")
+    landed, a1, a2, a3 = commit("landed"), commit("a1"), commit("a2"), commit("a3")
+    sh(r, "switch", "--quiet", "-c", "upstream-first", base)
+    upstream_first = commit("x1")  # its change upstream already: dropped with nothing before it
+    sh(r, "switch", "--quiet", "-c", "onto", base)
+    landing, onto = commit("landing"), commit("landed since")
+    a1r, a3r = commit("a1 rebased"), commit("a3 rebased")
+    pending = submodule.Pending(submodule.Sub("dep", r, "dep", r), "wb", a3, a3r,
+                                {a1: a1r, a3: a3r}, frozenset({landed}), landing, onto)
+    assert [submodule.counterpart(pending, p, landing) for p in (a1, a2, a3, landed, upstream_first, a1r, "0" * 40)] \
+        == [a1r, a1r, a3r, landing, onto, a1r, a3r]
+    assert [submodule.counterpart(pending, p, onto) for p in (base, landed, a1)] == [onto, onto, a1r]
+    say("counterparts: ok")
 
 
 def git_cases(d: Path) -> None:
@@ -1336,15 +1372,44 @@ def announce_cases(d: Path) -> None:
     what it leaves behind."""
     scratch_env()
     wb = "work/tester/9"
-    with mock.patch.object(checkout, "HEARTBEAT", 0.2), \
-            scratch_origin(d, f"{wb}*\nwork/other/1\n", {"a.txt": "one\n"}, wb=wb) as (_origin, seed, co):
+    # The renewal thread makes only the first push (HEARTBEAT, __main__):
+    # each renewal below is driven on this thread, dated after the first and
+    # after each other (a new commit each), so no assertion waits on the
+    # thread or races it.
+    with scratch_origin(d, f"{wb}*\nwork/other/1\n", {"a.txt": "one\n"}, wb=wb) as (_origin, seed, co):
         put(co, "a.txt", "one\ntwo\n")
         snap = checkout.staged_snapshot()
         t0 = int(time.time())
+        dates = (f"{t0 + 1000 + k} +0000" for k in itertools.count(1))
+
+        def renew(ann: checkout.Announce) -> str:
+            with mock.patch.dict(checkout.DATELESS_ENV, GIT_COMMITTER_DATE=next(dates)):
+                assert ann._push(), ann.detail
+            return ann.sha
+
+        def beat(ann: checkout.Announce, beats: int) -> None:
+            """The renewal loop itself (Announce._beat) on this thread: its
+            first push, then `beats` renewals, its timer returning at once and
+            each push dated after the last, the last one's date on origin."""
+            renewals: list[str] = []
+
+            def wait(_secs: float) -> bool:
+                if len(renewals) == beats:
+                    return True
+                renewals.append(next(dates))
+                checkout.DATELESS_ENV["GIT_COMMITTER_DATE"] = renewals[-1]
+                return False
+            with mock.patch.dict(checkout.DATELESS_ENV, GIT_COMMITTER_DATE=next(dates)), \
+                    mock.patch.object(ann, "_stop", types.SimpleNamespace(wait=wait)):
+                ann._beat()
+            assert len(renewals) == beats, renewals
+            assert sh(co, "log", "-1", "--format=%cd", "--date=raw", ann.sha) == renewals[-1]
+            assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{ann.key}").split()[0] == ann.sha
         # Announced: listed as under way by a fetch anywhere, the author
         # date the deploy's start, this run's own branch left out.
         ann = checkout.Announce(wb, snap)
-        assert ann.collect() and ann.key == wb
+        assert ann.collect(), ann.detail
+        assert ann.key == wb
         first = ann.sha
         sh(co, *checkout.fetch_args())
         assert sh(co, "rev-parse", f"{first}^{{tree}}") == sh(co, "rev-parse", f"{snap}^{{tree}}")
@@ -1353,39 +1418,36 @@ def announce_cases(d: Path) -> None:
             f"pending increment of {wb} from tester:{co} (pid {os.getpid()})"
         (pend,) = checkout.pending_announcements()
         assert pend.key == pend.branch == wb and pend.sha == first and not pend.settled and \
-            t0 <= pend.since <= pend.at <= t0 + 60, pend
+            t0 <= pend.since <= pend.at <= t0 + 2, pend
         assert checkout.announced(wb) == {}
         assert checkout.announced(None) == {wb: first}
         # Renewed while the deploy runs: a fresh commit of the same tree on
         # origin, the author date kept (the rank), the committer date new.
-        deadline = time.monotonic() + 10
-        while ann.sha == first and time.monotonic() < deadline:
-            time.sleep(0.1)
+        renew(ann)
         sh(co, *checkout.fetch_args())
         (renewed,) = checkout.pending_announcements()
-        assert renewed.sha != first and renewed.since == pend.since and \
+        assert renewed.sha != first and renewed.since == pend.since and renewed.at > pend.at and \
             sh(co, "rev-parse", f"{renewed.sha}^{{tree}}") == sh(co, "rev-parse", f"{snap}^{{tree}}"), renewed
         # A re-run announces with the rank of the announcement it renews.
+        ann.stop()
         again = checkout.Announce(wb, snap)
-        assert again.collect() and again.since == pend.since
-        again.stop()
+        assert again.collect(), again.detail
+        assert again.since == pend.since
         # Withdrawn (the deploy ended without a switch): deleted, the
         # renewals over.
-        ann.withdraw()
+        again.withdraw()
         sh(co, *checkout.fetch_args())
         assert checkout.pending_announcements() == []
         assert proc.rev(f"{checkout.PENDING_REFS}/{wb}") is None
         assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{wb}") == ""
-        time.sleep(0.5)
-        sh(co, *checkout.fetch_args())
-        assert checkout.pending_announcements() == []
+        assert not again._thread.is_alive()
 
         # The deploy records: the union's tree, chained on the target's
         # previous record first, then main, the branches and the increment;
         # a parent not here is left out.  Carried by the announcement from
         # before the switch: parents of its commit, kept by the renewals.
         ann = checkout.Announce(wb, snap)
-        assert ann.collect()
+        assert ann.collect(), ann.detail
         committed = checkout.deployed_commit(snap, "two\n\nReaches: a\nDeployed: a")
         main = proc.rev("refs/remotes/origin/main")
         assert main is not None
@@ -1409,18 +1471,15 @@ def announce_cases(d: Path) -> None:
         carried = ann.sha
         assert sh(co, "log", "-1", "--format=%P", carried).split() == [sh(co, "rev-parse", "HEAD"), rec1, rec2]
         assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{wb}").split()[0] == carried
-        deadline = time.monotonic() + 10
-        while ann.sha == carried and time.monotonic() < deadline:
-            time.sleep(0.1)
-        assert ann.sha != carried and sh(co, "log", "-1", "--format=%P", ann.sha).split()[1:] == [rec1, rec2]
+        assert renew(ann) != carried and sh(co, "log", "-1", "--format=%P", ann.sha).split()[1:] == [rec1, rec2]
+        # So do the renewal loop's own beats, each a new commit.
+        beat(ann, 2)
+        assert sh(co, "log", "-1", "--format=%P", ann.sha).split()[1:] == [rec1, rec2]
         # A stage redone starts without records: the renewals drop them.
         ann.retarget(snap)
         assert ann.records == ()
         last = ann.sha
-        deadline = time.monotonic() + 10
-        while ann.sha == last and time.monotonic() < deadline:
-            time.sleep(0.1)
-        assert ann.sha != last and sh(co, "log", "-1", "--format=%P", ann.sha).split() == [sh(co, "rev-parse", "HEAD")]
+        assert renew(ann) != last and sh(co, "log", "-1", "--format=%P", ann.sha).split() == [sh(co, "rev-parse", "HEAD")]
         assert ann.carry({"a": rec1, "b": rec2}) is None
         # The push that ends the deploy, atomic: the work branch, the
         # records onto the history branches and the announcement deleted.
@@ -1451,7 +1510,8 @@ def announce_cases(d: Path) -> None:
         key = checkout.announce_key("main")
         assert key.startswith("main@tester-") and len(key) == len("main@tester-") + 8, key
         ann = checkout.Announce("main", "HEAD")
-        assert ann.collect() and ann.key == key
+        assert ann.collect(), ann.detail
+        assert ann.key == key
         checkout.push_deployed(None, ann, {"a": rec2})
         checkout.await_background_push()
         sh(co, *checkout.fetch_args())
@@ -1470,7 +1530,8 @@ def announce_cases(d: Path) -> None:
         # pending, announced for its records) is under way, not cleared,
         # until settled.
         ann = checkout.Announce("main", "HEAD")
-        assert ann.collect() and ann.carry({"a": rec2}) is None
+        assert ann.collect(), ann.detail
+        assert ann.carry({"a": rec2}) is None
         sh(co, *checkout.fetch_args())
         assert [p.key for p in checkout.pending_announcements()] == [key] and checkout.announcements()[1] == {}
         checkout.push_deployed(None, ann, {"a": rec2})
@@ -1496,7 +1557,7 @@ def announce_cases(d: Path) -> None:
         # so the deploy still counts as under way (dead, once its renewals
         # stop) until a push of the branch clears it.
         ann = checkout.Announce(wb, snap)
-        assert ann.collect()
+        assert ann.collect(), ann.detail
         put(co, "a.txt", "one\ntwo\nthree\n", "three")
         sh(seed, "fetch", "--quiet", "origin", f"+refs/heads/{wb}:refs/heads/{wb}")
         sh(seed, "switch", "--quiet", wb)
@@ -1607,7 +1668,8 @@ def submodule_cases(d: Path) -> None:
                               capture_output=True, text=True).stdout.strip()
         record = sh(co, "commit-tree", tree, "-p", "HEAD", "-m", "record")
         ann = checkout.Announce(wb, "HEAD")
-        assert ann.collect() and ann.carry({"a": record}) is None
+        assert ann.collect(), ann.detail
+        assert ann.carry({"a": record}) is None
         sh(co, *checkout.fetch_args())
         assert fake in submodule.pinned_revs(dep())
         ann.withdraw()
@@ -1844,11 +1906,11 @@ def submodule_cases(d: Path) -> None:
         assert submodule.orphaned(co) == ["dep"]  # the worktree gone, the pin still the branch's
 
         # The landing on main: the other checkout's rebase onto it meets the
-        # landed gitlink, rebases its branch onto the landed default branch
-        # and pins that - once, every later pin of the same submodule (here
-        # the deploy's staged one, replayed as a tmp commit that resolves to
-        # nothing) pinning the same tip; the branch is pushed once the
-        # rebase is through.
+        # landed gitlink and rebases its branch onto the landed default
+        # branch, once; each replayed commit pins the rebase of its own pin
+        # (the committed increment b1's, the deploy's staged one t2's), so
+        # the increment still moves the pin it moved; the branch is pushed
+        # once the rebase is through.
         sh(co, "push", "--quiet", "--force", "origin", f"{after_land}:refs/heads/main")
         os.chdir(co8)
         put(ax8, "tool3.py", "c\n", "dep: c")  # a deploy's increment from before the landing...
@@ -1870,8 +1932,13 @@ def submodule_cases(d: Path) -> None:
         assert b2 not in (b1, t2) and proc.is_ancestor(dep_main, b2, cwd=str(ax8))
         assert sh(ax8, "show", f"{b2}:tool.py") == "v2" and sh(ax8, "show", f"{b2}:tool3.py") == "c"
         assert pinned(co8) == b2
+        b1r = sh(ax8, "rev-parse", f"{b2}^")
+        assert b1r != b1 and sh(ax8, "show", f"{b1r}:tool2.py") == "b" and \
+            sh(ax8, "log", "-1", "--format=%s", b1r) == sh(ax8, "log", "-1", "--format=%s", b1)
+        assert sh(co8, "rev-parse", f"HEAD:{path}") == b1r
         assert sh(co8, "log", "--format=%s", "origin/main..HEAD").split("\n") == ["dep: b"], sh(co8, "log", "--format=%s", "origin/main..HEAD")
-        assert not sh(co8, "status", "--porcelain")
+        assert sh(co8, "status", "--porcelain") == f"M  {path}"
+        sh(co8, "commit", "--quiet", "-m", "dep: c")  # the deploy's commit of the increment
         assert said.count("rebased onto origin/main") == 1, said
         assert dep_ref(f"refs/heads/{wb8}") == b2
         assert dep_ref(f"{submodule.PAST_REFS}/{wb8}/{t2}") == t2
@@ -2453,12 +2520,15 @@ if __name__ == "__main__":
     require_guard_of_this_tree()
     proc.this_machine = lambda: "tester"
     config.set_cfg(config.parse(toml()))
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    # No announcement renews on its timer: announce_cases drives the renewals.
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+            mock.patch.object(checkout, "HEARTBEAT", 3600):
         with tempfile.TemporaryDirectory() as d:
             switch_cases(Path(d))
         for cases in (gate_cases, provenance_cases, target_cases, memo_cases):
             cases()
-        for scratch_cases in (guard_cases, reach_cases, git_cases, landing_rebase_cases, announce_cases,
+        for scratch_cases in (guard_cases, reach_cases, git_cases, landing_rebase_cases, counterpart_cases,
+                              announce_cases,
                               submodule_cases, open_cases,
                               init_cases):
             with tempfile.TemporaryDirectory() as d:
