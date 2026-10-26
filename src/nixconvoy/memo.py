@@ -10,18 +10,25 @@ import functools
 import hashlib
 import os
 import re
-import subprocess
+import signal
 import sys
 import time
 from collections.abc import Collection
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import NamedTuple
+from urllib.parse import quote
 
-from .config import cfg
+from .config import cfg, root
 from .proc import NOTHING_DONE, cache_dir, die, dump_json, is_ancestor, load_json, out, run
 
+# A precheck entry past this proves a tree nobody deploys any more.  A
+# target entry lives while its .drv does: unrooted once no checkout's last
+# deploy used it (memo_prune), the store's collector decides.
 MEMO_MAX_AGE = 30 * 86400
+# How long registering a root may wait on the daemon, which holds it while
+# a collection runs (minutes on a full disk).
+ROOT_TIMEOUT = 300
 
 
 class Protection(NamedTuple):
@@ -96,6 +103,76 @@ def memo_write(path: Path, ent: Top) -> None:
         pass
 
 
+def memo_root(path: Path) -> Path:
+    """A target entry's GC root: a symlink to its .drv under roots/ beside
+    the entries, registered with the store as an indirect root."""
+    return path.parent / "roots" / f"{path.stem}.drv"
+
+
+def root_drv(path: Path, drv: str) -> bool:
+    """Whether `path`'s entry's .drv is rooted, registering the root when
+    it is not: nix-instantiate's --add-root on the imported .drv (no
+    build), through the daemon, which holds it while a collection runs,
+    so on return the .drv closure is kept whole or gone - gone is False,
+    the entry stale.  A root already pointing at a .drv still there holds
+    without asking the daemon.  Any other failure is the deploy's."""
+    link = memo_root(path)
+    try:
+        if str(link.readlink()) == drv and Path(drv).exists():
+            return True
+    except OSError:
+        pass
+    try:
+        link.parent.mkdir(exist_ok=True)
+        p = run(["nix-instantiate", "--add-root", str(link), "--indirect",
+                 "-E", f'import "{drv}"'], check=False, timeout=ROOT_TIMEOUT)
+    except FileNotFoundError:
+        die("nix-instantiate is not on PATH: a memoized .drv cannot be rooted")
+    if p.returncode == -signal.SIGKILL:
+        die(f"rooting {drv} timed out after {ROOT_TIMEOUT} s: is the daemon stuck?")
+    if not Path(drv).exists():
+        return False
+    if p.returncode != 0:
+        die(f"rooting {drv} failed:\n{p.stderr.strip()}")
+    return True
+
+
+def memo_use(d: Path, names: Collection[str]) -> None:
+    """Record this checkout's use of the entries `names` under users/,
+    replacing its last record: memo_prune keeps an entry rooted while some
+    checkout's record names it.  Written before the entries are read, so
+    a prune running beside this deploy keeps what it is about to use."""
+    here = root().resolve()
+    users = d / "users"
+    try:
+        users.mkdir(exist_ok=True)
+        rec = users / f"{quote(str(here), safe='')}.json"
+        tmp = rec.with_name(f"{rec.name}.tmp{os.getpid()}")
+        tmp.write_text(dump_json({"checkout": str(here), "entries": sorted(names)}))
+        tmp.replace(rec)
+    except OSError:
+        pass
+
+
+def memo_used(d: Path) -> set[str]:
+    """The entries the checkouts' records name, dropping the record of a
+    checkout gone or unreadable."""
+    used: set[str] = set()
+    users = d / "users"
+    for rec in (users.iterdir() if users.is_dir() else ()):
+        try:
+            doc = load_json(rec.read_text())
+            co = doc.get("checkout") if isinstance(doc, dict) else None
+            names = doc.get("entries") if isinstance(doc, dict) else None
+            if isinstance(co, str) and isinstance(names, list) and Path(co).is_dir():
+                used.update(n for n in names if isinstance(n, str))
+            else:
+                rec.unlink()
+        except (OSError, ValueError):
+            pass
+    return used
+
+
 def memo_dir() -> Path:
     """One JSON file per (target, key) under the XDG cache, shared by every
     checkout on the machine (keys are content-addressed), so checkouts
@@ -107,16 +184,34 @@ def memo_dir() -> Path:
 
 
 def memo_prune(d: Path) -> None:
-    """Drop entries whose .drv was garbage-collected or older than
-    MEMO_MAX_AGE.  A precheck entry proves a tree, not a .drv, so only
-    age applies to it."""
+    """Drop a precheck entry past MEMO_MAX_AGE, a target entry whose .drv
+    is gone, and the root of an entry gone or of one no checkout's record
+    names (memo_use): an unrooted entry stays a hint until the store's
+    collector takes its .drv.  Under roots/, only *.drv links are
+    nixconvoy's; nix makes its new link under a temporary name first."""
     now = time.time()
+    used = memo_used(d)
     for path in d.iterdir():
+        if path.is_dir():
+            continue
         ent = memo_read(path)
         try:
-            if (ent is None or now - path.stat().st_mtime > MEMO_MAX_AGE
-                    or (not path.name.startswith("check-") and not Path(ent.drv).exists())):
+            if path.name.startswith("check-"):
+                memo_root(path).unlink(missing_ok=True)
+                if ent is None or now - path.stat().st_mtime > MEMO_MAX_AGE:
+                    path.unlink()
+            elif ent is None or not Path(ent.drv).exists():
                 path.unlink()
+                memo_root(path).unlink(missing_ok=True)
+            elif path.stem not in used:
+                memo_root(path).unlink(missing_ok=True)
+        except OSError:
+            pass
+    roots = d / "roots"
+    for link in (roots.iterdir() if roots.is_dir() else ()):
+        try:
+            if link.suffix == ".drv" and not (d / f"{link.stem}.json").exists():
+                link.unlink()
         except OSError:
             pass
 
@@ -486,16 +581,22 @@ def eval_toplevels(wt: str, union: str, targets: list[str],
     `nix eval` process per stale target, all at once: the module system is
     CPU-serial per configuration, and one parallel-eval process forcing
     several targets overlaps them poorly.  --apply bypasses the flake eval
-    cache, hence memo_dir.  A memo entry is trusted only while its .drv
-    exists, which implies its whole closure (GC never breaks references).
-    A failing `check` (the precheck) ends the deploy at once rather than
-    after the evals."""
+    cache, hence memo_dir.  A .drv is trusted only while rooted (root_drv,
+    which keeps its closure whole through the build): a memo entry's is
+    rooted again here before the hit counts, a fresh evaluation's as soon
+    as its eval returns.  A failing `check` (the precheck) ends the deploy
+    at once rather than after the evals."""
     d = memo_dir()
     keys = {h: target_eval_key(wt, union, h) for h in targets}
+    paths = {h: d / f"{h}-{keys[h]}.json" for h in targets}
+    memo_use(d, [p.stem for p in paths.values()])
     tops: dict[str, Top] = {}
     stale: list[str] = []
     for h in targets:
-        ent = memo_read(d / f"{h}-{keys[h]}.json")
+        ent = memo_read(paths[h])
+        if ent is not None and not root_drv(paths[h], ent.drv):
+            paths[h].unlink(missing_ok=True)
+            ent = None
         if ent is None:
             stale.append(h)
         else:
@@ -508,11 +609,22 @@ def eval_toplevels(wt: str, union: str, targets: list[str],
     flake = f"{wt}/{c.flake_path}" if c.flake_path != "." else wt
     parallel = parallel_eval_known() if c.parallel_eval is None else c.parallel_eval
 
-    def eval_target(h: str) -> subprocess.CompletedProcess[str]:
+    def eval_target(h: str) -> Top | str:
+        """The target's Top, written and rooted, or the failure text."""
         par = (["--eval-cores", str(min(8, os.cpu_count() or 1)),
                 "--extra-experimental-features", "parallel-eval"] if parallel else [])
-        return run(["nix", "eval", "--json", *par, f"{flake}#nixosConfigurations",
-                    "--apply", eval_expr(h, parallel)], check=False)
+        p = run(["nix", "eval", "--json", *par, f"{flake}#nixosConfigurations",
+                 "--apply", eval_expr(h, parallel)], check=False)
+        if p.returncode != 0:
+            return f"evaluating {h} failed:\n{p.stderr.strip()}"
+        ent = memo_entry(load_json(p.stdout))
+        if ent is None:
+            return f"nix eval returned no toplevel for {h}:\n{p.stdout[:500]}"
+        memo_write(paths[h], ent)
+        if not root_drv(paths[h], ent.drv):
+            paths[h].unlink(missing_ok=True)
+            return f"{h}'s .drv was collected as soon as it was evaluated; re-run"
+        return ent
 
     with ThreadPoolExecutor(len(stale)) as pool:
         evals = {h: pool.submit(eval_target, h) for h in stale}
@@ -525,14 +637,10 @@ def eval_toplevels(wt: str, union: str, targets: list[str],
             if check is not None and check.done() and check.result():
                 die(f"{check.result()}; {NOTHING_DONE}")
     for h in stale:
-        p = evals[h].result()
-        if p.returncode != 0:
-            die(f"evaluating {h} failed:\n{p.stderr.strip()}")
-        ent = memo_entry(load_json(p.stdout))
-        if ent is None:
-            die(f"nix eval returned no toplevel for {h}:\n{p.stdout[:500]}")
-        tops[h] = ent
-        memo_write(d / f"{h}-{keys[h]}.json", ent)
+        r = evals[h].result()
+        if isinstance(r, str):
+            die(r)
+        tops[h] = r
     return tops
 
 

@@ -252,6 +252,18 @@ lexical, so the flake keeps two habits for the memo to hit:
 `inputs` handed to the modules can reach anything, and keys every target
 on the whole tree.
 
+A target's .drv is trusted only while it is a GC root
+(`~/.cache/nixconvoy/eval-memo/roots/`): a deploy roots each fresh
+evaluation's as soon as it returns and roots a memo entry's again
+before the hit counts, so the store's own collector (determinate-nixd
+runs one on a schedule and at the daemon's start, a switch's included)
+cannot take it before the build; one taken anyway is re-evaluated.  Each
+checkout records which entries its last deploy used (`users/`), and a
+deploy's prune unroots the entries no record names - a landing or the
+nightly lock update moves every checkout's keys - so the roots pin no
+tree nobody deploys; an unrooted entry stays a hint until the collector
+takes its .drv.
+
 ## Commands
 
 ```
