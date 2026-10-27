@@ -231,7 +231,19 @@ nixconvoy.switchLast = true;                # the router: switched alone, after 
 ```
 
 `nixconvoy.nixosModules.boot-assessment` adds `nixconvoy.bootAssessment.*`
-(requires lanzaboote).
+(requires lanzaboote): `enable`, `requiredUnits` (active for a boot to
+pass, beside sshd listening), `checks` (bash in the gate's poll, `fail
+<reason>` per failing assertion), `deadline` (seconds after stage 2 by
+which a boot still failing is rebooted out of), `notice` (the command
+the judge raises its notices through: `set <name>` with the body on
+stdin, `clear <name>`; discarded by default) and `noticeEnvironmentFile`.
+The ESP's stubs are the bootable set: `boot.lanzaboote.configurationLimit`
+sizes it (15 unless set, a `mkDefault` included; at least the four named
+generations and the three anchors, 7) and
+`boot.lanzaboote.bootCounting.initialTries` counts each (defaulted to 2).
+Which profile generations go is the module's prune, run as nix-gc's
+pre-start: `nix.gc.automatic` must be on and `nix.gc.options` is defaulted
+to `""` - an explicit value deleting generations by age fails an assertion.
 
 ### The eval memo
 

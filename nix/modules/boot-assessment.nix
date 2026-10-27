@@ -11,11 +11,18 @@ let
   # stub it just decremented: its presence is what "under assessment" means,
   # for the units here and for systemd-bless-boot's own generator.
   countPath = "/sys/firmware/efi/efivars/LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
-  initialTries = 2;
   sshPort = lib.head config.services.openssh.ports;
   panicSec = 30;
-  bootable = 15;
   tiers = [ 1 7 30 ];
+  # lanzaboote's own options, defaulted below: the stubs it installs are
+  # the bootable set, each counted with that many tries.
+  limit = config.boot.lanzaboote.configurationLimit;
+  bootable = if limit == null then 0 else limit;
+  initialTries = config.boot.lanzaboote.bootCounting.initialTries;
+  minBootable = 4 + lib.length tiers;
+  # nix's legacy parser expands combined short flags (-vd is -v -d) and the
+  # options are inlined into a bash script, which unquotes them.
+  gcWords = lib.filter lib.isString (builtins.split "[[:space:]]+" (lib.replaceStrings [ "'" "\"" ] [ "" "" ] config.nix.gc.options));
   # The newest generations the prune spares beside the bootable set, for a
   # rollback by hand to a never-booted one: the agent checkouts and the
   # nightly make several deploys a day, so this is about a day's.
@@ -155,16 +162,37 @@ in
     # generation that breaks later is hardware or filesystem trouble, left
     # for someone to look at.
     system.build.installBootLoader = lib.mkForce install;
-    assertions = [ {
-      assertion = !config.boot.lanzaboote.measuredBoot.enable && config.boot.lanzaboote.extraEfiSysMountPoints == [ ];
-      message = "nixconvoy.bootAssessment needs lanzaboote with one ESP and no measured boot: it installs the counted stubs through lzbt itself";
-    } ];
-    boot.lanzaboote.bootCounting.initialTries = initialTries;
-    boot.lanzaboote.configurationLimit = bootable;
+    assertions = [
+      {
+        assertion = !config.boot.lanzaboote.measuredBoot.enable && config.boot.lanzaboote.extraEfiSysMountPoints == [ ];
+        message = "nixconvoy.bootAssessment needs lanzaboote with one ESP and no measured boot: it installs the counted stubs through lzbt itself";
+      }
+      {
+        assertion = bootable >= minBootable;
+        message = "nixconvoy.bootAssessment: boot.lanzaboote.configurationLimit sizes the bootable set, which holds the target, booted, running and previous generations and ${toString (lib.length tiers)} anchors: at least ${toString minBootable}, not ${if limit == null then "null (unlimited)" else toString limit}";
+      }
+      {
+        assertion = initialTries > 0;
+        message = "nixconvoy.bootAssessment judges counted boots: boot.lanzaboote.bootCounting.initialTries must be above 0";
+      }
+      {
+        assertion = config.nix.gc.automatic;
+        message = "nixconvoy.bootAssessment prunes generations as nix-gc's pre-start: nix.gc.automatic must be on";
+      }
+      {
+        assertion = !lib.any (w: builtins.match "-[a-zA-Z]*d[a-zA-Z]*" w != null || lib.hasPrefix "--delete-old" w) gcWords;
+        message = "nixconvoy.bootAssessment's prune decides which generations go (the bootable set, the anchors and the newest stay): nix.gc.options must not delete generations (-d, --delete-old, --delete-older-than) - set it to \"\"";
+      }
+    ];
+    # Below mkDefault, so a consumer's own default wins and meets the
+    # assertions instead of conflicting.
+    boot.lanzaboote.bootCounting.initialTries = lib.mkOverride 1200 2;
+    boot.lanzaboote.configurationLimit = lib.mkOverride 1200 15;
 
     # The prune (`prune --dry-run` shows it) decides which profile
-    # generations go, on nix.gc's timer.
-    nix.gc.options = lib.mkForce "";
+    # generations go, on nix.gc's timer.  Just below mkDefault, so another
+    # module's default yields while an explicit setting meets the assertion.
+    nix.gc.options = lib.mkOverride 999 "";
     systemd.services.nix-gc.serviceConfig.ExecStartPre = run "prune";
 
     # Reboot-on-panic for the initrd of a counted boot only: the kernel keeps

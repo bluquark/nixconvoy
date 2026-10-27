@@ -108,6 +108,7 @@ struct Case {
     previous: Option<P>,
     now: i64,
     reserve: u64,
+    bootable: usize,
 }
 
 const DAY: i64 = 86400;
@@ -124,10 +125,10 @@ fn case() -> impl Strategy<Value = Case> {
             let boots = proptest::collection::vec((0i64..45, proptest::option::of(0usize..n + 2)), 0..10);
             let files = (proptest::collection::vec((0u8..6, 0u8..6), 12), proptest::collection::vec(1u64..40, 12));
             let who = (0usize..n, proptest::option::of(0usize..n), proptest::option::of(0usize..n), proptest::option::of(0usize..n));
-            (Just(n), paths, ages, stubs, boots, files, who, (0u64..400, 0u64..40, 0u64..20))
+            (Just(n), paths, ages, stubs, boots, files, who, (0u64..400, 0u64..40, 0u64..20, 7usize..=20))
         })
-        .prop_map(|(n, paths, ages, stubs, boots, files, who, (size, base, reserve))| {
-            build(n, paths, ages, stubs, boots, files, who, size, base, reserve)
+        .prop_map(|(n, paths, ages, stubs, boots, files, who, (size, base, reserve, bootable))| {
+            build(n, paths, ages, stubs, boots, files, who, size, base, reserve, bootable)
         })
 }
 
@@ -143,6 +144,7 @@ fn build(
     size: u64,
     base: u64,
     reserve: u64,
+    bootable: usize,
 ) -> Case {
     let now = 50 * DAY;
     // Number order is creation order: newer generations are younger.
@@ -178,11 +180,18 @@ fn build(
         previous: p.map(path),
         now,
         reserve,
+        bootable,
     }
 }
 
-fn policy(reserve: u64) -> Policy {
-    Policy { bootable: 15, tiers: vec![1, 7, 30], reserve }
+const TIERS: [u64; 3] = [1, 7, 30];
+
+fn policy(c: &Case) -> Policy {
+    Policy { bootable: c.bootable, tiers: TIERS.to_vec(), reserve: c.reserve }
+}
+
+fn fixed_policy() -> Policy {
+    Policy { bootable: 15, tiers: TIERS.to_vec(), reserve: 0 }
 }
 
 proptest! {
@@ -194,8 +203,8 @@ proptest! {
         let ctx = Ctx { target: c.target, booted: c.booted, running: c.running, previous: c.previous, now: c.now };
         let before = Profile::new(c.esp.gens.clone());
         let stubs0: Vec<Stub> = c.esp.stubs.clone();
-        let anchors = anchors(&before, &c.boots, &stubs0, c.now, &[1, 7, 30]);
-        let out = install(&mut esp, &c.boots, &ctx, &policy(c.reserve));
+        let anchors = anchors(&before, &c.boots, &stubs0, c.now, &TIERS);
+        let out = install(&mut esp, &c.boots, &ctx, &policy(&c));
         let after = Profile::new(esp.gens.clone());
         let tgen0 = before.gen_of(Some(&ctx.target));
 
@@ -222,7 +231,7 @@ proptest! {
         for g in &must {
             prop_assert!(sel.chosen[..sel.must].contains(g), "must {} not chosen: {:?}", g, sel);
         }
-        prop_assert!(sel.chosen.len() <= 15);
+        prop_assert!(sel.chosen.len() <= c.bootable);
         for (i, g) in sel.chosen.iter().enumerate() {
             prop_assert!(after.has(*g));
             prop_assert!(!sel.chosen[..i].contains(g));
@@ -259,7 +268,7 @@ proptest! {
     fn prune_keeps_the_bootable_set(c in case(), keep_newest in 0usize..6) {
         let profile = Profile::new(c.esp.gens.clone());
         let ctx = Ctx { target: c.target, booted: c.booted, running: c.running, previous: c.previous, now: c.now };
-        let pol = policy(c.reserve);
+        let pol = policy(&c);
         let anchors = anchors(&profile, &c.boots, &c.esp.stubs, c.now, &pol.tiers);
         let set = choose(&profile, &ctx, &anchors, &c.esp.stubs, pol.bootable).chosen;
         let dropped = prune(&profile, &c.boots, &c.esp.stubs, &ctx, &pol, keep_newest);
@@ -270,8 +279,9 @@ proptest! {
                 || c.esp.stubs.iter().any(|s| s.gen == x.num) || named.contains(&Some(&x.path));
             prop_assert_eq!(dropped.contains(&x.num), !kept, "generation {}", x.num);
         }
+        // The named generations and the anchors always fit: bootable is at least 7.
         for a in &anchors {
-            prop_assert!(set.len() == pol.bootable || !dropped.contains(a), "dropped anchor {}", a);
+            prop_assert!(!dropped.contains(a), "dropped anchor {}", a);
         }
         if let Some(b) = blessed(&c.esp.stubs).into_iter().find(|g| profile.has(*g)) {
             prop_assert!(set.len() == pol.bootable || !dropped.contains(&b), "dropped the newest blessed {}", b);
@@ -289,7 +299,7 @@ fn prune_ignores_age() {
     let stubs = [Stub { gen: 1, tries_left: None }, Stub { gen: 3, tries_left: None }, Stub { gen: 6, tries_left: Some(2) }];
     let boots = [Boot { time: now - 40 * DAY, gen: Some(1) }, Boot { time: now - 20 * DAY, gen: Some(3) }];
     let ctx = Ctx { target: 6, booted: Some(3), running: Some(6), previous: None, now };
-    let pol = policy(0);
+    let pol = fixed_policy();
     assert_eq!(anchors(&profile, &boots, &stubs, now, &pol.tiers), vec![3, 3, 1]);
     assert_eq!(prune(&profile, &boots, &stubs, &ctx, &pol, 0), vec![7, 5, 4, 2]);
     assert_eq!(prune(&profile, &boots, &stubs, &ctx, &pol, 2), vec![5, 4, 2]);
@@ -307,7 +317,7 @@ fn prune_keeps_every_generation_of_a_named_system() {
     let now = 100 * DAY;
     let profile = Profile::new(vec![gen(1, now - 3 * DAY, 1), gen(2, now - 2 * DAY, 2), gen(3, now - DAY, 1), gen(4, now, 4)]);
     let ctx = Ctx { target: 1, booted: Some(1), running: Some(1), previous: None, now };
-    assert_eq!(prune(&profile, &[], &[], &ctx, &policy(0), 0), vec![4, 2]);
+    assert_eq!(prune(&profile, &[], &[], &ctx, &fixed_policy(), 0), vec![4, 2]);
 }
 
 #[test]
