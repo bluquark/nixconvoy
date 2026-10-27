@@ -3,7 +3,7 @@ use super::*;
 use crate::plan::{drive, Replay, Reply};
 
 fn params(named: bool) -> Params {
-    Params { name: "agent-x".into(), named, own_session_ends: false, stopped: None }
+    Params { names: Names::default(), name: "agent-x".into(), named, own_session_ends: false, stopped: None }
 }
 
 /// Answers for a worktree holding nothing of its own, locked by dead

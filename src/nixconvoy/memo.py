@@ -23,7 +23,7 @@ from typing import NamedTuple
 from urllib.parse import quote
 
 from .checkout import lock_pid_alive, pid_started
-from .config import cfg, root
+from .config import cfg, main_ref, root
 from .proc import NOTHING_DONE, cache_dir, die, dump_json, is_ancestor, load_json, out, run
 
 # A target entry lives while its .drv does: unrooted once no checkout's
@@ -405,15 +405,41 @@ def target_eval_reads(wt: str, union: str, target: str) -> tuple[frozenset[str],
     if not scan_sound(wt):
         return None
     c = cfg()
-    flake_nix, hosts_dir = c.flake_file("flake.nix"), c.targets_path
+    flake_nix, hosts_dir, root = c.flake_file("flake.nix"), c.targets_path, c.target_root(target)
     objs = union_objects(union)
-    depth = hosts_dir.count("/") + 1
-    other_targets = tuple(q for q, (t, _) in objs.items()
-                          if t == "tree" and q.count("/") == depth
-                          and q.startswith(hosts_dir + "/") and q != f"{hosts_dir}/{target}")
+    # The other targets' directories, skipped where flake.nix names them:
+    # the configured ones and the subdirectories of targets_dir, less any
+    # holding this target's own directory or the flake (a target whose
+    # directory is the flake's holds every other's files, which are still
+    # theirs to read).
+    others = {r for t in c.targets if t != target and (r := c.target_root(t))}
+    if hosts_dir:
+        depth = hosts_dir.count("/") + 1
+        others.update(q for q, (t, _) in objs.items()
+                      if t == "tree" and q.count("/") == depth and q.startswith(hosts_dir + "/"))
+    if not hosts_dir:
+        # The hosts directory inferred (hosts_candidates).  This target's
+        # subdirectory of a candidate is its directory, read whole, when
+        # one candidate holds it; the other targets' subdirectories are
+        # skipped only when there is one candidate at all - a second one is
+        # as likely a tree of shared profiles named after the targets,
+        # which they import, so skipping it would hide its changes.
+        candidates = hosts_candidates(wt, union, tuple(sorted({*c.inventory, target})), flake_nix)
+        mine = [p for p, found in candidates if target in found]
+        if root is None and len(mine) == 1:
+            root = f"{mine[0]}/{target}" if mine[0] else target
+        if len(candidates) == 1:
+            parent, found = candidates[0]
+            others.update(f"{parent}/{n}" if parent else n for n in found if n != target and not c.target(n).dir)
+    flake_dir = str(Path(flake_nix).parent)
+    others = {r for r in others if r != root and not any(d == r or d.startswith(r + "/")
+                                                           for d in (root or "", flake_dir))}
+    other_targets = tuple(f"{r}/" for r in others)
     seen: set[str] = set()
-    todo = [flake_nix, f"{hosts_dir}/{target}"]
+    todo = [flake_nix, *([root] if root else [])]
     via: dict[str, str] = {}
+    if root:
+        via[root] = f"nixconvoy.toml's targets.{target}" if c.target(target).dir else f"{target}'s directory"
     named: set[str] = set()
     while todo:
         path = todo.pop()
@@ -433,11 +459,10 @@ def target_eval_reads(wt: str, union: str, target: str) -> tuple[frozenset[str],
             words, refs = file_facts(wt, f)
             named.update(words)
             for ref in refs:
-                if f == flake_nix and ref.startswith(other_targets):
+                if f == flake_nix and (ref in others or ref.startswith(other_targets)):
                     continue
                 via.setdefault(ref, f)
                 todo.append(ref)
-    flake_dir = str(Path(flake_nix).parent)
     for q in sorted(seen):
         if objs[q][0] == "tree" and (q == flake_dir or flake_dir.startswith(q + "/")):
             print(f"eval memo: {target} keys on the whole {q}/ tree: {via[q]} names it "
@@ -446,6 +471,26 @@ def target_eval_reads(wt: str, union: str, target: str) -> tuple[frozenset[str],
     # directory, or the gitlink of a submodule (a commit object in objs).
     seen.update(q for n, q in path_inputs(wt).items() if n in named and q in objs)
     return frozenset(seen), frozenset(named)
+
+
+@functools.cache
+def hosts_candidates(wt: str, union: str, targets: tuple[str, ...],
+                     flake_nix: str) -> tuple[tuple[str, frozenset[str]], ...]:
+    """The directories of the `union` commit that look like the hosts
+    directory, (parent, the targets found): a directory holding
+    subdirectories named after two or more of `targets`, each of which
+    flake.nix names, itself or a file under it.  One alone could be anything; two named by flake.nix are the
+    hosts' directories, or a tree of shared profiles (target_eval_reads
+    tells by their number)."""
+    objs = union_objects(union)
+    _, refs = file_facts(wt, flake_nix)
+    wanted = set(targets)
+    by_parent: dict[str, set[str]] = {}
+    for q, (t, _) in objs.items():
+        parent, _, name = q.rpartition("/")
+        if t == "tree" and name in wanted and any(r == q or r.startswith(q + "/") for r in refs):
+            by_parent.setdefault(parent, set()).add(name)
+    return tuple(sorted((p, frozenset(found)) for p, found in by_parent.items() if len(found) >= 2))
 
 
 @functools.cache
@@ -505,7 +550,7 @@ def recorded_tip(provenance: str, branch: str) -> str | None:
         return None
     branches = doc.get("branches")
     tip = branches.get(branch) if isinstance(branches, dict) else None
-    if tip is None and branch == "main":
+    if tip is None and branch == cfg().main_branch:
         tip = doc.get("main")
     return tip if isinstance(tip, str) else None
 
@@ -561,8 +606,8 @@ def reached_targets(wt: str, union: str, targets: list[str], tip: str,
     merge base (nothing to measure from) reaches every target."""
     from .checkout import current_branch  # noqa: PLC0415 - checkout imports guard, which imports checkout
 
-    own = current_branch() or "main"
-    p = run(["git", "merge-base", tip, "refs/remotes/origin/main"], check=False)
+    own = current_branch() or cfg().main_branch
+    p = run(["git", "merge-base", tip, main_ref()], check=False)
     mb = p.stdout.strip()
     if p.returncode != 0 or not mb:
         return set(targets)

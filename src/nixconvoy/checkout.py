@@ -22,7 +22,16 @@ from pathlib import Path
 from typing import IO, NamedTuple
 
 from . import config, proc
-from .config import CLAUDE_WORKTREES, CONFIG_FILE, MSG_FILE, ConfigError, cfg, load
+from .config import (
+    CLAUDE_WORKTREES,
+    CONFIG_FILE,
+    MSG_FILE,
+    ConfigError,
+    cfg,
+    load,
+    main_ref,
+    remote_ref,
+)
 from .guard import decide
 from .proc import PERF, die, git, is_ancestor, ok, out, rev, run, solve_with_mergiraf
 from .wire import (
@@ -51,6 +60,8 @@ from .wire import (
     Ran,
     Rebase,
     RebaseAbort,
+    RebaseParams,
+    RepoNames,
     Rev,
     SetUpstream,
     StagedDiffers,
@@ -87,8 +98,6 @@ TMP_PREFIX = "nixconvoy-"
 # the same refs.
 PENDING_REFS = "refs/nixconvoy/deploying/branch"
 DEPLOYED_PREFIX = "nixconvoy-history"
-FETCH_REFSPECS = ("+refs/heads/*:refs/remotes/origin/*",
-                  f"+{PENDING_REFS}/*:{PENDING_REFS}/*")
 # A deploy renews its announcement every HEARTBEAT seconds while it runs; a
 # deploy waiting for it (deploy.await_pending) takes it for dead and goes
 # on without it - to be refused by the drift core, which names the dead
@@ -128,7 +137,8 @@ def fetch_origin(*flags: str, check: bool = True) -> subprocess.CompletedProcess
 
 def fetch_args(*flags: str) -> list[str]:
     """`git fetch origin` of the branches and nixconvoy's own refs."""
-    return ["fetch", "--quiet", "--prune", *flags, "origin", *FETCH_REFSPECS]
+    return ["fetch", "--quiet", "--prune", *flags, cfg().remote,
+            f"+refs/heads/*:refs/remotes/{cfg().remote}/*", f"+{PENDING_REFS}/*:{PENDING_REFS}/*"]
 
 
 def allowed_branches() -> set[str]:
@@ -258,24 +268,27 @@ def state_dir(d: Path) -> Path:
 
 
 def note_prefix(top: Path) -> None:
-    """This machine's expanded branch_prefix, written into the repository's
-    common git dir for the shell prompt (integrations/shell/prompt.bash),
-    which shows a work branch by its leaf: bash reads a line there where
-    it could not read nixconvoy.toml at every prompt.  Written by `init`
-    and refreshed by every later command; a repository without a readable
-    nixconvoy.toml (a submodule's, `review` works there) gets none, and
-    nothing else changes."""
+    """This machine's expanded branch_prefix, and origin/main by its
+    configured names, written into the repository's common git dir for the
+    shell prompt (integrations/shell/prompt.bash), which shows a work
+    branch by its leaf and its lead over main: bash reads a line there
+    where it could not read nixconvoy.toml at every prompt.  Written by
+    `init` and refreshed by every later command; a repository without a
+    readable nixconvoy.toml (a submodule's, `review` works there) gets
+    none, and nothing else changes."""
     common = git_common(top)
     if common is None:
         return
     try:
-        text = config.load(top).branch_prefix.format(machine=proc.this_machine()) + "\n"
+        c = config.load(top)
     except config.ConfigError:
         return
-    with contextlib.suppress(OSError):
-        p = common_state_path("branch-prefix", common)
-        if not p.exists() or p.read_text() != text:
-            p.write_text(text)
+    for name, text in (("branch-prefix", c.branch_prefix.format(machine=proc.this_machine())),
+                       ("main-ref", c.names.main_short)):
+        with contextlib.suppress(OSError):
+            p = common_state_path(name, common)
+            if not p.exists() or p.read_text() != text + "\n":
+                p.write_text(text + "\n")
 
 
 def identity_of(here: Path, cur: str | None, pats: set[str] | None = None) -> Checkout:
@@ -457,9 +470,11 @@ class GitQueries:
     the throwaway worktree a rebase of a branch not checked out here
     (`aside`) runs in."""
 
-    def __init__(self) -> None:
+    def __init__(self, names: RepoNames | None = None) -> None:
         self.aside = ""
         self.aside_branch = ""
+        # The repository's names (a submodule's own, when the core runs there).
+        self.names = names or cfg().names
 
     def __call__(self, ask: PlanQuery) -> PlanReply:
         match ask:
@@ -492,7 +507,7 @@ class GitQueries:
                 if problem is not None:
                     return Ran(False, problem)
                 head = rev(f"refs/heads/{branch}")
-                p = git(*push_cmd(branch, rev(f"refs/remotes/origin/{branch}") or ""), check=False)
+                p = git(*push_cmd(branch, rev(remote_ref(branch)) or ""), check=False)
                 if p.returncode == 0 and head:
                     note_pushed(branch, head)
                 return ran(p)
@@ -509,15 +524,18 @@ class GitQueries:
             case Detach(upstream):
                 return ran(git("switch", "--quiet", "--detach", upstream, check=False))
             case Pushed():
-                return Flag(any(is_ancestor("HEAD", t) for t in listed_tips(allowed_branches()).values()))
+                return Flag(any(is_ancestor("HEAD", t)
+                                for t in listed_tips(allowed_branches(), names=self.names).values()))
             case OnOrigin():
-                return Flag(on_origin())
+                return Flag(on_origin(names=self.names))
             case Switch(branch, start):
                 return ran(git("switch", "--quiet", *(["-c", branch, start] if start else [branch]), check=False))
             case Upstream(branch):
-                return Text(git("config", f"branch.{branch}.merge", check=False).stdout.strip() or None)
+                remote = git("config", f"branch.{branch}.remote", check=False).stdout.strip()
+                merge = git("config", f"branch.{branch}.merge", check=False).stdout.strip()
+                return Text(f"{remote}\t{merge}" if remote and merge else None)
             case SetUpstream(branch):
-                return ran(git("branch", "--set-upstream-to=origin/main", branch, check=False))
+                return ran(git("branch", f"--set-upstream-to={self.names.main_short}", branch, check=False))
             case Fate(branch, tip, union, checkout):
                 return Text(increment_fate(branch, tip, union, checkout))
             case _:
@@ -564,13 +582,13 @@ class GitQueries:
 def pop_tmp_commits() -> None:
     """Unwind the tmp commits a run that died mid-rebase left on the
     checked-out branch (never pushed)."""
-    decide(PopTmp())
+    decide(RebaseParams(cfg().names, PopTmp()))
 
 
 def ensure_rebased() -> None:
     """Make HEAD contain origin/main, its staged and unstaged changes intact,
     or die leaving the checkout as it was."""
-    decide(EnsureRebased())
+    decide(RebaseParams(cfg().names, EnsureRebased()))
 
 
 def sibling_checkouts(here: Path | None = None) -> list[Path]:
@@ -578,7 +596,7 @@ def sibling_checkouts(here: Path | None = None) -> list[Path]:
     current directory's by default): its worktrees (not a run's throwaway
     ones) and the clones beside it with the same origin."""
     here = (here or Path.cwd()).resolve()
-    origin = out(["git", "remote", "get-url", "origin"], cwd=str(here))
+    origin = out(["git", "remote", "get-url", cfg().remote], cwd=str(here))
     found: set[Path] = set()
 
     def worktrees(of: Path) -> None:
@@ -596,7 +614,7 @@ def sibling_checkouts(here: Path | None = None) -> list[Path]:
     worktrees(here)
     for d in (sub_parent(here) or here).parent.iterdir():
         if d != here and has_git(d):
-            url = run(["git", "remote", "get-url", "origin"], cwd=str(d), check=False).stdout
+            url = run(["git", "remote", "get-url", cfg().remote], cwd=str(d), check=False).stdout
             if url.strip() == origin:
                 worktrees(d)
     return [d for d in sorted(found) if d != here and d.is_dir() and is_checkout(d)]
@@ -619,7 +637,7 @@ def update_checkout(path: Path) -> tuple[bool, str]:
             return False, f"skipped: {lock_holder()} is running there"
         try:
             wb = work_branch_name()
-            done = decide(Sync(wb))
+            done = decide(RebaseParams(cfg().names, Sync(wb)))
             good, status = isinstance(done, Ok), done.value
             if good and wb is not None:
                 problems = submodule.catch_up(path, wb)
@@ -653,8 +671,8 @@ def catch_up(paths: list[Path]) -> bool:
 
 def ensure_on_work_branch(wb: str) -> None:
     prev = current_branch()
-    decide(OnWorkBranch(wb))
-    if (prev is not None and prev not in (wb, "main") and current_branch() == wb
+    decide(RebaseParams(cfg().names, OnWorkBranch(wb)))
+    if (prev is not None and prev not in (wb, cfg().main_branch) and current_branch() == wb
             and checkout_identity().kind == "sub"):
         # The fresh branch a subagent's worktree was created on, replaced.
         git("branch", "--quiet", "-D", prev, check=False)
@@ -712,8 +730,8 @@ def edit_message(draft: str, wb: str, tips: list[tuple[str, str]] | None = None)
     cmd = editor()
     if cmd is None:
         return None
-    main = "refs/remotes/origin/main"
-    notes = [f"Landing {wb} on main."]
+    main = main_ref()
+    notes = [f"Landing {wb} on {cfg().main_branch}."]
     for label, tip in tips or [("", "HEAD")]:
         of = f" of {label}" if label else ""
         notes += [f"Increments{of}:",
@@ -862,7 +880,7 @@ def forget_pushed(wb: str) -> None:
 def adopt_origin_tip(wb: str) -> None:
     """Origin's copy of the work branch, taken as this checkout's (open by
     name), noted as pushed."""
-    up = rev(f"refs/remotes/origin/{wb}")
+    up = rev(remote_ref(wb))
     if up is not None:
         note_pushed(wb, up)
 
@@ -877,17 +895,17 @@ def sole_writer_problem(wb: str) -> str | None:
     onto it.  The deploy decides before its rebase moves the local
     branch, so the message's remedy, which brings origin's commits into
     it, is seen; after a rebase the note or the reflog decides."""
-    up = rev(f"refs/remotes/origin/{wb}")
+    up = rev(remote_ref(wb))
     local = rev(f"refs/heads/{wb}")
-    if up is None or local is None or is_ancestor(up, "refs/remotes/origin/main") or is_ancestor(up, local) \
+    if up is None or local is None or is_ancestor(up, main_ref()) or is_ancestor(up, local) \
             or pushed_tip(wb) == up:
         return None
     held = run(["git", "reflog", "show", "--format=%H", f"refs/heads/{wb}"], check=False).stdout.split()
     if not held or up in held:
         return None
-    return (f"{wb} moved on origin ({up[:12]}): another checkout deployed on it, but a work branch has one "
-            f"writer.  `git log refs/heads/{wb}..refs/remotes/origin/{wb}` shows what it holds; in that "
-            f"branch's checkout, `git rebase --autostash refs/remotes/origin/{wb}` carries this checkout's "
+    return (f"{wb} moved on {cfg().remote} ({up[:12]}): another checkout deployed on it, but a work branch has one "
+            f"writer.  `git log refs/heads/{wb}..{remote_ref(wb)}` shows what it holds; in that "
+            f"branch's checkout, `git rebase --autostash {remote_ref(wb)}` carries this checkout's "
             f"increments onto it, or `git checkout -b {this_prefix()}<leaf>` moves them to a branch of their "
             f"own; then re-run")
 
@@ -901,7 +919,7 @@ def ensure_sole_writer(wb: str) -> str:
     problem = sole_writer_problem(wb)
     if problem is not None:
         die(problem)
-    return rev(f"refs/remotes/origin/{wb}") or ""
+    return rev(remote_ref(wb)) or ""
 
 
 def push_refspecs(wb: str, lease: str) -> list[str]:
@@ -911,23 +929,23 @@ def push_refspecs(wb: str, lease: str) -> list[str]:
 
 
 def push_cmd(wb: str, lease: str) -> list[str]:
-    return ["push", "--quiet", "origin", *push_refspecs(wb, lease)]
+    return ["push", "--quiet", cfg().remote, *push_refspecs(wb, lease)]
 
 
 def push_work_branch(wb: str) -> None:
     """Push the work branch (a deploy's end pushes in the background instead:
     push_deployed)."""
     head = rev(f"refs/heads/{wb}")
-    if head is None or rev(f"refs/remotes/origin/{wb}") == head:
+    if head is None or rev(remote_ref(wb)) == head:
         return
     p = git(*push_cmd(wb, ensure_sole_writer(wb)), check=False)
     if p.returncode != 0:
-        die(f"pushing {wb} failed - it moved on origin, but this checkout is its "
+        die(f"pushing {wb} failed - it moved on {cfg().remote}, but this checkout is its "
             f"only writer.  Investigate:\n{p.stderr.strip()}")
     note_pushed(wb, head)
     clear = clear_refspec(wb)
     if clear:
-        git("push", "--quiet", "origin", *clear, check=False)
+        git("push", "--quiet", cfg().remote, *clear, check=False)
     print(f"pushed {wb} ({head[:12] if head else '?'})")
 
 
@@ -1018,7 +1036,7 @@ class Announce:
             sha = self._commit(settled=False)
             if not sha:
                 return False
-            p = git("push", "--quiet", "--force", "origin", f"{sha}:{PENDING_REFS}/{self.key}",
+            p = git("push", "--quiet", "--force", cfg().remote, f"{sha}:{PENDING_REFS}/{self.key}",
                     check=False, timeout=PUSH_TIMEOUT)
             if p.returncode != 0:
                 self.detail = (p.stderr or "").strip() or "push failed"
@@ -1070,7 +1088,7 @@ class Announce:
         since a push that landed but timed out here must not strand it."""
         self.stop()
         with proc.finishing():
-            git("push", "--quiet", "origin", *delete_args({f"{PENDING_REFS}/{self.key}": self.sha}),
+            git("push", "--quiet", cfg().remote, *delete_args({f"{PENDING_REFS}/{self.key}": self.sha}),
                 check=False, timeout=PUSH_TIMEOUT)
 
 
@@ -1081,9 +1099,9 @@ def announce_key(branch: str) -> str:
     main checkout has a pending state of its own, and two on one machine
     (a nightly's and a hand deploy's) must not renew over each other's
     carried records."""
-    if branch != "main":
+    if branch != cfg().main_branch:
         return branch
-    return f"main@{proc.this_machine()}-{hashlib.sha256(str(Path.cwd()).encode()).hexdigest()[:8]}"
+    return f"{branch}@{proc.this_machine()}-{hashlib.sha256(str(Path.cwd()).encode()).hexdigest()[:8]}"
 
 
 class Pending(NamedTuple):
@@ -1130,8 +1148,8 @@ def announcements() -> tuple[list[Pending], dict[str, str]]:
         key, sha, since, at, parents, subject = ln.split("\t", 5)
         branch = key.partition("@")[0]
         settled = subject.endswith(SETTLED)
-        if branch == "main" and (settled or " " not in parents) \
-                and is_ancestor(f"{sha}^", "refs/remotes/origin/main"):
+        if branch == cfg().main_branch and (settled or " " not in parents) \
+                and is_ancestor(f"{sha}^", main_ref()):
             cleared[key] = sha
             continue
         found.append(Pending(key, branch, sha, int(since), int(at), settled, tuple(parents.split()[1:])))
@@ -1205,10 +1223,10 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str])
     problem: str | None = None
     pushed_note: list[str] = []
     head = rev(f"refs/heads/{wb}") if wb else None
-    if wb and head and current_branch() == wb and rev(f"refs/remotes/origin/{wb}") != head:
+    if wb and head and current_branch() == wb and rev(remote_ref(wb)) != head:
         problem = sole_writer_problem(wb)
         if problem is None:
-            refspecs += push_refspecs(wb, rev(f"refs/remotes/origin/{wb}") or "")
+            refspecs += push_refspecs(wb, rev(remote_ref(wb)) or "")
             pushed_note = ["git", "update-ref", f"{PUSHED_REFS}/{wb}", head]
             what.append(f"{wb} ({head[:12]})")
     refspecs += [f"+{sha}:refs/heads/{DEPLOYED_PREFIX}/{h}" for h, sha in records.items()]
@@ -1228,7 +1246,7 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str])
         return problem
     pidf, statusf, logf = (push_state(k) for k in ("pid", "status", "log"))
     hold = os.environ.get("NIXCONVOY_HOLD_PUSH", "")
-    push = ["git", "-c", "core.hooksPath=/dev/null", *proc.PUSH_NET, "push", "--quiet", "origin"]
+    push = ["git", "-c", "core.hooksPath=/dev/null", *proc.PUSH_NET, "push", "--quiet", cfg().remote]
     script = "export GIT_TERMINAL_PROMPT=0; " + (shlex.join([*push, "--atomic", *refspecs]) if refspecs else "true") + "; rc=$?"
     if pushed_note:
         script += f'; [ "$rc" = 0 ] && {shlex.join(pushed_note)}'
@@ -1245,17 +1263,19 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str])
     return problem
 
 
-def origin_tips(cwd: str | None = None) -> dict[str, str]:
+def origin_tips(cwd: str | None = None, names: RepoNames | None = None) -> dict[str, str]:
     """origin's branches as last fetched: name -> tip."""
+    names = names or cfg().names
     listing = out(["git", "for-each-ref", "--format=%(refname:strip=3)%09%(objectname)",
-                   "refs/remotes/origin"], cwd=cwd)
+                   f"refs/remotes/{names.remote}"], cwd=cwd)
     return dict(ln.split("\t", 1) for ln in listing.splitlines() if not ln.startswith("HEAD\t"))
 
 
-def listed_tips(pats: set[str], cwd: str | None = None) -> dict[str, str]:
+def listed_tips(pats: set[str], cwd: str | None = None, names: RepoNames | None = None) -> dict[str, str]:
     """origin_tips narrowed to main and the work branches `pats` list."""
-    return {b: t for b, t in origin_tips(cwd).items()
-            if b == "main" or listed(b, pats)}
+    names = names or cfg().names
+    return {b: t for b, t in origin_tips(cwd, names).items()
+            if b == names.main or listed(b, pats)}
 
 
 # The Deployed: trailer's value in a git log format; Applied: is the same
@@ -1402,17 +1422,19 @@ def tree_less_msg(ref: str, cwd: str | None = None) -> str:
         Path(tmpidx).unlink()
 
 
-def on_origin(cwd: str | None = None, pats: set[str] | None = None) -> bool:
+def on_origin(cwd: str | None = None, pats: set[str] | None = None, names: RepoNames | None = None) -> bool:
     """Whether HEAD holds nothing of its own beyond origin: it is an
     ancestor of origin/main or of origin's tip of a listed work branch, or
     its tree less MSG_FILE is that of an origin/main commit past their
-    merge base (a review checkout of a tip since landed)."""
-    tips = set(listed_tips(allowed_branches() if pats is None else pats, cwd).values())
+    merge base (a review checkout of a tip since landed).  `names`: the
+    repository's, a submodule's own where the core runs there."""
+    names = names or cfg().names
+    tips = set(listed_tips(allowed_branches() if pats is None else pats, cwd, names).values())
     # Excluded as ^sha lines: --not does not reach revisions read from stdin.
     if not out(["git", "rev-list", "-n", "1", "HEAD", "--stdin"], cwd=cwd,
                input="".join(f"^{c}\n" for c in sorted(tips))):
         return True
-    main = "refs/remotes/origin/main"
+    main = names.main_ref
     base = run(["git", "merge-base", "HEAD", main], cwd=cwd, check=False).stdout.strip()
     if not base:
         return False
@@ -1438,7 +1460,7 @@ def increment_fate(branch: str, tip: str, union: str, checkout: str | None) -> s
     subagent worktree, force-pushed over, or landed and since undone)."""
     if rev(f"{tip}^{{commit}}") is None:
         return "kept"
-    up = f"refs/remotes/origin/{branch}"
+    up = remote_ref(branch)
     if rev(up) is not None:
         if is_ancestor(tip, up):
             return "kept"

@@ -50,7 +50,11 @@ SUBSTITUTERS_TIMEOUT = 10
 
 
 def flake_target_names() -> list[str]:
-    """The deployable targets: <targets_dir>/<name>/ maps 1:1 to nixosConfigurations."""
+    """The deployable targets: <targets_dir>/<name>/ maps 1:1 to
+    nixosConfigurations, or without targets_dir the `[targets.<name>]`
+    tables do."""
+    if cfg().inventory:
+        return cfg().inventory
     d = cfg().targets_path
     try:
         names = sorted(e.name for e in Path(d).iterdir() if e.is_dir())

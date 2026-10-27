@@ -214,10 +214,11 @@ def removal_keeps(d: Path) -> str | None:
         return f"another claude session holds it ({reason})"
     if out(["git", "status", "--porcelain", "--ignored"], cwd=str(d)):
         return "it has uncommitted, untracked or ignored changes"
-    main = run(["git", "rev-parse", "-q", "--verify", "refs/remotes/origin/main"], cwd=str(d), check=False)
-    landed = "refs/remotes/origin/main" if main.returncode == 0 else "--remotes"
+    n = config.names_at(d)
+    main = run(["git", "rev-parse", "-q", "--verify", n.main_ref], cwd=str(d), check=False)
+    landed = n.main_ref if main.returncode == 0 else "--remotes"
     if out(["git", "rev-list", "-n", "1", "HEAD", "--not", landed], cwd=str(d)):
-        return "it carries commits not on origin/main"
+        return f"it carries commits not on {n.main_short}"
     for ln in out(["git", "ls-files", "-s"], cwd=str(d)).splitlines():
         meta, _, sub = ln.partition("\t")
         if meta.startswith("160000") and (d / sub / ".git").exists():

@@ -48,6 +48,7 @@ from .checkout import (
     MACHINE_ENV,
     PENDING_REFS,
     TMP_PREFIX,
+    GitQueries,
     common_state_path,
     fold_subject,
     index_tree,
@@ -58,10 +59,10 @@ from .checkout import (
     rebase_solving,
     tree_less_msg,
 )
-from .config import MSG_FILE, cfg
+from .config import MSG_FILE, cfg, main_ref, main_short
 from .guard import decide
 from .proc import NOTHING_DONE, Fail, die, git, is_ancestor, ok, out, run, solve_with_mergiraf
-from .wire import Ok, Onto
+from .wire import Ok, Onto, RebaseParams, RepoNames
 
 # On a submodule's origin: every tip a branch left behind (a reset, a
 # rebase, its removal) as refs/nixconvoy/past/<branch>/<sha>, since nix
@@ -840,13 +841,15 @@ def catch_up(top: Path, wb: str) -> list[str]:
     return problems
 
 
-def onto(d: Path, upstream: str) -> tuple[bool, str]:
-    """The rebase core's Onto run in `d`: HEAD made to contain `upstream`,
-    (ok, status)."""
+def onto(d: Path, default: str) -> tuple[bool, str]:
+    """The rebase core's Onto run in `d`, under the submodule repository's
+    own names (origin, its `default` branch): HEAD made to contain
+    origin/<default>, (ok, status)."""
+    names = RepoNames("origin", default)
     prev = Path.cwd()
     os.chdir(d)
     try:
-        done = decide(Onto(upstream))
+        done = decide(RebaseParams(names, Onto(names.main_ref)), GitQueries(names))
     finally:
         os.chdir(prev)
     return isinstance(done, Ok), done.value
@@ -866,7 +869,7 @@ def catch_up_one(sub: Sub, wb: str, top: Path) -> str | None:
     default = default_branch(sub.repo)
     was = rev_in(sub.dir, "HEAD")
     own = has_own(sub, default)
-    good, status = onto(sub.dir, f"refs/remotes/origin/{default}")
+    good, status = onto(sub.dir, default)
     if not good:
         return f"submodule {sub.name}: {status}"
     head = rev_in(sub.dir, "HEAD")
@@ -915,7 +918,7 @@ def catch_up_repo(name: str, repo: Path) -> str | None:
         return None
     default = default_branch(repo)
     with repo_lock(repo):  # another checkout's sweep, reaching the same repository
-        good, status = onto(repo, f"refs/remotes/origin/{default}")
+        good, status = onto(repo, default)
     if not good:
         return f"{repo} (submodule {name}): {status}"
     if status != "up to date":
@@ -1296,8 +1299,8 @@ def remove_one(sub: Sub) -> None:
 
 def main_pin(sub: Sub, top: Path) -> str:
     """What origin/main pins the submodule on, or die."""
-    return pin_at("refs/remotes/origin/main", sub.path, top) or \
-        die(f"origin/main pins no {sub.path} to restore {sub.name}'s pin from")
+    return pin_at(main_ref(), sub.path, top) or \
+        die(f"{main_short()} pins no {sub.path} to restore {sub.name}'s pin from")
 
 
 def restore(sub: Sub, top: Path) -> bool:
@@ -1307,7 +1310,7 @@ def restore(sub: Sub, top: Path) -> bool:
     if pin(sub, top) == want:
         return False
     set_pin(sub, want, top)
-    print(f"submodule {sub.name}: pinned on origin/main's {want[:12]}, staged (deploy to revert it "
+    print(f"submodule {sub.name}: pinned on {main_short()}'s {want[:12]}, staged (deploy to revert it "
           f"on the targets)")
     return True
 

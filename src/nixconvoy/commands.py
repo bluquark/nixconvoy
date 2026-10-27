@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import IO, NamedTuple
 
-from . import names, submodule
+from . import config, names, submodule
 from .checkout import (
     DEPLOYED_TRAILER,
     KEPT_EDIT,
@@ -79,7 +79,7 @@ from .checkout import (
     worktree_lock,
     write_holder,
 )
-from .config import MSG_FILE
+from .config import CONFIG_FILE, MSG_FILE, cfg, main_ref, main_short, remote_ref, repo_names
 from .guard import binary, decide
 from .names import label as sub_label
 from .proc import Fail, die, failure, git, is_ancestor, ok, out, painter, rev, run, solve_with_mergiraf
@@ -169,8 +169,8 @@ def main_message(wb: str, given: str | None, main: str, appended: str = "",
     if given is None and (edited := edit_message(whole, wb, tips)) is not None:
         kept.write_text(edited + "\n", encoding="utf-8")
         git(*fetch_args())
-        if rev("refs/remotes/origin/main") != main:
-            die("origin/main moved while the message was being edited; re-run (the edit is kept)")
+        if rev(main_ref()) != main:
+            die(f"{main_short()} moved while the message was being edited; re-run (the edit is kept)")
         return edited
     if not whole:
         die(f"{wb} has no {MSG_FILE}; write one (it becomes the main commit message), or pass -m <msg>")
@@ -189,15 +189,15 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
         die("staged but undeployed changes present; deploy or unstage them first")
     lease = ensure_sole_writer(wb)  # origin's copy is reset at the end: it must be ours
     ensure_rebased()
-    main = rev("refs/remotes/origin/main")
-    if main is None or tree_less_msg("HEAD") == out(["git", "rev-parse", "origin/main^{tree}"]):
-        die("no changes vs origin/main to land")
+    main = rev(main_ref())
+    if main is None or tree_less_msg("HEAD") == out(["git", "rev-parse", f"{main_short()}^{{tree}}"]):
+        die(f"no changes vs {main_short()} to land")
     refuse_no_message(wb, message)
     # A branch forked from another's tip (a subagent worktree made by hand at
     # its parent's) would land that branch's increments under this message.
     carried = [b for b, tip in listed_tips(allowed_branches()).items()
                if b != wb and is_ancestor(tip, "HEAD")
-               and not is_ancestor(tip, "refs/remotes/origin/main")]
+               and not is_ancestor(tip, main_ref())]
     if carried:
         die(f"{wb} contains the unlanded increments of {', '.join(carried)}; land "
             "that branch first, then re-run")
@@ -209,7 +209,7 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
             f"`nixconvoy close <input> --force` after it drops it")
     holds(wb, "HEAD", main, not_yet_deployed)
     msg = main_message(wb, message, main)
-    if rev(f"refs/remotes/origin/{wb}") != lease:  # the edit's fetch brought a tip
+    if rev(remote_ref(wb)) != lease:  # the edit's fetch brought a tip
         lease = ensure_sole_writer(wb)
     before = rev("HEAD")
     assert before is not None
@@ -221,22 +221,22 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
         landings = submodule.prepare_all(wb, msg)
         tree = tree_less_msg("HEAD")
         commit = out(["git", "commit-tree", tree, "-p", main, "-m", msg])
-        p = git("push", "--quiet", "origin", f"{commit}:refs/heads/main", check=False)
+        p = git("push", "--quiet", cfg().remote, f"{commit}:refs/heads/{cfg().main_branch}", check=False)
         # A push cut off while the server took it in has landed all the same.
-        if p.returncode != 0 and git("ls-remote", "origin", "refs/heads/main", check=False).stdout.split()[:1] != [commit]:
-            die(f"pushing main failed (moved since fetch?); re-run:\n{p.stderr.strip()}")
+        if p.returncode != 0 and git("ls-remote", cfg().remote, f"refs/heads/{cfg().main_branch}", check=False).stdout.split()[:1] != [commit]:
+            die(f"pushing {cfg().main_branch} failed (moved since fetch?); re-run:\n{p.stderr.strip()}")
     except Fail:
         submodule.abandon_all(landings)
         git("reset", "--quiet", "--keep", before, check=False)
         raise
     # Refused where main is checked out (the main worktree): catch_up moves it.
-    git("branch", "-f", "main", commit, check=False)
+    git("branch", "-f", cfg().main_branch, commit, check=False)
     submodule.finish_all(landings)
 
     git("reset", "--quiet", commit)  # move wb to main; working tree untouched
     Path(MSG_FILE).unlink(missing_ok=True)  # now main's commit message
     kept_edit().unlink(missing_ok=True)
-    print(f"landed on main: {summarize(commit)}")
+    print(f"landed on {cfg().main_branch}: {summarize(commit)}")
     siblings = sibling_checkouts()  # the parent of a subagent worktree included
     finish(wb, lease)
     if not (catch_up(siblings) & submodule.catch_up_repos()):
@@ -278,9 +278,9 @@ def undeploy(back_to: str = "HEAD^") -> bool:
     if current_branch() != wb:
         die(f"undeploy runs from the work branch ({wb}); currently on "
             f"{current_branch() or '(detached HEAD)'}")
-    main = rev("refs/remotes/origin/main")
+    main = rev(main_ref())
     if main is None:
-        die("origin/main not found")
+        die(f"{main_short()} not found")
     prev = rev("HEAD") or ""
     base = out(["git", "merge-base", "HEAD", main])  # the branch's increments start here
     target = rev(f"{back_to}^{{commit}}")
@@ -291,7 +291,7 @@ def undeploy(back_to: str = "HEAD^") -> bool:
     elif not is_ancestor(target, "HEAD"):
         die(f"--back-to {back_to} ({target[:12]}) is not on {wb}")
     if target == prev:
-        die("nothing to undeploy" + (": no increment beyond origin/main" if target == base else f": HEAD is {back_to}"))
+        die("nothing to undeploy" + (f": no increment beyond {main_short()}" if target == base else f": HEAD is {back_to}"))
     if staged_differs():
         die("staged but undeployed changes present, which the deploy would carry; "
             "deploy or unstage them first")
@@ -324,7 +324,7 @@ def undeploy(back_to: str = "HEAD^") -> bool:
         print(f"deployed to {', '.join(deployed)}: deploying now to revert it")
     else:
         print("it reached no target: nothing to deploy")
-    finish(wb, lease, "origin/main" if target == main else target[:12])
+    finish(wb, lease, main_short() if target == main else target[:12])
     return bool(deployed)
 
 
@@ -428,7 +428,7 @@ def prune_one(d: Path, *, named: bool, own_session_ends: bool = False,
     perform = PruneQueries(d, memo, deploy_held=deploy_held, invoker=own_session_ends,
                            stop=stopped, name_wait=named if wait_name is None else wait_name)
     try:
-        done = decide(PruneParams(d.name, named, own_session_ends,
+        done = decide(PruneParams(repo_names(), d.name, named, own_session_ends,
                                   None if stopped is None else Stopped(stopped.pid, stopped.lock)), perform)
     finally:
         perform.close()
@@ -621,7 +621,7 @@ class PruneQueries(GitQueries):
             case OwnBranch():
                 return Text(identity_of(self.d, current_branch()).wb)
             case Unpushed(sha):
-                return Flag(bool(out(["git", "rev-list", "-n", "1", sha, "--not", "--remotes=origin"])))
+                return Flag(bool(out(["git", "rev-list", "-n", "1", sha, "--not", f"--remotes={cfg().remote}"])))
             case Dirty():
                 # An agent that stopped may be resumed: what git ignores (its
                 # builds, notes) is kept for it too.
@@ -699,17 +699,18 @@ def transcript_cwd(path: Path, *, last: bool = False) -> Path | None:
     return Path(found).resolve() if found else None
 
 
-def finish(wb: str, lease: str, onto: str = "origin/main") -> None:
+def finish(wb: str, lease: str, onto: str | None = None) -> None:
     """The checked-out work branch after a land or undeploy, now at `onto`
-    (origin/main's commit, or an earlier increment), moved there on origin
-    too, over `lease` (ensure_sole_writer's).  A subagent worktree left
-    with nothing stays, idle: `close` removes it (the session-exit sweep
-    does so on its own)."""
+    (origin/main's commit, the default, or an earlier increment), moved
+    there on origin too, over `lease` (ensure_sole_writer's).  A subagent
+    worktree left with nothing stays, idle: `close` removes it (the
+    session-exit sweep does so on its own)."""
+    onto = onto or main_short()
     git(*push_cmd(wb, lease))
     note_pushed(wb, rev(f"refs/heads/{wb}") or "")
     print(f"{wb} reset onto {onto}")
     here = Path.cwd().resolve()
-    if sub_parent(here) is not None and rev("HEAD") == rev("refs/remotes/origin/main"):
+    if sub_parent(here) is not None and rev("HEAD") == rev(main_ref()):
         print(f"the worktree stays; `nixconvoy close {here.name}` removes it")
 
 
@@ -736,7 +737,7 @@ def remove_sub(here: Path, branches: list[str]) -> None:
     if failed:
         die("\n".join(failed))
     print(f"subagent worktree {here.relative_to(parent)} removed, with "
-          f"{', '.join(names) or 'no branch of its own'} here and on origin")
+          f"{', '.join(names) or 'no branch of its own'} here and on {cfg().remote}")
 
 
 def sub_branches(here: Path, cur: str | None, branches: list[str]) -> list[str]:
@@ -747,7 +748,7 @@ def sub_branches(here: Path, cur: str | None, branches: list[str]) -> list[str]:
     fresh one goes when it holds nothing beyond origin/main."""
     fresh = f"worktree-{here.name}"
     names = [b for b in {cur, *branches} if b is not None and (b in branches or b == fresh or b.endswith(f"-{here.name}"))]
-    if fresh not in names and rev(f"refs/heads/{fresh}") and is_ancestor(fresh, "refs/remotes/origin/main"):
+    if fresh not in names and rev(f"refs/heads/{fresh}") and is_ancestor(fresh, main_ref()):
         names.append(fresh)
     return names
 
@@ -756,12 +757,12 @@ def drop_branches(names: list[str]) -> list[str]:
     """Delete `names` here and on origin: the origin deletions that failed.
     One origin holds commits of another checkout's (sole_writer_problem:
     taken over by name elsewhere) stays there, that checkout's now."""
-    gone = {b: rev(f"refs/remotes/origin/{b}") for b in names}
+    gone = {b: rev(remote_ref(b)) for b in names}
     failed = []
     for b in names:
         if sole_writer_problem(b) is not None:
             del gone[b]
-            print(f"note: {b} stays on origin, holding another checkout's increments", file=sys.stderr)
+            print(f"note: {b} stays on {cfg().remote}, holding another checkout's increments", file=sys.stderr)
         git("branch", "--quiet", "-D", b, check=False)
         forget_pushed(b)
     pushed = {b: old for b, old in gone.items() if old}
@@ -769,27 +770,27 @@ def drop_branches(names: list[str]) -> list[str]:
         # One push (a stall ends it: prune holds the worktree's name lock
         # meanwhile).  Retried once: origin has rejected a deletion out of
         # the blue.
-        cmd = ["push", "--quiet", "origin", *(f":refs/heads/{b}" for b in pushed),
+        cmd = ["push", "--quiet", cfg().remote, *(f":refs/heads/{b}" for b in pushed),
                *(f"--force-with-lease=refs/heads/{b}:{old}" for b, old in pushed.items())]
         p = git(*cmd, check=False)
         if p.returncode != 0:
             time.sleep(2)
             p = git(*cmd, check=False)
         if p.returncode != 0:
-            failed.append(f"deleting {', '.join(pushed)} on origin failed: "
+            failed.append(f"deleting {', '.join(pushed)} on {cfg().remote} failed: "
                           f"{(p.stderr or '').strip() or 'no error given'}")
     # The gone branches' announcements, on their own: a stale lease (origin
     # moved since the fetch) must not count as a branch deletion failed.
     clears = [spec for b in names for spec in clear_refspec(b)]
     if clears:
-        cmd = ["push", "--quiet", "origin", *clears]
+        cmd = ["push", "--quiet", cfg().remote, *clears]
         p = git(*cmd, check=False)
         if p.returncode != 0:
             time.sleep(2)
             p = git(*cmd, check=False)
         if p.returncode != 0:
-            failed.append(f"deleting the announcements of {', '.join(names)} on origin failed "
-                          f"(git push origin :{PENDING_REFS}/<branch> clears one by hand): "
+            failed.append(f"deleting the announcements of {', '.join(names)} on {cfg().remote} failed "
+                          f"(git push {cfg().remote} :{PENDING_REFS}/<branch> clears one by hand): "
                           f"{(p.stderr or '').strip() or 'no error given'}")
     return failed
 
@@ -803,7 +804,7 @@ def has_increments(d: Path) -> bool:
     """Whether the checkout `d` has commits beyond origin/main: what an
     undeploy back to origin/main undoes."""
     head = run(["git", "rev-parse", "HEAD"], cwd=str(d), check=False).stdout.strip()
-    return bool(head and not is_ancestor(head, "refs/remotes/origin/main"))
+    return bool(head and not is_ancestor(head, main_ref()))
 
 
 def enter_sub(name: str) -> None:
@@ -822,7 +823,7 @@ def status() -> None:
     origin holds (cli docstring: Status)."""
     paint = painter()
     git(*fetch_args("--no-auto-gc"), check=False)
-    main = rev("refs/remotes/origin/main")
+    main = rev(main_ref())
     tips = origin_tips()
     pats = allowed_branches()
     here = Path.cwd().resolve()
@@ -846,11 +847,11 @@ def status() -> None:
         ident = identity_of(d, cur, pats)
         # A subagent's commits of its own: beyond main and beyond the parent's
         # (any listed branch's) pushed tip it forked from.
-        beyond = ["origin/main"] + ([f"refs/remotes/origin/{b}" for b in tips
+        beyond = [main_short()] + ([remote_ref(b) for b in tips
                                      if b != cur and listed(b, pats)]
                                     if ident.kind == "sub" else [])
         ahead = int(g(d, "rev-list", "--count", "HEAD", "--not", *beyond) or 0)
-        behind = int(g(d, "rev-list", "--count", "HEAD..origin/main") or 0)
+        behind = int(g(d, "rev-list", "--count", f"HEAD..{main_short()}") or 0)
         own = ahead  # commits of its own: a review checkout's are on origin
         if cur is None and ahead and on_origin(str(d), pats):
             own = 0
@@ -872,26 +873,26 @@ def status() -> None:
                  and not submodule.own(d))
         p = (lambda text, _style: text) if quiet else paint
         if cur is None:
-            where = (p("detached at origin/main", "green") if head == main
+            where = (p(f"detached at {main_short()}", "green") if head == main
                      else p(f"detached at {head[:12]}, nothing of its own", "green")
-                     if not own else p(f"detached, {ahead} ahead of origin/main", "red"))
-        elif cur == "main":
-            where = p("main", "green") + (p(f", {ahead} unpushed", "red") if ahead else "")
+                     if not own else p(f"detached, {ahead} ahead of {main_short()}", "red"))
+        elif cur == cfg().main_branch:
+            where = p(cur, "green") + (p(f", {ahead} unpushed", "red") if ahead else "")
         elif ahead:
             tip = tips.get(cur)
             pushed = (p("pushed", "green") if tip == head
-                      else p("unpushed" if tip else "not on origin", "red"))
+                      else p("unpushed" if tip else f"not on {cfg().remote}", "red"))
             where = f"{p(cur, 'yellow')} +{ahead} {pushed}"
         else:
-            where = p(f"{cur} = origin/main (idle)", "green")
+            where = p(f"{cur} = {main_short()} (idle)", "green")
         if behind:
-            where += p(f", {behind} behind main", "magenta")
+            where += p(f", {behind} behind {cfg().main_branch}", "magenta")
         notes: list[str] = []
         if ident.wb and cur != ident.wb and ident.kind != "main":
             notes.append(p(f"owns {ident.wb}", "dim"))
         notes += [p(f"{label} {n}", "cyan") for label, n in counts.items() if n]
-        if own and cur not in (None, "main"):
-            held = sorted(held_targets("origin/main..HEAD", str(d)))
+        if own and cur not in (None, cfg().main_branch):
+            held = sorted(held_targets(f"{main_short()}..HEAD", str(d)))
             if held:
                 notes.append(p(f"holds back {', '.join(held)}", "yellow"))
         notes += [p(a, "cyan") for a in submodule.notes(d)]
@@ -906,7 +907,7 @@ def status() -> None:
                                "stops or that session exits", "dim"))
             else:
                 notes.append(p(f"empty: nixconvoy close {d.name} removes it", "dim"))
-        msg = g(d, "show", f"HEAD:{MSG_FILE}").partition("\n")[0] if cur not in (None, "main") else ""
+        msg = g(d, "show", f"HEAD:{MSG_FILE}").partition("\n")[0] if cur not in (None, cfg().main_branch) else ""
         if msg:
             notes.append(p(f'"{msg[:60]}"', "dim"))
         if op:
@@ -945,14 +946,14 @@ def status() -> None:
     local |= set(out(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/"]).splitlines())
     elsewhere = []
     for name, tip in sorted(tips.items()):
-        if name == "main" or name in local or not listed(name, pats):
+        if name == cfg().main_branch or name in local or not listed(name, pats):
             continue
         if main and is_ancestor(tip, main):
             continue
-        n = out(["git", "rev-list", "--count", f"origin/main..{tip}"])
+        n = out(["git", "rev-list", "--count", f"{main_short()}..{tip}"])
         elsewhere.append(f"{name} +{n}: {summarize(tip)}")
     if elsewhere:
-        print(paint("on origin only (other machines' checkouts):", "dim"))
+        print(paint(f"on {cfg().remote} only (other machines' checkouts):", "dim"))
         for e in elsewhere:
             print(f"  {paint(e, 'yellow')}")
     repos = submodule.configured()
@@ -1048,9 +1049,14 @@ def ensure_excluded(root: Path, d: Path) -> None:
 
 
 def default_base(root: Path) -> str:
-    """origin's default branch as fetched (origin/HEAD, else origin/main),
-    else HEAD."""
-    return next((r for r in ("refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    """Where a new branch starts: main as fetched (nixconvoy.toml's names;
+    in a repository without one, the plugin's create hook runs here too:
+    origin/HEAD, else origin/main), else HEAD."""
+    if (root / CONFIG_FILE).is_file():
+        refs = [config.names_at(root).main_ref]
+    else:
+        refs = ["refs/remotes/origin/HEAD", "refs/remotes/origin/main"]
+    return next((r for r in refs
                  if run(["git", "rev-parse", "-q", "--verify", r], cwd=str(root), check=False).returncode == 0),
                 "HEAD")
 
@@ -1089,7 +1095,7 @@ def open_checkout(path: Path, branch: str | None) -> Path:
         branch = f"{prefix}{d.name}"
         held = sorted(b for b in tips if b == branch or b.startswith(f"{branch}-"))
         if held:
-            die(f"origin holds {', '.join(held)}: a removed checkout's, or another machine's (the prefix "
+            die(f"{cfg().remote} holds {', '.join(held)}: a removed checkout's, or another machine's (the prefix "
                 f"shared).  `--branch {d.name}` makes it this checkout's, `--branch <leaf>` opens another")
     elif not branch.startswith(prefix) and "/" not in branch:
         branch = f"{prefix}{branch}"
@@ -1104,22 +1110,22 @@ def open_checkout(path: Path, branch: str | None) -> Path:
     if branch in local and branch in tips and rev(f"refs/heads/{branch}") != tips[branch]:
         # Origin's copy taken over a stale local one; a local one ahead
         # of it (its push pending) stays.
-        if is_ancestor(branch, f"refs/remotes/origin/{branch}"):
+        if is_ancestor(branch, remote_ref(branch)):
             git("branch", "--quiet", "-f", branch, tips[branch])
-        elif not is_ancestor(f"refs/remotes/origin/{branch}", branch):
-            die(f"{branch} here and on origin have diverged: `git branch -f {branch} origin/{branch}` takes "
-                f"origin's copy (or the other way round), then re-run")
+        elif not is_ancestor(remote_ref(branch), branch):
+            die(f"{branch} here and on {cfg().remote} have diverged: `git branch -f {branch} "
+                f"{cfg().remote}/{branch}` takes {cfg().remote}'s copy (or the other way round), then re-run")
     if branch in local:
         p = git("worktree", "add", "--quiet", str(d), branch, check=False)
     elif branch in tips:
-        p = git("worktree", "add", "--quiet", "-b", branch, str(d), f"refs/remotes/origin/{branch}", check=False)
+        p = git("worktree", "add", "--quiet", "-b", branch, str(d), remote_ref(branch), check=False)
     else:
         p = git("worktree", "add", "--quiet", "-b", branch, str(d), default_base(here), check=False)
     if p.returncode != 0:
         die(f"git worktree add failed:\n{(p.stderr or '').strip()}")
-    if branch in tips and is_ancestor(f"refs/remotes/origin/{branch}", branch):
+    if branch in tips and is_ancestor(remote_ref(branch), branch):
         adopt_origin_tip(branch)
-    git("branch", "--quiet", "--set-upstream-to=origin/main", branch, check=False)
+    git("branch", "--quiet", f"--set-upstream-to={main_short()}", branch, check=False)
     if branch not in local and branch not in tips:
         # A branch made here is reserved on origin: --force-with-lease
         # against no branch at all loses to an open of the same name
@@ -1130,12 +1136,12 @@ def open_checkout(path: Path, branch: str | None) -> Path:
             git("worktree", "remove", "--force", str(d), check=False)
             git("branch", "--quiet", "-D", branch, check=False)
             err = (p.stderr or "").strip()
-            why = "origin holds one now: --branch says whether to take it over" if "stale info" in err \
-                else "origin unreachable?"
+            why = f"{cfg().remote} holds one now: --branch says whether to take it over" if "stale info" in err \
+                else f"{cfg().remote} unreachable?"
             die(f"pushing {branch} failed ({why}); nothing opened:\n{err}")
         note_pushed(branch, rev(f"refs/heads/{branch}") or "")
     print(d)
-    print(f"checkout {d.name} on {branch}" + (" (origin's copy: this checkout's now)"
+    print(f"checkout {d.name} on {branch}" + (f" ({cfg().remote}'s copy: this checkout's now)"
                                                if branch in tips and branch not in local else ""), file=sys.stderr)
     return d
 
@@ -1174,9 +1180,9 @@ def close_checkout(path: Path, *, force: bool = False) -> None:
              if ln[3:] not in submodule.paths(d)]
     tip = rev(f"refs/heads/{wb}") if wb else None
     kept = ("edits or untracked files" if edits
-            else "commits not on origin/main" if not is_ancestor(head, "refs/remotes/origin/main")
-            else f"its work branch {wb}, with commits not on origin/main"
-            if tip and not is_ancestor(tip, "refs/remotes/origin/main")
+            else f"commits not on {main_short()}" if not is_ancestor(head, main_ref())
+            else f"its work branch {wb}, with commits not on {main_short()}"
+            if tip and not is_ancestor(tip, main_ref())
             else "a submodule holding something" if submodule.own(d) else None)
     if kept and not force:
         die(f"{d} holds {kept}: land or undeploy it first (--force removes it anyway)")
@@ -1189,7 +1195,7 @@ def close_checkout(path: Path, *, force: bool = False) -> None:
     failed = drop_branches(names)
     if failed:
         die("\n".join(failed))
-    print(f"checkout {d} removed, with {', '.join(sorted(names)) or 'no branch of its own'} here and on origin")
+    print(f"checkout {d} removed, with {', '.join(sorted(names)) or 'no branch of its own'} here and on {cfg().remote}")
 
 
 def land_with_children(message: str | None = None, not_yet_deployed: bool = False) -> None:
@@ -1212,9 +1218,9 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
     if staged_differs():
         die("staged but undeployed changes present; deploy or unstage them first")
     ensure_rebased()
-    main = rev("refs/remotes/origin/main")
+    main = rev(main_ref())
     if main is None:
-        die("origin/main not found")
+        die(f"{main_short()} not found")
     refuse_no_message(wb, message)
     main_tree = out(["git", "rev-parse", f"{main}^{{tree}}"])
     # The participants: each sub on its work branch with work beyond main.
@@ -1249,7 +1255,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
             problem = sole_writer_problem(b)
             if problem is not None:
                 die(f"{d.name}: {problem}")
-            leases[b] = rev(f"refs/remotes/origin/{b}") or ""
+            leases[b] = rev(remote_ref(b)) or ""
         # Each sub's MSG_FILE, as its branch carries it, appended in turn.
         sub_msgs = []
         for d, _ in parts:
@@ -1320,11 +1326,11 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
         msg = main_message(wb, message, main, "\n\n".join(sub_msgs),
                            [(here.name, "HEAD"), *((sub_label(d), f"refs/heads/{b}") for d, b in parts)])
         for d, b in [(here, wb), *parts]:  # the edit's fetch may have brought a tip
-            if rev(f"refs/remotes/origin/{b}") != leases[b]:
+            if rev(remote_ref(b)) != leases[b]:
                 problem = sole_writer_problem(b)
                 if problem is not None:
                     die(f"{d.name}: {problem}")
-                leases[b] = rev(f"refs/remotes/origin/{b}") or ""
+                leases[b] = rev(remote_ref(b)) or ""
         befores = {d: out(["git", "rev-parse", "HEAD"], cwd=str(d)) for d, _ in [(here, wb), *parts]}
         landings: list[submodule.Landing] = []
         # As in land: nothing moves on any origin before main's push is in,
@@ -1336,22 +1342,22 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
                 os.chdir(here)
             tree = merged_tree()
             if tree == main_tree:
-                die("no changes vs origin/main to land")
+                die(f"no changes vs {main_short()} to land")
             clashes(tree, pinned=True)
             submodule.check_pins(tree, landings, here)
             commit = out(["git", "commit-tree", tree, "-p", main, "-m", msg])
-            p = git("push", "--quiet", "origin", f"{commit}:refs/heads/main", check=False)
+            p = git("push", "--quiet", cfg().remote, f"{commit}:refs/heads/{cfg().main_branch}", check=False)
             if p.returncode != 0:
-                die(f"pushing main failed (moved since fetch?); re-run:\n{p.stderr.strip()}")
+                die(f"pushing {cfg().main_branch} failed (moved since fetch?); re-run:\n{p.stderr.strip()}")
         except Fail:
             os.chdir(here)
             submodule.abandon_all(landings)
             for d, _ in [(here, wb), *parts]:
                 git("reset", "--quiet", "--keep", befores[d], cwd=str(d), check=False)
             raise
-        git("branch", "-f", "main", commit, check=False)
+        git("branch", "-f", cfg().main_branch, commit, check=False)
         submodule.finish_all(landings)
-        print(f"landed on main: {summarize(commit)}")
+        print(f"landed on {cfg().main_branch}: {summarize(commit)}")
         kept_edit().unlink(missing_ok=True)
         for d, b in [(here, wb), *parts]:
             os.chdir(d)

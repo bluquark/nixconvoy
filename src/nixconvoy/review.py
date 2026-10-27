@@ -18,13 +18,14 @@ boundaries."""
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import IO
 
-from . import names, submodule
+from . import config, names, submodule
 from .checkout import listed, sub_parent
 from .config import MSG_FILE, ConfigError, load
 from .proc import die, painter, run
@@ -51,8 +52,12 @@ def toplevel(d: Path) -> Path:
 
 
 def default_of(d: Path) -> str:
-    """origin's default branch of the repository at `d`, as a remote ref
-    name (origin/HEAD, else main)."""
+    """The default branch of the repository at `d`, as a remote ref name
+    (remote/branch): its nixconvoy.toml's main, else origin/HEAD, else
+    origin/main."""
+    top = toplevel(d)
+    with contextlib.suppress(config.ConfigError, OSError, UnicodeDecodeError):
+        return config.load(top).names.main_short
     head = run(["git", "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"], cwd=str(d),
                check=False).stdout.strip()
     return head or "origin/main"
@@ -102,7 +107,7 @@ def base_of(d: Path, all_wts: dict[Path, str | None]) -> str | None:
                                   check=False).stdout.strip()
     default = default_of(d)
     primary = next(iter(worktrees(d)), None)
-    if sub_parent(top) is None and not (cur and f"origin/{cur}" != default
+    if sub_parent(top) is None and not (cur and f"{default.partition('/')[0]}/{cur}" != default
                                         and (listed_in(top, cur) or primary != top)):
         return None
     p = run(["git", "merge-base", default, "HEAD"], cwd=str(d), check=False)

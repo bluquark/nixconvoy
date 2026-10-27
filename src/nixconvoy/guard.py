@@ -18,18 +18,14 @@ from .wire import (
     DriftOutcome,
     DriftParams,
     Effect,
-    EnsureRebased,
     Mark,
-    Onto,
-    OnWorkBranch,
     PlanQuery,
     PlanReply,
-    PopTmp,
     Print,
     PruneOutcome,
     PruneParams,
     RebaseOutcome,
-    Sync,
+    RebaseParams,
     UnionOutcome,
     UnionParams,
     Variant,
@@ -114,20 +110,19 @@ CORES: dict[type, tuple[str, object]] = {
     DriftParams: ("drift", DriftOutcome),
     UnionParams: ("union", UnionOutcome),
     PruneParams: ("prune", PruneOutcome),
-    **{cls: ("rebase", RebaseOutcome) for cls in (PopTmp, EnsureRebased, Onto, Sync, OnWorkBranch)},
+    RebaseParams: ("rebase", RebaseOutcome),
 }
 
 
 @overload
 def decide(params: DriftParams, perform: PlanPerform | None = None) -> DriftOutcome: ...
 @overload
-def decide(params: PopTmp | EnsureRebased | Onto | Sync | OnWorkBranch, perform: PlanPerform | None = None) -> RebaseOutcome: ...
+def decide(params: RebaseParams, perform: PlanPerform | None = None) -> RebaseOutcome: ...
 @overload
 def decide(params: UnionParams, perform: PlanPerform | None = None) -> UnionOutcome: ...
 @overload
 def decide(params: PruneParams, perform: PlanPerform | None = None) -> PruneOutcome: ...
-def decide(params: DriftParams | PopTmp | EnsureRebased | Onto | Sync | OnWorkBranch | UnionParams | PruneParams,
-           perform: PlanPerform | None = None) -> object:
+def decide(params: DriftParams | RebaseParams | UnionParams | PruneParams, perform: PlanPerform | None = None) -> object:
     """The outcome of nixconvoy-plan's core `params` are of, its git queries
     performed in the current checkout unless `perform` says otherwise."""
     from .checkout import GitQueries  # noqa: PLC0415 - the queries decide through here too

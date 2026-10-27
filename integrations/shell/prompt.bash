@@ -7,7 +7,7 @@
 # a fresh one does not count), ", submodule X" for each submodule
 # worktree planted in the checkout (nixconvoy open --submodule) holding
 # edits or commits beyond its upstream.  One git status call carries most
-# of it (nixconvoy points every work branch's upstream at origin/main, so
+# of it (nixconvoy points every work branch's upstream at main as fetched, so
 # branch.ab is the count beyond main); only a detached HEAD, having no
 # upstream, costs a count of its own.  The prefix comes from the
 # nixconvoy/branch-prefix note `nixconvoy init` and every later command
@@ -16,16 +16,17 @@
 #   source prompt.bash; PS1='\h:$(__nixconvoy_ps1)\w\$ '
 # The package installs it as share/nixconvoy/prompt.bash.
 __nixconvoy_ps1() {
-  local top common prefix='' w n=0 agents='' submodules='' out line head='' oid='' ahead='' xy unstaged='' staged='' leaf subject
+  local top common prefix='' main w n=0 agents='' submodules='' out line head='' oid='' ahead='' xy unstaged='' staged='' leaf subject
   { read -r top && read -r common; } < <(git rev-parse --path-format=absolute --show-toplevel --git-common-dir 2>/dev/null) \
     && [ -f "$top/nixconvoy.toml" ] \
     || { command -v __git_ps1 >/dev/null 2>&1 && __git_ps1 "(%s)"; return; }
   read -r prefix 2>/dev/null < "$common/nixconvoy/branch-prefix"
+  read -r main 2>/dev/null < "$common/nixconvoy/main-ref" || main=origin/main
   for w in $(git worktree list --porcelain 2>/dev/null | sed -n "s|^worktree $top/||p"); do
     w=$top/$w
     [ -e "$w/.git" ] || continue
     if [ -n "$(git -C "$w" status --porcelain -uno 2>/dev/null | head -n 1)" ] \
-       || [ "$(git -C "$w" rev-list --count origin/main..HEAD 2>/dev/null)" != 0 ]; then
+       || [ "$(git -C "$w" rev-list --count "$main"..HEAD 2>/dev/null)" != 0 ]; then
       n=$((n + 1))
     fi
   done
@@ -50,14 +51,14 @@ __nixconvoy_ps1() {
     esac
   done <<< "$out"
   if [ "$head" = '(detached)' ]; then
-    ahead=$(git rev-list --count origin/main..HEAD 2>/dev/null)
-    if [ "$ahead" = 0 ] && [ "$oid" = "$(git rev-parse -q --verify origin/main 2>/dev/null)" ]; then
-      head='origin/main'
+    ahead=$(git rev-list --count "$main"..HEAD 2>/dev/null)
+    if [ "$ahead" = 0 ] && [ "$oid" = "$(git rev-parse -q --verify "$main" 2>/dev/null)" ]; then
+      head=$main
     else
       head="detached ${oid:0:7}"
     fi
   elif [ -z "$ahead" ]; then
-    ahead=$(git rev-list --count origin/main..HEAD 2>/dev/null)
+    ahead=$(git rev-list --count "$main"..HEAD 2>/dev/null)
   fi
   [ "${ahead:-0}" = 0 ] && ahead='' || ahead=" +$ahead"
   leaf=$head

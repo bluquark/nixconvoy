@@ -213,9 +213,34 @@ def step(v: object, query: object, outcome: object) -> tuple[list[Effect], str, 
 
 
 @dataclass(frozen=True)
+class RepoNames:
+    """The repository's remote and its main branch there (plan.rs's Names):
+    nixconvoy.toml's `remote` and `main_branch`."""
+
+    remote: str
+    main: str
+
+    @property
+    def main_ref(self) -> str:
+        """main as fetched, in full: refs/remotes/origin/main."""
+        return self.remote_ref(self.main)
+
+    @property
+    def main_short(self) -> str:
+        """main as fetched, as a person names it: origin/main."""
+        return f"{self.remote}/{self.main}"
+
+    def remote_ref(self, branch: str) -> str:
+        """`branch` as fetched, in full: refs/remotes/origin/<branch>."""
+        return f"refs/remotes/{self.remote}/{branch}"
+
+
+
+@dataclass(frozen=True)
 class Context:
     """What the deploy knows when it classifies."""
 
+    names: RepoNames
     me: tuple[str, str]
     listed: list[str]
     tips: dict[str, str]
@@ -273,7 +298,15 @@ class OnWorkBranch(Variant):
     wb: str
 
 
-RebaseParams = PopTmp | EnsureRebased | Onto | Sync | OnWorkBranch
+RebaseOp = PopTmp | EnsureRebased | Onto | Sync | OnWorkBranch
+
+
+@dataclass(frozen=True)
+class RebaseParams:
+    """The rebase core's parameters: the operation, under the repository's names."""
+
+    names: RepoNames
+    op: RebaseOp
 
 
 @dataclass(frozen=True)
@@ -293,6 +326,7 @@ RebaseOutcome = Ok | Err
 
 @dataclass(frozen=True)
 class UnionParams:
+    names: RepoNames
     wb: str
     evict: bool
     main0: str | None
@@ -312,6 +346,7 @@ class Stopped:
 
 @dataclass(frozen=True)
 class PruneParams:
+    names: RepoNames
     name: str
     named: bool
     own_session_ends: bool

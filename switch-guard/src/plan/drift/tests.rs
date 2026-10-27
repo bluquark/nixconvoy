@@ -54,6 +54,7 @@ fn doc(top: &str, by: (&str, &str), pending: Option<(&str, Option<&str>)>, other
 
 fn cx(tips: &[(&str, &str)]) -> Context {
     Context {
+        names: Names::default(),
         me: (ME.0.into(), ME.1.into()),
         listed: ["main", BRANCH, "work/haswell-wsl/3", "work/chikuwa/1"].iter().map(|s| s.to_string()).collect(),
         tips: tips.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
@@ -186,7 +187,7 @@ fn classifies_provenances() {
 
 #[test]
 fn refusal_advice() {
-    let a = refusal(&[("side1".into(), Kind::InFlight, None)]);
+    let a = refusal(&[("side1".into(), Kind::InFlight, None)], "origin");
     assert!(
         a.contains("side1 runs another")
             && a.contains("reaches it too")
@@ -194,7 +195,7 @@ fn refusal_advice() {
         "{a}"
     );
     assert!(a.contains(&format!("{EVICT_FLAG} side1")) && !a.contains(BRANCHES_KEY) && !a.contains("dead"), "{a}");
-    let a = refusal(&[("side1".into(), Kind::Unlisted, None), ("side6".into(), Kind::InFlight, None)]);
+    let a = refusal(&[("side1".into(), Kind::Unlisted, None), ("side6".into(), Kind::InFlight, None)], "origin");
     assert!(a.contains("side1, side6 run another") && a.contains("reaches them too"), "{a}");
     assert!(
         a.contains(
@@ -204,12 +205,13 @@ fn refusal_advice() {
     );
     assert!(a.contains(&format!("{EVICT_FLAG} side1 ")), "{a}");
     // A dead deploy's: the clear that ends it, named once per branch.
-    let a = refusal(&[("side1".into(), Kind::InFlight, Some(BRANCH.into())), ("side6".into(), Kind::InFlight, Some(BRANCH.into()))]);
+    let a =
+        refusal(&[("side1".into(), Kind::InFlight, Some(BRANCH.into())), ("side6".into(), Kind::InFlight, Some(BRANCH.into()))], "origin");
     assert!(a.starts_with(&format!("nothing switched or committed: side1, side6 run another checkout's work this union lacks, and this checkout's work reaches them too (see above).  The deploy of {BRANCH} looks dead")), "{a}");
     assert_eq!(a.matches("looks dead").count(), 1);
     assert!(a.contains(&format!("git push origin :{PENDING_REFS}/{BRANCH} - or push {BRANCH} from its checkout")), "{a}");
     assert!(!a.contains("Re-run once"), "{a}");
-    let a = refusal(&[("side1".into(), Kind::InFlight, Some("main@chikuwa".into())), ("side6".into(), Kind::InFlight, None)]);
+    let a = refusal(&[("side1".into(), Kind::InFlight, Some("main@chikuwa".into())), ("side6".into(), Kind::InFlight, None)], "origin");
     assert!(
         a.contains("from its checkout; or the deploy of main looks dead")
             && a.contains(&format!("{PENDING_REFS}/main@chikuwa - or push main from")),

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import proc
+from .wire import RepoNames
 
 CONFIG_FILE = "nixconvoy.toml"
 MSG_FILE = "COMMIT_MSG.md"
@@ -27,6 +28,10 @@ class TargetConfig:
     ssh_address: str = ""
     # `@tag` on the command line names every target carrying it.
     tags: tuple[str, ...] = ()
+    # The repo directory the target's configuration lives in, the eval
+    # memo's scan root for it (Config.target_root); empty: <targets_dir>/<name>,
+    # or the memo's own inference (memo.hosts_candidates).
+    dir: str = ""
 
 
 
@@ -44,7 +49,8 @@ class Config:
     # The directory holding flake.nix, relative to the repo root.
     flake_dir: str
     # The directory whose subdirectories name the nixosConfigurations,
-    # relative to the repo root.
+    # relative to the repo root; empty: the `[targets.<name>]` tables name
+    # them instead.
     targets_dir: str
     # The targets' system (checks.<targets_arch>.<precheck> is the precheck).
     targets_arch: str
@@ -67,6 +73,10 @@ class Config:
     # Determinate Nix's parallel evaluation (builtins.parallel, --eval-cores):
     # None is "auto", on when the nix here knows the feature.
     parallel_eval: bool | None
+    # The remote origin/main and the work branches live on, and main's name
+    # there: `remote` and `main_branch` (origin and main unless set).
+    remote: str = "origin"
+    main_branch: str = "main"
     # eval.precheck: a flake check (checks.<targets_arch>.<precheck>) proven
     # before any build; empty is none.
     precheck: str = ""
@@ -95,7 +105,25 @@ class Config:
 
     @property
     def targets_path(self) -> str:
-        return os.path.normpath(self.targets_dir)
+        return os.path.normpath(self.targets_dir) if self.targets_dir else ""
+
+    @property
+    def inventory(self) -> list[str]:
+        """The targets `[targets.<name>]` names; empty with targets_dir set
+        (targets.flake_target_names lists its subdirectories then).  A
+        store host that is no target has no table: the ssh address
+        template (or ~/.ssh/config) addresses it."""
+        return [] if self.targets_dir else sorted(self.targets)
+
+    def target_root(self, name: str) -> str | None:
+        """The repo directory holding `name`'s configuration, where the eval
+        memo's scan of the target starts: its `dir`, else
+        <targets_dir>/<name>; None when neither names one (the memo infers
+        one, else starts at flake.nix alone)."""
+        t = self.target(name)
+        if t.dir:
+            return os.path.normpath(t.dir)
+        return f"{self.targets_path}/{name}" if self.targets_dir else None
 
     @property
     def flake_path(self) -> str:
@@ -105,9 +133,25 @@ class Config:
         """A repo path inside the flake directory (flake.nix, flake.lock)."""
         return os.path.normpath(f"{self.flake_dir}/{name}")
 
+    @property
+    def names(self) -> RepoNames:
+        return RepoNames(self.remote, self.main_branch)
+
 
 class ConfigError(Exception):
     pass
+
+
+def valid_remote(name: str) -> bool:
+    """A git remote's name as nixconvoy addresses it: letters, digits, '.',
+    '-' and '_', not starting with '-' (an option) and not '.' or '..'."""
+    return bool(re.fullmatch(r"\w[\w.-]*", name)) and name not in (".", "..")
+
+
+def valid_branch(name: str, remote: str) -> bool:
+    """A branch's name, not a ref or a remote-tracking name (<remote>/x)."""
+    return bool(re.fullmatch(r"\w[\w./-]*", name)) and ".." not in name and "//" not in name \
+        and not name.endswith("/") and not name.startswith(("refs/", f"{remote}/"))
 
 
 def _table(v: object, where: str) -> dict[str, object]:
@@ -174,7 +218,7 @@ def parse(text: str) -> Config:
     if isinstance(version, bool) or version != 1:
         raise ConfigError(f"{CONFIG_FILE}: config_version {version} is not supported (1 is)")
     known = {"config_version", "flake_dir", "targets_dir", "targets_arch", "ssh_address_template", "branch_prefix",
-             "work_branches", "child_worktrees",
+             "work_branches", "child_worktrees", "remote", "main_branch",
              "eval", "build", "targets", "submodules"}
     for k in doc:
         if k not in known:
@@ -182,7 +226,7 @@ def parse(text: str) -> Config:
     # The required keys in the file's order, so a hand-written file is
     # told of its first gap first.
     flake_dir = _str(doc, "flake_dir", CONFIG_FILE, None)
-    targets_dir = _str(doc, "targets_dir", CONFIG_FILE, None)
+    targets_dir = _str(doc, "targets_dir", CONFIG_FILE)
     targets_arch = _str(doc, "targets_arch", CONFIG_FILE, None)
     ssh_template = _template(doc, "ssh_address_template", "target")
     branch_prefix = _template(doc, "branch_prefix", "machine")
@@ -201,6 +245,14 @@ def parse(text: str) -> Config:
     children = _str(doc, "child_worktrees", CONFIG_FILE, None).strip("/")
     if not children or ".." in children.split("/"):
         raise ConfigError(f"{CONFIG_FILE}: child_worktrees is a directory inside the checkout")
+    remote = _str(doc, "remote", CONFIG_FILE, "origin")
+    if not valid_remote(remote):
+        raise ConfigError(f"{CONFIG_FILE}: remote is a git remote's name (letters, digits, '.', '-', '_', "
+                          f"not starting with '-'), not {remote!r}")
+    main_branch = _str(doc, "main_branch", CONFIG_FILE, "main")
+    if not valid_branch(main_branch, remote):
+        raise ConfigError(f"{CONFIG_FILE}: main_branch is a branch's name (main, not {remote}/main or refs/...), "
+                          f"not {main_branch!r}")
     ev = _table(_required(doc, "eval", CONFIG_FILE), "eval")
     for k in ev:
         if k not in ("parallel", "precheck"):
@@ -234,10 +286,19 @@ def parse(text: str) -> Config:
     for name, h in _table(doc.get("targets", {}), "targets").items():
         t = _table(h, f"targets.{name}")
         for k in t:
-            if k not in ("ssh_address", "tags"):
+            if k not in ("ssh_address", "tags", "dir"):
                 raise ConfigError(f"{CONFIG_FILE}: unknown key targets.{name}.{k}")
+        d = _str(t, "dir", f"targets.{name}")
+        if d.startswith("/") or ".." in d.split("/"):
+            raise ConfigError(f"{CONFIG_FILE}: targets.{name}.dir is a directory inside the repository, "
+                              f"relative to its root, not {d!r}")
+        d = os.path.normpath(d) if d else ""
+        if d == ".":
+            raise ConfigError(f"{CONFIG_FILE}: targets.{name}.dir names the repository root: leave it out instead")
         targets[name] = TargetConfig(ssh_address=_str(t, "ssh_address", f"targets.{name}"),
-                                     tags=_strs(t, "tags", f"targets.{name}"))
+                                     tags=_strs(t, "tags", f"targets.{name}"), dir=d)
+    if not targets_dir and not targets:
+        raise ConfigError(f"{CONFIG_FILE}: targets_dir, or a [targets.<name>] table per target, is required")
     submodules: dict[str, SubmoduleConfig] = {}
     for name, a in _table(doc.get("submodules", {}), "submodules").items():
         t = _table(a, f"submodules.{name}")
@@ -259,6 +320,8 @@ def parse(text: str) -> Config:
         branch_prefix=branch_prefix,
         work_branches=tuple(pats),
         child_worktrees=children,
+        remote=remote,
+        main_branch=main_branch,
         precheck=_str(ev, "precheck", "eval"),
         parallel_eval=_auto_bool(ev, "parallel", "eval"),
         store=store,
@@ -306,6 +369,33 @@ def cfg() -> Config:
 def set_cfg(c: Config) -> None:
     global _CFG
     _CFG = c
+
+
+def repo_names() -> RepoNames:
+    """The remote and main branch of the repository the cores and the git
+    calls address (nixconvoy.toml's `remote` and `main_branch`)."""
+    return cfg().names
+
+
+def names_at(root: Path) -> RepoNames:
+    """The names of the repository at `root`: its nixconvoy.toml's, else
+    origin and main (a submodule's repository, any plain one)."""
+    try:
+        return load(root).names
+    except (ConfigError, OSError, UnicodeDecodeError):
+        return RepoNames("origin", "main")
+
+
+def main_ref() -> str:
+    return cfg().names.main_ref
+
+
+def main_short() -> str:
+    return cfg().names.main_short
+
+
+def remote_ref(branch: str) -> str:
+    return cfg().names.remote_ref(branch)
 
 
 def store_host() -> str:

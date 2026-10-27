@@ -18,11 +18,12 @@
 //! lifts it right before `git worktree remove` and puts it back when git
 //! refuses; a process working in it without its lock (a shell cd'd there)
 //! keeps it too.
-use super::{Query, Run, Script, MAIN};
+use super::{Names, Query, Run, Script};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Params {
+    pub names: Names,
     /// The worktree's directory name.
     pub name: String,
     /// Named on the command line, rather than found by a sweep.
@@ -85,7 +86,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     }
     // Before any lock: a slow fetch holds up no create of this name.
     if let Err(detail) = s.ran(Query::Fetch)? {
-        return Ok(Outcome::Kept(format!("origin could not be fetched to judge it:\n{}", detail.trim())));
+        return Ok(Outcome::Kept(format!("{} could not be fetched to judge it:\n{}", p.names.remote, detail.trim())));
     }
     if !s.flag(Query::TakeNameLock)? {
         return Ok(Outcome::Kept("its name is locked: a create or another removal is at it; re-run".into()));
@@ -116,8 +117,9 @@ fn holder(s: &mut Script, p: &Params) -> Run<Result<(), Outcome>> {
         Some(reason) => match session(reason) {
             None if reason.ends_with(SESSIONLESS) => {
                 return kept(format!(
-                    "its create found no claude session to outlive: `nixconvoy close {}` removes it (undeploy --back-to origin/main first when it holds increments), or `git worktree unlock` it to let prune judge it",
-                    p.name
+                    "its create found no claude session to outlive: `nixconvoy close {}` removes it (undeploy --back-to {} first when it holds increments), or `git worktree unlock` it to let prune judge it",
+                    p.name,
+                    p.names.main_short()
                 ));
             }
             None => {
@@ -159,8 +161,8 @@ fn judge(s: &mut Script, p: &Params) -> Run<Result<(String, Option<String>), Out
     if on_wb && !wb.ends_with(&format!("-{}", p.name)) {
         return kept(format!("it has {wb}, another checkout's work branch, checked out"));
     }
-    if let Some(tip) = s.text(Query::Rev { name: format!("refs/remotes/origin/{wb}") })? {
-        if !s.flag(Query::Contains { a: tip, b: MAIN.into() })? {
+    if let Some(tip) = s.text(Query::Rev { name: p.names.remote_ref(&wb) })? {
+        if !s.flag(Query::Contains { a: tip, b: p.names.main_ref() })? {
             return kept(if on_wb {
                 format!("its work branch {wb} carries pushed increments: land or undeploy decides it")
             } else {
@@ -171,7 +173,9 @@ fn judge(s: &mut Script, p: &Params) -> Run<Result<(String, Option<String>), Out
     if let Some(local) = s.text(Query::Rev { name: format!("refs/heads/{wb}") })? {
         if s.flag(Query::Unpushed { sha: local })? {
             return kept(format!(
-                "it owns {wb}, which carries commits not on origin (a deploy whose push failed?); push it or `git switch {wb}` there and undeploy --back-to origin/main"
+                "it owns {wb}, which carries commits not on {} (a deploy whose push failed?); push it or `git switch {wb}` there and undeploy --back-to {}",
+                p.names.remote,
+                p.names.main_short()
             ));
         }
     }
@@ -179,7 +183,10 @@ fn judge(s: &mut Script, p: &Params) -> Run<Result<(String, Option<String>), Out
         return kept("it has uncommitted or untracked changes, which the removal would lose; commit or discard them (git status there)");
     }
     if !s.flag(Query::OnOrigin)? {
-        return kept("it carries commits not on origin, which the removal would lose; push them (git push origin HEAD:main) or deploy from the work branch");
+        return kept(format!(
+            "it carries commits not on {}, which the removal would lose; push them (git push {} HEAD:{}) or deploy from the work branch",
+            p.names.remote, p.names.remote, p.names.main
+        ));
     }
     Ok(Ok((wb, cur)))
 }

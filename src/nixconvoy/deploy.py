@@ -45,7 +45,7 @@ from .checkout import (
     staged_snapshot,
     work_branch,
 )
-from .config import store_host
+from .config import cfg, main_ref, remote_ref, repo_names, store_host
 from .guard import binary, decide
 from .memo import Top
 from .proc import NOTHING_DONE, PERF, Fail, die, dump_json, is_ancestor, load_json, out, rev
@@ -199,7 +199,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     candidates = filter_targets or list(all_targets)
 
     await_background_push()
-    main0 = rev("refs/remotes/origin/main")
+    main0 = rev(main_ref())
     # Non-candidates are probed best-effort: the verdict reports their
     # drift, and a hold on one is read off its provenance.
     probe_names: list[str] = [] if skip else list(all_targets)
@@ -213,28 +213,28 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     pop_tmp_commits()
     wb = work_branch()
     cur = current_branch()
-    if wb is not None and cur not in (wb, "main", None):
+    if wb is not None and cur not in (wb, cfg().main_branch, None):
         # A subagent worktree's fresh branch: the provenance must name wb.
         had = rev(f"refs/heads/{wb}") is not None
-        up = rev(f"refs/remotes/origin/{wb}")
-        if not had and up is not None and not is_ancestor(up, "refs/remotes/origin/main"):
+        up = rev(remote_ref(wb))
+        if not had and up is not None and not is_ancestor(up, main_ref()):
             # Recovered from origin only while empty there (a removed
             # worktree's): increments there are another worktree's of
             # this name (a machine sharing the prefix).
-            die(f"origin holds {wb} with increments this worktree never pushed: another worktree of "
-                f"this name?  `git log refs/remotes/origin/main..refs/remotes/origin/{wb}` shows them; "
-                f"open this worktree under another name, or `git branch {wb} refs/remotes/origin/{wb}` "
+            die(f"{cfg().remote} holds {wb} with increments this worktree never pushed: another worktree of "
+                f"this name?  `git log {main_ref()}..{remote_ref(wb)}` shows them; "
+                f"open this worktree under another name, or `git branch {wb} {remote_ref(wb)}` "
                 f"to take them over")
         ensure_on_work_branch(wb)
         if not had and (made := rev(f"refs/heads/{wb}")) is not None:
             note_pushed(wb, made)  # the branch as taken from origin's empty copy, or fresh
-    elif wb is None and cur not in ("main", None):
+    elif wb is None and cur not in (cfg().main_branch, None):
         die(f"on branch {cur}, which nixconvoy.toml's work_branches does not list; the "
-            "main checkout deploys from main (a hand commit there is claimed as main's "
-            "until pushed)")
+            f"main checkout deploys from {cfg().main_branch} (a hand commit there is claimed as "
+            f"{cfg().main_branch}'s until pushed)")
 
     def increment_name() -> str:
-        n = int(out(["git", "rev-list", "--count", "refs/remotes/origin/main..HEAD"])) + 1
+        n = int(out(["git", "rev-list", "--count", f"{main_ref()}..HEAD"])) + 1
         return f"{Path.cwd().name}: increment {n}"
 
     if msg is None and wb is not None and not dry and (
@@ -282,12 +282,12 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     # a HEAD origin lacks (the nightly's lock commit on main) - is announced
     # for as long as this run lives.
     ann: Announce | None = None
-    own = current_branch() or "main"  # detached: at origin/main (ensure_rebased)
+    own = current_branch() or cfg().main_branch  # detached: at origin/main (ensure_rebased)
     # A work branch holding targets back may end a hold with an empty
     # increment (the stage below): announced like any increment.
-    if not dry and not skip and (snap or rev("HEAD") != rev(f"refs/remotes/origin/{own}")
+    if not dry and not skip and (snap or rev("HEAD") != rev(remote_ref(own))
                                  or (wb is not None and own == wb
-                                     and held_targets("refs/remotes/origin/main..HEAD"))):
+                                     and held_targets(f"{main_ref()}..HEAD"))):
         ann = Announce(own, snap or "HEAD")
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, exit_on_signal)
@@ -306,7 +306,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
                 ann.stop()
                 print(f"note: {', '.join(ann.claimed)} were switched (or a switch was started), so "
                       f"this deploy's announcement stays, carrying their deploy records: re-run to "
-                      f"finish the deploy, or clear it (git push origin :{PENDING_REFS}/{ann.key})",
+                      f"finish the deploy, or clear it (git push {cfg().remote} :{PENDING_REFS}/{ann.key})",
                       file=sys.stderr)
             elif ann.claimed:
                 # Those targets run the increment (or a switch onto it was
@@ -317,7 +317,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
                 print(f"note: {', '.join(ann.claimed)} run this checkout's unpushed increment "
                       f"(or a switch onto it was started), so its announcement stays: re-run "
                       f"to finish the deploy, or clear it to have the increment reverted by the "
-                      f"next deploy there (git push origin :{PENDING_REFS}/{ann.key})",
+                      f"next deploy there (git push {cfg().remote} :{PENDING_REFS}/{ann.key})",
                       file=sys.stderr)
             else:
                 ann.withdraw()
@@ -419,7 +419,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                 # branch: its parent (the announcer's HEAD) when origin has
                 # that, else origin's tip of the branch - a wider diff, so
                 # main's changes count too, but never a narrower one.
-                tip = rev(f"refs/remotes/origin/{p.branch}")
+                tip = rev(remote_ref(p.branch))
                 base = f"{p.sha}^" if tip is None or is_ancestor(f"{p.sha}^", tip) else tip
                 both = memo.reached_between(wt, union, mine, base, p.sha)
                 if both:
@@ -445,7 +445,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                     break
                 failed_polls += 1
                 if failed_polls >= 12:
-                    die(f"origin stopped answering while waiting for the deploy under way; {NOTHING_DONE}")
+                    die(f"{cfg().remote} stopped answering while waiting for the deploy under way; {NOTHING_DONE}")
         if waited:
             print("...ended; probing the targets again and redoing the union", flush=True)
             PERF.mark("probe")
@@ -471,7 +471,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             return True
 
         if ann is not None and not ann.collect():
-            die(f"announcing this deploy on origin failed; {NOTHING_DONE}:\n{ann.detail}")
+            die(f"announcing this deploy on {cfg().remote} failed; {NOTHING_DONE}:\n{ann.detail}")
         PERF.mark("eval")
         with memo.memo_lock(memo.memo_dir()):
             memo.memo_prune(memo.memo_dir())
@@ -497,12 +497,12 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         # running the branch's tip (its provenance) is not held by it.
         held: dict[str, list[str]] = {}
         for name, tip in branches:
-            for h in held_targets(f"refs/remotes/origin/main..{tip}"):
+            for h in held_targets(f"{main_ref()}..{tip}"):
                 if h in probed and memo.recorded_tip(probed[h].provenance, name) == tip:
                     continue
                 held.setdefault(h, []).append(name)
         last = [h for h in sorted(tops) if tops[h].last]
-        cx = Context(me=(me, str(Path.cwd())), listed=sorted(listed), tips=origin_tips(),
+        cx = Context(names=repo_names(), me=(me, str(Path.cwd())), listed=sorted(listed), tips=origin_tips(),
                      in_flight=announced(ann.key if ann is not None else None), dead=sorted(dead),
                      tz_offset=time.localtime().tm_gmtoff)
         verdict = decide(DriftParams(
@@ -532,9 +532,9 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         # Nothing pending, but targets to switch: announced now, for the
         # records to ride (and the provenance to name).
         if ann is None and plan and not dry:
-            ann = run.ann = Announce(current_branch() or "main", "HEAD")
+            ann = run.ann = Announce(current_branch() or cfg().main_branch, "HEAD")
             if not ann.collect():
-                die(f"announcing this deploy on origin failed; {NOTHING_DONE}:\n{ann.detail}")
+                die(f"announcing this deploy on {cfg().remote} failed; {NOTHING_DONE}:\n{ann.detail}")
 
         # The increment's commit and each target's record, before the
         # switch: the provenance the targets get names the commit origin will
@@ -548,7 +548,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         # the second is held back (held_targets) until a deploy here
         # switches it.
         committed = ""
-        subject = "main" + "".join(f" + {n}" for n, _ in branches)
+        subject = cfg().main_branch + "".join(f" + {n}" for n, _ in branches)
         fmt = ", ".join
         deployed = sorted(h for h in tops if h in plan or h not in affected)
         if snap and not dry:
@@ -563,7 +563,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             # No increment, but a target this branch held back now runs its
             # tip: an empty increment records the hold's end, as a hold is
             # read from the branch's trailers alone.
-            ends = sorted(held_targets("refs/remotes/origin/main..HEAD") & set(deployed))
+            ends = sorted(held_targets(f"{main_ref()}..HEAD") & set(deployed))
             if ends:
                 subject = f"deployed to {fmt(ends)}, held back until now"
                 committed = deployed_commit("HEAD", f"{subject}\n\nReaches: none\nDeployed: {fmt(deployed)}")
@@ -572,7 +572,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         if not dry:
             for h in plan:
                 body = dump_json({**doc, "toplevel": tops[h].out})
-                parents = [previous_record(probed[h].provenance), rev("refs/remotes/origin/main") or "",
+                parents = [previous_record(probed[h].provenance), rev(main_ref()) or "",
                            *(t for _, t in branches), committed]
                 records[h] = record_commit(h, union, parents, subject, body)
                 provenances[h] = dump_json({**doc, "toplevel": tops[h].out, "record": records[h]})
@@ -583,7 +583,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             for h, pr in probed.items():
                 r = previous_record(pr.provenance)
                 if h not in records and r and by_me(pr.provenance, me) and rev(f"{r}^{{commit}}") \
-                        and r != rev(f"refs/remotes/origin/{DEPLOYED_PREFIX}/{h}"):
+                        and r != rev(remote_ref(f"{DEPLOYED_PREFIX}/{h}")):
                     records[h] = r
 
         if plan:
@@ -629,7 +629,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                 print(f"--dry-activate: nothing drifts from the union ({union}); nothing to switch")
             return True
         if unpushed:
-            die(f"announcing the deploy records on origin failed; {NOTHING_DONE}:\n{unpushed}")
+            die(f"announcing the deploy records on {cfg().remote} failed; {NOTHING_DONE}:\n{unpushed}")
         return False
 
     def switch_all(nixconvoy_switch: str) -> None:
@@ -676,7 +676,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
     for redo in range(SWITCH_REDOS + 1):
         queries = UnionQueries(lambda: snap or "HEAD", fetch, refresh, stage, await_pending)
         try:
-            done = decide(UnionParams(wb or "", evict, main0), queries)
+            done = decide(UnionParams(repo_names(), wb or "", evict, main0), queries)
             if skip or dry:
                 return False
             union = done.union

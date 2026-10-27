@@ -152,8 +152,10 @@ nix run .#nixconvoy -- init
 nix run .#nixconvoy -- deploy -m "describe this increment"
 ```
 
-`init` detects what it can (the flake directory, the hosts directory, the
-targets' system) and writes `nixconvoy.toml` - its optional sections as
+`init` writes `nixconvoy.toml`: the targets as `[targets.<name>]`
+tables, one per nixosConfiguration as nix evaluates them (so nix must
+be on PATH); the flake directory, the targets' system, the remote and
+its main branch detected; its optional sections as
 commented examples, the branch prefix `nixconvoy/`, listed as the one
 work-branch prefix (`nixconvoy/{machine}/`, the hostname, namespaces each
 machine's branches when several deploy); the ssh address
@@ -170,11 +172,12 @@ The package also carries `share/nixconvoy/prompt.bash`
 segment showing, in a checkout, the work branch by its leaf with
 `COMMIT_MSG.md`'s subject, `+N` commits beyond `origin/main`, staged and
 unstaged edits, the subagent worktrees and the submodule worktrees
-holding something (`__git_ps1` in any other repository).  The leaf
-needs the branch prefix `init` and every later command note in the
-common git dir's `nixconvoy/` (every file nixconvoy keeps in a git dir
-lives there), so a repository set up before this note shows the
-branch in full until its next command.  With
+holding something (`__git_ps1` in any other repository).  The leaf,
+and `origin/main` by its configured names, need the notes `init` and
+every later command leave in the common git dir's `nixconvoy/` (every
+file nixconvoy keeps in a git dir lives there), so a repository set up
+before these notes shows the branch in full, counted against
+`origin/main`, until its next command.  With
 `environment.pathsToLink = [ "/share/nixconvoy" ]` beside the package it
 is on the system profile:
 
@@ -183,10 +186,15 @@ source /run/current-system/sw/share/nixconvoy/prompt.bash
 PS1='\h:$(__nixconvoy_ps1)\w\$ '
 ```
 
+Requirements where nixconvoy runs: Nix with flakes, git 2.31 or newer and
+OpenSSH on PATH (the package brings only mergiraf, which no distribution
+packages, after them on its PATH), and Linux or macOS (a macOS runner
+realises the closures in a Linux machine's store: `build.store` below).
 Requirements on each target: `/run/current-system` reachable over ssh with
 passwordless sudo for the deploying user (a switch, the provenance file under
-`/var/lib/nixconvoy` and a dry activation all need root), and the target's
-nixosConfiguration named after its directory under `hosts/`.
+`/var/lib/nixconvoy` and a dry activation all need root), and the target
+named like its nixosConfiguration: by its directory under `hosts/`
+(`targets_dir`), or by a `[targets.<name>]` table.
 
 ## Layout nixconvoy expects
 
@@ -194,21 +202,33 @@ nixosConfiguration named after its directory under `hosts/`.
 nixconvoy.toml      the settings (below), written by `nixconvoy init`
 COMMIT_MSG.md       on a work branch: the pending landing's commit message
 <flake>/flake.nix
-<flake>/hosts/<name>/   one directory per nixosConfiguration
+<flake>/hosts/<name>/   one directory per nixosConfiguration: the targets_dir shortcut, or
+                        found on its own beside the [targets.<name>] tables (see the eval memo)
 ```
 
 ### nixconvoy.toml
 
 `nixconvoy init [<flake-dir>]` writes it, refusing to overwrite one.  The keys up to `[eval]` are required and have
 no defaults - init detects each, the ssh address template starting as
-`<you>@{target}`.  The sections after are optional: absent means none.
+`<you>@{target}` - but `remote` and `main_branch`, origin and main unless
+set, and `targets_dir`, the hand-written shortcut for a directory per
+target; without it (init never writes it) the `[targets.<name>]` tables
+are the inventory, every table a target (a store host that is no target
+needs none: the template, or ~/.ssh/config, addresses it), and a
+nixosConfiguration added later needs its table.  The sections after are
+optional: absent means none.
 
 ```toml
 config_version = 1
 flake_dir = "nixos"               # directory holding flake.nix
-targets_dir = "nixos/hosts"       # one directory per nixosConfiguration: the targets
+targets_dir = "nixos/hosts"       # one directory per nixosConfiguration: the targets; unset, the
+                                  # [targets.<name>] tables below are
 targets_arch = "x86_64-linux"     # the targets' system
 ssh_address_template = "me@{target}.lan"   # a target's ssh address; the store host's too
+remote = "origin"                 # the remote the work branches are pushed to and main is landed on
+main_branch = "main"              # main's name there: what the work branches are rebased onto and land on
+                                  # (set before the first deploy: the targets' provenances name it, so a rename
+                                  # leaves every target refused as running unlisted work until a deploy --evict)
 branch_prefix = "nixconvoy/"       # a checkout owns "<prefix><leaf>" (`open <path>`: the path's name), a
                                    # subagent worktree "<checkout's branch>-<name>" ("<prefix>main-<name>"
                                    # under a plain checkout); "{machine}" in it is this machine's hostname,
@@ -233,6 +253,9 @@ skip_substituters = ["https://slow.cachix.org"]   # left out of deploy builds; t
 [targets.laptop]
 ssh_address = "root@10.0.0.9"   # overrides the template
 tags = ["portable"]          # `@portable` on the command line names every target tagged so
+dir = "nixos/machines/laptop"  # where its configuration lives, the eval memo's scan root for it
+                             # (default: <targets_dir>/laptop, or a directory named laptop beside
+                             # the other targets' - see the eval memo)
 
 [submodules.mytool]          # a flake input developed in place, a git submodule (see Submodules)
 repo = "~/projects/mytool"   # its repository's checkout here; its origin is the .gitmodules url
@@ -268,7 +291,13 @@ to `""` - an explicit value deleting generations by age fails an assertion.
 ### The eval memo
 
 A deploy evaluates a target only when something its evaluation can read
-changed: each target is keyed on `flake.nix`, its `hosts/<name>/`,
+changed: each target is keyed on `flake.nix`, its directory (`hosts/<name>/`:
+`targets_dir`'s subdirectory, its table's `dir`, or found on its own as its
+subdirectory of the one directory holding subdirectories named after two
+or more targets that flake.nix names - the other targets' skipped where
+flake.nix names them, but only with one such directory in the tree: a
+second is as likely a tree of shared profiles, so nothing is skipped then
+and `targets_dir` or `dir` has to say),
 transitively every repo path a scanned `.nix` file names by path literal,
 and the lock entries of the flake inputs those files mention.  The scan is
 lexical, so the flake keeps two habits for the memo to hit:

@@ -4,7 +4,8 @@ Problem: several checkouts of one NixOS flake repo (worktrees, machines)
 deploy work in progress to the same targets, so a plain nixos-rebuild from
 one tree silently reverts what another tree already deployed.
 
-Model:
+Model (origin and main below are nixconvoy.toml's `remote` and
+`main_branch`, those names unless set):
   - main: mirror of origin/main; only finished (landed) commits.
   - A work branch, listed by prefix in nixconvoy.toml's work_branches and
     named with this machine's branch_prefix, is owned by the checkout that
@@ -41,7 +42,8 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
   <n>", n its number on the branch); with nothing staged the deploy
   converges the targets on the union as it is (the nightlies', and a main
   checkout's, deploy).
-  1. start fetching origin; enumerate the targets from the hosts directory
+  1. start fetching origin; enumerate the targets (the hosts directory's
+     subdirectories, or the [targets.<name>] tables without targets_dir)
   2. probe every target's running system and its provenance
      (/var/lib/nixconvoy/provenance.json, in the same round trip), concurrently
      with steps 3-4.  Candidates default to all targets; naming targets (or @tag, every
@@ -390,16 +392,18 @@ Init (nixconvoy init [<flake-dir>]): nixconvoy.toml for a fresh install,
 at the repository's root, refused when one is there.  Its required keys
 are detected: flake_dir, the
 directory holding flake.nix (<flake-dir>, the root, else the one no
-deeper than any other); targets_dir, the directory whose subdirectories
-best match the nixosConfigurations' names (`nix eval` after `nix flake
-archive`, best effort; without it the one holding the most configuration.nix); targets_arch,
+deeper than any other); the targets as [targets.<name>] tables, the
+nixosConfigurations' names (`nix eval` after `nix flake archive`: refused
+when they cannot be read); targets_arch,
 the one system literal the hosts' .nix files agree on, else the first
 target's evaluated hostPlatform, else this machine's architecture as a
 guess the file says to verify; ssh_address_template, "<this
 user>@{target}", to edit; branch_prefix nixconvoy/ ({machine} in it, the
 hostname, namespaces one machine's branches) and work_branches, that
 prefix; child_worktrees
-.claude/worktrees; eval.parallel "auto".  The optional sections follow as
+.claude/worktrees; remote, origin, else the one remote, and main_branch,
+that remote's HEAD's branch as fetched, else main or master as fetched,
+else main; eval.parallel "auto".  The optional sections follow as
 commented examples filled with what was found: the flake's checks for
 eval.precheck, the targets' names.  git is only read: what it wrote is
 left for you to stage.

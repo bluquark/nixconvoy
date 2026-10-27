@@ -48,6 +48,7 @@ from nixconvoy import (
     deploy,
     guard,
     hooks,
+    init,
     memo,
     names,
     proc,
@@ -56,7 +57,7 @@ from nixconvoy import (
     targets,
 )
 from nixconvoy.union import UnionQueries
-from nixconvoy.wire import Context, DriftParams, Ran, RemoveWorktree, UnionOutcome, UnionParams
+from nixconvoy.wire import Context, DriftParams, Ran, RemoveWorktree, RepoNames, UnionOutcome, UnionParams
 
 PROGRESS = sys.stderr
 
@@ -66,6 +67,7 @@ ALREADY_CONFIRMED = 3
 
 BRANCH, BASE, LANDED = "work/haswell-wsl/2", "a" * 40, "b" * 40
 ME = ("haswell-wsl", "/home/blu/projects/homelab3")
+NAMES = RepoNames("origin", "main")
 OTHER = ("haswell-wsl", "/home/blu/projects/homelab2")
 LISTED = {"main", BRANCH, "work/haswell-wsl/3", "work/chikuwa/1"}
 
@@ -262,7 +264,7 @@ def report(text: str, *, tips: dict[str, str] | None = None,
     def drift() -> None:
         nonlocal died
         try:
-            cx = Context(me=ME, listed=sorted(LISTED), tips={BRANCH: BASE} if tips is None else tips,
+            cx = Context(names=NAMES, me=ME, listed=sorted(LISTED), tips={BRANCH: BASE} if tips is None else tips,
                          in_flight=in_flight or {}, dead=dead or [], tz_offset=0)
             guard.decide(DriftParams(
                 cx=cx, union="u" * 40, router="choko", targets=["side1"], candidates=["side1"],
@@ -330,7 +332,14 @@ def target_cases() -> None:
                           # No defaults: every scalar key is required.
                           ("", "config_version is required"),
                           (toml().replace('flake_dir = "."\n', ""), "flake_dir is required"),
-                          (toml().replace('targets_dir = "hosts"\n', ""), "targets_dir is required"),
+                          (toml().replace('targets_dir = "hosts"\n', ""), "targets_dir, or a [targets.<name>] table"),
+                          (toml('[targets.a]\ndir = "../x"\n'), "targets.a.dir is a directory inside"),
+                          (toml('[targets.a]\ndir = "/etc/x"\n'), "targets.a.dir is a directory inside"),
+                          (toml('[targets.a]\ndir = "./"\n'), "targets.a.dir names the repository root"),
+                          (toml(remote="-x"), "remote is a git remote's name"),
+                          (toml(remote="."), "remote is a git remote's name"),
+                          (toml(main_branch="origin/main"), "main_branch is a branch's name"),
+                          (toml(main_branch="refs/heads/main"), "main_branch is a branch's name"),
                           (toml().replace('targets_arch = "x86_64-linux"\n', ""), "targets_arch is required"),
                           (toml().replace('ssh_address_template = "{target}"\n', ""), "ssh_address_template is required"),
                           (toml().replace('branch_prefix = "work/{machine}/"\n', ""), "branch_prefix is required"),
@@ -682,22 +691,29 @@ def clear_memo() -> None:
 
 @contextlib.contextmanager
 def scratch_origin(d: Path, branches: str, files: dict[str, str], *, wb: str | None = None,
-                   seeded: Callable[[Path], object] = lambda _seed: None) -> Iterator[tuple[Path, Path, Path]]:
+                   seeded: Callable[[Path], object] = lambda _seed: None,
+                   names: RepoNames = NAMES) -> Iterator[tuple[Path, Path, Path]]:
     """(origin, seed, co): a bare origin whose main holds a nixconvoy.toml
     listing `branches` (prefixes, one per line), `files` and what `seeded`
     adds in the seed clone, and the checkout co cloned from it, on `wb`
-    when given and the cwd throughout."""
+    when given and the cwd throughout.  `names` other than origin/main
+    name the remote and main in both clones and in the toml (the suite's
+    configuration too, for the run)."""
     origin, seed, co = d / "origin.git", d / "seed", d / "homelab9"
-    sh(d, "init", "--quiet", "--bare", "-b", "main", str(origin))
-    sh(d, "clone", "--quiet", str(origin), str(seed))
-    put(seed, "nixconvoy.toml", toml(precheck="lint", flake_dir="nixos", targets_dir="nixos/hosts",
-                                     branches=tuple(ln.strip() for ln in branches.splitlines() if ln.strip())))
+    sh(d, "init", "--quiet", "--bare", "-b", names.main, str(origin))
+    sh(d, "clone", "--quiet", "-o", names.remote, str(origin), str(seed))
+    settings = toml(precheck="lint", flake_dir="nixos", targets_dir="nixos/hosts",
+                    branches=tuple(ln.strip() for ln in branches.splitlines() if ln.strip()),
+                    remote=names.remote, main_branch=names.main)
+    if names != NAMES:
+        config.set_cfg(config.parse(settings))
+    put(seed, "nixconvoy.toml", settings)
     for name, text in files.items():
         put(seed, name, text)
     seeded(seed)
     sh(seed, "commit", "--quiet", "-m", "seed")
-    sh(seed, "push", "--quiet", "origin", "HEAD:main")
-    sh(d, "clone", "--quiet", str(origin), str(co))
+    sh(seed, "push", "--quiet", names.remote, f"HEAD:{names.main}")
+    sh(d, "clone", "--quiet", "-o", names.remote, str(origin), str(co))
     prev = Path.cwd()
     os.chdir(co)
     config.set_root(co)
@@ -758,6 +774,47 @@ def reach_cases(d: Path) -> None:
         put(co, "nixos/modules/x.nix", "{ pkgs, ... }: { environment.systemPackages = [ (import ../pkgs/tool.nix) ]; x = 1; }\n", "x")
         c_x = sh(co, "rev-parse", "HEAD")
         assert reached() == {"a"}
+        # Without targets_dir the [targets] tables are the inventory and
+        # `dir` each one's scan root: b without one keys on flake.nix and
+        # what it names outside the other targets' directories (its own
+        # configuration file here), so x.nix still reaches a alone.
+        tables = toml('[targets.a]\ndir = "nixos/hosts/a"\n[targets.b]\n', precheck="lint", flake_dir="nixos",
+                      targets_dir="")
+        config.set_cfg(config.parse(tables))
+        assert config.cfg().inventory == ["a", "b"] and config.cfg().target_root("b") is None
+        assert reached() == {"a"}
+        # nixos/hosts holds a and b, so it is the hosts directory: a's is
+        # read whole (a file nothing imports counts), b's skipped for a.
+        put(co, "nixos/hosts/a/unused.nix", "{ }\n", "unused under a")
+        assert reached() == {"a"}
+        put(co, "nixos/hosts/b/unused.nix", "{ }\n", "unused under b")
+        assert reached() == {"a", "b"}
+        sh(co, "reset", "--quiet", "--hard", "HEAD~2")
+        # Every table is a target, a store host's too (one that is no
+        # target needs no table).
+        c = config.parse(tables + '[build]\nstore = "big"\n[targets.big]\nssh_address = "me@big"\n')
+        assert c.inventory == ["a", "b", "big"], c.inventory
+        # A second directory holding subdirectories named after the
+        # targets, which flake.nix names too (shared profiles): neither is
+        # taken for the hosts directory, nothing skipped, both read whole.
+        put(co, "nixos/profiles/a/p.nix", "{ }\n")
+        put(co, "nixos/profiles/b/p.nix", "{ }\n")
+        put(co, "nixos/flake.nix", (co / "nixos/flake.nix").read_text().replace(
+            "./hosts/b/configuration.nix ];", "./hosts/b/configuration.nix ./profiles/a ./profiles/b ];"), "profiles")
+        c_prof = sh(co, "rev-parse", "HEAD")
+        put(co, "nixos/profiles/b/p.nix", "{ p = 1; }\n", "profile b")
+        assert reached({"a": provenance(**{wb: c_prof}), "b": provenance(**{wb: c_prof})}) == {"a", "b"}
+        sh(co, "reset", "--quiet", "--hard", "HEAD~2")
+        with_b = tables.replace("[targets.b]\n", '[targets.b]\ndir = "nixos/hosts/b"\n')
+        config.set_cfg(config.parse(with_b))
+        assert config.cfg().target_root("b") == "nixos/hosts/b"
+        assert reached() == {"a"}
+        # A target whose directory holds the flake does not hide the other
+        # targets' reads of what flake.nix names: a's configuration, and
+        # so x.nix, is b's to read then.
+        config.set_cfg(config.parse(with_b.replace('dir = "nixos/hosts/a"', 'dir = "nixos"')))
+        assert reached() == {"a", "b"}
+        scratch_env()
         # A package file counts for the targets importing it; one nothing
         # imports reaches no target, though the precheck's lint names its
         # whole directory.
@@ -849,6 +906,67 @@ def reach_cases(d: Path) -> None:
         assert deploy.increment_reaches(checkout.staged_snapshot(), targets)
         sh(co, "reset", "--quiet", "--hard", "HEAD")
     say("reach: ok")
+
+
+def names_cases(d: Path) -> None:
+    """nixconvoy.toml's `remote` and `main_branch`: a repository whose
+    remote is `up` and whose main is `trunk`, through the rebase and union
+    cores, land, status and the prompt's note."""
+    scratch_env()
+    names = RepoNames("up", "trunk")
+    wb, other = "work/tester/9", "work/other/1"
+    with scratch_origin(d, f"work/tester/\n{other}\n", {"a.txt": "one\n"}, wb=wb, names=names) as (_origin, seed, co):
+        assert checkout.current_branch() == wb
+        assert sh(co, "config", f"branch.{wb}.merge") == "refs/heads/trunk"
+        assert sh(co, "config", f"branch.{wb}.remote") == "up" and sh(co, "remote") == "up"
+        # An upstream on another remote is re-pointed.
+        sh(co, "remote", "add", "origin", str(_origin))
+        sh(co, "config", f"branch.{wb}.remote", "origin")
+        checkout.ensure_on_work_branch(wb)
+        assert sh(co, "config", f"branch.{wb}.remote") == "up"
+        sh(co, "remote", "remove", "origin")
+        put(seed, "a.txt", "ONE\n", "upstream")
+        sh(seed, "push", "--quiet", "up", "HEAD:trunk")
+        sh(co, "fetch", "--quiet")
+        put(co, "b.txt", "local\n", "local")
+        checkout.ensure_rebased()
+        assert proc.is_ancestor("refs/remotes/up/trunk", "HEAD") and (co / "a.txt").read_text() == "ONE\n"
+        assert sh(co, "log", "--format=%s", "up/trunk..HEAD") == "local"
+        put(seed, "a.txt", "UNO\n", "upstream 2")
+        sh(seed, "push", "--quiet", "up", "HEAD:trunk")
+        sh(co, "fetch", "--quiet")
+        put(co, "a.txt", "one\nlocal\n")
+        assert f"rebasing {wb} onto up/trunk is not clean" in dies(checkout.ensure_rebased)
+        sh(co, "restore", "--staged", "--worktree", "a.txt")
+        checkout.ensure_rebased()
+        # The union: the other branch, on up, merged on up/trunk.
+        sh(seed, "switch", "--quiet", "-c", other)
+        put(seed, "o.txt", "other\n", "other")
+        sh(seed, "push", "--quiet", "up", other)
+        sh(co, "fetch", "--quiet")
+        fetched: Future[subprocess.CompletedProcess[str]] = Future()
+        fetched.set_result(subprocess.CompletedProcess([], 0))
+        q = UnionQueries(lambda: "HEAD", fetched, lambda: None, lambda *_: False)
+        try:
+            done = guard.decide(UnionParams(names, wb, False, proc.rev("refs/remotes/up/trunk")), q)
+        finally:
+            q.drop()
+        assert done.branches == [(other, sh(co, "rev-parse", f"up/{other}"))], done
+        assert sh(co, "rev-parse", f"{done.union}^") == sh(co, "rev-parse", "up/trunk")
+        # The prompt's notes, and status.
+        checkout.note_prefix(co)
+        assert (co / ".git/nixconvoy/main-ref").read_text() == "up/trunk\n"
+        assert f"{wb} +1" in printed(commands.status)
+        # A landing: trunk on up moves, the branch is reset onto it.
+        put(co, "COMMIT_MSG.md", "mine\n", "msg")
+        sh(co, "push", "--quiet", "up", wb)
+        commands.land()
+        trunk = sh(co, "rev-parse", "up/trunk")
+        assert sh(co, "log", "-1", "--format=%s", trunk) == "mine"
+        assert sh(co, "rev-parse", "HEAD") == trunk and sh(co, "rev-parse", f"up/{wb}") == trunk
+        assert "b.txt" in sh(co, "ls-tree", "--name-only", trunk).split()
+        assert f"{wb} = up/trunk (idle)" in printed(commands.status)
+    config.set_cfg(config.parse(toml()))
 
 
 def landing_rebase_cases(d: Path) -> None:
@@ -1027,7 +1145,7 @@ def git_cases(d: Path) -> None:
             q = UnionQueries(lambda: "HEAD", fetched, lambda: refreshes.append("r"), stage)
             try:
                 with contextlib.redirect_stdout(io.StringIO()) as said:
-                    done = guard.decide(UnionParams(wb, False, main0 or proc.rev("refs/remotes/origin/main")), q)
+                    done = guard.decide(UnionParams(NAMES, wb, False, main0 or proc.rev("refs/remotes/origin/main")), q)
             finally:
                 q.drop()
             return done, said.getvalue()
@@ -1749,7 +1867,7 @@ def submodule_cases(d: Path) -> None:
         def union() -> UnionOutcome:
             q = UnionQueries(lambda: "HEAD", settled, lambda: None, lambda *_: False)
             try:
-                done = guard.decide(UnionParams(wb, False, proc.rev("refs/remotes/origin/main")), q)
+                done = guard.decide(UnionParams(NAMES, wb, False, proc.rev("refs/remotes/origin/main")), q)
             finally:
                 q.drop()
             return done
@@ -2501,18 +2619,28 @@ def open_cases(d: Path) -> None:
 
 
 def init_cases(d: Path) -> None:
-    """`nixconvoy init`: nixconvoy.toml detected from the repository (the
-    flake under nixos/, its hosts directory, the one system literal), the
-    ssh address template as this user, this machine's work-branch pattern,
-    nothing staged; a second init refused."""
+    """`nixconvoy init`: nixconvoy.toml from the repository (the flake under
+    nixos/, the nixosConfigurations as nix names them - a fake nix here -
+    the one system literal), the ssh address template as this user, this
+    machine's work-branch pattern, nothing staged; a second init refused;
+    refused without nix."""
     scratch_env()
 
     repo = d / "repo"
+    hosts: list[str] | None = ["a", "b"]
+
+    def fake_nix(self: init.NixProbe, ref: str, attr: str, what: str,  # noqa: ARG001 - NixProbe.json's signature
+                 apply: str | None = None) -> object | None:  # noqa: ARG001
+        if hosts is None:
+            self.notes.append(f"no nix on PATH: {what} not read")
+            return None
+        return hosts if attr == "nixosConfigurations" else None
 
     def run_cli(argv: list[str]) -> None:
         os.chdir(repo / "nixos" / "hosts")  # main chdirs to the root and stays
         sys.argv = ["nixconvoy", *argv]
-        cli.main()
+        with mock.patch.object(init.NixProbe, "json", fake_nix):
+            cli.main()
 
     sh(d, "init", "--quiet", "-b", "main", str(repo))
     put(repo, "nixos/flake.nix", "{ outputs = _: { }; }\n")
@@ -2533,36 +2661,76 @@ def init_cases(d: Path) -> None:
         assert not (repo / ".git/nixconvoy/branch-prefix").exists()
         run_cli(["init"])
         c = config.load(repo)
-        assert (c.flake_dir, c.targets_dir, c.targets_arch) == ("nixos", "nixos/hosts", "aarch64-linux"), c
+        assert (c.flake_dir, c.targets_dir, c.targets_arch) == ("nixos", "", "aarch64-linux"), c
+        assert c.inventory == ["a", "b"] and c.target_root("a") is None
         assert c.ssh_template == me + "@{target}" and c.branch_prefix == "nixconvoy/", c
         assert c.work_branches == ("nixconvoy/",), c
         assert c.child_worktrees == ".claude/worktrees" and c.parallel_eval is None and not c.precheck
-        assert not c.submodules and not c.targets
+        assert (c.remote, c.main_branch) == ("origin", "main"), c  # no remote: assumed
+        assert not c.submodules and set(c.targets) == {"a", "b"} and not c.target("a").dir
         text = (repo / "nixconvoy.toml").read_text()
-        assert "# [targets.a]" in text and "# precheck = " in text and "# [submodules.<input>]" in text, text
+        assert "[targets.a]\n" in text and "[targets.b]\n" in text and "# precheck = " in text \
+            and "# [submodules.<input>]" in text, text
         assert "?? nixconvoy.toml" in sh(repo, "status", "--porcelain")  # written, not staged
         assert "already there" in dies(lambda: run_cli(["init"]))
         assert (repo / ".git/nixconvoy/branch-prefix").read_text() == "nixconvoy/\n"  # init notes the prefix (the repo's, not the suite's)
+        assert (repo / ".git/nixconvoy/main-ref").read_text() == "origin/main\n"
         (repo / ".git/nixconvoy/branch-prefix").unlink()
         assert "usage:" in printed(lambda: run_cli(["orphans", "-h"]))  # as does any later command
         assert (repo / ".git/nixconvoy/branch-prefix").read_text() == "nixconvoy/\n"
         (repo / "nixconvoy.toml").unlink()
-        # The flake named, relative to where init runs.
+        # The flake named, relative to where init runs; the one remote and
+        # its HEAD's branch detected.
+        up = d / "up.git"
+        sh(d, "init", "--quiet", "--bare", "-b", "trunk", str(up))
+        sh(repo, "remote", "add", "up", str(up))
+        sh(repo, "commit", "--quiet", "-m", "seed")
+        sh(repo, "push", "--quiet", "up", "HEAD:trunk")
+        sh(repo, "fetch", "--quiet", "up")
+        sh(repo, "symbolic-ref", "refs/remotes/up/HEAD", "refs/remotes/up/trunk")
         run_cli(["init", ".."])
         c = config.load(repo)
         assert (c.flake_dir, c.branch_prefix) == ("nixos", "nixconvoy/"), c
+        assert (c.remote, c.main_branch) == ("up", "trunk"), c
+        assert (repo / ".git/nixconvoy/main-ref").read_text() == "up/trunk\n"
     finally:
         os.chdir(prev)
-    # A flake at the root with no hosts directory yet.
+    # A name that is no bare TOML key is quoted; no targets is no file.
+    c = config.parse(init.render(flake="nixos", system="x86_64-linux", ssh="me@{target}",
+                                 prefix="nixconvoy/", branches=["nixconvoy/"], checks=[],
+                                 targets=["a", "b", "web.example.com"]))
+    assert not c.targets_dir and c.inventory == ["a", "b", "web.example.com"] and c.target_root("a") is None, c
+    try:
+        config.parse(init.render(flake="nixos", system="x86_64-linux", ssh="me@{target}", prefix="nixconvoy/",
+                                 branches=["nixconvoy/"], checks=[], targets=[]))
+    except config.ConfigError as e:
+        assert "targets_dir, or a [targets.<name>] table" in str(e), e
+    else:
+        raise AssertionError("an empty inventory parsed")
+    # A new branch's base: the configured main as fetched; in a repository
+    # without nixconvoy.toml (the plugin's create hook runs there too)
+    # origin's HEAD, else HEAD.
+    assert commands.default_base(repo) == "refs/remotes/up/trunk"
+    (repo / "nixconvoy.toml").unlink()
+    assert commands.default_base(repo) == "HEAD"
+    sh(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/up/trunk")
+    assert commands.default_base(repo) == "refs/remotes/origin/HEAD"
+    # A flake with no nixosConfigurations yet: refused.
+    hosts = []
+    assert "no nixosConfigurations yet" in dies(lambda: run_cli(["init"]))
+    assert not (repo / "nixconvoy.toml").exists()
+    # Without nix the targets cannot be read: refused, nothing written.
     bare = d / "bare"
     sh(d, "init", "--quiet", "-b", "main", str(bare))
     put(bare, "flake.nix", "{ outputs = _: { }; }\n")
     os.chdir(bare)
+    hosts = None
     try:
         sys.argv = ["nixconvoy", "init"]
-        cli.main()
-        c = config.load(bare)
-        assert (c.flake_dir, c.targets_dir, c.ssh_template) == (".", "hosts", me + "@{target}"), c
+        with mock.patch.object(init.NixProbe, "json", fake_nix):
+            err = dies(cli.main)
+        assert "could not be read" in err and "no nix on PATH" in err, err
+        assert not (bare / "nixconvoy.toml").exists()
     finally:
         os.chdir(prev)
     say("init: ok")
@@ -2578,7 +2746,7 @@ if __name__ == "__main__":
             switch_cases(Path(d))
         for cases in (gate_cases, provenance_cases, target_cases, memo_cases, await_cases):
             cases()
-        for scratch_cases in (guard_cases, reach_cases, git_cases, landing_rebase_cases, counterpart_cases,
+        for scratch_cases in (guard_cases, reach_cases, git_cases, landing_rebase_cases, names_cases, counterpart_cases,
                               announce_cases,
                               submodule_cases, open_cases,
                               init_cases):

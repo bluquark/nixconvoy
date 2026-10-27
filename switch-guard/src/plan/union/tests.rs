@@ -3,6 +3,7 @@
 //! checks the merge protocol (no merge over an unresolved one, every
 //! conflicted file resolved or the merge aborted).
 use super::*;
+use crate::plan::MAIN;
 use crate::plan::{drive, Effect, Replay, Reply};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
@@ -190,7 +191,7 @@ fn answer(o: &mut Origin, t: &mut Trace, q: &Query) -> Reply {
 }
 
 fn params(evict: bool) -> Params {
-    Params { wb: WB.into(), evict, main0: Some("m0".into()) }
+    Params { names: Names::default(), wb: WB.into(), evict, main0: Some("m0".into()) }
 }
 
 fn arb_refs() -> impl Strategy<Value = Refs> {

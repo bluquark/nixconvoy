@@ -18,16 +18,22 @@
 //! the checkout left exactly as found.  A run that dies between the rebase
 //! and the restore leaves the tmp commits behind (never pushed); the next
 //! run pops them first.
-use super::{failed, no_hints, Halt, Query, Run, Script, MAIN};
+use super::{failed, no_hints, Halt, Names, Query, Run, Script};
 use serde::Deserialize;
 
 pub const TMP_STAGED: &str = "tmp: staged (ensure_rebased)";
 pub const TMP_UNSTAGED: &str = "tmp: unstaged (ensure_rebased)";
 
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Params {
+    pub names: Names,
+    pub op: Op,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Params {
+pub enum Op {
     /// Unwind a dead run's tmp commits.
     PopTmp,
     /// Make HEAD contain origin/main, dying when that isn't clean.
@@ -48,10 +54,11 @@ pub enum Params {
 pub type Outcome = Result<String, String>;
 
 pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
-    match p {
-        Params::PopTmp => pop_tmp(s).map(|()| Ok(String::new())),
-        Params::EnsureRebased => match onto_main(s)? {
-            Ok(status) if status == LEFT => Err(Halt::Die(format!("{LEFT}, not on origin/main; switch to a branch to deploy"))),
+    let n = &p.names;
+    match &p.op {
+        Op::PopTmp => pop_tmp(s).map(|()| Ok(String::new())),
+        Op::EnsureRebased => match onto_main(s, n)? {
+            Ok(status) if status == LEFT => Err(Halt::Die(format!("{LEFT}, not on {}; switch to a branch to deploy", n.main_short()))),
             Ok(status) => {
                 if status != "up to date" {
                     s.print(status.clone());
@@ -60,12 +67,12 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
             }
             Err(e) => Err(Halt::Die(e)),
         },
-        Params::Sync { wb } => sync(s, wb.as_deref()),
-        Params::Onto { upstream } => {
+        Op::Sync { wb } => sync(s, n, wb.as_deref()),
+        Op::Onto { upstream } => {
             pop_tmp(s)?;
-            onto(s, upstream)
+            onto(s, n, upstream)
         }
-        Params::OnWorkBranch { wb } => on_work_branch(s, wb).map(|()| Ok(String::new())),
+        Op::OnWorkBranch { wb } => on_work_branch(s, n, wb).map(|()| Ok(String::new())),
     }
 }
 
@@ -106,11 +113,11 @@ fn short(upstream: &str) -> &str {
     upstream.strip_prefix("refs/remotes/").unwrap_or(upstream)
 }
 
-pub fn onto_main(s: &mut Script) -> Run<Outcome> {
-    onto(s, MAIN)
+pub fn onto_main(s: &mut Script, n: &Names) -> Run<Outcome> {
+    onto(s, n, &n.main_ref())
 }
 
-pub fn onto(s: &mut Script, upstream: &str) -> Run<Outcome> {
+pub fn onto(s: &mut Script, n: &Names, upstream: &str) -> Run<Outcome> {
     let up = short(upstream);
     if contains(s, upstream, "HEAD")? {
         return Ok(Ok("up to date".into()));
@@ -119,7 +126,7 @@ pub fn onto(s: &mut Script, upstream: &str) -> Run<Outcome> {
         return Ok(Err(format!("a {op} is in progress; finish or abort it first")));
     }
     let Some(br) = branch(s)? else {
-        return detached_onto(s, upstream);
+        return detached_onto(s, n, upstream);
     };
     let ff = contains(s, "HEAD", upstream)?;
     let staged = s.flag(Query::StagedDiffers)?;
@@ -147,21 +154,24 @@ pub fn onto(s: &mut Script, upstream: &str) -> Run<Outcome> {
     })
 }
 
-pub const LEFT: &str = "detached HEAD left as is: nothing of its own, its commits are already on origin";
+pub const LEFT: &str = "detached HEAD left as is: nothing of its own, its commits are already pushed";
 
 /// Why a detached HEAD with commits of its own is left alone.
-fn stranded(upstream: &str) -> String {
+fn stranded(n: &Names, upstream: &str) -> String {
     let up = short(upstream);
-    let branch = up.split_once('/').map_or(up, |(_, b)| b);
-    format!("the detached HEAD carries commits not on {up}; push them (git push origin HEAD:{branch}) or put them on a branch, then re-run")
+    let branch = up.strip_prefix(&format!("{}/", n.remote)).unwrap_or(up);
+    format!(
+        "the detached HEAD carries commits not on {up}; push them (git push {} HEAD:{branch}) or put them on a branch, then re-run",
+        n.remote
+    )
 }
 
 /// A detached HEAD behind `upstream` moved onto it; one at commits that
-/// are on origin anyway left where it is.
-fn detached_onto(s: &mut Script, upstream: &str) -> Run<Outcome> {
+/// are on the remote anyway left where it is.
+fn detached_onto(s: &mut Script, n: &Names, upstream: &str) -> Run<Outcome> {
     let up = short(upstream);
     if !contains(s, "HEAD", upstream)? {
-        return Ok(if s.flag(Query::OnOrigin)? { Ok(LEFT.into()) } else { Err(stranded(upstream)) });
+        return Ok(if s.flag(Query::OnOrigin)? { Ok(LEFT.into()) } else { Err(stranded(n, upstream)) });
     }
     Ok(match s.ran(Query::Detach { upstream: upstream.into() })? {
         Ok(()) => Ok(format!("fast-forwarded the detached HEAD onto {up}")),
@@ -172,19 +182,21 @@ fn detached_onto(s: &mut Script, upstream: &str) -> Run<Outcome> {
 /// The local branch `wb`, not checked out here, onto origin/main in a
 /// throwaway worktree: no tmp commits to protect, so commits that become
 /// empty are dropped.
-pub fn aside(s: &mut Script, wb: &str) -> Run<Outcome> {
+pub fn aside(s: &mut Script, n: &Names, wb: &str) -> Run<Outcome> {
     let local = format!("refs/heads/{wb}");
-    if contains(s, MAIN, &local)? {
+    let main = n.main_ref();
+    let up = n.main_short();
+    if contains(s, &main, &local)? {
         return Ok(Ok("up to date".into()));
     }
-    let ff = contains(s, &local, MAIN)?;
+    let ff = contains(s, &local, &main)?;
     let result = match s.ran(Query::AddWorktree { branch: wb.into() })? {
         Err(detail) => Err(format!("cannot check out {wb} to rebase it:\n{}", detail.trim())),
-        Ok(()) => match s.ran(Query::Rebase { keep_empty: false, aside: true, upstream: MAIN.into() })? {
-            Ok(()) => Ok(format!("{} {wb} onto origin/main", verb(ff))),
+        Ok(()) => match s.ran(Query::Rebase { keep_empty: false, aside: true, upstream: main })? {
+            Ok(()) => Ok(format!("{} {wb} onto {up}", verb(ff))),
             Err(detail) => {
                 s.tolerate(Query::RebaseAbort { aside: true })?;
-                Err(format!("rebasing {wb} onto origin/main is not clean, left as it was: {}", no_hints(&detail)))
+                Err(format!("rebasing {wb} onto {up} is not clean, left as it was: {}", no_hints(&detail)))
             }
         },
     };
@@ -192,12 +204,12 @@ pub fn aside(s: &mut Script, wb: &str) -> Run<Outcome> {
     Ok(result)
 }
 
-fn sync(s: &mut Script, wb: Option<&str>) -> Run<Outcome> {
+fn sync(s: &mut Script, n: &Names, wb: Option<&str>) -> Run<Outcome> {
     if let Err(detail) = s.ran(Query::Fetch)? {
         return Ok(Err(failed("fetch", &detail)));
     }
     pop_tmp(s)?;
-    let mut done = vec![match onto_main(s)? {
+    let mut done = vec![match onto_main(s, n)? {
         Ok(d) => d,
         Err(e) => return Ok(Err(e)),
     }];
@@ -209,12 +221,12 @@ fn sync(s: &mut Script, wb: Option<&str>) -> Run<Outcome> {
         return Ok(Ok(done.remove(0)));
     }
     if branch(s)?.as_deref() != Some(wb) {
-        match aside(s, wb)? {
+        match aside(s, n, wb)? {
             Ok(d) => done.push(d),
             Err(e) => return Ok(Err(e)),
         }
     }
-    if rev(s, local)? != rev(s, format!("refs/remotes/origin/{wb}"))? {
+    if rev(s, local)? != rev(s, n.remote_ref(wb))? {
         if let Err(detail) = s.ran(Query::Push { branch: wb.into() })? {
             return Ok(Err(format!("pushing {wb} failed:\n{}", detail.trim())));
         }
@@ -226,37 +238,40 @@ fn sync(s: &mut Script, wb: Option<&str>) -> Run<Outcome> {
 
 /// Plain `git pull --rebase` on the work branch then means the same
 /// catch-up deploys do.  Pushes are unaffected: each names its refspec.
-fn ensure_upstream(s: &mut Script, wb: &str) -> Run<()> {
-    if s.text(Query::Upstream { branch: wb.into() })?.as_deref() != Some("refs/heads/main") {
+fn ensure_upstream(s: &mut Script, n: &Names, wb: &str) -> Run<()> {
+    if s.text(Query::Upstream { branch: wb.into() })?.as_deref() != Some(format!("{}\trefs/heads/{}", n.remote, n.main).as_str()) {
         s.must(Query::SetUpstream { branch: wb.into() }, &format!("setting {wb}'s upstream"))?;
     }
     Ok(())
 }
 
-fn on_work_branch(s: &mut Script, wb: &str) -> Run<()> {
+fn on_work_branch(s: &mut Script, n: &Names, wb: &str) -> Run<()> {
     let cur = branch(s)?;
     if cur.as_deref() == Some(wb) {
-        return ensure_upstream(s, wb);
+        return ensure_upstream(s, n, wb);
     }
     // Nothing of its own to strand: detached at or behind origin/main, or
     // the fresh branch a subagent's worktree was created with - at its
     // parent's tip, whose increments are pushed on the parent's branch.
-    let safe = cur.as_deref() != Some("main") && (contains(s, "HEAD", MAIN)? || s.flag(Query::Pushed)?);
+    let main = n.main_ref();
+    let safe = cur.as_deref() != Some(n.main.as_str()) && (contains(s, "HEAD", &main)? || s.flag(Query::Pushed)?);
     match cur.as_deref() {
-        Some("main") => {}
+        Some(b) if b == n.main => {}
         _ if safe => {}
-        None => return Err(Halt::Die(stranded(MAIN))),
+        None => return Err(Halt::Die(stranded(n, &main))),
         Some(other) => {
             return Err(Halt::Die(format!(
-                "on branch {other}, which carries commits not on origin/main; deploys run from {wb} or from main"
+                "on branch {other}, which carries commits not on {}; deploys run from {wb} or from {}",
+                n.main_short(),
+                n.main
             )));
         }
     }
     let start = if rev(s, format!("refs/heads/{wb}"))?.is_some() {
         None
     } else {
-        // Recover the branch from origin if an earlier clone pushed one.
-        let remote = format!("refs/remotes/origin/{wb}");
+        // Recover the branch from the remote if an earlier clone pushed one.
+        let remote = n.remote_ref(wb);
         Some(if rev(s, remote.clone())?.is_some() { remote } else { "HEAD".into() })
     };
     if let Err(detail) = s.ran(Query::Switch { branch: wb.into(), start })? {
@@ -265,7 +280,7 @@ fn on_work_branch(s: &mut Script, wb: &str) -> Run<()> {
             detail.trim()
         )));
     }
-    ensure_upstream(s, wb)?;
+    ensure_upstream(s, n, wb)?;
     s.print(format!("switched to work branch {wb}"));
     Ok(())
 }

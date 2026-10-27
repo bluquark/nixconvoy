@@ -1,8 +1,8 @@
 # The nixconvoy command: the Python package carrying the switch-guard cores
 # it drives (src/nixconvoy/guard.py finds them beside itself, so the two
-# never pair with another tree's build), wrapped with the tools its
-# subprocesses need, `git review` beside it and the shell prompt segment
-# under share/.  The test suite (tests/switch_test.py) runs against the
+# never pair with another tree's build), with mergiraf, which no
+# distribution packages, on its PATH (git and ssh are the machine's own),
+# `git review` beside it and the shell prompt segment under share/.  The test suite (tests/switch_test.py) runs against the
 # installed package as its check phase, so a deploy that moves the pin
 # pays it in its build, never in the precheck (nix/lint.nix).
 { pkgs, switch-guard }:
@@ -36,7 +36,7 @@ python.pkgs.buildPythonApplication {
     runHook postCheck
   '';
   makeWrapperArgs = [
-    "--prefix" "PATH" ":" (lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.mergiraf pkgs.util-linux ])
+    "--suffix" "PATH" ":" (lib.makeBinPath [ pkgs.mergiraf ])
   ];
   postInstall = ''
     install -Dm755 integrations/claude-code/bin/git-review $out/bin/git-review

@@ -20,7 +20,7 @@ from .checkout import (
     this_prefix,
     worktree_lock,
 )
-from .config import MSG_FILE
+from .config import MSG_FILE, cfg, remote_ref
 from .proc import git, run
 
 
@@ -67,12 +67,12 @@ def find() -> list[tuple[str, Path | None, str]]:
         d = owners.get(b)
         if d is not None and held(d):
             continue
-        others = [f"refs/remotes/origin/{o}" for o in ["main", *listed] if o != b and o in tips]
-        own = run(["git", "rev-list", "-n", "1", f"refs/remotes/origin/{b}", "--not", *others],
+        others = [remote_ref(o) for o in [cfg().main_branch, *listed] if o != b and o in tips]
+        own = run(["git", "rev-list", "-n", "1", remote_ref(b), "--not", *others],
                   check=False).stdout.strip()
         if not own:
             continue
-        msg = run(["git", "show", f"refs/remotes/origin/{b}:{MSG_FILE}"], check=False).stdout
+        msg = run(["git", "show", f"{remote_ref(b)}:{MSG_FILE}"], check=False).stdout
         found.append((b, d, msg.partition("\n")[0].replace("\t", " ").strip()))
     return found
 

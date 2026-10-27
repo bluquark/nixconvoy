@@ -17,7 +17,7 @@
 //! the build is redone then too; ATTEMPTS such moves of origin end the
 //! run (a wait is another deploy's progress, not a move, and counts for
 //! nothing).
-use super::{failed, listed, Halt, Query, Run, Script, BRANCHES_KEY, MAIN, MSG_FILE};
+use super::{failed, listed, Halt, Names, Query, Run, Script, BRANCHES_KEY, MSG_FILE};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -28,6 +28,7 @@ pub const WAITS: usize = 10;
 
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Params {
+    pub names: Names,
     /// This checkout's work branch.
     pub wb: String,
     /// --evict: no other branch.
@@ -74,7 +75,7 @@ fn select(s: &mut Script, p: &Params, seen: &mut Seen) -> Run<Vec<(String, Strin
         }
         if !listed(seen.listed.iter().map(String::as_str), &name) {
             if seen.warned.insert(name.clone()) {
-                s.warn(format!("warning: ignoring origin/{name}: not listed in {BRANCHES_KEY}"));
+                s.warn(format!("warning: ignoring {}/{name}: not listed in {BRANCHES_KEY}", p.names.remote));
             }
             continue;
         }
@@ -125,12 +126,14 @@ fn build(s: &mut Script, branches: &[(String, String)]) -> Run<Result<String, Co
     Ok(Ok(union))
 }
 
-fn guidance(s: &mut Script, c: &Conflict) -> Run<String> {
+fn guidance(s: &mut Script, n: &Names, c: &Conflict) -> Run<String> {
     let summary = s.text(Query::Summary { sha: c.sha.clone() })?.unwrap_or_default();
     let name = &c.name;
     Ok(format!(
-        "cannot union work branch {name}; mergiraf could not resolve:\n  {}\nits last deploy: {summary}\noptions:\n  - fix or rebase that branch in its own checkout, redeploy from there, re-run here\n  - if that work is abandoned: git push --force-with-lease origin origin/main:{name}\n  - --evict deploys ignoring all other branches (one-off; they return next deploy), reverting their work on every target it switches",
-        c.files.join(", ")
+        "cannot union work branch {name}; mergiraf could not resolve:\n  {}\nits last deploy: {summary}\noptions:\n  - fix or rebase that branch in its own checkout, redeploy from there, re-run here\n  - if that work is abandoned: git push --force-with-lease {} {}:{name}\n  - --evict deploys ignoring all other branches (one-off; they return next deploy), reverting their work on every target it switches",
+        c.files.join(", "),
+        n.remote,
+        n.main_short()
     ))
 }
 
@@ -142,12 +145,12 @@ fn origin_moved(s: &mut Script, p: &Params, branches: &[(String, String)], fetch
     }
     *fetched = true;
     s.mark("fetch");
-    s.must(Query::CollectFetch, "fetching origin")?;
-    if s.text(Query::Rev { name: MAIN.into() })? == p.main0 && select(s, p, seen)? == branches {
+    s.must(Query::CollectFetch, &format!("fetching {}", p.names.remote))?;
+    if s.text(Query::Rev { name: p.names.main_ref() })? == p.main0 && select(s, p, seen)? == branches {
         return Ok(false);
     }
-    s.print("origin moved since the last fetch; redoing the union");
-    s.must(Query::Refresh, "bringing the checkout onto origin/main")?;
+    s.print(format!("{} moved since the last fetch; redoing the union", p.names.remote));
+    s.must(Query::Refresh, &format!("bringing the checkout onto {}", p.names.main_short()))?;
     Ok(true)
 }
 
@@ -167,7 +170,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
                     moves += 1;
                     continue;
                 }
-                return Err(Halt::Die(guidance(s, &c)?));
+                return Err(Halt::Die(guidance(s, &p.names, &c)?));
             }
         };
         if origin_moved(s, p, &branches, &mut fetched, &mut seen)? {
@@ -180,7 +183,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
                 return Err(Halt::Die(format!("waited for {WAITS} deploys in one run; re-run")));
             }
             s.print("redoing the union with what that deploy pushed");
-            s.must(Query::Refresh, "bringing the checkout onto origin/main")?;
+            s.must(Query::Refresh, &format!("bringing the checkout onto {}", p.names.main_short()))?;
             continue;
         }
         let stage = Query::Stage { union: union.clone(), listed: seen.listed.clone(), branches: branches.clone() };
@@ -190,7 +193,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         s.print("work branches moved during the build; rebuilding the union");
         moves += 1;
     }
-    Err(Halt::Die(format!("origin kept moving during {ATTEMPTS} attempts; re-run")))
+    Err(Halt::Die(format!("{} kept moving during {ATTEMPTS} attempts; re-run", p.names.remote)))
 }
 
 #[cfg(test)]

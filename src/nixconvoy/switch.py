@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import proc, targets
 from .checkout import current_branch
+from .config import cfg, main_ref, remote_ref
 from .guard import drive
 from .proc import Fail, out, rev, run, stream
 from .targets import PROBE_TIMEOUT, provenance_digest, ssh_opts
@@ -80,10 +81,10 @@ def provenance_record(union: str, branches: list[tuple[str, str]], snap: str,
                    announce: str = "", key: str = "") -> dict[str, object]:
     """provenance_doc for this deploy, from the refs it built its union on;
     `snap` the increment's work-branch commit (deployed_commit), or ""."""
-    own = current_branch() or "main"  # detached: at origin/main (ensure_rebased)
+    own = current_branch() or cfg().main_branch  # detached: at origin/main (ensure_rebased)
     return provenance_doc(
-        union=union, main=rev("refs/remotes/origin/main"), branches=dict(branches),
-        own=own, head=rev("HEAD"), base=rev(f"refs/remotes/origin/{own}"), snap=snap,
+        union=union, main=rev(main_ref()), branches=dict(branches),
+        own=own, head=rev("HEAD"), base=rev(remote_ref(own)), snap=snap,
         announce=announce, key=key, at=time.time(), machine=proc.this_machine(),
         checkout=str(Path.cwd()), pid=os.getpid())
 

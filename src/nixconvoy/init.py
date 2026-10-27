@@ -1,10 +1,12 @@
-"""`nixconvoy init`: nixconvoy.toml for a fresh install.  Every required
-key is detected from the repository - the flake directory, the hosts
-directory, the targets' system, this machine's work-branch prefix - or
+"""`nixconvoy init`: nixconvoy.toml for a fresh install.  The targets are
+the flake's nixosConfigurations as nix evaluates them, one
+[targets.<name>] table each (so nix is needed); every other key is
+detected from the repository - the flake directory, the targets' system,
+this machine's work-branch prefix, the remote and its main branch - or
 starts from this machine (the ssh address template, as this user); the
 optional sections are written as commented examples filled with what was
-found (the flake's checks, the targets).  git is only read: nothing is
-staged or committed."""
+found (the flake's checks).  git is only read: nothing is staged or
+committed."""
 
 from __future__ import annotations
 
@@ -41,34 +43,57 @@ def main(flake_arg: str | None, start: Path) -> None:
         hosts = nix.json(alt, "nixosConfigurations", "HEAD's nixosConfigurations' names", apply="builtins.attrNames")
         if hosts is not None:
             ref = alt
-    host_names = sorted(h for h in hosts if isinstance(h, str)) if isinstance(hosts, list) else None
-    hosts_dir = find_hosts_dir(root, flake, host_names)
-    if hosts_dir is None:
-        hosts_dir = os.path.normpath(f"{flake}/hosts")
-        notes.append(f"no hosts directory found: {hosts_dir}/<name>/ per nixosConfiguration is where "
-                     "the targets are enumerated")
-    targets = sorted(p.name for p in (root / hosts_dir).iterdir() if p.is_dir()) \
-        if (root / hosts_dir).is_dir() else []
-    if host_names is not None:
-        targets = [t for t in targets if t in host_names]
+    targets = sorted(h for h in hosts if isinstance(h, str)) if isinstance(hosts, list) else None
+    if targets is None:
+        die("the targets are the flake's nixosConfigurations, which could not be read:\n  "
+            + "\n  ".join(notes) + "\nfix that (nix on PATH, a flake that evaluates) and re-run")
+    if not targets:
+        die("the flake has no nixosConfigurations yet: nothing to deploy to; add one and re-run")
+    # Where the hosts' files are, for the system literal they may hold.
+    hosts_dir = find_hosts_dir(root, flake, targets)
     system, system_how = detect_system(root, ref, hosts_dir, targets, nix)
     prefix = DEFAULT_BRANCH_PREFIX
     checks = nix.json(ref, f"checks.{system}", "the flake's checks",
                       apply="builtins.attrNames") if system_how != "guessed" else None
     check_names = sorted(c for c in checks if isinstance(c, str)) if isinstance(checks, list) else []
     ssh = f"{this_user()}@{{target}}"
-    text = render(flake=flake, hosts_dir=hosts_dir, system=system, ssh=ssh, prefix=prefix,
-                  branches=[prefix.format(machine=proc.this_machine())], checks=check_names, targets=targets)
+    remote, main = detect_names(notes)
+    text = render(flake=flake, system=system, ssh=ssh, prefix=prefix,
+                  branches=[prefix.format(machine=proc.this_machine())], checks=check_names, targets=targets,
+                  remote=remote, main=main, hosts_dir=hosts_dir)
     try:
         config.parse(text)
     except config.ConfigError as e:  # a bug in render, never the user's
         die(f"generated an invalid {CONFIG_FILE}: {e}")
     (root / CONFIG_FILE).write_text(text, encoding="utf-8")
     print(f"wrote {CONFIG_FILE}:")
-    print(f"  flake_dir = {flake!r}, targets_dir = {hosts_dir!r} ({', '.join(targets) or 'no target directories yet'})")
+    print(f"  flake_dir = {flake!r}, targets: {', '.join(targets)}")
     print(f"  targets_arch = {system!r} ({system_how}), ssh_address_template = {ssh!r}, branch_prefix = {prefix!r}")
+    print(f"  remote = {remote!r}, main_branch = {main!r}")
     for n in notes:
         print(f"  note: {n}")
+
+
+def detect_names(notes: list[str]) -> tuple[str, str]:
+    """The remote main lives on and main's name there: origin, else the one
+    remote; its HEAD's branch as fetched, else main or master as fetched,
+    else main (noted)."""
+    remotes = out(["git", "remote"]).split()
+    if "origin" in remotes or len(remotes) != 1 or not config.valid_remote(remotes[0]):
+        remote = "origin"
+        if "origin" not in remotes:
+            notes.append(f"remote = \"origin\" assumed ({', '.join(remotes) or 'no remote yet'}); "
+                         "nixconvoy fetches and pushes it")
+    else:
+        remote = remotes[0]
+    head = run(["git", "symbolic-ref", "-q", "--short", f"refs/remotes/{remote}/HEAD"], check=False).stdout.strip()
+    if head.startswith(f"{remote}/") and config.valid_branch(head[len(remote) + 1:], remote):
+        return remote, head[len(remote) + 1:]
+    for b in ("main", "master"):
+        if run(["git", "rev-parse", "-q", "--verify", f"refs/remotes/{remote}/{b}"], check=False).returncode == 0:
+            return remote, b
+    notes.append(f"main_branch = \"main\" assumed ({remote} has no HEAD, main or master as fetched)")
+    return remote, "main"
 
 
 def this_user() -> str:
@@ -130,6 +155,7 @@ class NixProbe:
         try:
             return json.loads(got)
         except ValueError:
+            self.notes.append(f"nix eval printed no JSON for {what}")
             return None
 
 
@@ -162,12 +188,11 @@ def find_flake(root: Path, given: Path | None) -> str:
     return top[0]
 
 
-def find_hosts_dir(root: Path, flake: str, host_names: list[str] | None) -> str | None:
+def find_hosts_dir(root: Path, flake: str, host_names: list[str]) -> str | None:
     """The directory whose subdirectories name the nixosConfigurations:
     under the flake directory (else anywhere near the root), the one whose
-    subdirectories best match the names nix gave, or without them hold the
-    most configuration.nix (a hosts/, machines/ or nodes/ before another
-    of the same score); None when nothing matches."""
+    subdirectories best match the names nix gave (a hosts/, machines/ or
+    nodes/ before another of the same score); None when none do."""
     dirs: set[str] = set()
     for f in repo_files(root):
         parts = f.split("/")
@@ -180,7 +205,7 @@ def find_hosts_dir(root: Path, flake: str, host_names: list[str] | None) -> str 
             return (0, 0)
         subs = {c.name for c in p.iterdir() if c.is_dir() and not c.name.startswith(".")}
         confs = sum((p / s / "configuration.nix").is_file() for s in subs)
-        return (len(subs & set(host_names)) if host_names is not None else confs, confs)
+        return (len(subs & set(host_names)), confs)
 
     # Best match first; under the flake directory before elsewhere, a
     # conventional name before another, shallow before deep.
@@ -192,14 +217,14 @@ def find_hosts_dir(root: Path, flake: str, host_names: list[str] | None) -> str 
     return ranked[0][-1]
 
 
-def detect_system(root: Path, ref: str, hosts_dir: str, targets: list[str], nix: NixProbe) -> tuple[str, str]:
+def detect_system(root: Path, ref: str, hosts_dir: str | None, targets: list[str], nix: NixProbe) -> tuple[str, str]:
     """The targets' system: the one system literal the hosts' .nix files
     agree on where they set a platform (hardware-configuration.nix's
     nixpkgs.hostPlatform, a `system =`; not binfmt's emulated systems or a
     comment), else the first target's evaluated hostPlatform, else this
     machine's architecture as a Linux guess."""
     seen: set[str] = set()
-    if (root / hosts_dir).is_dir():
+    if hosts_dir and (root / hosts_dir).is_dir():
         for f in (root / hosts_dir).rglob("*.nix"):
             try:
                 lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -221,15 +246,20 @@ def detect_system(root: Path, ref: str, hosts_dir: str, targets: list[str], nix:
     return f"{arch}-linux", "guessed"
 
 
-def render(*, flake: str, hosts_dir: str, system: str, ssh: str, prefix: str, branches: list[str],
-           checks: list[str], targets: list[str]) -> str:
+def render(*, flake: str, system: str, ssh: str, prefix: str, branches: list[str],
+           checks: list[str], targets: list[str], remote: str = "origin", main: str = "main",
+           hosts_dir: str | None = None) -> str:
+    """The file, the `targets` as [targets.<name>] tables, `hosts_dir`
+    (where their files were found) in the `dir` examples."""
     q = json.dumps  # a TOML basic string
     lines = [
         "config_version = 1",
         f"flake_dir = {q(flake)}",
-        f"targets_dir = {q(hosts_dir)}",
         f"targets_arch = {q(system)}",
         f"ssh_address_template = {q(ssh)}",
+        "# The remote the work branches are pushed to and main is landed on, and main's name there.",
+        f"remote = {q(remote)}",
+        f"main_branch = {q(main)}",
         "",
         "# A checkout's work branch is <branch_prefix><leaf>, `open <path>` naming it after the path.",
         "# {machine} in the prefix is this machine's hostname, a namespace per machine when you want one.",
@@ -255,15 +285,31 @@ def render(*, flake: str, hosts_dir: str, system: str, ssh: str, prefix: str, br
         "# store = { \"*\" = \"bigbox\" }",
         "# skip_substituters = [\"https://slow.cachix.org\"]",
         "",
-        "# Optional per-target settings" + (f" (autodetected targets: {', '.join(targets)})" if targets else ""),
-        f"# [targets.{targets[0] if targets else '<name>'}]",
-        "# # overrides ssh_address_template, if one target has an unusual username or domain-name",
-        "# ssh_address = \"root@10.0.0.9\"",
-        "# # For larger fleets, tags can be used to refer to several machines as a group in `nixconvoy deploy`",
-        "# tags = [\"vps\"]",
+        *target_tables(targets, hosts_dir if hosts_dir is not None else os.path.normpath(f"{flake}/hosts")),
         "",
         "# Optional support for git submodules. Feel free to ignore this if you don't have any submodules in your git repo.",
         "# [submodules.<input>]",
         "# repo = \"~/src/<input>\"",
     ]
     return "\n".join(lines) + "\n"
+
+
+def target_tables(targets: list[str], hosts_dir: str) -> list[str]:
+    """One [targets.<name>] table per nixosConfiguration - the inventory -
+    each with the optional keys as comments, `dir`'s example under
+    `hosts_dir`."""
+    q = json.dumps
+    lines = ["# The targets: one table per nixosConfiguration (the inventory, as there is no targets_dir);",
+             "# a nixosConfiguration added later needs its table here.",
+             "# A deploy re-evaluates a target only when flake.nix, a file it names (transitively) or the",
+             "# target's own directory changed: a directory named after it beside the other targets' is",
+             "# found on its own, `dir` names one elsewhere."]
+    for i, t in enumerate(targets):
+        lines += [f"[targets.{t if re.fullmatch(r'[A-Za-z0-9_-]+', t) else q(t)}]",
+                  f"# dir = {q(f'{hosts_dir}/{t}')}"]
+        if i == 0:
+            lines += ["# # overrides ssh_address_template, if one target has an unusual username or domain-name",
+                      "# ssh_address = \"root@10.0.0.9\"",
+                      "# # For larger fleets, tags can be used to refer to several machines as a group in `nixconvoy deploy`",
+                      "# tags = [\"vps\"]"]
+    return lines

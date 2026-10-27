@@ -21,7 +21,7 @@ from .checkout import (
     ran,
     summarize,
 )
-from .config import MSG_FILE, cfg
+from .config import MSG_FILE, cfg, main_ref, main_short
 from .proc import git, ok, out, rev, run, solve_with_mergiraf
 from .wire import (
     AbortMerge,
@@ -82,11 +82,11 @@ class UnionQueries(GitQueries):
                 shape = cfg().branch_prefix.replace("{machine}", "*") + "*"
                 pats = allowed_branches()
                 listing = out(["git", "for-each-ref", "--format=%(refname:strip=3)%09%(objectname)",
-                               "refs/remotes/origin/"])
+                               f"refs/remotes/{cfg().remote}/"])
                 refs = [(n, t) for n, t in (ln.split("\t", 1) for ln in listing.splitlines())]
                 return Refs([r for r in refs if listed(r[0], pats) or fnmatchcase(r[0], shape)])
             case Unchanged(sha):
-                base = out(["git", "merge-base", "origin/main", sha])
+                base = out(["git", "merge-base", main_short(), sha])
                 return Flag(ok(["git", "diff", "--quiet", base, sha, "--", ".", f":(exclude){MSG_FILE}"]))
             case Worktree():
                 self.drop()
@@ -121,7 +121,7 @@ class UnionQueries(GitQueries):
             case HeadTree():
                 return Text(out(["git", "rev-parse", "HEAD^{tree}"], cwd=wt))
             case CommitUnion(tree):
-                p = run(["git", "commit-tree", tree, "-p", rev("refs/remotes/origin/main") or "HEAD",
+                p = run(["git", "commit-tree", tree, "-p", rev(main_ref()) or "HEAD",
                          "-m", "deploy union of work branches"], env=MACHINE_ENV, check=False)
                 return Text(p.stdout.strip() if p.returncode == 0 else None)
             case Checkout(union):

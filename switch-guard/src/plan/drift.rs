@@ -53,7 +53,7 @@
 //! the held target instead (Params::work_branch).  A --evict unions no
 //! other branch, so nothing is held under it: the target gets this
 //! checkout's view alone, the hold standing.
-use super::{listed, Halt, Query, Run, Script, BRANCHES_KEY};
+use super::{listed, Halt, Names, Query, Run, Script, BRANCHES_KEY};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -195,6 +195,7 @@ impl Kind {
 /// What the deploy knows when it classifies.
 #[derive(Deserialize, Clone, Debug, PartialEq)]
 pub struct Context {
+    pub names: Names,
     /// This checkout: (machine, checkout directory).
     pub me: (String, String),
     /// The branches its union may contain besides main: work_branches'
@@ -228,8 +229,12 @@ pub fn classify(lin: Option<&Provenance>, running: &str, cx: &Context) -> (Kind,
         return (Kind::ThisBranch, format!("over this checkout's deploy of {when}"));
     }
     let who = format!("{}:{} (pid {}) at {when}", lin.machine, lin.checkout, lin.pid);
-    let unknown: Vec<&str> =
-        lin.branches.iter().filter(|b| *b != "main" && !listed(cx.listed.iter().map(String::as_str), b)).map(String::as_str).collect();
+    let unknown: Vec<&str> = lin
+        .branches
+        .iter()
+        .filter(|b| **b != cx.names.main && !listed(cx.listed.iter().map(String::as_str), b))
+        .map(String::as_str)
+        .collect();
     if !unknown.is_empty() {
         return (
             Kind::Unlisted,
@@ -246,7 +251,10 @@ pub fn classify(lin: Option<&Provenance>, running: &str, cx: &Context) -> (Kind,
         return (Kind::CatchUp, format!("runs {branch}'s increment deployed by {who}, pushed since"));
     }
     let at: String = base.as_deref().unwrap_or("nothing").chars().take(12).collect();
-    let mut why = format!("runs an increment of {branch} deployed by {who} whose push has not landed (origin/{branch} is still at {at})");
+    let mut why = format!(
+        "runs an increment of {branch} deployed by {who} whose push has not landed ({}/{branch} is still at {at})",
+        cx.names.remote
+    );
     if let Some(key) = lin.announce_key() {
         if !cx.in_flight.contains_key(key) {
             return (
@@ -342,7 +350,7 @@ pub struct Outcome {
 
 /// The die message of a deploy refusing `refused` (in report order), each
 /// with the announcement ref of its dead deploy when the refusal is one.
-pub fn refusal(refused: &[(String, Kind, Option<String>)]) -> String {
+pub fn refusal(refused: &[(String, Kind, Option<String>)], remote: &str) -> String {
     let (held, refused): (Vec<_>, Vec<_>) = refused.iter().cloned().partition(|(_, k, _)| *k == Kind::Held);
     let held: Vec<&str> = held.iter().map(|(h, _, _)| h.as_str()).collect();
     let targets: Vec<&str> = refused.iter().map(|(h, _, _)| h.as_str()).collect();
@@ -366,7 +374,7 @@ pub fn refusal(refused: &[(String, Kind, Option<String>)]) -> String {
     for key in dead {
         let branch = key.split('@').next().unwrap_or(key);
         fixes.push(format!(
-            "the deploy of {branch} looks dead (its announcement is no longer renewed): clear it to have the next deploy revert its increment - git push origin :{PENDING_REFS}/{key} - or push {branch} from its checkout to keep it"
+            "the deploy of {branch} looks dead (its announcement is no longer renewed): clear it to have the next deploy revert its increment - git push {remote} :{PENDING_REFS}/{key} - or push {branch} from its checkout to keep it"
         ));
     }
     if refused.iter().any(|(_, k, _)| *k == Kind::Unlisted) {
@@ -511,7 +519,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         }
     }
     if !refused.is_empty() {
-        return Err(Halt::Die(refusal(&refused)));
+        return Err(Halt::Die(refusal(&refused, &p.cx.names.remote)));
     }
     Ok(Outcome { affected, plan, drift })
 }

@@ -3,6 +3,7 @@
 //! does - a conflict when the base changed the same file differently, an
 //! empty commit kept or dropped as asked - refusing a dirty checkout.
 use super::*;
+use crate::plan::MAIN;
 use crate::plan::{drive, Effect, Replay, Reply};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
@@ -264,10 +265,14 @@ impl Repo {
     }
 }
 
-fn run(repo: &mut Repo, p: Params, limit: usize) -> (Vec<Query>, Vec<Effect>, Option<Result<Outcome, String>>) {
+fn with(op: Op) -> Params {
+    Params { names: Names::default(), op }
+}
+
+fn run(repo: &mut Repo, op: Op, limit: usize) -> (Vec<Query>, Vec<Effect>, Option<Result<Outcome, String>>) {
     let mut asked = Vec::new();
     let mut fx = Vec::new();
-    let mut m = Replay::new(p, program);
+    let mut m = Replay::new(with(op), program);
     let mut reply = None;
     loop {
         let step = m.decide(reply.take());
@@ -416,7 +421,7 @@ proptest! {
     fn rebase_keeps_the_split(s in shape()) {
         let mut r = build(&s);
         let before = r.clone();
-        let (_, fx, out) = run(&mut r, Params::EnsureRebased, 100);
+        let (_, fx, out) = run(&mut r, Op::EnsureRebased, 100);
         let out = out.unwrap();
         let main = &before.origin["main"];
         if prefix(main, before.commits()) {
@@ -433,7 +438,7 @@ proptest! {
             // Moved along when behind origin/main, refused when it holds
             // commits of its own.
             if !prefix(before.commits(), main) {
-                prop_assert_eq!(out, Err(stranded(MAIN)));
+                prop_assert_eq!(out, Err(stranded(&Names::default(), MAIN)));
                 prop_assert_eq!(&r, &before);
             } else if before.work == tree_of(before.commits()) || tree_of(main) == tree_of(before.commits()) {
                 prop_assert_eq!(out, Ok(Ok("fast-forwarded the detached HEAD onto origin/main".into())));
@@ -480,7 +485,7 @@ proptest! {
         let s = Shape { op: false, detached: false, ..s };
         let mut r = build(&s);
         let before = r.clone();
-        let (asked, _, out) = run(&mut r, Params::EnsureRebased, at);
+        let (asked, _, out) = run(&mut r, Op::EnsureRebased, at);
         if out.is_some() || r.op.is_some() {
             return Ok(());
         }
@@ -491,7 +496,7 @@ proptest! {
         }
         let rebased = asked.iter().any(|q| matches!(q, Query::Rebase { .. }));
         let work = r.work.clone();
-        let (_, _, popped) = run(&mut r, Params::PopTmp, 100);
+        let (_, _, popped) = run(&mut r, Op::PopTmp, 100);
         prop_assert_eq!(popped, Some(Ok(Ok(String::new()))));
         prop_assert_eq!(&r.work, &work);
         let top = r.commits().last().unwrap().subject.clone();
@@ -524,7 +529,7 @@ proptest! {
         upstream.push(commit(&mut r.next_id, "upstream", t));
         r.remote.insert("main".into(), upstream.clone());
         let before = r.clone();
-        let (asked, _, out) = run(&mut r, Params::Sync { wb: Some(WB.into()) }, 100);
+        let (asked, _, out) = run(&mut r, Op::Sync { wb: Some(WB.into()) }, 100);
         prop_assert_eq!(r.open_worktrees, 0);
         let out = out.unwrap().unwrap();
         prop_assert!(prefix(&upstream, &r.branches["main"]));
@@ -576,7 +581,7 @@ fn pops_only_tmp_commits() {
     r.work = r.index.clone();
     r.work.insert(3, 1);
     let before = r.clone();
-    run(&mut r, Params::PopTmp, 100);
+    run(&mut r, Op::PopTmp, 100);
     assert_eq!(r, before);
     for (msg, add) in [(TMP_STAGED, false), (TMP_UNSTAGED, true)] {
         if add {
@@ -584,14 +589,14 @@ fn pops_only_tmp_commits() {
         }
         r.answer(&Query::Commit { msg: msg.into() });
     }
-    let (_, _, out) = run(&mut r, Params::PopTmp, 100);
+    let (_, _, out) = run(&mut r, Op::PopTmp, 100);
     assert_eq!(out, Some(Ok(Ok(String::new()))));
     assert_eq!(r, Repo { next_id: r.next_id, ..before.clone() });
     // A dead run's tmp commit on a detached HEAD is popped too.
     r.head = Head::Detached(r.commits().clone());
     let parked = r.clone();
     r.answer(&Query::Commit { msg: TMP_STAGED.into() });
-    let (_, _, out) = run(&mut r, Params::PopTmp, 100);
+    let (_, _, out) = run(&mut r, Op::PopTmp, 100);
     assert_eq!(out, Some(Ok(Ok(String::new()))));
     assert_eq!(r, Repo { next_id: r.next_id, ..parked });
 }
@@ -611,22 +616,22 @@ fn moves_onto_the_work_branch() {
     let mut r = build(&s);
     r.branches.remove(WB);
     r.head = Head::On("main".into());
-    let (asked, fx, out) = run(&mut r.clone(), Params::OnWorkBranch { wb: WB.into() }, 100);
+    let (asked, fx, out) = run(&mut r.clone(), Op::OnWorkBranch { wb: WB.into() }, 100);
     assert_eq!(out, Some(Ok(Ok(String::new()))));
     assert!(asked.contains(&Query::Switch { branch: WB.into(), start: Some("HEAD".into()) }), "{asked:?}");
     assert_eq!(fx, [Effect::Print(format!("switched to work branch {WB}"))]);
     r.origin.insert(WB.into(), r.branches["main"].clone());
-    let (asked, _, _) = run(&mut r.clone(), Params::OnWorkBranch { wb: WB.into() }, 100);
+    let (asked, _, _) = run(&mut r.clone(), Op::OnWorkBranch { wb: WB.into() }, 100);
     assert!(asked.contains(&Query::Switch { branch: WB.into(), start: Some(format!("refs/remotes/origin/{WB}")) }), "{asked:?}");
     // From a HEAD detached at origin/main.
     r.head = Head::Detached(r.branches["main"].clone());
-    let (asked, _, out) = run(&mut r.clone(), Params::OnWorkBranch { wb: WB.into() }, 100);
+    let (asked, _, out) = run(&mut r.clone(), Op::OnWorkBranch { wb: WB.into() }, 100);
     assert_eq!(out, Some(Ok(Ok(String::new()))));
     assert!(asked.contains(&Query::Switch { branch: WB.into(), start: Some(format!("refs/remotes/origin/{WB}")) }), "{asked:?}");
     // A detached HEAD with a commit of its own would be stranded by the switch.
     r.index.insert(3, 3);
     r.answer(&Query::Commit { msg: "by hand".into() });
-    let (_, _, out) = run(&mut r.clone(), Params::OnWorkBranch { wb: WB.into() }, 100);
+    let (_, _, out) = run(&mut r.clone(), Op::OnWorkBranch { wb: WB.into() }, 100);
     assert_eq!(
         out,
         Some(Err("the detached HEAD carries commits not on origin/main; push them (git push origin HEAD:main) or put them on a branch, then re-run".into()))
@@ -634,17 +639,17 @@ fn moves_onto_the_work_branch() {
     // A fresh branch with nothing of its own (a subagent worktree's) is fine too.
     r.head = Head::On("feature".into());
     r.branches.insert("feature".into(), r.branches["main"].clone());
-    let (asked, _, out) = run(&mut r.clone(), Params::OnWorkBranch { wb: WB.into() }, 100);
+    let (asked, _, out) = run(&mut r.clone(), Op::OnWorkBranch { wb: WB.into() }, 100);
     assert_eq!(out, Some(Ok(Ok(String::new()))));
     assert!(asked.iter().any(|q| matches!(q, Query::Switch { branch, .. } if branch == WB)), "{asked:?}");
     r.index.insert(3, 3);
     r.work = r.index.clone();
     r.answer(&Query::Commit { msg: "feature work".into() });
-    let (_, _, out) = run(&mut r.clone(), Params::OnWorkBranch { wb: WB.into() }, 100);
+    let (_, _, out) = run(&mut r.clone(), Op::OnWorkBranch { wb: WB.into() }, 100);
     assert_eq!(out, Some(Err(format!("on branch feature, which carries commits not on origin/main; deploys run from {WB} or from main"))));
     // ...unless those commits are pushed on a work branch (its parent's).
     r.origin.insert("haswell-wsl-deploys2".into(), r.branches["feature"].clone());
-    let (asked, _, out) = run(&mut r, Params::OnWorkBranch { wb: WB.into() }, 100);
+    let (asked, _, out) = run(&mut r, Op::OnWorkBranch { wb: WB.into() }, 100);
     assert_eq!(out, Some(Ok(Ok(String::new()))));
     assert!(asked.contains(&Query::Pushed), "{asked:?}");
 }
@@ -665,17 +670,17 @@ fn leaves_a_review_checkout_alone() {
         detached: true,
     };
     let mut r = build(&s);
-    let (_, _, out) = run(&mut r.clone(), Params::Sync { wb: Some(WB.into()) }, 100);
-    assert_eq!(out, Some(Ok(Err(stranded(MAIN)))));
+    let (_, _, out) = run(&mut r.clone(), Op::Sync { wb: Some(WB.into()) }, 100);
+    assert_eq!(out, Some(Ok(Err(stranded(&Names::default(), MAIN)))));
     // On origin, as fetched and as the fetch will find it.
     r.origin.insert("haswell-wsl-deploys2".into(), r.commits().clone());
     r.remote.insert("haswell-wsl-deploys2".into(), r.commits().clone());
     let before = r.clone();
-    let (asked, _, out) = run(&mut r, Params::Sync { wb: Some("tester-deploys9-review".into()) }, 100);
+    let (asked, _, out) = run(&mut r, Op::Sync { wb: Some("tester-deploys9-review".into()) }, 100);
     assert!(asked.contains(&Query::OnOrigin), "{asked:?}");
     assert_eq!(out, Some(Ok(Ok(LEFT.into()))));
     assert_eq!(r, before);
-    let (_, _, out) = run(&mut r, Params::EnsureRebased, 100);
+    let (_, _, out) = run(&mut r, Op::EnsureRebased, 100);
     assert_eq!(out, Some(Err(format!("{LEFT}, not on origin/main; switch to a branch to deploy"))));
 }
 
@@ -683,7 +688,7 @@ fn leaves_a_review_checkout_alone() {
 fn reports_what_blocks_a_rebase() {
     let ask = |replies: Vec<Reply>| {
         let mut it = replies.into_iter();
-        drive(Replay::new(Params::Sync { wb: Some(WB.into()) }, program), 20, move |_| it.next().unwrap()).2
+        drive(Replay::new(with(Op::Sync { wb: Some(WB.into()) }), program), 20, move |_| it.next().unwrap()).2
     };
     let ran = |ok| Reply::Ran { ok, detail: "boom".into() };
     assert_eq!(ask(vec![ran(false)]), Ok(Err("fetch failed:\nboom".into())));
@@ -693,7 +698,7 @@ fn reports_what_blocks_a_rebase() {
     assert_eq!(ask([pre(), vec![some("merge")]].concat()), Ok(Err("a merge is in progress; finish or abort it first".into())));
     assert_eq!(
         ask([pre(), vec![Reply::Text(None), Reply::Text(None), Reply::Flag(false), Reply::Flag(false)]].concat()),
-        Ok(Err(stranded(MAIN)))
+        Ok(Err(stranded(&Names::default(), MAIN)))
     );
     assert_eq!(
         ask([pre(), vec![Reply::Text(None), Reply::Text(None), Reply::Flag(false), Reply::Flag(true), Reply::Text(None)]].concat()),
@@ -701,7 +706,7 @@ fn reports_what_blocks_a_rebase() {
     );
     // The main checkout syncs without a work branch.
     let mut it = vec![ran(true), some("x"), Reply::Flag(true)].into_iter();
-    let out = drive(Replay::new(Params::Sync { wb: None }, program), 20, move |_| it.next().unwrap()).2;
+    let out = drive(Replay::new(with(Op::Sync { wb: None }), program), 20, move |_| it.next().unwrap()).2;
     assert_eq!(out, Ok(Ok("up to date".into())));
 }
 
@@ -725,7 +730,7 @@ fn onto_brings_a_submodule_onto_its_default_branch() {
     r.origin.insert("dev".into(), r.origin["main"].clone());
     let dev = "refs/remotes/origin/dev";
     let before = r.clone();
-    let (asked, _, out) = run(&mut r, Params::Onto { upstream: dev.into() }, 100);
+    let (asked, _, out) = run(&mut r, Op::Onto { upstream: dev.into() }, 100);
     assert_eq!(out, Some(Ok(Ok(format!("fast-forwarded {WB} onto origin/dev")))));
     assert!(asked.iter().any(|q| matches!(q, Query::Rebase { upstream, .. } if upstream == dev)), "{asked:?}");
     assert_eq!(r.commits(), &r.origin["dev"]);
@@ -735,7 +740,7 @@ fn onto_brings_a_submodule_onto_its_default_branch() {
     let mut r = before;
     r.work.insert(2, 9); // the landing's file, edited here too
     let before = r.clone();
-    let (_, _, out) = run(&mut r, Params::Onto { upstream: dev.into() }, 100);
+    let (_, _, out) = run(&mut r, Op::Onto { upstream: dev.into() }, 100);
     let msg = out.unwrap().unwrap().unwrap_err();
     assert!(msg.starts_with(&format!("rebasing {WB} onto origin/dev is not clean, left as it was: ")), "{msg}");
     r.next_id = before.next_id; // the tmp commit's id, spent

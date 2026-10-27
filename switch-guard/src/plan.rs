@@ -20,7 +20,40 @@ pub mod wire;
 
 pub const MSG_FILE: &str = "COMMIT_MSG.md";
 pub const BRANCHES_KEY: &str = "nixconvoy.toml's work_branches";
+#[cfg(test)]
 pub const MAIN: &str = "refs/remotes/origin/main";
+
+/// The repository's remote and its main branch there: nixconvoy.toml's
+/// `remote` and `main_branch`, origin and main unless set.
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Names {
+    pub remote: String,
+    pub main: String,
+}
+
+#[cfg(test)]
+impl Default for Names {
+    fn default() -> Self {
+        Names { remote: "origin".into(), main: "main".into() }
+    }
+}
+
+impl Names {
+    /// main as fetched, in full: refs/remotes/origin/main.
+    pub fn main_ref(&self) -> String {
+        self.remote_ref(&self.main)
+    }
+
+    /// main as fetched, as a person names it: origin/main.
+    pub fn main_short(&self) -> String {
+        format!("{}/{}", self.remote, self.main)
+    }
+
+    /// `branch` as fetched, in full.
+    pub fn remote_ref(&self, branch: &str) -> String {
+        format!("refs/remotes/{}/{branch}", self.remote)
+    }
+}
 
 /// Whether `name` starts with one of work_branches' prefixes.
 pub fn listed<'a>(prefixes: impl IntoIterator<Item = &'a str>, name: &str) -> bool {
@@ -110,7 +143,8 @@ pub enum Query {
     /// tree less MSG_FILE an origin/main commit's past their merge base (a
     /// review checkout of a tip since landed) -> Flag.
     OnOrigin,
-    /// The branch's configured merge ref -> Text.
+    /// The branch's configured upstream, "<remote>\t<merge ref>" -> Text
+    /// (None: not both set).
     Upstream {
         branch: String,
     },
