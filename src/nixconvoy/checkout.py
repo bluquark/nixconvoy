@@ -215,6 +215,27 @@ def note_branch(d: Path, wb: str) -> None:
             note_path(d).write_text(wb + "\n")
 
 
+def note_prefix(top: Path) -> None:
+    """This machine's expanded branch_prefix, written into the repository's
+    common git dir for the shell prompt (integrations/shell/prompt.bash),
+    which shows a work branch by its leaf: bash reads a line there where
+    it could not read nixconvoy.toml at every prompt.  Written by `init`
+    and refreshed by every later command; a repository without a readable
+    nixconvoy.toml (a submodule's, `review` works there) gets none, and
+    nothing else changes."""
+    common = git_common(top)
+    if common is None:
+        return
+    try:
+        text = config.load(top).branch_prefix.format(machine=proc.this_machine()) + "\n"
+    except config.ConfigError:
+        return
+    p = common / "nixconvoy-branch-prefix"
+    with contextlib.suppress(OSError):
+        if not p.exists() or p.read_text() != text:
+            p.write_text(text)
+
+
 def identity_of(here: Path, cur: str | None, pats: set[str] | None = None) -> Checkout:
     """What the checkout at `here` with `cur` checked out is: on one of
     this machine's listed work branches it owns that branch (a subagent's

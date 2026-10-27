@@ -467,7 +467,7 @@ from pathlib import Path
 from typing import IO, NoReturn
 
 from . import commands, config, hooks, init, names, orphans, proc, review, submodule
-from .checkout import lock_checkout, lock_holder, require_work_branch, sub_parent
+from .checkout import lock_checkout, lock_holder, note_prefix, require_work_branch, sub_parent
 from .deploy import deploy
 from .proc import PERF, TOOL, Fail, die, ok, out, painter
 
@@ -612,6 +612,8 @@ def dispatch() -> None:
     if subcmd == "init":
         # Before anything reads nixconvoy.toml, which it writes.
         init_args(args, start)
+    note_prefix(Path.cwd())
+    if subcmd == "init":
         return
     if subcmd == "review":
         os.chdir(start)  # its paths are the caller's

@@ -2576,6 +2576,8 @@ def init_cases(d: Path) -> None:
     try:
         assert "usage:" in dies(lambda: run_cli(["init", "--ssh-domain", "lan"]))
         assert not (repo / "nixconvoy.toml").exists()
+        assert "usage:" in printed(lambda: run_cli(["orphans", "-h"]))  # a command without the toml still runs
+        assert not (repo / ".git/nixconvoy-branch-prefix").exists()
         run_cli(["init"])
         c = config.load(repo)
         assert (c.flake_dir, c.targets_dir, c.targets_arch) == ("nixos", "nixos/hosts", "aarch64-linux"), c
@@ -2587,6 +2589,10 @@ def init_cases(d: Path) -> None:
         assert "# [targets.a]" in text and "# precheck = " in text and "# [submodules.<input>]" in text, text
         assert "?? nixconvoy.toml" in sh(repo, "status", "--porcelain")  # written, not staged
         assert "already there" in dies(lambda: run_cli(["init"]))
+        assert (repo / ".git/nixconvoy-branch-prefix").read_text() == "nixconvoy/\n"  # init notes the prefix (the repo's, not the suite's)
+        (repo / ".git/nixconvoy-branch-prefix").unlink()
+        assert "usage:" in printed(lambda: run_cli(["orphans", "-h"]))  # as does any later command
+        assert (repo / ".git/nixconvoy-branch-prefix").read_text() == "nixconvoy/\n"
         (repo / "nixconvoy.toml").unlink()
         # The flake named, relative to where init runs.
         run_cli(["init", ".."])

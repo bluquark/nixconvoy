@@ -163,6 +163,23 @@ That is the running system's build, which trails the lock until the
 machine itself switches; an unattended deploy that first moves the lock
 should run the lock's build (`nix run .#nixconvoy -- deploy ...`).
 
+The package also carries `share/nixconvoy/prompt.bash`
+(`integrations/shell/prompt.bash`): `__nixconvoy_ps1`, a bash prompt
+segment showing, in a checkout, the work branch by its leaf with
+`COMMIT_MSG.md`'s subject, `+N` commits beyond `origin/main`, staged and
+unstaged edits, the subagent worktrees and the submodule worktrees
+holding something (`__git_ps1` in any other repository).  The leaf
+needs the branch prefix `init` and every later command note in the
+common git dir, so a repository set up before this note shows the
+branch in full until its next command.  With
+`environment.pathsToLink = [ "/share/nixconvoy" ]` beside the package it
+is on the system profile:
+
+```sh
+source /run/current-system/sw/share/nixconvoy/prompt.bash
+PS1='\h:$(__nixconvoy_ps1)\w\$ '
+```
+
 Requirements on each target: `/run/current-system` reachable over ssh with
 passwordless sudo for the deploying user (a switch, the provenance file under
 `/var/lib/nixconvoy` and a dry activation all need root), and the target's
@@ -345,10 +362,8 @@ machine's, `--branch` says whether to take it over or open another) - and
 `integrations/claude-code/` is a Claude Code plugin holding the hooks
 that create an isolated subagent's worktree under the spawning checkout,
 close it when its agent stops and recreate it for its resume, beside
-`bin/git-review` (which the package installs as `git review`) and
-`prompt.bash`, a bash prompt segment to source from a copy of this
-repository (the package does not ship it); `integrations/claude-code-isolate/`
-is a second plugin whose one hook gives every subagent spawned inside a
+`bin/git-review` (which the package installs as `git review`);
+`integrations/claude-code-isolate/` is a second plugin whose one hook gives every subagent spawned inside a
 repository such a worktree (`isolation: worktree` added to the Agent
 call unless it chose otherwise):
 

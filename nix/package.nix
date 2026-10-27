@@ -1,7 +1,8 @@
 # The nixconvoy command: the Python package carrying the switch-guard cores
 # it drives (src/nixconvoy/guard.py finds them beside itself, so the two
 # never pair with another tree's build), wrapped with the tools its
-# subprocesses need, and `git review` beside it.
+# subprocesses need, `git review` beside it and the shell prompt segment
+# under share/.
 { pkgs, switch-guard }:
 let
   inherit (pkgs) lib;
@@ -18,6 +19,7 @@ python.pkgs.buildPythonApplication {
       ../src
       ../README.md
       ../integrations/claude-code/bin/git-review
+      ../integrations/shell/prompt.bash
     ];
   };
   build-system = [ python.pkgs.setuptools ];
@@ -27,6 +29,7 @@ python.pkgs.buildPythonApplication {
   ];
   postInstall = ''
     install -Dm755 integrations/claude-code/bin/git-review $out/bin/git-review
+    install -Dm644 integrations/shell/prompt.bash $out/share/nixconvoy/prompt.bash
     mkdir $out/${python.sitePackages}/nixconvoy/bin
     ln -s ${switch-guard}/bin/nixconvoy-plan ${switch-guard}/bin/nixconvoy-switch $out/${python.sitePackages}/nixconvoy/bin/
   '';
