@@ -19,6 +19,7 @@ from .checkout import (
     PENDING_REFS,
     WAIT_STALE,
     Announce,
+    Pending,
     add_worktree,
     adopt_commit,
     announced,
@@ -46,14 +47,40 @@ from .checkout import (
 from .config import store_host
 from .guard import binary, decide
 from .memo import Top
-from .proc import NOTHING_DONE, PERF, die, dump_json, git, is_ancestor, load_json, out, rev
-from .switch import provenance_record, switch
+from .proc import NOTHING_DONE, PERF, Fail, die, dump_json, git, is_ancestor, load_json, out, rev
+from .switch import SwitchedMeanwhile, provenance_record, switch
 from .targets import Probe, expand_targets, flake_target_names
 from .union import UnionQueries
 from .wire import Context, DriftParams, UnionParams
 
 # Seconds between the looks at origin while waiting for a deploy under way.
 WAIT_POLL = 5
+# How many times a run whose target another deploy switched meanwhile
+# probes again and redoes its plan (memoized: seconds) before giving up.
+SWITCH_REDOS = 2
+
+
+def news_of(p: Pending, now: float, seen: dict[str, tuple[str, float]], dead: set[str]) -> bool:
+    """Whether `p`'s deploy is alive by its renewals: `seen` keeps each
+    key's sha as last seen and when it changed (the caller's clock, `now`,
+    as of a successful fetch).  One unchanged for WAIT_STALE is dead
+    (`dead`, said once) until it changes again - a re-run from that
+    checkout, said too."""
+    sha, changed = seen.get(p.key, ("", now))
+    if sha != p.sha:
+        seen[p.key] = (p.sha, now)
+        if p.key in dead:
+            print(f"{p.key}'s deploy is under way again: waited for after all", flush=True)
+            dead.discard(p.key)
+        return True
+    if p.key in dead:
+        return False
+    if now - changed > WAIT_STALE:
+        print(f"warning: no news of {p.key}'s deploy for {WAIT_STALE} s (its announcement is no "
+              f"longer renewed): taken as dead, going on without it", flush=True)
+        dead.add(p.key)
+        return False
+    return True
 
 
 def exit_on_signal(signum: int, _frame: object) -> None:
@@ -338,6 +365,10 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
     # to the drift core, which names the dead deploy when it refuses a
     # target running its increment.
     dead: set[str] = set()
+    # Each announcement as last seen, and when it last changed (this
+    # machine's clock, as of a successful fetch): across the waits of a
+    # run, so a dead key seen again unchanged stays dead.
+    seen: dict[str, tuple[str, float]] = {}
 
     def await_pending(wt: str, union: str) -> bool:
         """The union core's AwaitPending (step 4a): while another checkout's
@@ -347,8 +378,9 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         build without it and be refused (or rebuild) once it switched.
         Only deploys announced before this one are waited for, so two never
         wait for each other; one whose announcement is not renewed for
-        WAIT_STALE seconds of successful looks at origin is taken for dead;
-        one settled (over, its push pending) is not waited for.
+        WAIT_STALE seconds of successful looks at origin is taken for dead
+        (until it is renewed again: a re-run); one settled (over, its push
+        pending) is not waited for.
         Whether it waited: the targets are then probed again, and the union
         redone with what landed."""
         nonlocal probes
@@ -357,9 +389,6 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         own = ann.key if ann is not None else None
         rank = (ann.since, ann.branch) if ann is not None else None
         mine: list[str] | None = None
-        # Each announcement as last seen, and when it last changed (this
-        # machine's clock, as of a successful fetch).
-        seen: dict[str, tuple[str, float]] = {}
         told: set[str] = set()
         waited = False
         started = status_at = time.monotonic()
@@ -367,17 +396,10 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             waiting: dict[str, list[str]] = {}
             now = time.monotonic()
             for p in pending_announcements():
-                if p.key == own or p.key in dead or p.settled or \
-                        (rank is not None and (p.since, p.branch) >= rank):
+                if p.key == own or p.settled:
                     continue
-                sha, changed = seen.get(p.key, ("", now))
-                if sha != p.sha:
-                    seen[p.key] = (p.sha, now)
-                elif now - changed > WAIT_STALE:
-                    print(f"warning: no news of {p.key}'s deploy for {WAIT_STALE} s (its "
-                          f"announcement is no longer renewed): taken as dead, going on "
-                          f"without it", flush=True)
-                    dead.add(p.key)
+                # Judged whatever its rank: a dead one the drift core names.
+                if not news_of(p, now, seen, dead) or (rank is not None and (p.since, p.branch) >= rank):
                     continue
                 if mine is None:
                     mine = sorted(memo.reached_targets(
@@ -600,17 +622,12 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             die(f"announcing the deploy records on origin failed; {NOTHING_DONE}:\n{unpushed}")
         return False
 
-    queries = UnionQueries(lambda: snap or "HEAD", fetch, refresh, stage, await_pending)
-    try:
-        done = decide(UnionParams(wb or "", evict, main0), queries)
-        if skip or dry:
-            return False
-        union = done.union
-        nixconvoy_switch = binary("nixconvoy-switch") if plan else ""
-
-        # The switch-last targets alone, one by one, once everything else has
-        # finished talking to them.  A failed switch dies once the others in
-        # its batch finish.
+    def switch_all(nixconvoy_switch: str) -> None:
+        """The plan's switches: the switch-last targets alone, one by one,
+        once everything else has finished talking to them.  A failed switch
+        dies once the others in its batch finish; one refused because the
+        target moved meanwhile (SwitchedMeanwhile) is raised once no sibling
+        failed, the moved targets' claims taken back."""
         first = [h for h in plan if not tops[h].last]
         batches = [first, *([h] for h in plan if tops[h].last)]
         for batch in batches:
@@ -626,35 +643,67 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             # a batch sibling's die) may still leave the target running it.
             if ann is not None:
                 ann.claimed += [n for n in batch if n not in ann.claimed]
-            if len(batch) == 1:
-                n = batch[0]
-                switch(n, expected[n], tops[n].out, nixconvoy_switch, provenance=provenances[n],
-                       digest=probed[n].digest, needs_internet=tops[n].last)
-                continue
             with ThreadPoolExecutor(len(batch)) as pool:
-                switches = [pool.submit(switch, n, expected[n], tops[n].out, nixconvoy_switch, True,
+                switches = [pool.submit(switch, n, expected[n], tops[n].out, nixconvoy_switch, len(batch) > 1,
                                         provenances[n], probed[n].digest, tops[n].last)
                             for n in batch]
+            moved: list[SwitchedMeanwhile] = []
+            failed: Fail | None = None
             for f in switches:
-                f.result()
+                try:
+                    f.result()
+                except SwitchedMeanwhile as e:
+                    moved.append(e)
+                except Fail as e:
+                    failed = failed or e
+            if moved and ann is not None:
+                ann.claimed = [h for h in ann.claimed if h not in {e.target for e in moved}]
+            if failed is not None:
+                raise failed
+            if moved:
+                raise moved[0]
 
-        PERF.mark("commit-push")
-        if committed:
-            assert wb is not None
-            adopt_commit(wb, committed)
-        # A local main ahead of origin is pushed by its owner once every
-        # target it affects has switched.
-        problem = push_deployed(wb, ann, records)
+    for redo in range(SWITCH_REDOS + 1):
+        queries = UnionQueries(lambda: snap or "HEAD", fetch, refresh, stage, await_pending)
+        try:
+            done = decide(UnionParams(wb or "", evict, main0), queries)
+            if skip or dry:
+                return False
+            union = done.union
+            try:
+                switch_all(binary("nixconvoy-switch") if plan else "")
+            except SwitchedMeanwhile as e:
+                if redo == SWITCH_REDOS:
+                    die(f"{e}, {redo + 1} times over; nothing was committed: re-run to converge with it")
+                # Its deploy's push may still be on its way: the union redone
+                # with what origin has by then (await_pending waits for a
+                # deploy still announced), the targets probed afresh.
+                print(f"{e}: probing the targets again and redoing the plan", flush=True)
+                PERF.mark("probe")
+                with ThreadPoolExecutor(1 + len(probes)) as pool:
+                    fetch = pool.submit(git, *fetch_args())
+                    probes = {n: pool.submit(targets.probe, n) for n in probes}
+                collect_probes()
+                continue
+        finally:
+            queries.drop()
+        break
 
-        if plan:
-            print(f"deployed {', '.join(plan)}: union {union}")
-        elif left_alone:
-            print(f"nothing switched: {', '.join(left_alone)} left alone, running another "
-                  f"checkout's work this checkout's does not reach (union {union})")
-        else:
-            print(f"nothing drifts from the union ({union}); nothing to switch")
-        if problem is not None:
-            die(f"{wb} is not pushed (the targets run it; its announcement stays for the re-run): {problem}")
-        return True
-    finally:
-        queries.drop()
+    PERF.mark("commit-push")
+    if committed:
+        assert wb is not None
+        adopt_commit(wb, committed)
+    # A local main ahead of origin is pushed by its owner once every
+    # target it affects has switched.
+    problem = push_deployed(wb, ann, records)
+
+    if plan:
+        print(f"deployed {', '.join(plan)}: union {union}")
+    elif left_alone:
+        print(f"nothing switched: {', '.join(left_alone)} left alone, running another "
+              f"checkout's work this checkout's does not reach (union {union})")
+    else:
+        print(f"nothing drifts from the union ({union}); nothing to switch")
+    if problem is not None:
+        die(f"{wb} is not pushed (the targets run it; its announcement stays for the re-run): {problem}")
+    return True

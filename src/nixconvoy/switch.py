@@ -35,7 +35,6 @@ from .wire import (
     Helper,
     Internet,
     Locked,
-    Moved,
     Now,
     ProbeHelper,
     Running,
@@ -87,6 +86,17 @@ def provenance_record(union: str, branches: list[tuple[str, str]], snap: str,
         own=own, head=rev("HEAD"), base=rev(f"refs/remotes/origin/{own}"), snap=snap,
         announce=announce, key=key, at=time.time(), machine=proc.this_machine(),
         checkout=str(Path.cwd()), pid=os.getpid())
+
+
+class SwitchedMeanwhile(Exception):
+    """The guard found `target` running `running`, not what was probed:
+    another deploy switched it since.  Raised before anything is activated,
+    for the deploy to probe again and redo its plan."""
+
+    def __init__(self, target: str, running: str) -> None:
+        super().__init__(f"{target} was switched by another deploy while this one ran (now running {running})")
+        self.target = target
+        self.running = running
 
 
 def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> list[str]:
@@ -184,7 +194,7 @@ def switch(target: str, expected: str, toplevel: str, nixconvoy_switch: str,
                               file=sys.stderr)
                     return Guard(Locked())
                 if line.startswith("MOVED"):
-                    return Guard(Moved(line.removeprefix("MOVED").strip() or "nothing readable"))
+                    raise SwitchedMeanwhile(target, line.removeprefix("MOVED").strip() or "nothing readable")
                 return Guard(Failed(line))
             case ProbeHelper():
                 return Code(run(targets.target_cmd(target, ["test", "-e", helper]), check=False,

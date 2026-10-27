@@ -60,8 +60,9 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      this one under way (step 4a) until the push that ends this deploy
      clears it (step 8; a main checkout's, the push of main by its owner
      that lands the announced HEAD) - or this run withdraws it, ending
-     without a switch.  Its author date is the run's start (a re-run keeps
-     it): its rank among the deploys under way
+     without a switch.  Its author date is the run's start, its rank among
+     the deploys under way (a re-run keeps it only while the announcement
+     carries records: a switch onto the increment was started)
   4. in a temporary worktree on that snapshot, union-merge every other
      pushed, listed work branch that still declares changes (mergiraf
      resolves structural conflicts; real conflicts abort with per-branch
@@ -78,9 +79,9 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      deploys announced before this one are waited for (two never wait for
      each other); one whose announcement goes 30 s without a renewal (by
      this machine's clock, as of successful fetches) is taken for dead and
-     gone on without, with a warning; one settled (over, its push pending:
-     a main checkout's, which its owner pushes) is not waited for; --evict
-     waits for nobody
+     gone on without, with a warning, until it is renewed again (a re-run);
+     one settled (over, its push pending: a main checkout's, which its
+     owner pushes) is not waited for; --evict waits for nobody
   5. evaluate every reachable target's toplevel for the union, one nix eval
      process per stale target, concurrently, memoized per target by the git
      hashes of the files its configuration references and the lock entries
@@ -133,8 +134,9 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      target not marked switch-last is switched at once and the switch-last
      ones alone after, activating the exact evaluated toplevel under a flock
      held ON THE TARGET that first re-verifies the target still runs what
-     step 2 probed.  This compare-and-swap makes a deploy abort cleanly
-     instead of reverting a switch another machine made meanwhile.  The
+     step 2 probed.  This compare-and-swap never reverts a switch another
+     machine made meanwhile: the run probes the targets again and redoes
+     steps 4-6 (memoized: seconds), twice at most, then fails.  The
      guard compares the provenance too, then claims the provenance file for the
      new toplevel before activation with its provenance: the toplevel, the
      union, origin/main and each unioned branch's tip, this checkout's

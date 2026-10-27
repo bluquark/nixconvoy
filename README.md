@@ -64,7 +64,10 @@ no work.
   before its own, so two never wait for each other), then builds with
   what it pushed - instead of building without it to be refused once it
   switched.  One whose announcement goes 30 seconds without a renewal is
-  taken for dead and no longer waited for.  The push that ends the deploy
+  taken for dead and no longer waited for, until a re-run renews it.  A
+  target that another deploy switched meanwhile all the same has the run
+  probe and plan again (memoized, so seconds) rather than fail.  The push
+  that ends the deploy
   deletes the announcement (a main checkout's is cleared by the push of
   main that lands its HEAD, by its owner, and swept by the next deploy);
   a deploy ending without a switch withdraws it.

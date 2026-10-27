@@ -219,7 +219,7 @@ def scenario(name: str, *, helper: bool = True, check_ok: bool = True, activate_
     try:
         switch.switch("testhost", OLD, NEW, nixconvoy_switch or guard.binary("nixconvoy-switch"),
                       provenance=PROVENANCE)
-    except proc.Fail as e:
+    except (proc.Fail, switch.SwitchedMeanwhile) as e:
         died = str(e).splitlines()[0]
     say(f"{name}: {died or 'switched'}")
     return died, load(state_file)
@@ -301,6 +301,7 @@ def switch_scenarios(d: Path) -> None:
     assert died is None and s["running"] == NEW and s["profile"] == NEW, (died, s)
     assert s.get("provenance") == PROVENANCE, s
 
+    # Raised (switch.SwitchedMeanwhile), for the deploy to probe and plan again.
     died, s = scenario("moved", running="/nix/store/other")
     assert died is not None and "was switched by another deploy" in died, died
     assert s["running"] == "/nix/store/other" and "provenance" not in s, s
@@ -465,6 +466,27 @@ def gate_cases() -> None:
     finally:
         proc.EXITING = None
     say("gate: ok")
+
+
+def await_cases() -> None:
+    """A waited-for announcement is alive while its sha keeps changing,
+    dead once unchanged past WAIT_STALE - and stays dead across looks,
+    however many, until it changes again."""
+    seen: dict[str, tuple[str, float]] = {}
+    dead: set[str] = set()
+    stale = checkout.WAIT_STALE
+
+    def p(sha: str) -> checkout.Pending:
+        return checkout.Pending("work/x", "work/x", sha, 1, 1, False, ())
+
+    assert deploy.news_of(p("a"), 0, seen, dead)
+    assert deploy.news_of(p("a"), stale, seen, dead)  # not past it yet
+    assert deploy.news_of(p("b"), stale + 1, seen, dead)
+    assert not deploy.news_of(p("b"), 2 * stale + 2, seen, dead) and dead == {"work/x"}
+    for t in (2 * stale + 3, 10 * stale):  # a later look, an await redone: dead still
+        assert not deploy.news_of(p("b"), t, seen, dead) and dead == {"work/x"}
+    assert deploy.news_of(p("c"), 10 * stale + 1, seen, dead) and not dead  # renewed: a re-run
+    say("await: ok")
 
 
 def memo_cases() -> None:
@@ -1430,11 +1452,13 @@ def announce_cases(d: Path) -> None:
         (renewed,) = checkout.pending_announcements()
         assert renewed.sha != first and renewed.since == pend.since and renewed.at > pend.at and \
             sh(co, "rev-parse", f"{renewed.sha}^{{tree}}") == sh(co, "rev-parse", f"{snap}^{{tree}}"), renewed
-        # A re-run announces with the rank of the announcement it renews.
+        # A re-run of an announcement carrying no record (nothing switched
+        # onto it) ranks as the fresh run it is.
         ann.stop()
+        t1 = int(time.time())
         again = checkout.Announce(wb, snap)
         assert again.collect(), again.detail
-        assert again.since == pend.since
+        assert t1 <= again.since <= t1 + 2 and again.records == (), again.since
         # Withdrawn (the deploy ended without a switch): deleted, the
         # renewals over.
         again.withdraw()
@@ -1477,11 +1501,21 @@ def announce_cases(d: Path) -> None:
         # So do the renewal loop's own beats, each a new commit.
         beat(ann, 2)
         assert sh(co, "log", "-1", "--format=%P", ann.sha).split()[1:] == [rec1, rec2]
-        # A stage redone starts without records: the renewals drop them.
+        # A re-run of a carried announcement keeps its rank and carries on.
+        sh(co, *checkout.fetch_args())
+        (pend,) = checkout.pending_announcements()
+        assert pend.carried and pend.records == (rec1, rec2), pend
+        rerun = checkout.Announce(wb, snap)
+        assert rerun.collect(), rerun.detail
+        assert rerun.since == ann.since and rerun.records == (rec1, rec2)
+        assert sh(co, "log", "-1", "--format=%P", rerun.sha).split()[1:] == [rec1, rec2]
+        rerun.stop()
+        # A stage redone keeps carrying them until it carries its own:
+        # none, here.
         ann.retarget(snap)
-        assert ann.records == ()
-        last = ann.sha
-        assert renew(ann) != last and sh(co, "log", "-1", "--format=%P", ann.sha).split() == [sh(co, "rev-parse", "HEAD")]
+        assert ann.records == (rec1, rec2)
+        assert ann.carry({}) is None
+        assert sh(co, "log", "-1", "--format=%P", ann.sha).split() == [sh(co, "rev-parse", "HEAD")]
         assert ann.carry({"a": rec1, "b": rec2}) is None
         # The push that ends the deploy, atomic: the work branch, the
         # records onto the history branches and the announcement deleted.
@@ -2502,7 +2536,7 @@ if __name__ == "__main__":
             mock.patch.object(checkout, "HEARTBEAT", 3600):
         with tempfile.TemporaryDirectory() as d:
             switch_cases(Path(d))
-        for cases in (gate_cases, provenance_cases, target_cases, memo_cases):
+        for cases in (gate_cases, provenance_cases, target_cases, memo_cases, await_cases):
             cases()
         for scratch_cases in (guard_cases, reach_cases, git_cases, landing_rebase_cases, counterpart_cases,
                               announce_cases,

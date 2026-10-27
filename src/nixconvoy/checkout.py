@@ -902,12 +902,17 @@ class Announce:
         self.branch = branch
         self.key = announce_key(branch)
         self.target = ("", "")
-        self.records: tuple[str, ...] = ()
+        # A re-run keeps carrying the records its last run left (until the
+        # stage carries its own), and the rank of an announcement whose
+        # increment a target runs or was being switched onto (the records:
+        # other deploys are refused there until this one ends); one that
+        # switched nothing ranks as the fresh run it is, waiting its turn
+        # behind the deploys that outlived it.
+        prev = next((p for p in pending_announcements() if p.key == self.key), None)
+        self.records: tuple[str, ...] = prev.records if prev is not None else ()
+        self.since = prev.since if prev is not None and prev.carried else int(time.time())
         self._lock = threading.Lock()
         self.retarget(base)
-        # A re-run keeps the rank of the announcement it renews.
-        prev = next((p for p in pending_announcements() if p.key == self.key), None)
-        self.since = prev.since if prev else int(time.time())
         self.sha = ""
         self.detail = ""
         # The targets running this checkout's pending state, or whose
@@ -924,11 +929,11 @@ class Announce:
         """What the renewals commit, resolved on the main thread: HEAD as
         the parent and `base`'s tree (the snapshot's, or HEAD's) - never
         read by the thread itself, since a rebase under way has temporary
-        commits on HEAD.  A stage redone has no records yet."""
+        commits on HEAD.  The records stay carried until a stage carries its
+        own (carry, which a redone stage drops the stale ones through)."""
         target = (rev("HEAD") or "", rev(f"{base}^{{tree}}") or "")
         with self._lock:
             self.target = target
-            self.records = ()
 
     def carry(self, records: dict[str, str]) -> str | None:
         """Renew at once with each target's deploy record as a further
@@ -1038,6 +1043,13 @@ class Pending(NamedTuple):
     at: int
     # Its deploy is over, its push pending (Announce.settled_commit).
     settled: bool
+    # The deploy records it carries (its parents past the announcer's
+    # HEAD): a switch onto its increment was started.
+    records: tuple[str, ...]
+
+    @property
+    def carried(self) -> bool:
+        return bool(self.records)
 
 
 SETTLED = " settled"
@@ -1068,7 +1080,7 @@ def announcements() -> tuple[list[Pending], dict[str, str]]:
                 and is_ancestor(f"{sha}^", "refs/remotes/origin/main"):
             cleared[key] = sha
             continue
-        found.append(Pending(key, branch, sha, int(since), int(at), settled))
+        found.append(Pending(key, branch, sha, int(since), int(at), settled, tuple(parents.split()[1:])))
     return found, cleared
 
 
