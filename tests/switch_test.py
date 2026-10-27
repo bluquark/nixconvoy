@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import functools
 import getpass
 import hashlib
 import io
@@ -2047,12 +2048,51 @@ def submodule_cases(d: Path) -> None:
         os.chdir(co)
         assert submodule.catch_up(co, wb) == []
         assert sh(ax, "rev-parse", "HEAD") == new_main
+        # land --with-children, three participants with the submodule: a
+        # landing with work is squashed onto the end of the line the ones
+        # before it left, one with nothing of its own follows its pin
+        # (behind the line, and never the base of the next); main pins the
+        # line's end and the default branch moves onto it.
+        co7, wb7 = d / "homelab7", "work/tester/7"
+        sh(d, "clone", "--quiet", str(origin), str(co7))
+        os.chdir(co7)
+        checkout.ensure_on_work_branch(wb7)
+        ax7 = submodule.create("dep", wb7)
+        submodule.sync(wb7, None)
+        assert sh(ax7, "rev-parse", "HEAD") == new_main
+        put(ax7, "tool7.py", "n\n")
+        submodule.sync(wb7, "dep: n")
+        sh(co7, "commit", "--quiet", "-m", "dep: n")
+        os.chdir(co8)
+        chain = submodule.prepare_all(wb8, "b landed")
+        os.chdir(co)
+        chain += submodule.prepare_all(wb, "nothing of its own", chain)
+        os.chdir(co7)
+        chain += submodule.prepare_all(wb7, "n landed", chain)
+        os.chdir(co)
+        assert len(chain) == 3 and chain[1].pending is None and chain[1].landed == new_main
+        lb, ln = chain[0].landed, chain[2].landed
+        assert sh(dep_repo, "rev-parse", f"{lb}^") == new_main and sh(dep_repo, "rev-parse", f"{ln}^") == lb
+        assert sh(dep_repo, "show", f"{ln}:tool2.py") == "b" and sh(dep_repo, "show", f"{ln}:tool7.py") == "n"
+        assert pinned(co8) == lb and pinned() == new_main and pinned(co7) == ln
+        assert submodule.line_end(chain, dep_repo) == ln and submodule.line_end(chain[:2], dep_repo) == lb
+        submodule.check_pins(sh(co7, "rev-parse", "HEAD^{tree}"), chain, co7)  # the union's pick: the end
+        for top in (co, co8):  # a tree pinning something else
+            behind = sh(top, "rev-parse", f"HEAD:{path}")
+            assert behind != ln
+            err = dies(functools.partial(submodule.check_pins, sh(top, "rev-parse", "HEAD^{tree}"), chain, top))
+            assert f"the landed tree pins {behind[:12]}, not the end of its landings {ln[:12]}" in err, err
+        submodule.finish_all(chain)
+        assert dep_ref("refs/heads/main") == ln
+        assert sh(ax8, "rev-parse", "HEAD") == lb and sh(ax7, "rev-parse", "HEAD") == ln
+        assert dep_ref(f"refs/heads/{wb8}") == lb and dep_ref(f"refs/heads/{wb7}") == ln
+        assert sh(ax, "rev-parse", "HEAD") == new_main
         # A dry activation leaves the submodule where it is; the deploy's
         # own submodule step brings it along.
         sh(ax, "reset", "--quiet", "--hard", dep_main)
         assert submodule.sync(wb, None, dry=True) == [] and sh(ax, "rev-parse", "HEAD") == dep_main
         assert submodule.sync(wb, None) == []
-        assert sh(ax, "rev-parse", "HEAD") == new_main
+        assert sh(ax, "rev-parse", "HEAD") == ln  # the default branch as the chained landing left it
         submodule.remove_all(co)
         # pin_file: every pin also writes the rev and its committer date,
         # staged; a union merge is dated a second past its parents' newest.

@@ -1329,6 +1329,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
             if tree == main_tree:
                 die("no changes vs origin/main to land")
             clashes(tree, pinned=True)
+            submodule.check_pins(tree, landings, here)
             commit = out(["git", "commit-tree", tree, "-p", main, "-m", msg])
             p = git("push", "--quiet", "origin", f"{commit}:refs/heads/main", check=False)
             if p.returncode != 0:

@@ -997,17 +997,38 @@ def prepare_all(wb: str, fallback_msg: str, earlier: list[Landing] | None = None
     """Each present submodule's landing prepared (prepare_one), for land to
     finish (finish_all) once main is pushed, or abandon (abandon_all); one
     that fails abandons the ones before it.  `earlier`: the landings of
-    the other participants of a land --with-children, which a repository
-    among them is landed on top of."""
+    the participants before this one in a land --with-children: a
+    repository among them is landed on top of the end of its line
+    (line_end), which the landing then extends."""
     landings: list[Landing] = []
     try:
         for sub in present(Path.cwd()):
-            base = next((e.landed for e in earlier or [] if e.sub.repo == sub.repo), None)
-            landings.append(prepare_one(sub, wb, fallback_msg, base))
+            landings.append(prepare_one(sub, wb, fallback_msg, line_end(earlier or [], sub.repo)))
     except Fail:
         abandon_all(landings)
         raise
     return landings
+
+
+def line_end(landings: list[Landing], repo: Path) -> str | None:
+    """The rev the landings of the repository `repo` so far put its
+    default branch on: the latest that carried work there (one with
+    nothing of its own just follows a pin, behind that line or on it).
+    None before any did."""
+    return next((e.landed for e in reversed(landings) if e.sub.repo == repo and e.settle), None)
+
+
+def check_pins(tree: str, landings: list[Landing], top: Path) -> None:
+    """Before main's push: `tree` (the landed tree) must pin each landed
+    repository on the end of its line (line_end), the rev finish_all
+    leaves its default branch on; a union merge, or a pin from outside
+    the landings, would leave that branch short of main's pin."""
+    for landing in {e.sub.repo: e for e in landings}.values():
+        end = line_end(landings, landing.sub.repo)
+        want = pin_at(tree, landing.sub.path, top)
+        if end is not None and want != end:
+            die(f"submodule {landing.sub.name}: the landed tree pins {(want or 'nothing')[:12]}, not the end of "
+                f"its landings {end[:12]}; nothing landed")
 
 
 def finish_all(landings: list[Landing]) -> None:

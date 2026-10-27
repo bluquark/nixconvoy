@@ -426,7 +426,11 @@ commit.  From a checkout on a work branch:
   temporary ref, then main, then the default branch moved onto the commit
   - the push of main, the one that can be refused, goes first, and refused
   it leaves every default branch as it was and the pins off the work
-  branch; a submodule whose HEAD is not what the tree pins is refused.  `undeploy`
+  branch; a submodule whose HEAD is not what the tree pins is refused.
+  `land --with-children` squashes each participant's tip onto the end of
+  the line the participants before it landed (one with nothing of its
+  own follows its pin), main pins that line's end and the default branch
+  moves there.  `undeploy`
   resets it onto the pin of the rev the checkout goes back to (its
   default branch, for a landed pin).  Either leaves the worktree in
   place.  `close <input>`
