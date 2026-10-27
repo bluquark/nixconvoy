@@ -5,9 +5,9 @@ from __future__ import annotations
 import functools
 import http.client
 import ipaddress
+import os
 import re
 import shlex
-import signal
 import socket
 import urllib.request
 from pathlib import Path
@@ -15,7 +15,7 @@ from typing import NamedTuple
 
 from . import proc
 from .config import _bare_url, cfg, store_host
-from .proc import NOTHING_DONE, die, load_json, ok, run
+from .proc import NOTHING_DONE, die, load_json, run
 
 # Seconds one probe of a target may take, so a stalled ssh session holds
 # neither a deploy's start nor verification past the deadline.
@@ -44,9 +44,23 @@ UNSANDBOXED = ("--option", "sandbox", "false")
 # A peer silent for 15 s ends the session (a master connection, and so every
 # session riding on it), however long its command may rightly run.
 SSH_KEEPALIVE = ("-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3")
-# Seconds `nix config show` may take on the store host (well under 0.1 s): a
-# longer wait means a stuck daemon or connection.
-SUBSTITUTERS_TIMEOUT = 10
+# Seconds `nix store info` or `nix config show` may take on the builder
+# (well under 0.1 s): a longer wait means a stuck daemon or connection.
+BUILDER_TIMEOUT = 10
+# What the first ssh to a store host may add: it opens the deploy's master
+# connection (ConnectTimeout 8, the key exchange, nix's own start).
+CONNECT_GRACE = 20
+# How the build runs where the daemon does not trust the user: as root,
+# which every daemon trusts.  -k ignores a cached password, so the probe
+# proves what the build gets; NIX_CONFIG (a unit's `builders =`, say) is
+# carried through sudo's environment reset when the shell has it.
+SUDO = ("sudo", "-n", "-k")
+# nix's own arguments under SUDO: root's nix would otherwise open the
+# store itself and build in the sudo session, outside the daemon unit's
+# scheduling and limits; as a client it is trusted all the same, and the
+# daemon drops its build when it goes.  Root reads no user nix.conf, so
+# the command set is enabled by hand.
+ROOT_NIX = ("--store", "daemon", "--extra-experimental-features", "nix-command")
 
 
 def flake_target_names() -> list[str]:
@@ -220,31 +234,91 @@ def kept_substituters(shown: str, skip: tuple[str, ...]) -> str:
 
 
 @functools.cache
-def store_substituters(via: tuple[str, ...]) -> tuple[bool, str]:
-    """The substituter list `nix config show` prints through `via`, or
-    False and the failure text; once per store host for the run (the precheck
-    and the build both ask)."""
-    cmd = [*via, "nix", "config", "show", "substituters"]
-    p = run(cmd, check=False, timeout=SUBSTITUTERS_TIMEOUT)
-    if p.returncode == -signal.SIGKILL:
-        return False, f"`nix config show substituters` timed out after {SUBSTITUTERS_TIMEOUT} s"
+def store_substituters(via: tuple[str, ...], prefix: tuple[str, ...]) -> tuple[bool, str]:
+    """The substituter list `nix config show` prints through `via` as
+    `prefix` (builder_prefix's) runs nix, or False and the failure text;
+    once per store host for the run (the precheck and the build both ask)."""
+    cmd = [*via, *prefix, "nix", *(ROOT_NIX[2:] if prefix else ()), "config", "show", "substituters"]
+    p = run(cmd, check=False, timeout=BUILDER_TIMEOUT)
+    if p.timed_out:
+        return False, f"`nix config show substituters` timed out after {BUILDER_TIMEOUT} s"
     if p.returncode != 0:
         return False, f"reading the substituters failed:\n{p.stderr.strip()}"
     return True, p.stdout
 
 
+def store_info(prefix: tuple[str, ...], via: tuple[str, ...]) -> dict[str, object] | str:
+    """What `nix store info --json` reports through `via` (the ssh prefix
+    reaching the store host, empty here) with `prefix` (SUDO or nothing)
+    before nix, or the failure text.  A nix without the verb (before 2.19,
+    Lix) is asked by its old name, `nix store ping`."""
+    t = BUILDER_TIMEOUT + (CONNECT_GRACE if via else 0)
+    err = ""
+    for verb in ("info", "ping"):
+        p = run([*via, *prefix, "nix", *(ROOT_NIX if prefix else ROOT_NIX[2:]), "store", verb, "--json"],
+                check=False, timeout=t)
+        if p.timed_out:
+            return f"`nix store {verb}` timed out after {t} s"
+        if p.returncode == 0:
+            try:
+                info = load_json(p.stdout)
+            except ValueError:
+                info = None
+            if not isinstance(info, dict):
+                return f"`nix store {verb}` printed no JSON object:\n{p.stdout.strip()}"
+            return info
+        err = p.stderr.strip()
+        if "not a recognised command" not in err:
+            break
+    return f"`nix store {verb}` failed:\n{err}"
+
+
+def trusts(info: dict[str, object]) -> bool:
+    """Whether the store trusts the user: its `trusted` (a bool from
+    Determinate Nix, 0/1 from upstream; absent from a store that cannot say,
+    which nothing restricts)."""
+    t = info.get("trusted")
+    return t is None or bool(t)
+
+
+@functools.cache
+def builder_prefix(via: tuple[str, ...]) -> list[str] | str:
+    """What the build phase's `nix` runs under through `via`: nothing when
+    the daemon trusts the user (store_info), BUILD_OPTS being honoured from
+    a trusted user alone, else SUDO, proven by the same probe as root.  The
+    failure text when the user is neither (or the probe fails: a store host
+    unreachable, its nix unusable); once per builder for the run."""
+    info = store_info((), via)
+    if isinstance(info, str):
+        return info
+    if trusts(info):
+        return []
+    pre = (*SUDO, "--preserve-env=NIX_CONFIG") if not via and os.environ.get("NIX_CONFIG") else SUDO
+    rooted = store_info(pre, via)
+    untrusted = "the nix daemon does not trust the user (nix.settings.trusted-users)"
+    if isinstance(rooted, str):
+        return f"{untrusted}, and nix as root ({shlex.join(pre)}) failed: {rooted}"
+    if not trusts(rooted):
+        return f"{untrusted}, nor root"
+    return list(pre)
+
+
 def build_cmd(opts: tuple[str, ...], via: list[str]) -> list[str] | str:
     """The `nix build` prefix the .drvs follow, run through `via` (the ssh
-    prefix reaching the store host, empty here), or the failure text.  With
+    prefix reaching the store host, empty here) under builder_prefix, or
+    the failure text.  With
     skip_substituters set it passes the store host's own substituter list
     (store_substituters; its failure is the build's) less
     those: the caches stay the store host's nix.conf's business, this only
     trims the probes a deploy makes."""
-    nix = ["nix", "build", "--no-link", *BUILD_OPTS, *opts]
+    pre = builder_prefix(tuple(via))
+    if isinstance(pre, str):
+        return pre
+    nix = [*pre, "nix", *(ROOT_NIX if pre else ()), "build", "--no-link", *BUILD_OPTS, *opts]
     skip = cfg().skip_substituters
     if not skip:
         return nix
-    good, shown = store_substituters(tuple(via))
+    good, shown = store_substituters(tuple(via), tuple(pre))
     if not good:
         return shown
     return [*nix, "--option", "substituters", kept_substituters(shown, skip)]
@@ -342,11 +416,18 @@ def copy_closure(target: str, toplevel: str, quiet: bool = False) -> None:
 
 
 def check_store() -> None:
-    """Fail before any nix work when a store host is set but unreachable,
-    rather than on ssh's own timeout deep in a build."""
+    """Fail before any nix work when a store host is set but cannot build:
+    unreachable, or its daemon neither trusting the user nor running nix
+    as root (builder_prefix), rather than on ssh's own timeout or nix's
+    ignored-setting warning deep in a build - the reach check a store host
+    always had, now also proving it can build.  This machine's own daemon
+    is asked once a build comes (build_cmd)."""
     b = store_host()
-    if b and not ok(["ssh", *ssh_opts(), ssh_address(b), "true"]):
-        die(f"store host {b} unreachable; {NOTHING_DONE}")
+    if not b:
+        return
+    pre = builder_prefix(("ssh", *ssh_opts(), ssh_address(b)))
+    if isinstance(pre, str):
+        die(f"store host {b}: {pre}; {NOTHING_DONE}")
 
 
 def rejected_generation(target: str, toplevel: str) -> str | None:

@@ -161,13 +161,29 @@ def gate() -> None:
         raise Fail(EXITING)
 
 
+# Seconds a sudo gets to relay a SIGTERM and see its command out before
+# it is killed itself (nix answers one within a second or two).
+SUDO_GRACE = 5
+
+
+def stop(c: subprocess.Popen[str]) -> None:
+    """End `c`: SIGKILL, or SIGTERM for a sudo, which relays it to root's
+    command (a grandchild no signal of our own reaches), killed itself after
+    SUDO_GRACE should that not end it."""
+    with contextlib.suppress(OSError):
+        if isinstance(c.args, list) and c.args[:1] == ["sudo"]:
+            c.terminate()
+            threading.Timer(SUDO_GRACE, lambda: c.poll() is None and c.kill()).start()
+        else:
+            c.kill()
+
+
 def kill_children(why: str) -> None:
     with CHILDREN_LOCK:
         for c in CHILDREN:
             if c.poll() is not None:
                 continue  # done already: its run() reports its own result
-            with contextlib.suppress(OSError):
-                c.kill()
+            stop(c)
             SWEPT[c] = why
 
 
@@ -190,6 +206,13 @@ def failure(e: Exception) -> str:
     return str(e) if isinstance(e, Fail) else repr(e)
 
 
+class Completed(subprocess.CompletedProcess[str]):
+    """run's result: a CompletedProcess that also says whether `timeout`
+    ended the command (its returncode then depends on what caught the
+    signal: nix exits 1 on SIGTERM)."""
+    timed_out: bool = False
+
+
 def run(
     cmd: list[str],
     *,
@@ -201,14 +224,15 @@ def run(
     timeout: float | None = None,
     input: str | None = None,
     pass_fds: tuple[int, ...] = (),
-) -> subprocess.CompletedProcess[str]:
+) -> Completed:
     """`merged` captures stderr into stdout, in order (p.stderr is None).
-    `timeout` kills the command after that many seconds (returncode -SIGKILL).
+    `timeout` ends the command after that many seconds (stop; p.timed_out).
     `input` is fed to the command's stdin; the command inherits `pass_fds`."""
     full_env = dict(os.environ)
     if env:
         full_env.update(env)
     t0 = time.monotonic()
+    timed_out = False
     with CHILDREN_LOCK:
         gate()
         child = subprocess.Popen(
@@ -223,15 +247,25 @@ def run(
         try:
             stdout, stderr = child.communicate(input=input, timeout=timeout)
         except subprocess.TimeoutExpired:
-            child.kill()
-            stdout, stderr = child.communicate()
+            timed_out = True
+            stop(child)
+            try:
+                stdout, stderr = child.communicate(timeout=SUDO_GRACE + 1)
+            except subprocess.TimeoutExpired:
+                # A sudo's command outlived it holding the pipes: not waited for.
+                child.wait()
+                stdout, stderr = "", ""
+                for f in (child.stdout, child.stderr):
+                    if f:
+                        f.close()
     finally:
         with CHILDREN_LOCK:
             CHILDREN.discard(child)
             swept = SWEPT.pop(child, None)
     if swept is not None:
         raise Fail(swept)
-    p = subprocess.CompletedProcess(cmd, child.returncode, stdout, stderr)
+    p = Completed(cmd, child.returncode, stdout, stderr)
+    p.timed_out = timed_out
     PERF.call(cmd, time.monotonic() - t0)
     if check and p.returncode != 0:
         detail = (p.stderr or "").strip() if capture else ""

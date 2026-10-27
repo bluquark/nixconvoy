@@ -276,6 +276,85 @@ def report(text: str, *, tips: dict[str, str] | None = None,
     return printed(drift).strip(), died
 
 
+def builder_cases() -> None:
+    """builder_prefix: nothing when the daemon trusts the user (a bool or
+    upstream's 0/1; a store not saying), SUDO when it does not and nix as
+    root is trusted, refused with the probe's failure otherwise; a nix
+    without `store info` asked by `store ping`; build_cmd carries the
+    prefix (with ROOT_NIX), check_store the refusal for a store host alone."""
+    Reply = tuple[int, str, str]
+    cmds: list[list[str]] = []
+
+    def fake(replies: dict[tuple[str, str], Reply]) -> Callable[..., subprocess.CompletedProcess[str]]:
+        def run(cmd: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            cmds.append(cmd)
+            if cmd[-1] == "substituters":
+                return proc.Completed(cmd, 0, "https://cache.nixos.org\n", "")
+            key = ("sudo" if "sudo" in cmd else "user", cmd[-2])
+            assert key in replies, cmd
+            rc, out, err = replies[key]
+            p = proc.Completed(cmd, rc, out, err)
+            p.timed_out = rc < 0
+            return p
+        return run
+
+    old = (1, "", "error: 'info' is not a recognised command")
+    cases: list[tuple[dict[tuple[str, str], Reply], list[str] | str]] = [
+        ({("user", "info"): (0, '{"trusted":true,"url":"daemon"}', "")}, []),
+        ({("user", "info"): (0, '{"trusted":1,"url":"daemon"}', "")}, []),
+        ({("user", "info"): (0, '{"url":"local"}', "")}, []),
+        ({("user", "info"): (0, '{"trusted":false}', ""), ("sudo", "info"): (0, '{"trusted":true}', "")}, list(targets.SUDO)),
+        ({("user", "info"): (0, '{"trusted":0}', ""), ("sudo", "info"): (0, '{"trusted":1}', "")}, list(targets.SUDO)),
+        ({("user", "info"): old, ("user", "ping"): (0, '{"trusted":0}', ""),
+          ("sudo", "info"): old, ("sudo", "ping"): (0, '{"trusted":1}', "")}, list(targets.SUDO)),
+        ({("user", "info"): (0, '{"trusted":0}', ""), ("sudo", "info"): (1, "", "sudo: a password is required")},
+         "trusted-users), and nix as root (sudo -n -k) failed: `nix store info` failed:\nsudo: a password is required"),
+        ({("user", "info"): (0, '{"trusted":0}', ""), ("sudo", "info"): (0, '{"trusted":0}', "")}, "nor root"),
+        ({("user", "info"): (1, "", "error: cannot connect to socket")}, "failed:\nerror: cannot connect to socket"),
+        ({("user", "info"): (-9, "", "")}, "timed out after 30 s"),
+        ({("user", "info"): (0, "nonsense", "")}, "printed no JSON object:\nnonsense"),
+    ]
+    env_cfg = os.environ.pop("NIX_CONFIG", None)
+    try:
+        for replies, want in cases:
+            targets.builder_prefix.cache_clear()
+            config.set_cfg(config.parse(toml('[build]\nstore = "big"\n')))
+            with mock.patch.object(targets, "run", fake(replies)):
+                via = ["ssh", "me@big"]
+                if isinstance(want, str):
+                    assert want in dies(targets.check_store), (replies, dies(targets.check_store))
+                    assert want in str(targets.build_cmd((), via)), replies
+                else:
+                    targets.check_store()
+                    assert targets.builder_prefix(tuple(via)) == want, (replies, targets.builder_prefix(tuple(via)))
+                    assert targets.build_cmd((), via) == [*want, "nix", *(targets.ROOT_NIX if want else ()), "build",
+                                                          "--no-link", *targets.BUILD_OPTS]
+                    config.set_cfg(config.parse(toml('[build]\nstore = "big"\nskip_substituters = ["https://x"]\n')))
+                    targets.store_substituters.cache_clear()
+                    cmds.clear()
+                    assert targets.build_cmd((), via)[-1] == "https://cache.nixos.org", replies
+                    assert cmds[-1][:len(via) + len(want)] == [*via, *want], cmds[-1]
+        # Without a store host nothing is asked before a build comes; the
+        # local probe then carries NIX_CONFIG through sudo.
+        targets.builder_prefix.cache_clear()
+        config.set_cfg(config.parse(toml()))
+        run = fake({("user", "info"): (0, '{"trusted":false}', ""), ("sudo", "info"): (0, '{"trusted":true}', "")})
+        with mock.patch.object(targets, "run", run):
+            cmds.clear()
+            targets.check_store()
+            assert not cmds
+            os.environ["NIX_CONFIG"] = "builders ="
+            assert targets.build_cmd((), [])[:4] == [*targets.SUDO, "--preserve-env=NIX_CONFIG"]
+            assert cmds[-1][:4] == [*targets.SUDO, "--preserve-env=NIX_CONFIG"], cmds[-1]
+    finally:
+        os.environ.pop("NIX_CONFIG", None)
+        if env_cfg is not None:
+            os.environ["NIX_CONFIG"] = env_cfg
+        targets.builder_prefix.cache_clear()
+        targets.store_substituters.cache_clear()
+    say("builder: ok")
+
+
 def target_cases() -> None:
     """expand_targets: names and @tags from nixconvoy.toml, once each; the
     store host by the machine nixconvoy runs on."""
@@ -2744,7 +2823,7 @@ if __name__ == "__main__":
             mock.patch.object(checkout, "HEARTBEAT", 3600):
         with tempfile.TemporaryDirectory() as d:
             switch_cases(Path(d))
-        for cases in (gate_cases, provenance_cases, target_cases, memo_cases, await_cases):
+        for cases in (gate_cases, provenance_cases, target_cases, builder_cases, memo_cases, await_cases):
             cases()
         for scratch_cases in (guard_cases, reach_cases, git_cases, landing_rebase_cases, names_cases, counterpart_cases,
                               announce_cases,

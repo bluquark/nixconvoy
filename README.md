@@ -192,9 +192,14 @@ packages, after them on its PATH), and Linux or macOS (a macOS runner
 realises the closures in a Linux machine's store: `build.store` below).
 Requirements on each target: `/run/current-system` reachable over ssh with
 passwordless sudo for the deploying user (a switch, the provenance file under
-`/var/lib/nixconvoy` and a dry activation all need root), and the target
-named like its nixosConfiguration: by its directory under `hosts/`
-(`targets_dir`), or by a `[targets.<name>]` table.
+`/var/lib/nixconvoy` and a dry activation all need root), the deploying
+user among the target's `nix.settings.trusted-users` (the closures reach it
+unsigned, by `nix copy` from the store host or the deploying machine), and
+the target named like its nixosConfiguration: by its directory under
+`hosts/` (`targets_dir`), or by a `[targets.<name>]` table.  The machine
+deploying runs the evaluation itself (nix with flakes; git 2.35 or later),
+and the store host, when one is set, needs the same trust for the build
+options a deploy passes.
 
 ## Layout nixconvoy expects
 
@@ -247,7 +252,10 @@ precheck = "repo-lint"       # optional: checks.<targets_arch>.<name>, a flake c
 store = { "*" = "bigbox", laptop = "laptop" }   # realise closures in that machine's store, by the hostname
                                      # nixconvoy runs on ("*": any other); a machine mapped to itself
                                      # realises locally.  Where they build is that store's nix daemon's
-                                     # call: its own remote builders (nix.conf's builders) or itself
+                                     # call: its own remote builders (nix.conf's builders) or itself.
+                                     # The build runs under sudo -n when that daemon does not trust the
+                                     # user (`nix store info` says), refused with neither trust nor
+                                     # passwordless sudo
 skip_substituters = ["https://slow.cachix.org"]   # left out of deploy builds; the caches are the store host's nix.conf's
 
 [targets.laptop]

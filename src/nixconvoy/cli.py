@@ -127,7 +127,8 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
   6. build the drifting candidates' closures straight from the evaluated
      .drvs (no re-eval), in the configured store host's store if any
      (build.store, by the machine deploying; its nix daemon may hand the
-     builds on to its own remote builders), unsandboxed
+     builds on to its own remote builders), as root through sudo -n where
+     that daemon does not trust the user, unsandboxed
      when a dry-run shows only trivial builders left.  Nothing drifting and
      no precheck to run means no build
   7. copy the closures over, concurrently, while re-fetching to check that
