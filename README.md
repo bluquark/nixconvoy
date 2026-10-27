@@ -394,34 +394,37 @@ machine's, `--branch` says whether to take it over or open another) - and
 `integrations/claude-code/` is a Claude Code plugin holding the hooks
 that create an isolated subagent's worktree under the spawning checkout,
 close it when its agent stops and recreate it for its resume, beside
-`bin/git-review` (which the package installs as `git review`);
-`integrations/claude-code-isolate/` is a second plugin whose one hook gives every subagent spawned inside a
-repository such a worktree (`isolation: worktree` added to the Agent
-call unless it chose otherwise):
+`bin/git-review` (which the package installs as `git review`), and the
+hook that gives every subagent spawned inside a repository such a
+worktree (`isolation: worktree` added to the Agent call unless it chose
+otherwise):
 
 ```
 claude plugin marketplace add bluquark/nixconvoy
 claude plugin install nixconvoy@nixconvoy --scope project
-claude plugin install nixconvoy-isolate@nixconvoy --scope project
 ```
 
-The isolation is a plugin of its own because two hooks that each rewrite
-one Agent call race: Claude Code runs matching hooks in parallel and
-keeps one `updatedInput`, whichever lands last.  A PreToolUse hook of
-your own on `Agent` that rewrites the call (pinning a subagent's model,
-say) must be the one rewriter: leave `nixconvoy-isolate` uninstalled and
-add `isolation: "worktree"` from inside it (`subagent-isolate.sh` shows
-the rule: a call without `isolation`, spawned in a git repository - the
-session's project directory, not the shell's, which drifts).  Both hooks
-return the rewritten call as allowed, so an `ask` rule on Agent does not
-prompt for a spawn they isolated.
+That last hook is behind the plugin's `isolate_subagents` option (on by
+default; `/config`, or `pluginConfigs["nixconvoy@nixconvoy"].options` in
+the user settings) because two hooks that each rewrite one Agent call
+race: Claude Code runs matching hooks in parallel and keeps one
+`updatedInput`, whichever lands last.  A PreToolUse hook of your own on
+`Agent` that rewrites the call (pinning a subagent's model, say) must be
+the one rewriter: turn the option off and add `isolation: "worktree"`
+from inside it (`subagent-isolate.sh` shows the rule: a call without
+`isolation`, spawned in a git repository - the session's project
+directory, not the shell's, which drifts).  Both hooks return the
+rewritten call as allowed, so an `ask` rule on Agent does not prompt for
+a spawn they isolated.  This hook was the separate `nixconvoy-isolate`
+plugin until 0.2.3: one still installed races it, so `claude plugin
+uninstall nixconvoy-isolate@nixconvoy`.
 
 `--scope project`, run in the repository, writes the enablement into its
 tracked `.claude/settings.json`: every worktree of it has it, and each
-collaborator runs the install once.  The hooks act in a repository
-with `nixconvoy.toml` alone: enabled at user scope, they run in every
-repository you open, but outside a nixconvoy repository `nixconvoy` is
-never called - the prunes and the resume do nothing, and the create and
+collaborator runs the install once.  The isolate hook acts in any git
+repository; the worktree hooks act in one with `nixconvoy.toml` alone:
+enabled at user scope, they run in every repository you open, but
+outside a nixconvoy repository `nixconvoy` is never called - the prunes and the resume do nothing, and the create and
 remove hooks, which Claude Code hands to a configured hook entirely, do
 what its own git would (a plain `.claude/worktrees/<name>` on
 `worktree-<name>` off origin's default branch, removed with that branch).

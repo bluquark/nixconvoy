@@ -10,7 +10,7 @@ let
     root = ../.;
     fileset = fs.unions [ ../src ../tests ../ruff.toml ../pyrefly.toml ../pyproject.toml ];
   };
-  hookScripts = [ "claude-code/hooks/run.sh" "claude-code-isolate/hooks/subagent-isolate.sh" ];
+  hookScripts = [ "claude-code/hooks/run.sh" "claude-code/hooks/subagent-isolate.sh" ];
   hookSources = fs.toSource { root = ../integrations; fileset = fs.unions (map (f: ../integrations + "/${f}") hookScripts); };
   sh = pkgs.runCommandLocal "nixconvoy-lint-sh" { } ''
     ${pkgs.shellcheck-minimal}/bin/shellcheck ${lib.concatMapStringsSep " " (f: "${hookSources}/${f}") hookScripts}

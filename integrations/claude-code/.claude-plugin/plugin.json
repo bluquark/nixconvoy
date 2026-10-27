@@ -1,10 +1,18 @@
 {
   "name": "nixconvoy",
-  "description": "Subagent worktrees under the spawning checkout, each owning a nixconvoy work branch",
-  "version": "0.2.2",
+  "description": "Subagent worktrees under the spawning checkout, each owning a nixconvoy work branch; every subagent spawned in a repository given one (isolation: worktree) unless the option says not to",
+  "version": "0.2.3",
   "author": {
     "name": "bluquark"
   },
   "repository": "https://github.com/bluquark/nixconvoy",
-  "license": "MIT OR Apache-2.0"
+  "license": "MIT OR Apache-2.0",
+  "userConfig": {
+    "isolate_subagents": {
+      "type": "boolean",
+      "title": "Isolate subagents",
+      "description": "Add isolation: worktree to every Agent call spawned inside a git repository that did not set one. Turn off when a PreToolUse hook of your own rewrites Agent calls: Claude Code keeps one hook's rewrite, so that hook must add the isolation itself.",
+      "default": true
+    }
+  }
 }
