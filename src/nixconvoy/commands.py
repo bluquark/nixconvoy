@@ -19,7 +19,7 @@ from .checkout import (
     MACHINE_ENV,
     PENDING_REFS,
     SESSIONLESS,
-    WAIT_STALE,
+    STALE_STAMP,
     GitQueries,
     add_worktree,
     adopt_origin_tip,
@@ -964,7 +964,7 @@ def status() -> None:
             entry = f"{a.key}: {summarize(a.sha)}" + (" (settled, awaiting its push)" if a.settled else "")
             # Display only: the announcer's clock, not this machine's.
             silent = now - a.at
-            if not a.settled and silent > WAIT_STALE:
+            if not a.settled and silent > STALE_STAMP:
                 print(f"  {paint(f'{entry} - not renewed for {silent / 60:.0f} min: dead?', 'red')}")
             else:
                 print(f"  {paint(entry, 'yellow')}")

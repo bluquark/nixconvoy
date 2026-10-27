@@ -77,9 +77,11 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      the targets again and redo step 4 with what it pushed.  Building without
      it would only end refused - or rebuilt - once it switched.  Only
      deploys announced before this one are waited for (two never wait for
-     each other); one whose announcement goes 30 s without a renewal (by
-     this machine's clock, as of successful fetches) is taken for dead and
-     gone on without, with a warning, until it is renewed again (a re-run);
+     each other); one whose announcement was last renewed over 10 min before
+     the fetch that first showed it (its machine's clock against this one's),
+     or goes 30 s without a renewal (by this machine's clock, as of
+     successful fetches), is taken for dead and gone on without, with a
+     warning, until it is renewed again (a re-run);
      one settled (over, its push pending: a main checkout's, which its
      owner pushes) is not waited for; --evict waits for nobody
   5. evaluate every reachable target's toplevel for the union, one nix eval

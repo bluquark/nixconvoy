@@ -1,11 +1,10 @@
-"""nixconvoy's test suite, run by the flake's lint check (nix/lint.nix)
-against the built package, the switch-guard cores it carries included:
+"""nixconvoy's test suite, the package's check phase (nix/package.nix),
+run against the built package, the switch-guard cores it carries included:
 
 - the switch step end to end against a fake target: the real
   nixconvoy-switch binary decides, the switch module's effects loop
-  performs, and every ssh call lands in this file's --fake-target mode,
-  which plays the confirmed-switch helper, systemd-run and nix-env on a JSON
-  state file;
+  performs, and every ssh call lands in fake_target.py, which plays the
+  confirmed-switch helper, systemd-run and nix-env on a JSON state file;
 - the batch's die() gate, the targets and nixconvoy.toml, the eval memo's
   entries, the provenance records and the drift classification other deploys
   read from them, and the real on-target switch guard;
@@ -29,7 +28,6 @@ import itertools
 import json
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -114,84 +112,6 @@ def load(path: Path) -> dict[str, object]:
     return {str(k): v for k, v in state.items()}
 
 
-def fake_target(argv: list[str]) -> int:
-    """One ssh call to the fake target."""
-    path = Path(os.environ["FAKE_TARGET_STATE"])
-    state = load(path)
-    calls = state.setdefault("calls", [])
-    assert isinstance(calls, list)
-    calls.append(argv)
-    if argv[0] == "systemd-run":
-        argv = [a for a in argv[1:] if not a.startswith("--")]
-    rc = 0
-    helper = f"{NEW}/confirmed-switch"
-    match argv:
-        case ["test", "-e", p]:
-            rc = 0 if state["helper"] and p == helper else 1
-        case ["readlink", "/run/current-system"]:
-            print(state["running"])
-        case [h, "deadline"] if h == helper:
-            print(20)
-        case [h, "arm"] if h == helper:
-            state["armed"] = True
-            print(f"confirmed-switch: armed, rolling back to {state['rollback_to']} in 20s unless confirmed")
-        case [h, "activate", top] if h == helper:
-            rc = int(str(state["activate_rc"]))
-            if rc != 100:
-                state["running"] = top
-        case [h, "check"] if h == helper:
-            if state["check_killed"]:
-                path.write_text(proc.dump_json(state))
-                os.kill(os.getpid(), signal.SIGKILL)
-            if not state["check_ok"]:
-                print("dnsmasq is not active", file=sys.stderr)
-                rc = 1
-        case [h, "confirm", top, *rest] if h == helper:
-            if state["confirm_rc"]:
-                rc = int(str(state["confirm_rc"]))
-            elif rest or state["running"] == top:
-                state["profile"] = top
-            else:
-                rc = 1
-        case [h, "rollback"] if h == helper:
-            rc = int(str(state["rollback_rc"]))
-            if rc == 0:
-                state["running"] = state["rollback_to"]
-                print(f"confirmed-switch: rolled back to {state['rollback_to']}")
-        case ["nix-env", "-p", _, "--set", top]:
-            state["profile"] = top
-        case [p, "switch"] if p == f"{NEW}/bin/switch-to-configuration":
-            state["running"] = NEW
-        case _:
-            print(f"fake target: unexpected {argv}", file=sys.stderr)
-            rc = 99
-    path.write_text(proc.dump_json(state))
-    return rc
-
-
-def fake_guard(expected: str, toplevel: str) -> int:
-    """switch_guard_cmd's contract: claim the provenance once locked, put it
-    back at the end unless the target runs or boots `toplevel`."""
-    path = Path(os.environ["FAKE_TARGET_STATE"])
-    running = load(path)["running"]
-    if running != expected:
-        print(f"MOVED {running}", flush=True)
-        return 1
-    print("LOCKED", flush=True)
-    rec = sys.stdin.readline().strip()
-    if rec:
-        state = load(path)
-        state["provenance"] = rec
-        path.write_text(proc.dump_json(state))
-    print("WROTE" if rec else "SKIPPED", flush=True)
-    sys.stdin.read()
-    state = load(path)
-    if toplevel not in (state["running"], state["profile"]):
-        state.pop("provenance", None)
-        path.write_text(proc.dump_json(state))
-    return 0
-
-
 class Clock:
     """Each reading a second after the last: verification rounds advance
     without sleeping."""
@@ -229,7 +149,7 @@ def scenario(name: str, *, helper: bool = True, check_ok: bool = True, activate_
 def switch_cases(d: Path) -> None:
     """The switch step against the fake target, on a clock that advances a
     second a reading and sleeps that return at once."""
-    me = [sys.executable, str(Path(__file__).resolve())]
+    me = [sys.executable, str(Path(__file__).resolve().with_name("fake_target.py"))]
 
     def target_cmd(target: str, argv: list[str], sudo: bool = False,
                    fresh: bool = False) -> list[str]:
@@ -471,22 +391,34 @@ def gate_cases() -> None:
 
 def await_cases() -> None:
     """A waited-for announcement is alive while its sha keeps changing,
-    dead once unchanged past WAIT_STALE - and stays dead across looks,
-    however many, until it changes again."""
+    dead once unchanged past WAIT_STALE, or at first sight when its stamp
+    was STALE_STAMP old at the fetch - and stays dead across looks, however
+    many, until it changes again.  A key seen renewed between two looks is
+    alive whatever its stamp (the announcer's clock behind)."""
     seen: dict[str, tuple[str, float]] = {}
     dead: set[str] = set()
-    stale = checkout.WAIT_STALE
+    stale, by_stamp = checkout.WAIT_STALE, checkout.STALE_STAMP
+    fetched = 10_000.0
 
-    def p(sha: str) -> checkout.Pending:
-        return checkout.Pending("work/x", "work/x", sha, 1, 1, False, ())
+    def p(sha: str, at: float = fetched, key: str = "work/x") -> checkout.Pending:
+        return checkout.Pending(key, key, sha, 1, int(at), False, ())
 
-    assert deploy.news_of(p("a"), 0, seen, dead)
-    assert deploy.news_of(p("a"), stale, seen, dead)  # not past it yet
-    assert deploy.news_of(p("b"), stale + 1, seen, dead)
-    assert not deploy.news_of(p("b"), 2 * stale + 2, seen, dead) and dead == {"work/x"}
+    assert deploy.news_of(p("a"), 0, fetched, seen, dead)
+    assert deploy.news_of(p("a"), stale, fetched, seen, dead)  # not past it yet
+    assert deploy.news_of(p("b"), stale + 1, fetched, seen, dead)
+    assert not deploy.news_of(p("b"), 2 * stale + 2, fetched, seen, dead) and dead == {"work/x"}
     for t in (2 * stale + 3, 10 * stale):  # a later look, an await redone: dead still
-        assert not deploy.news_of(p("b"), t, seen, dead) and dead == {"work/x"}
-    assert deploy.news_of(p("c"), 10 * stale + 1, seen, dead) and not dead  # renewed: a re-run
+        assert not deploy.news_of(p("b"), t, fetched, seen, dead) and dead == {"work/x"}
+    assert deploy.news_of(p("c"), 10 * stale + 1, fetched, seen, dead) and not dead  # renewed: a re-run
+    # Renewed since the last look: alive, its stamp however old.
+    assert deploy.news_of(p("d", fetched - 10 * by_stamp), 10 * stale + 2, fetched, seen, dead) and not dead
+    # First sight: a stale stamp is dead at once, a fresh or future one not.
+    assert not deploy.news_of(p("e", fetched - by_stamp - 1, "work/y"), 0, fetched, seen, dead)
+    assert dead == {"work/y"}
+    assert deploy.news_of(p("f", fetched, "work/y"), 1, fetched, seen, dead) and not dead  # renewed: alive
+    assert deploy.news_of(p("h", fetched - by_stamp + 1, "work/z"), 0, fetched, seen, dead)
+    assert deploy.news_of(p("i", fetched + by_stamp, "work/w"), 0, fetched, seen, dead)
+    assert deploy.news_of(p("j", 0, "work/v"), 0, 0.0, seen, dead) and dead == set()  # no fetch yet
     say("await: ok")
 
 
@@ -2616,10 +2548,6 @@ def init_cases(d: Path) -> None:
 
 
 if __name__ == "__main__":
-    if sys.argv[1:2] == ["--fake-target"]:
-        sys.exit(fake_target(sys.argv[2:]))
-    if sys.argv[1:2] == ["--fake-guard"]:
-        sys.exit(fake_guard(sys.argv[2], sys.argv[3]))
     proc.this_machine = lambda: "tester"
     config.set_cfg(config.parse(toml()))
     # No announcement renews on its timer: announce_cases drives the renewals.

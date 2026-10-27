@@ -243,8 +243,9 @@ def out(cmd: list[str], *, cwd: str | None = None,
     return run(cmd, cwd=cwd, env=env, input=input).stdout.strip()
 
 
-def ok(cmd: list[str], *, cwd: str | None = None, timeout: float | None = None) -> bool:
-    return run(cmd, cwd=cwd, check=False, timeout=timeout).returncode == 0
+def ok(cmd: list[str], *, cwd: str | None = None, env: dict[str, str] | None = None,
+       timeout: float | None = None) -> bool:
+    return run(cmd, cwd=cwd, env=env, check=False, timeout=timeout).returncode == 0
 
 
 # A git transfer under 1 kB/s for 10 s aborts (HTTPS remotes; ssh ones have
@@ -344,6 +345,13 @@ HELD: list[IO[str]] = []  # locks held until exit
 
 
 def solve_with_mergiraf(wt: str, path: str) -> bool:
-    """Resolve the conflicted `path` in the worktree `wt` structurally."""
-    tool = ["mergiraf"] if shutil.which("mergiraf") else ["nix", "run", "nixpkgs#mergiraf", "--"]
-    return ok([*tool, "solve", "--keep-backup=false", path], cwd=wt)
+    """Resolve the conflicted `path` in the worktree `wt` structurally.
+    mergiraf first probes PATH for jj (Jujutsu), which it never needs here,
+    and a shim directory that fetches a command on its first use (omnibin)
+    answers that probe with a 20 s fetch: it runs on a PATH of its own and
+    git's directories alone (git check-attr is what it calls)."""
+    tool = shutil.which("mergiraf")
+    if tool is None:
+        return ok(["nix", "run", "nixpkgs#mergiraf", "--", "solve", "--keep-backup=false", path], cwd=wt)
+    dirs = dict.fromkeys(str(Path(t).parent) for t in (tool, shutil.which("git")) if t)
+    return ok([tool, "solve", "--keep-backup=false", path], cwd=wt, env={"PATH": os.pathsep.join(dirs)})

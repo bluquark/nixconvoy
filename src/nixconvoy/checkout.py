@@ -90,17 +90,40 @@ DEPLOYED_PREFIX = "nixconvoy-history"
 FETCH_REFSPECS = ("+refs/heads/*:refs/remotes/origin/*",
                   f"+{PENDING_REFS}/*:{PENDING_REFS}/*")
 # A deploy renews its announcement every HEARTBEAT seconds while it runs; a
-# deploy waiting for it (deploy.await_pending) that has seen no renewal for
-# WAIT_STALE seconds takes it for dead and goes on without it - to be
-# refused by the drift core, which names the dead deploy, if a target it
-# reaches still runs that increment.  Both by the waiter's own clock, so
-# the machines' clocks need not agree.
+# deploy waiting for it (deploy.await_pending) takes it for dead and goes
+# on without it - to be refused by the drift core, which names the dead
+# deploy, if a target it reaches still runs that increment - when its last
+# renewal (the commit's committer date, the announcer's clock) was already
+# STALE_STAMP seconds old at the fetch that first brought it (the fetch's
+# start by the waiter's clock), or once the waiter has seen no renewal for
+# WAIT_STALE seconds of its own clock.  The stamp rule spares every later
+# deploy the WAIT_STALE wait on a key a deploy left behind long ago; it is
+# the one place two machines' clocks meet, so its margin is minutes, more
+# than any clock still being set drifts, and a key seen renewed between
+# two looks is alive whatever its stamp.
 HEARTBEAT = 10
 WAIT_STALE = 30
+STALE_STAMP = 600
 # A renewal push slower than this is given up (the next renewal retries):
 # one hanging past WAIT_STALE would have the deploy taken for dead.  A
 # withdrawal too: one that never lands costs other deploys at most WAIT_STALE.
 PUSH_TIMEOUT = 15
+
+
+# Wall time at the start of the last fetch of origin that succeeded (the
+# refs are at least that fresh), 0.0 before any: what an announcement's
+# stamp is judged against (deploy.news_of).
+FETCHED_AT = 0.0
+
+
+def fetch_origin(*flags: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    """`git fetch origin` (fetch_args), stamping FETCHED_AT on success."""
+    global FETCHED_AT
+    started = time.time()
+    p = git(*fetch_args(*flags), check=check)
+    if p.returncode == 0:
+        FETCHED_AT = started
+    return p
 
 
 def fetch_args(*flags: str) -> list[str]:
@@ -452,7 +475,7 @@ class GitQueries:
             case Rev(name):
                 return Text(rev(name))
             case Fetch():
-                return ran(git(*fetch_args("--no-auto-gc"), check=False))
+                return ran(fetch_origin("--no-auto-gc", check=False))
             case Push(branch):
                 problem = sole_writer_problem(branch)
                 if problem is not None:

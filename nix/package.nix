@@ -2,7 +2,9 @@
 # it drives (src/nixconvoy/guard.py finds them beside itself, so the two
 # never pair with another tree's build), wrapped with the tools its
 # subprocesses need, `git review` beside it and the shell prompt segment
-# under share/.
+# under share/.  The test suite (tests/switch_test.py) runs against the
+# installed package as its check phase, so a deploy that moves the pin
+# pays it in its build, never in the precheck (nix/lint.nix).
 { pkgs, switch-guard }:
 let
   inherit (pkgs) lib;
@@ -17,13 +19,22 @@ python.pkgs.buildPythonApplication {
     fileset = lib.fileset.unions [
       ../pyproject.toml
       ../src
+      ../tests
       ../README.md
       ../integrations/claude-code/bin/git-review
+      ../integrations/claude-code/hooks
       ../integrations/shell/prompt.bash
     ];
   };
   build-system = [ python.pkgs.setuptools ];
-  doCheck = false;
+  # The suite reads /proc and flocks: Linux alone.
+  doCheck = pkgs.stdenv.hostPlatform.isLinux;
+  nativeCheckInputs = [ pkgs.git pkgs.mergiraf pkgs.jq pkgs.util-linux ];
+  checkPhase = ''
+    runHook preCheck
+    HOME=$TMPDIR PYTHONPATH=$out/${python.sitePackages} python3 tests/switch_test.py
+    runHook postCheck
+  '';
   makeWrapperArgs = [
     "--prefix" "PATH" ":" (lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.mergiraf pkgs.util-linux ])
   ];

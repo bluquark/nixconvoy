@@ -13,10 +13,11 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
-from . import memo, proc, submodule, targets
+from . import checkout, memo, proc, submodule, targets
 from .checkout import (
     DEPLOYED_PREFIX,
     PENDING_REFS,
+    STALE_STAMP,
     WAIT_STALE,
     Announce,
     Pending,
@@ -31,7 +32,7 @@ from .checkout import (
     ensure_on_work_branch,
     ensure_rebased,
     ensure_sole_writer,
-    fetch_args,
+    fetch_origin,
     held_targets,
     note_pushed,
     origin_tips,
@@ -47,7 +48,7 @@ from .checkout import (
 from .config import store_host
 from .guard import binary, decide
 from .memo import Top
-from .proc import NOTHING_DONE, PERF, Fail, die, dump_json, git, is_ancestor, load_json, out, rev
+from .proc import NOTHING_DONE, PERF, Fail, die, dump_json, is_ancestor, load_json, out, rev
 from .switch import SwitchedMeanwhile, provenance_record, switch
 from .targets import Probe, expand_targets, flake_target_names
 from .union import UnionQueries
@@ -60,27 +61,35 @@ WAIT_POLL = 5
 SWITCH_REDOS = 2
 
 
-def news_of(p: Pending, now: float, seen: dict[str, tuple[str, float]], dead: set[str]) -> bool:
+def news_of(p: Pending, now: float, fetched: float, seen: dict[str, tuple[str, float]],
+            dead: set[str]) -> bool:
     """Whether `p`'s deploy is alive by its renewals: `seen` keeps each
-    key's sha as last seen and when it changed (the caller's clock, `now`,
-    as of a successful fetch).  One unchanged for WAIT_STALE is dead
-    (`dead`, said once) until it changes again - a re-run from that
-    checkout, said too."""
+    key's sha as last seen and when it changed (the caller's monotonic
+    clock, `now`, as of a successful fetch).  One first seen with its last
+    renewal STALE_STAMP old by its own stamp against the fetch's wall time
+    `fetched` (0.0: no fetch yet, the rule skipped), or unchanged for
+    WAIT_STALE, is dead (`dead`, said once) until it changes again - a
+    re-run from that checkout, said too."""
     sha, changed = seen.get(p.key, ("", now))
+    first = not sha
     if sha != p.sha:
         seen[p.key] = (p.sha, now)
+        changed = now
         if p.key in dead:
             print(f"{p.key}'s deploy is under way again: waited for after all", flush=True)
             dead.discard(p.key)
-        return True
     if p.key in dead:
         return False
-    if now - changed > WAIT_STALE:
+    if first and fetched and fetched - p.at > STALE_STAMP:
+        print(f"warning: {p.key}'s deploy last renewed its announcement {(fetched - p.at) / 60:.0f} min "
+              f"ago (by its machine's clock): taken as dead, going on without it", flush=True)
+    elif now - changed > WAIT_STALE:
         print(f"warning: no news of {p.key}'s deploy for {WAIT_STALE} s (its announcement is no "
               f"longer renewed): taken as dead, going on without it", flush=True)
-        dead.add(p.key)
-        return False
-    return True
+    else:
+        return True
+    dead.add(p.key)
+    return False
 
 
 def exit_on_signal(signum: int, _frame: object) -> None:
@@ -195,7 +204,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     # drift, and a hold on one is read off its provenance.
     probe_names: list[str] = [] if skip else list(all_targets)
     pool = ThreadPoolExecutor(1 + len(probe_names) + len(submodule.present(Path.cwd())))
-    fetch = pool.submit(git, *fetch_args("--no-auto-gc"))
+    fetch = pool.submit(fetch_origin, "--no-auto-gc")
     if not dry:  # a dry activation brings no submodule along
         submodule.prefetch(Path.cwd(), pool)
     probes = {n: pool.submit(targets.probe, n) for n in probe_names}
@@ -361,9 +370,9 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             ann.retarget(snap or "HEAD")
 
     # The announcements (by key) whose deploy is dead as far as this run
-    # can tell (no renewal for WAIT_STALE seconds while waited for): told
-    # to the drift core, which names the dead deploy when it refuses a
-    # target running its increment.
+    # can tell (news_of: a stale stamp at first sight, or no renewal for
+    # WAIT_STALE seconds while waited for): told to the drift core, which
+    # names the dead deploy when it refuses a target running its increment.
     dead: set[str] = set()
     # Each announcement as last seen, and when it last changed (this
     # machine's clock, as of a successful fetch): across the waits of a
@@ -377,10 +386,11 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         on `union`, checked out in `wt`), wait for it to end rather than
         build without it and be refused (or rebuild) once it switched.
         Only deploys announced before this one are waited for, so two never
-        wait for each other; one whose announcement is not renewed for
-        WAIT_STALE seconds of successful looks at origin is taken for dead
-        (until it is renewed again: a re-run); one settled (over, its push
-        pending) is not waited for.
+        wait for each other; one whose announcement was last renewed
+        STALE_STAMP seconds before the fetch that first showed it, or is not
+        renewed for WAIT_STALE seconds of successful looks at origin, is
+        taken for dead (until it is renewed again: a re-run); one settled
+        (over, its push pending) is not waited for.
         Whether it waited: the targets are then probed again, and the union
         redone with what landed."""
         nonlocal probes
@@ -394,12 +404,12 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         started = status_at = time.monotonic()
         while True:
             waiting: dict[str, list[str]] = {}
-            now = time.monotonic()
+            now, fetched = time.monotonic(), checkout.FETCHED_AT
             for p in pending_announcements():
                 if p.key == own or p.settled:
                     continue
                 # Judged whatever its rank: a dead one the drift core names.
-                if not news_of(p, now, seen, dead) or (rank is not None and (p.since, p.branch) >= rank):
+                if not news_of(p, now, fetched, seen, dead) or (rank is not None and (p.since, p.branch) >= rank):
                     continue
                 if mine is None:
                     mine = sorted(memo.reached_targets(
@@ -431,7 +441,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             failed_polls = 0
             while True:
                 time.sleep(WAIT_POLL)
-                if git(*fetch_args("--no-auto-gc"), check=False).returncode == 0:
+                if fetch_origin("--no-auto-gc", check=False).returncode == 0:
                     break
                 failed_polls += 1
                 if failed_polls >= 12:
@@ -597,7 +607,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         if dry and plan:
             print(f"dry-activating {', '.join(plan)}...")
         with ThreadPoolExecutor(2 + len(plan)) as pool:
-            refetch = pool.submit(git, *fetch_args())
+            refetch = pool.submit(fetch_origin)
             # Carried, or a redone stage's stale records dropped.
             pushed = pool.submit(ann.carry, records) if ann is not None and (records or ann.records) else None
             copies = [pool.submit(copy_then_dry, n, tops[n], len(plan) > 1) for n in plan]
@@ -681,7 +691,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                 print(f"{e}: probing the targets again and redoing the plan", flush=True)
                 PERF.mark("probe")
                 with ThreadPoolExecutor(1 + len(probes)) as pool:
-                    fetch = pool.submit(git, *fetch_args())
+                    fetch = pool.submit(fetch_origin)
                     probes = {n: pool.submit(targets.probe, n) for n in probes}
                 collect_probes()
                 continue

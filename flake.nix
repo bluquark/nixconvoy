@@ -17,8 +17,11 @@
     checks = forAll (pkgs: {
       lint = import ./nix/lint.nix {
         inherit pkgs;
-        inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) switch-guard nixconvoy;
+        inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) switch-guard;
       };
+      # The package build runs the suite (nix/package.nix): named here so
+      # `nix flake check` runs it too.
+      tests = self.packages.${pkgs.stdenv.hostPlatform.system}.nixconvoy;
     });
 
     # The target side: the switch policy options nixconvoy reads at eval time,

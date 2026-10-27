@@ -63,8 +63,10 @@ no work.
   a target that one reaches too waits for it (only for deploys announced
   before its own, so two never wait for each other), then builds with
   what it pushed - instead of building without it to be refused once it
-  switched.  One whose announcement goes 30 seconds without a renewal is
-  taken for dead and no longer waited for, until a re-run renews it.  A
+  switched.  One whose announcement was last renewed more than ten minutes
+  before it was first seen, or goes 30 seconds without a renewal while
+  waited for, is taken for dead and no longer waited for, until a re-run
+  renews it.  A
   target that another deploy switched meanwhile all the same has the run
   probe and plan again (memoized, so seconds) rather than fail.  The push
   that ends the deploy
@@ -497,8 +499,10 @@ commit.  From a checkout on a work branch:
   resumes), `nixconvoy-switch` (the switch protocol), `nixconvoy-confirmed-switch` (the
   target-side helper) and `nixconvoy-boot-assessment`.
 - `tests/switch_test.py`: the switch driven end to end against a fake target,
-  the provenance classification, and the git cores on scratch repositories.
-- `nix flake check` runs all of it.
+  the provenance classification, and the git cores on scratch repositories;
+  the package's check phase, so building the package runs it.
+- `nix flake check` builds the `lint` check: ruff, pyrefly, shellcheck,
+  rustfmt and clippy alone, cheap enough for a deploy's precheck.
 
 ## Prior art
 
