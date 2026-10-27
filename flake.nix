@@ -3,6 +3,14 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
+  # Builds of the packages below, pushed by the maintainer;
+  # `nix run github:bluquark/nixconvoy` offers them, a flake taking
+  # nixconvoy as an input names them in its own nix.conf.
+  nixConfig = {
+    extra-substituters = [ "https://nixconvoy.cachix.org" ];
+    extra-trusted-public-keys = [ "nixconvoy.cachix.org-1:8HCQ3qVkg+lUbouy8s7aWzWoDoGDrm0lkg07VvD8RwQ=" ];
+  };
+
   outputs = { self, nixpkgs }:
   let
     systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
