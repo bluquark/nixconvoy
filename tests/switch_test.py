@@ -2102,6 +2102,24 @@ def submodule_cases(d: Path) -> None:
         sh(ax8, "push", "--quiet", "--force", "origin", wb8)
         submodule.set_pin(dep(co8), t2, co8)  # ...its pin staged, as that deploy's sync left it
         sh(co8, "fetch", "--quiet")
+        # A text conflict beside the gitlink: the rebase is the hand's, told
+        # what to do at the gitlink's stop (the landing merges the submodule).
+        co9 = d / "homelab9b"
+        sh(d, "clone", "--quiet", str(origin), str(co9))
+        put(co9, "note.txt", "main's\n", "note")
+        sh(co9, "push", "--quiet", "origin", "HEAD:main")
+        shutil.rmtree(co9)
+        sh(co8, "fetch", "--quiet")
+        put(co8, "note.txt", "mine\n")  # staged, as a deploy's state
+        err = dies(checkout.ensure_rebased)
+        assert f"rebasing {wb8} onto origin/main is not clean" in err and "Could not read" not in err and \
+            f"at a stop on {path} keep this branch's own pin" in err and \
+            f"git update-index --cacheinfo 160000,$(git rev-parse :3:{path}),{path}" in err, err
+        assert sh(ax8, "rev-parse", "HEAD") == t2 and pinned(co8) == t2 and checkout.git_op_in_progress() is None
+        sh(co8, "rm", "--quiet", "--cached", "note.txt")
+        (co8 / "note.txt").unlink()
+        sh(co8, "push", "--quiet", "--force", "origin", f"{after_land}:refs/heads/main")  # main as it was
+        sh(co8, "fetch", "--quiet")
         # The submodule's worktree cannot follow (edits): the rebase's
         # failure says why git could not do it alone and what to do.
         (ax8 / "tool2.py").write_text("b, edited\n")

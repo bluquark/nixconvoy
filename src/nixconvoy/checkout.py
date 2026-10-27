@@ -550,7 +550,9 @@ class GitQueries:
         # where main pins a submodule this branch pinned too (its
         # landing elsewhere) - the submodule follows (solve_stop).
         why = ""
+        met: list[str] = []  # the gitlinks a hand rebase meets again, nixconvoy's solutions undone with the abort
         while p.returncode != 0:
+            met = list(dict.fromkeys(met + unmerged_gitlinks(where)))
             why = solve_stop(where, upstream)
             if why is not None:
                 break
@@ -576,7 +578,19 @@ class GitQueries:
                              if ln.strip() and not ln.startswith(noise) and not ln.startswith("hint:"))
             return Ran(False, why + (f"\n{rest}" if rest else ""))
         there = f"git {rebase_hint(upstream, where)}" + (f" {self.aside_branch}" if where else "")
-        return Ran(False, f"run `{there}` there, resolve, then re-run:\n{(p.stderr or '').strip()}")
+        hint = f"run `{there}` there, resolve, then re-run"
+        if met:  # git checkout --theirs leaves a gitlink unmerged: the stage is written outright
+            wt = Path(where or Path.cwd()).resolve()
+            fixes = []
+            for g in met:
+                fixes.append(f"git update-index --cacheinfo {submodule.GITLINK},$(git rev-parse :3:{g}),{g}")
+                sub = submodule.owner(wt, g)
+                if sub is not None and sub.pin_file:
+                    fixes.append(f"git checkout --theirs -- {sub.pin_file}")
+            hint += (f"; at a stop on {', '.join(met)} keep this branch's own pin, the landing merging the "
+                     f"submodule onto its default branch itself (a deploy rebases it there first):\n  "
+                     + "\n  ".join(fixes))
+        return Ran(False, f"{hint}:\n{(p.stderr or '').strip()}")
 
 
 def pop_tmp_commits() -> None:
@@ -1345,6 +1359,15 @@ def rebase_hint(upstream: str, cwd: str | None = None) -> str:
     """The rebase to run by hand, as rebase_range would: `rebase [--onto]
     origin/main [<base>]`."""
     return "rebase " + " ".join(a.removeprefix("refs/remotes/") for a in rebase_range(upstream, cwd))
+
+
+def unmerged_gitlinks(where: str | None) -> list[str]:
+    """The gitlinks among a stopped rebase's conflicts in `where`."""
+    from . import submodule  # noqa: PLC0415 - submodule builds on this module
+
+    lines = out(["git", "ls-files", "-u"], cwd=where).splitlines()
+    return list(dict.fromkeys(path for meta, _, path in (ln.partition("\t") for ln in lines)
+                              if meta.startswith(f"{submodule.GITLINK} ")))
 
 
 def solve_stop(where: str | None, upstream: str) -> str | None:
