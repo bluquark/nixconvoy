@@ -217,12 +217,37 @@ def branch_at(d: Path) -> str | None:
     return p.stdout.strip() or None
 
 
+STATE_DIR = "nixconvoy"
+
+
+def state_path(name: str, cwd: Path | None = None) -> Path:
+    """nixconvoy's file `name` in the checkout's (`cwd`, else the current
+    one's) own git dir: .git/nixconvoy/<name>, under .git/worktrees/<it>/
+    for a linked worktree, as `git rev-parse --git-path` places it; the
+    directory made where it can be (a read of a missing file in a git dir
+    that cannot be written fails as the read)."""
+    return state_dir(Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path", STATE_DIR],
+                             cwd=None if cwd is None else str(cwd)))) / name
+
+
+def common_state_path(name: str, common: Path) -> Path:
+    """nixconvoy's file `name` under `common`, a repository's common git
+    dir: .git/nixconvoy/<name>, shared by its worktrees."""
+    return state_dir(common / STATE_DIR) / name
+
+
+def state_dir(d: Path) -> Path:
+    with contextlib.suppress(OSError):
+        d.mkdir(exist_ok=True)
+    return d
+
+
 def note_path(d: Path) -> Path:
     """The note in a checkout's git dir naming the work branch it owns:
     the listed branch it last deployed or committed from, so switching to
     main to look around does not orphan the branch (pull still rebases it
     aside, status still shows it as this checkout's)."""
-    return d / out(["git", "rev-parse", "--git-path", "nixconvoy-work-branch"], cwd=str(d))
+    return state_path("work-branch", d)
 
 
 def noted_branch(d: Path) -> str | None:
@@ -253,8 +278,8 @@ def note_prefix(top: Path) -> None:
         text = config.load(top).branch_prefix.format(machine=proc.this_machine()) + "\n"
     except config.ConfigError:
         return
-    p = common / "nixconvoy-branch-prefix"
     with contextlib.suppress(OSError):
+        p = common_state_path("branch-prefix", common)
         if not p.exists() or p.read_text() != text:
             p.write_text(text)
 
@@ -319,7 +344,7 @@ def staged_differs() -> bool:
     return not ok(["git", "diff", "--cached", "--quiet"])
 
 
-LOCK_FILE = "nixconvoy-deploy.lock"
+LOCK_FILE = "deploy.lock"
 
 
 def lock_checkout() -> IO[str] | None:
@@ -329,7 +354,7 @@ def lock_checkout() -> IO[str] | None:
     onto HEAD at its end, so `pull` must not rebase HEAD under it.  The
     holder's pid, start time and arguments go in the file, for lock_holder."""
     # "a+", so that a contender does not truncate the holder's line.
-    f = Path(out(["git", "rev-parse", "--git-path", LOCK_FILE])).open("a+")  # noqa: SIM115
+    f = state_path(LOCK_FILE).open("a+")
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -359,7 +384,7 @@ def lock_holder(d: Path | None = None) -> str:
     older build wrote nothing."""
     where = d or Path.cwd()
     try:
-        line = (where / out(["git", "rev-parse", "--git-path", LOCK_FILE], cwd=str(where))).read_text()
+        line = state_path(LOCK_FILE, where).read_text()
     except OSError:
         line = ""
     held = holder_of(line)
@@ -414,7 +439,7 @@ def deploy_running(d: Path) -> bool:
     """Whether an nixconvoy holds the checkout's lock (lock_checkout): a shared
     lock, tried and dropped at once, conflicts only with its exclusive one.
     No lock file yet means no run ever took it."""
-    lock = d / out(["git", "rev-parse", "--git-path", "nixconvoy-deploy.lock"], cwd=str(d))
+    lock = state_path(LOCK_FILE, d)
     if not lock.exists():
         return False
     try:
@@ -674,7 +699,7 @@ def landing_message(given: str | None, on_file: str, draft: str, where: str) -> 
 
 
 SCISSORS = "# ------------------------ >8 ------------------------"
-KEPT_EDIT = "NIXCONVOY_LANDMSG"  # in the git dir: a landing's edited message, until it lands
+KEPT_EDIT = "landmsg"  # in the git dir (state_path): a landing's edited message, until it lands
 
 
 def editor() -> str | None:
@@ -793,16 +818,16 @@ def commit_deployed(wb: str, snap: str, msg: str) -> None:
     adopt_commit(wb, deployed_commit(snap, msg))
 
 
-def push_state(kind: str) -> str:
+def push_state(kind: str) -> Path:
     """The background push's pid/status/log file (in the git dir)."""
-    return out(["git", "rev-parse", "--git-path", f"nixconvoy-push.{kind}"])
+    return state_path(f"push.{kind}")
 
 
 def await_background_push() -> None:
     """Collect the previous run's background push (push_deployed) before
     anything fetches or pushes: wait for it, report a failure (this run's
     push retries it) and clear its files."""
-    pidf, statusf, logf = (Path(push_state(k)) for k in ("pid", "status", "log"))
+    pidf, statusf, logf = (push_state(k) for k in ("pid", "status", "log"))
     if not pidf.exists():
         return
     try:
@@ -1216,7 +1241,7 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str])
     sweep = {f"{PENDING_REFS}/{k}": sha for k, sha in announcements()[1].items()}
     if not refspecs and not sweep:
         return problem
-    pidf, statusf, logf = (Path(push_state(k)) for k in ("pid", "status", "log"))
+    pidf, statusf, logf = (push_state(k) for k in ("pid", "status", "log"))
     hold = os.environ.get("NIXCONVOY_HOLD_PUSH", "")
     push = ["git", "-c", "core.hooksPath=/dev/null", *proc.PUSH_NET, "push", "--quiet", "origin"]
     script = "export GIT_TERMINAL_PROMPT=0; " + (shlex.join([*push, "--atomic", *refspecs]) if refspecs else "true") + "; rc=$?"
@@ -1351,8 +1376,7 @@ def rebase_solving(d: Path, upstream: str, base: str | None, rewritten: dict[str
     through - else aborted, `d` as it was.  `rewritten` gets each replayed
     commit's rewrite, old -> new, as git's post-rewrite hook reports them:
     the one hook run, as no user hook runs under git()."""
-    where = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path", "nixconvoy-rewrite"],
-                     cwd=str(d)))
+    where = state_path("rewrite", d)
     shutil.rmtree(where, ignore_errors=True)
     where.mkdir(parents=True)
     try:

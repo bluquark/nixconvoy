@@ -5,7 +5,7 @@ nearest claude ancestor of this process.  worktree-create opens the
 subagent worktree the session asks for, locked with the session's identity;
 worktree-resume does so again for an agent a message resumes;
 subagent-stop and session-start remove the worktrees the session's agents
-leave with nothing of their own, detached, logging to nixconvoy-prune.log
+leave with nothing of their own, detached, logging to nixconvoy/prune.log
 in the common git dir; worktree-remove removes the one Claude Code itself
 lets go of (a `claude --worktree` session's, at its exit)."""
 
@@ -25,6 +25,7 @@ from .checkout import (
     SESSIONLESS,
     ancestors,
     branch_at,
+    common_state_path,
     lock_live,
     lock_pid_alive,
     proc_stat,
@@ -39,6 +40,7 @@ from .commands import (
     name_lock_path,
     open_worktree,
     outermost,
+    prune_lock,
     prune_one,
     sub_label,
     transcript_cwd,
@@ -235,7 +237,7 @@ def session_start(pid: int) -> None:
     common = Path(out(["git", "rev-parse", "--git-common-dir"])).resolve()
     if not detached(top):
         return
-    waiter = common / f"nixconvoy-prune-after.{pid}"
+    waiter = common_state_path(f"prune-after.{pid}", common)
     held = waiter.open("w")
     try:
         fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -277,9 +279,9 @@ def detached(top: Path) -> bool:
 
 
 def log_to(common: Path) -> None:
-    """stdout and stderr onto nixconvoy-prune.log in the common git dir,
+    """stdout and stderr onto prune.log in the common git dir's nixconvoy/,
     started over past 1 MiB."""
-    logf = common / "nixconvoy-prune.log"
+    logf = common_state_path("prune.log", common)
     with contextlib.suppress(OSError):
         if logf.stat().st_size > 1 << 20:
             logf.replace(logf.with_suffix(".log.old"))
@@ -336,7 +338,7 @@ def subagent_stop(session: int, stop: dict[str, object]) -> None:
             verdict = f"kept, agent {forked[0]} works in it"
         else:
             time.sleep(STOP_GRACE)
-            with (common / "nixconvoy-prune.lock").open("w") as serial:
+            with prune_lock(common).open("w") as serial:
                 fcntl.flock(serial, fcntl.LOCK_EX)
                 gone = not d.is_dir()
                 why = None if gone else prune_one(d, named=True, stopped=Stop(session, stop_lock), wait_name=False)

@@ -172,7 +172,8 @@ segment showing, in a checkout, the work branch by its leaf with
 unstaged edits, the subagent worktrees and the submodule worktrees
 holding something (`__git_ps1` in any other repository).  The leaf
 needs the branch prefix `init` and every later command note in the
-common git dir, so a repository set up before this note shows the
+common git dir's `nixconvoy/` (every file nixconvoy keeps in a git dir
+lives there), so a repository set up before this note shows the
 branch in full until its next command.  With
 `environment.pathsToLink = [ "/share/nixconvoy" ]` beside the package it
 is on the system profile:
@@ -482,10 +483,10 @@ commit.  From a checkout on a work branch:
   that resolves a gitlink rewrites the file with it; a deploy rewrites a
   file a hand-moved gitlink left behind (a main checkout only says so).
 - **Never work in the repository's own checkout.**  `status` flags
-  edits there, and the `nixconvoy-submodule` marker nixconvoy leaves in
-  its git dir lets a global pre-commit hook refuse an agent's commit on
-  the default branch there (`[ -f "$(git rev-parse
-  --git-common-dir)/nixconvoy-submodule" ]` with `git rev-parse
+  edits there, and the `submodule` marker nixconvoy leaves in its git
+  dir's `nixconvoy/` lets a global pre-commit hook refuse an agent's
+  commit on the default branch there (`[ -f "$(git rev-parse
+  --git-common-dir)/nixconvoy/submodule" ]` with `git rev-parse
   --git-dir` the common dir; a repository setting its own
   `core.hooksPath`, husky's say, bypasses global hooks).
 

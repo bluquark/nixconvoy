@@ -16,6 +16,7 @@ from . import names, submodule
 from .checkout import (
     DEPLOYED_TRAILER,
     KEPT_EDIT,
+    LOCK_FILE,
     MACHINE_ENV,
     PENDING_REFS,
     SESSIONLESS,
@@ -30,6 +31,7 @@ from .checkout import (
     catch_up,
     checkout_identity,
     clear_refspec,
+    common_state_path,
     current_branch,
     deploy_running,
     drop_worktree,
@@ -66,6 +68,7 @@ from .checkout import (
     sibling_checkouts,
     sole_writer_problem,
     staged_differs,
+    state_path,
     sub_dir,
     sub_parent,
     summarize,
@@ -125,7 +128,7 @@ def holds(wb: str, tip: str, main: str, not_yet_deployed: bool = False) -> None:
 
 def kept_edit() -> Path:
     """Where a landing's edited message waits for the landing (checkout.KEPT_EDIT)."""
-    return Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path", KEPT_EDIT]))
+    return state_path(KEPT_EDIT)
 
 
 def committed_message(wb: str, given: str | None) -> str:
@@ -344,8 +347,7 @@ def close_worktrees(names: list[str], *, force: bool = False) -> None:
     top = sub_parent(here) or here
     if force and not names:
         die("--force needs the worktrees named")
-    serial = Path(out(["git", "rev-parse", "--git-common-dir"])).resolve() / "nixconvoy-prune.lock"
-    with serial.open("w") as held:
+    with prune_lock(Path(out(["git", "rev-parse", "--git-common-dir"])).resolve()).open("w") as held:
         fcntl.flock(held, fcntl.LOCK_EX)
         subs = ([find_sub(n) for n in names] if names
                 else sorted(d for d in sibling_checkouts() if sub_parent(d) == top))
@@ -440,7 +442,13 @@ def name_lock_path(d: Path) -> Path:
     remove hooks take too: in the common git dir, so it outlives the
     worktree; named after the path with each / a %."""
     common = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]))
-    return common / "nixconvoy-worktree-locks" / f"{str(d).replace('/', '%')}.lock"
+    return common_state_path("worktree-locks", common) / f"{str(d).replace('/', '%')}.lock"
+
+
+def prune_lock(common: Path) -> Path:
+    """The lock serialising the prunes of a repository's subagent
+    worktrees (close, the stop and session hooks), in its common git dir."""
+    return common_state_path("prune.lock", common)
 
 
 # How long a lock may stay held by no process found holding it: the next
@@ -598,15 +606,14 @@ class PruneQueries(GitQueries):
             case TakeDeployLock():
                 if self.deploy_held:
                     return Flag(True)
-                return Flag(self.take(Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path",
-                                                "nixconvoy-deploy.lock"]))) is not None)
+                return Flag(self.take(state_path(LOCK_FILE)) is not None)
             case Lock():
                 return Text(self.read(self.locked))
             case Alive(pid, start, own_ends):
                 reason = f"pid {pid}" + (f" start {start}" if start is not None else "")
                 return Flag(lock_live(reason) if own_ends else lock_pid_alive(reason) is not False)
             case PushInFlight():
-                return Flag(Path(push_state("pid")).exists())
+                return Flag(push_state("pid").exists())
             case Nested():
                 inside = [Path(ln[len("worktree "):]).resolve() for ln in out(
                     ["git", "worktree", "list", "--porcelain"]).splitlines() if ln.startswith("worktree ")]

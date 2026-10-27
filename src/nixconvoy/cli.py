@@ -205,7 +205,7 @@ git's editor (`git var GIT_EDITOR`; `:` skips it) over a scissors line
 listing the branch's increments and changed paths - an agent's COMMIT_MSG.md
 adjusted by hand before it lands, an empty message aborting; off a terminal
 (an agent's shell) COMMIT_MSG.md lands as it is.  The editor opens once every
-check has passed, and the edit is kept in the git dir (NIXCONVOY_LANDMSG)
+check has passed, and the edit is kept in the git dir (nixconvoy/landmsg)
 until it lands, so a landing that fails after it (a push rejected) re-runs
 with the edit.  Then push
 main, reset this branch (and its origin copy) onto the new main, the
@@ -354,7 +354,7 @@ every default branch as it was;
 origin/main's and staged for the next deploy to revert it.  status
 lists the configured submodules.  A submodule repository's own checkout
 is never deployed from: status flags edits there, and nixconvoy leaves a
-`nixconvoy-submodule` marker in its git dir for a pre-commit hook to
+`submodule` marker in its git dir's nixconvoy/ for a pre-commit hook to
 refuse an agent's commit on its default branch there.
 
 Close (nixconvoy close [<path> ... | <worktree> ... | <submodule> ...]
@@ -427,7 +427,7 @@ worktree recreated, or relocked, as worktree-create does; the resume is
 refused (exit 2) when that fails.  session-start: detached, a sweep of
 what dead sessions left, then, once this session exits, a sweep of what
 its agents' stops kept (one waiter per session).  Both log to
-nixconvoy-prune.log in the common git dir.  worktree-remove: Claude
+nixconvoy/prune.log in the common git dir.  worktree-remove: Claude
 Code letting go of a worktree the create hook made (a `claude
 --worktree` session's, at its exit), removed with its branch unless
 another live session holds it, it has changes, commits not on

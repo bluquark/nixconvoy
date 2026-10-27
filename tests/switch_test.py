@@ -1610,7 +1610,7 @@ def submodule_cases(d: Path) -> None:
         assert ax == co / path and submodule.branch_at(ax) == wb
         assert sh(ax, "rev-parse", "HEAD") == v1
         assert sh(ax, "config", f"branch.{wb}.merge") == "refs/heads/main"
-        assert (dep_repo / ".git" / submodule.MARKER).exists()
+        assert (dep_repo / ".git" / checkout.STATE_DIR / submodule.MARKER).exists()
         assert not sh(co, "status", "--porcelain")  # planted at the pinned rev
         assert submodule.create("dep", wb) == ax  # idempotent
         assert submodule.sync(wb, None) == []  # nothing of its own: no push, the pin as it was
@@ -2509,7 +2509,7 @@ def init_cases(d: Path) -> None:
         assert "usage:" in dies(lambda: run_cli(["init", "--ssh-domain", "lan"]))
         assert not (repo / "nixconvoy.toml").exists()
         assert "usage:" in printed(lambda: run_cli(["orphans", "-h"]))  # a command without the toml still runs
-        assert not (repo / ".git/nixconvoy-branch-prefix").exists()
+        assert not (repo / ".git/nixconvoy/branch-prefix").exists()
         run_cli(["init"])
         c = config.load(repo)
         assert (c.flake_dir, c.targets_dir, c.targets_arch) == ("nixos", "nixos/hosts", "aarch64-linux"), c
@@ -2521,10 +2521,10 @@ def init_cases(d: Path) -> None:
         assert "# [targets.a]" in text and "# precheck = " in text and "# [submodules.<input>]" in text, text
         assert "?? nixconvoy.toml" in sh(repo, "status", "--porcelain")  # written, not staged
         assert "already there" in dies(lambda: run_cli(["init"]))
-        assert (repo / ".git/nixconvoy-branch-prefix").read_text() == "nixconvoy/\n"  # init notes the prefix (the repo's, not the suite's)
-        (repo / ".git/nixconvoy-branch-prefix").unlink()
+        assert (repo / ".git/nixconvoy/branch-prefix").read_text() == "nixconvoy/\n"  # init notes the prefix (the repo's, not the suite's)
+        (repo / ".git/nixconvoy/branch-prefix").unlink()
         assert "usage:" in printed(lambda: run_cli(["orphans", "-h"]))  # as does any later command
-        assert (repo / ".git/nixconvoy-branch-prefix").read_text() == "nixconvoy/\n"
+        assert (repo / ".git/nixconvoy/branch-prefix").read_text() == "nixconvoy/\n"
         (repo / "nixconvoy.toml").unlink()
         # The flake named, relative to where init runs.
         run_cli(["init", ".."])

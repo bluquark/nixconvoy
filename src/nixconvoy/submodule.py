@@ -48,6 +48,7 @@ from .checkout import (
     MACHINE_ENV,
     PENDING_REFS,
     TMP_PREFIX,
+    common_state_path,
     fold_subject,
     index_tree,
     landed_prefix,
@@ -77,7 +78,7 @@ REFSPECS = ("+refs/heads/*:refs/remotes/origin/*", f"+{PAST_REFS}/*:{PAST_REFS}/
 # In a submodule repository's common git dir once nixconvoy has worked on
 # it: a hook can then tell an agent's commit on its default branch (in the
 # repository's own checkout) from work in a planted worktree.
-MARKER = "nixconvoy-submodule"
+MARKER = "submodule"
 GITLINK = "160000"
 
 
@@ -187,12 +188,14 @@ def staged(d: Path, *, less_msg: bool = False) -> bool:
 
 
 def mark(repo: Path) -> None:
-    """Leave MARKER in the submodule repository's common git dir."""
+    """Leave MARKER in the submodule repository's common git dir's nixconvoy/."""
     common = run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
                  cwd=str(repo), check=False).stdout.strip()
-    if common and not (Path(common) / MARKER).exists():
+    if common:
         with contextlib.suppress(OSError):
-            (Path(common) / MARKER).write_text(f"{Path.cwd()}\n")
+            marker = common_state_path(MARKER, Path(common))
+            if not marker.exists():
+                marker.write_text(f"{Path.cwd()}\n")
 
 
 # --- the pin ---------------------------------------------------------------
@@ -391,7 +394,7 @@ def repo_lock(repo: Path) -> Iterator[None]:
     """A lock on the submodule repository, serialising the deploys merging
     in it (two subagents' unions at once)."""
     common = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=str(repo)))
-    with (common / "nixconvoy-submodule.lock").open("w") as held:
+    with common_state_path("submodule.lock", common).open("w") as held:
         fcntl.flock(held, fcntl.LOCK_EX)
         yield
 

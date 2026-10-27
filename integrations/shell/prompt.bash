@@ -10,7 +10,7 @@
 # of it (nixconvoy points every work branch's upstream at origin/main, so
 # branch.ab is the count beyond main); only a detached HEAD, having no
 # upstream, costs a count of its own.  The prefix comes from the
-# nixconvoy-branch-prefix note `nixconvoy init` and every later command
+# nixconvoy/branch-prefix note `nixconvoy init` and every later command
 # leave in the common git dir; without it, the branch shows in full.
 # Elsewhere it falls back to __git_ps1 when that exists.
 #   source prompt.bash; PS1='\h:$(__nixconvoy_ps1)\w\$ '
@@ -20,7 +20,7 @@ __nixconvoy_ps1() {
   { read -r top && read -r common; } < <(git rev-parse --path-format=absolute --show-toplevel --git-common-dir 2>/dev/null) \
     && [ -f "$top/nixconvoy.toml" ] \
     || { command -v __git_ps1 >/dev/null 2>&1 && __git_ps1 "(%s)"; return; }
-  read -r prefix 2>/dev/null < "$common/nixconvoy-branch-prefix"
+  read -r prefix 2>/dev/null < "$common/nixconvoy/branch-prefix"
   for w in $(git worktree list --porcelain 2>/dev/null | sed -n "s|^worktree $top/||p"); do
     w=$top/$w
     [ -e "$w/.git" ] || continue
