@@ -70,7 +70,8 @@ pub enum Query {
     /// Take the on-target switch guard (compare-and-swap on the running
     /// system) -> Guard.
     TakeGuard,
-    /// Whether the toplevel carries /confirmed-switch -> Code (0/1).
+    /// Root the target's switch kit for the toplevel, when it has one -> Code
+    /// (0: confirmed, 1: none, switched plainly; else a failure).
     ProbeHelper,
     /// nix-env --set of the toplevel -> Code.
     SetProfile,
@@ -280,7 +281,7 @@ impl Machine {
             (Pc::Probing, Reply::Code(rc)) => {
                 if rc != 0 && rc != 1 {
                     return Next::Die(format!(
-                        "could not probe {target} for its confirmed-switch helper (exit {rc}); nothing was switched or committed"
+                        "could not root {target}'s switch kit (exit {rc}); nothing was switched or committed"
                     ));
                 }
                 let confirmed = rc == 0;
@@ -365,7 +366,7 @@ impl Machine {
 
             // One round of verification: a new ssh connection finds the
             // target running the new system, its check passes (the internet
-            // probe when configured, then nixconvoy.confirmedSwitch.checks),
+            // probe when configured, then the policy's checks),
             // and for the router this machine reaches the internet too.
             (Pc::VerifyNow { w, rc }, Reply::Now(now)) => {
                 self.cut = false;

@@ -62,6 +62,7 @@ from nixconvoy.wire import Context, DriftParams, Ran, RemoveWorktree, RepoNames,
 PROGRESS = sys.stderr
 
 OLD, NEW = "/nix/store/old-system", "/nix/store/new-system"
+KIT = "/nix/store/new-kit"
 # The helper's rollback exit when the confirm landed after all.
 ALREADY_CONFIRMED = 3
 
@@ -133,14 +134,14 @@ def scenario(name: str, *, helper: bool = True, check_ok: bool = True, activate_
     """Run one switch; (the die message or None, the target's final state)."""
     state_file = Path(os.environ["FAKE_TARGET_STATE"])
     state_file.write_text(proc.dump_json({
-        "helper": helper, "check_ok": check_ok, "activate_rc": activate_rc,
+        "check_ok": check_ok, "activate_rc": activate_rc, "rooted": False,
         "running": running, "profile": running, "armed": False, "rollback_to": rollback_to,
         "check_killed": check_killed, "confirm_rc": confirm_rc, "rollback_rc": rollback_rc,
     }))
     proc.ARMED.clear()
     died: str | None = None
     try:
-        switch.switch("testhost", OLD, NEW, nixconvoy_switch or guard.binary("nixconvoy-switch"),
+        switch.switch("testhost", OLD, NEW, KIT if helper else "", nixconvoy_switch or guard.binary("nixconvoy-switch"),
                       provenance=PROVENANCE)
     except (proc.Fail, switch.SwitchedMeanwhile) as e:
         died = str(e).splitlines()[0]
@@ -173,7 +174,7 @@ def switch_cases(d: Path) -> None:
 
 def switch_scenarios(d: Path) -> None:
     died, s = scenario("confirmed")
-    assert died is None and s["running"] == NEW and s["profile"] == NEW, (died, s)
+    assert died is None and s["running"] == NEW and s["profile"] == NEW and s["rooted"], (died, s)
     assert not proc.ARMED
     assert s.get("provenance") == PROVENANCE, s
 
@@ -221,7 +222,8 @@ def switch_scenarios(d: Path) -> None:
     assert s.get("provenance") == PROVENANCE, s  # the reboot takes the target to it
 
     died, s = scenario("plain", helper=False)
-    assert died is None and s["running"] == NEW and s["profile"] == NEW, (died, s)
+    assert died is None and s["running"] == NEW and s["profile"] == NEW and not s["rooted"], (died, s)
+    assert s.get("unrooted"), s
     assert s.get("provenance") == PROVENANCE, s
 
     # Raised (switch.SwitchedMeanwhile), for the deploy to probe and plan again.
@@ -516,7 +518,7 @@ def memo_cases() -> None:
     toplevel is no entry; a tree's proof is found in the log once appended,
     past a torn line, and a prune leaves the log alone; and the dry
     activation's report is parsed."""
-    top = memo.Top("/nix/store/new", "/nix/store/new.drv", True, False)
+    top = memo.Top("/nix/store/new", "/nix/store/new.drv", "/nix/store/kit", "/nix/store/kit.drv", False)
     with tempfile.TemporaryDirectory() as d:
         memo.memo_write(Path(d) / "e", top)
         assert memo.memo_read(Path(d) / "e") == top
@@ -533,7 +535,7 @@ def memo_cases() -> None:
         (Path(d) / "e").unlink()
         memo.memo_prune(Path(d))
         assert log.exists() and memo.tree_proven(log, "lint", "c" * 40)
-    assert memo.memo_entry({"out": "o", "drv": "d", "protected": {}}) == memo.Top("o", "d", False, False)
+    assert memo.memo_entry({"out": "o", "drv": "d", "protected": {}}) == memo.Top("o", "d", "", "", False)
     assert memo.memo_entry({"out": "o"}) is None
     assert targets.unit_changes("would restart the following units: nftables.service, nginx.service\n"
                                 "would reload the following units: postgresql.service\n"
@@ -616,11 +618,12 @@ def provenance_cases() -> None:
     assert line.startswith("side1: left alone: held back by") and not died, (line, died)
 
     text = provenance_line(NEW)
-    p = targets.parse_probe(f"{NEW}\n{text}")
-    assert p.running == NEW and p.provenance == text, p
+    p = targets.parse_probe(f"{NEW}\n{KIT}\n{text}")
+    assert p.running == NEW and p.provenance == text and p.kit == KIT, p
     assert p.digest == hashlib.sha256(text.encode()).hexdigest(), p
-    p = targets.parse_probe(f"{OLD}\n")
+    p = targets.parse_probe(f"{OLD}\n\n")
     assert p == targets.Probe(OLD, "", hashlib.sha256(b"").hexdigest()), p
+    assert targets.kit_link(NEW) == "/var/lib/nixconvoy/kits/new-system"
 
     with mock.patch.object(switch, "rev"), mock.patch.object(switch, "current_branch"):
         def record(branch: str | None, head: str, origin: str | None, snap: str) -> object:

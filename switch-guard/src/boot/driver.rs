@@ -37,7 +37,7 @@ pub struct Settings {
     status_file: PathBuf,
     count_path: PathBuf,
     checks: String,
-    switch_check: Option<String>,
+    kits_dir: Option<PathBuf>,
     initial_tries: u32,
     reported: PathBuf,
 }
@@ -68,7 +68,7 @@ impl Settings {
             status_file: p("status_file")?,
             count_path: p("count_path")?,
             checks: s("checks")?,
-            switch_check: c.opt("switch_check").map(str::to_string),
+            kits_dir: c.opt("kits_dir").map(PathBuf::from),
             initial_tries: c.num("initial_tries")?,
             reported: p("reported")?,
         })
@@ -378,8 +378,14 @@ fn failures(s: &Settings) -> Vec<String> {
         }
         Err(e) => vec![format!("cannot run the checks: {e}")],
     };
-    if let Some(c) = &s.switch_check {
-        match Command::new(c).stdout(std::process::Stdio::null()).output() {
+    // The booted system's kit's checks; none rooted for it (switched
+    // plainly), or a kit without checks, is nothing more to prove.
+    let switch_check = s.kits_dir.as_ref().and_then(|d| {
+        let booted = std::fs::read_link(BOOTED).ok()?;
+        Some(d.join(booted.file_name()?).join("checks")).filter(|c| c.exists())
+    });
+    if let Some(c) = switch_check {
+        match Command::new(&c).stdout(std::process::Stdio::null()).output() {
             Ok(o) if o.status.success() => {}
             Ok(o) => {
                 let err = String::from_utf8_lossy(&o.stderr);

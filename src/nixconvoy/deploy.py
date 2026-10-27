@@ -354,6 +354,8 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         targets.check_store()
 
     plan: list[str] = []
+    # The plan's switch-last targets (the union's policy).
+    last_targets: set[str] = set()
     affected: list[str] = []
     left_alone: list[str] = []
     tops: dict[str, Top] = {}
@@ -458,7 +460,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         """Eval, precheck, build and copy for `union`, checked out in `wt`,
         from the branches `listed` in nixconvoy.toml's work_branches, `branches` the ones
         it merged: whether the deploy ends here."""
-        nonlocal plan, affected, left_alone, tops, committed, records, provenances, ann
+        nonlocal plan, affected, left_alone, tops, committed, records, provenances, ann, last_targets
         if skip:
             if dry:
                 print(f"NIXCONVOY_SKIP_SWITCH=1 --dry-activate: union {union}; nothing done")
@@ -501,7 +503,13 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                 if h in probed and memo.recorded_tip(probed[h].provenance, name) == tip:
                     continue
                 held.setdefault(h, []).append(name)
-        last = [h for h in sorted(tops) if tops[h].last]
+        policy = memo.union_config(wt).switch_policy
+        last = [h for h in sorted(tops) if policy(h).last]
+        last_targets = set(last)
+        for h in sorted(tops):
+            if tops[h].assessed and not tops[h].kit:
+                print(f"warning: {h} is switched plainly (confirmed = false) but carries the boot-assessment "
+                      "module: a counted boot there runs no switch checks", file=sys.stderr)
         cx = Context(names=repo_names(), me=(me, str(Path.cwd())), listed=sorted(listed), tips=origin_tips(),
                      in_flight=announced(ann.key if ann is not None else None), dead=sorted(dead),
                      tz_offset=time.localtime().tm_gmtoff)
@@ -586,12 +594,24 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                         and r != rev(remote_ref(f"{DEPLOYED_PREFIX}/{h}")):
                     records[h] = r
 
-        if plan:
+        # A candidate up to date (running the union's toplevel, not left
+        # alone) whose rooted kit is not the one this eval made (its policy
+        # or the kit sources moved): the kit alone is refreshed, no switch -
+        # so a change to a target's checks lands, and a boot's assessment
+        # runs the current ones.
+        refresh = [h for h in sorted(tops) if h in candidates and h not in plan and h not in left_alone
+                   and running.get(h) == tops[h].out and probed[h].kit != tops[h].kit]
+        if dry and refresh:
+            print(f"--dry-activate: the switch kit on {', '.join(refresh)} would be refreshed")
+            refresh = []
+        if plan or refresh:
             b = store_host()
             where = f" on {b}" if b else ""
             PERF.mark("build")
-            print(f"building {', '.join(plan)}{where}...")
-            err = targets.build_drvs([tops[h].drv for h in plan], f"build of {', '.join(plan)}")
+            what = ", ".join([*plan, *(f"{h}'s switch kit" for h in refresh)])
+            print(f"building {what}{where}...")
+            err = targets.build_drvs([d for h in plan for d in (tops[h].drv, tops[h].kit_drv) if d]
+                                     + [tops[h].kit_drv for h in refresh if tops[h].kit_drv], f"build of {what}")
             if err:
                 die(f"{err}; {NOTHING_DONE}")
 
@@ -601,17 +621,22 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         PERF.mark("copy")
 
         def copy_then_dry(name: str, top: Top, quiet: bool) -> str | None:
-            targets.copy_closure(name, top.out, quiet)
+            targets.copy_closure(name, [top.out, *([top.kit] if top.kit else [])], quiet)
             return targets.dry_activate(name, top.out) if dry else None
 
         if dry and plan:
             print(f"dry-activating {', '.join(plan)}...")
-        with ThreadPoolExecutor(2 + len(plan)) as pool:
+        with ThreadPoolExecutor(2 + len(plan) + len(refresh)) as pool:
             refetch = pool.submit(fetch_origin)
             # Carried, or a redone stage's stale records dropped.
             pushed = pool.submit(ann.carry, records) if ann is not None and (records or ann.records) else None
             copies = [pool.submit(copy_then_dry, n, tops[n], len(plan) > 1) for n in plan]
+            refreshes = [pool.submit(targets.refresh_kit, h, tops[h].out, tops[h].kit) for h in refresh]
             failures = [r for r in (cp.result() for cp in copies) if r]
+            # The old kit stays rooted there: the next deploy tries again.
+            for err in (r.result() for r in refreshes):
+                if err:
+                    print(f"warning: {err}", file=sys.stderr)
             refetch.result()
             unpushed = pushed.result() if pushed is not None else None
         if dry:
@@ -638,8 +663,8 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         dies once the others in its batch finish; one refused because the
         target moved meanwhile (SwitchedMeanwhile) is raised once no sibling
         failed, the moved targets' claims taken back."""
-        first = [h for h in plan if not tops[h].last]
-        batches = [first, *([h] for h in plan if tops[h].last)]
+        first = [h for h in plan if h not in last_targets]
+        batches = [first, *([h] for h in plan if h in last_targets)]
         for batch in batches:
             if not batch:
                 continue
@@ -654,8 +679,8 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             if ann is not None:
                 ann.claimed += [n for n in batch if n not in ann.claimed]
             with ThreadPoolExecutor(len(batch)) as pool:
-                switches = [pool.submit(switch, n, expected[n], tops[n].out, nixconvoy_switch, len(batch) > 1,
-                                        provenances[n], probed[n].digest, tops[n].last)
+                switches = [pool.submit(switch, n, expected[n], tops[n].out, tops[n].kit, nixconvoy_switch,
+                                        len(batch) > 1, provenances[n], probed[n].digest, n in last_targets)
                             for n in batch]
             moved: list[SwitchedMeanwhile] = []
             failed: Fail | None = None

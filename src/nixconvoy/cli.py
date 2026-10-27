@@ -91,9 +91,10 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      hashes of the files its configuration references and the lock entries
      of the flake inputs those files name: a change to a module only one
      target imports re-evaluates that target alone, and a no-op redeploy
-     evaluates nothing.  The same eval reads the switch policy the target's
-     configuration declares through the nixconvoy NixOS module (switch
-     last, boot assessment).  Targets whose running system
+     evaluates nothing.  The same eval makes the target's switch kit (the
+     confirmed-switch helper, its deadline and checks from nixconvoy.toml's
+     [switch] tables, against the target's own nixpkgs) and reads whether
+     its configuration carries the boot-assessment module.  Targets whose running system
      matches are up to date; the rest will be switched (their drift may be
      catch-up to main or other branches, not just this increment) - unless
      the provenance shows the target runs another checkout's increment that this
@@ -147,8 +148,9 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      union, origin/main and each unioned branch's tip, this checkout's
      branch as pending when what it unioned of it is not on origin yet
      (with the announcement), the time, this machine and checkout, and the
-     record.  A target whose toplevel carries
-     /confirmed-switch (the confirmed-switch module) is switched confirmed:
+     record.  A target whose policy is confirmed (every target's unless
+     [switch] or its [targets.<name>.switch] says confirmed = false) is
+     switched through its kit, copied and rooted beside the toplevel:
      a rollback timer is armed, the toplevel activated with `test`, and
      only once a new ssh connection finds the target running it and its own
      checks pass (the internet probe when configured; for a switch-last

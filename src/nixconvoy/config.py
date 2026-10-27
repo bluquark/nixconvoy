@@ -23,6 +23,30 @@ CLAUDE_WORKTREES = ".claude/worktrees"
 
 
 @dataclass(frozen=True)
+class SwitchPolicy:
+    """How a target is switched: nixconvoy.toml's `[switch]` table, the
+    fleet's defaults, under a target's `[targets.<name>.switch]`."""
+
+    # Confirmed (nix/kit.nix's helper arms a rollback timer, the toplevel
+    # is activated with `test`, verified from here, then the profile set),
+    # or plainly, as nixos-rebuild switch would.
+    confirmed: bool = True
+    # Seconds after arming before an unconfirmed switch rolls back: the
+    # activation plus the verification must fit.
+    deadline: int = 30
+    # The verification begins with an HTTPS probe of the internet from the
+    # target.
+    internet_check: bool = False
+    # Bash the helper's `check` verb runs as root (errexit) after that
+    # probe: the target's own assertions on the new system, whose last
+    # stderr line is what a failed verification reports.
+    checks: str = ""
+    # Switched alone after every other target, verified only while this
+    # machine still reaches the internet (the router).  Per target only.
+    last: bool = False
+
+
+@dataclass(frozen=True)
 class TargetConfig:
     # ssh address, overriding Config.ssh_address's template.
     ssh_address: str = ""
@@ -32,6 +56,8 @@ class TargetConfig:
     # memo's scan root for it (Config.target_root); empty: <targets_dir>/<name>,
     # or the memo's own inference (memo.hosts_candidates).
     dir: str = ""
+    # Its [targets.<name>.switch] over the [switch] defaults; None: the defaults.
+    switch: SwitchPolicy | None = None
 
 
 
@@ -90,6 +116,8 @@ class Config:
     # configured list (targets.build_cmd): the caches themselves are each
     # store host's nix.conf's business.
     skip_substituters: tuple[str, ...] = ()
+    # [switch]: every target's switch policy unless its table overrides.
+    switch: SwitchPolicy = field(default_factory=SwitchPolicy)
     targets: dict[str, TargetConfig] = field(default_factory=dict)
     # The flake inputs developed in place (submodule.py), by input name.
     submodules: dict[str, SubmoduleConfig] = field(default_factory=dict)
@@ -99,6 +127,9 @@ class Config:
 
     def ssh_address(self, name: str) -> str:
         return self.target(name).ssh_address or self.ssh_template.format(target=name)
+
+    def switch_policy(self, name: str) -> SwitchPolicy:
+        return self.target(name).switch or self.switch
 
     def tagged(self, tag: str) -> list[str]:
         return [n for n, h in self.targets.items() if tag in h.tags]
@@ -184,6 +215,30 @@ def _auto_bool(t: dict[str, object], k: str, where: str) -> bool | None:
     return v
 
 
+def _bool(t: dict[str, object], k: str, where: str, default: bool) -> bool:
+    v = t.get(k, default)
+    if not isinstance(v, bool):
+        raise ConfigError(f"{CONFIG_FILE}: {where}.{k} must be true or false")
+    return v
+
+
+def _switch(t: dict[str, object], where: str, base: SwitchPolicy, per_target: bool) -> SwitchPolicy:
+    """A `switch` table over `base`: `[switch]` (the defaults; `last` is a
+    target's alone) or a `[targets.<name>.switch]`."""
+    keys = ("confirmed", "deadline", "internet_check", "checks", *(("last",) if per_target else ()))
+    for k in t:
+        if k not in keys:
+            raise ConfigError(f"{CONFIG_FILE}: unknown key {where}.{k}"
+                              + (" (last is a target's setting: [targets.<name>.switch])" if k == "last" else ""))
+    d = t.get("deadline", base.deadline)
+    if isinstance(d, bool) or not isinstance(d, int) or d <= 0:
+        raise ConfigError(f"{CONFIG_FILE}: {where}.deadline is a number of seconds, above 0")
+    return SwitchPolicy(confirmed=_bool(t, "confirmed", where, base.confirmed), deadline=d,
+                        internet_check=_bool(t, "internet_check", where, base.internet_check),
+                        checks=_str(t, "checks", where, base.checks),
+                        last=_bool(t, "last", where, base.last))
+
+
 def _strs(t: dict[str, object], k: str, where: str) -> tuple[str, ...]:
     v = t.get(k, [])
     if not isinstance(v, list) or not all(isinstance(s, str) for s in v):
@@ -219,7 +274,7 @@ def parse(text: str) -> Config:
         raise ConfigError(f"{CONFIG_FILE}: config_version {version} is not supported (1 is)")
     known = {"config_version", "flake_dir", "targets_dir", "targets_arch", "ssh_address_template", "branch_prefix",
              "work_branches", "child_worktrees", "remote", "main_branch",
-             "eval", "build", "targets", "submodules"}
+             "eval", "build", "switch", "targets", "submodules"}
     for k in doc:
         if k not in known:
             raise ConfigError(f"{CONFIG_FILE}: unknown key {k}")
@@ -282,12 +337,15 @@ def parse(text: str) -> Config:
         if s.split() != [s]:
             raise ConfigError(f"{CONFIG_FILE}: build.skip_substituters entry {s!r} is not a substituter URL")
         skip.append(_bare_url(s))
+    switch = _switch(_table(doc.get("switch", {}), "switch"), "switch", SwitchPolicy(), per_target=False)
     targets: dict[str, TargetConfig] = {}
     for name, h in _table(doc.get("targets", {}), "targets").items():
         t = _table(h, f"targets.{name}")
         for k in t:
-            if k not in ("ssh_address", "tags", "dir"):
+            if k not in ("ssh_address", "tags", "dir", "switch"):
                 raise ConfigError(f"{CONFIG_FILE}: unknown key targets.{name}.{k}")
+        own = (_switch(_table(t["switch"], f"targets.{name}.switch"), f"targets.{name}.switch", switch, per_target=True)
+               if "switch" in t else None)
         d = _str(t, "dir", f"targets.{name}")
         if d.startswith("/") or ".." in d.split("/"):
             raise ConfigError(f"{CONFIG_FILE}: targets.{name}.dir is a directory inside the repository, "
@@ -296,7 +354,7 @@ def parse(text: str) -> Config:
         if d == ".":
             raise ConfigError(f"{CONFIG_FILE}: targets.{name}.dir names the repository root: leave it out instead")
         targets[name] = TargetConfig(ssh_address=_str(t, "ssh_address", f"targets.{name}"),
-                                     tags=_strs(t, "tags", f"targets.{name}"), dir=d)
+                                     tags=_strs(t, "tags", f"targets.{name}"), dir=d, switch=own)
     if not targets_dir and not targets:
         raise ConfigError(f"{CONFIG_FILE}: targets_dir, or a [targets.<name>] table per target, is required")
     submodules: dict[str, SubmoduleConfig] = {}
@@ -326,6 +384,7 @@ def parse(text: str) -> Config:
         parallel_eval=_auto_bool(ev, "parallel", "eval"),
         store=store,
         skip_substituters=tuple(skip),
+        switch=switch,
         targets=targets,
         submodules=submodules,
     )

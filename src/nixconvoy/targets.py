@@ -24,6 +24,12 @@ PROBE_TIMEOUT = 20
 # claimed under the switch lock before activation, read by every probe.
 # Persistent, so a reboot keeps it beside the system it describes.
 PROVENANCE_FILE: str = "/var/lib/nixconvoy/provenance.json"
+# Where a target's switch kits (nix/kit.nix) are rooted with the store, one
+# link per system named after its store path (kit_link): a collection in the
+# rollback window cannot take the helper the timer runs, and a boot's
+# assessment finds the booted system's own checks, not the last deploy's.
+# A deploy prunes the links of systems the store no longer holds.
+KIT_DIR: str = "/var/lib/nixconvoy/kits"
 CURRENT_SYSTEM: str = "/run/current-system"
 SYSTEM_PROFILE: str = "/nix/var/nix/profiles/system"
 SWITCH_LOCK: str = "/tmp/nixconvoy-switch.lock"  # noqa: S108 - every deploy shares it
@@ -134,6 +140,40 @@ class Probe(NamedTuple):
     provenance: str
     # switch.provenance_digest of it, for the guard's compare.
     digest: str
+    # The kit rooted for the running system (kit_link), "" when none.
+    kit: str = ""
+
+
+def kit_link(toplevel: str) -> str:
+    return f"{KIT_DIR}/{Path(toplevel).name}"
+
+
+def kit_root_script(toplevel: str, kit: str) -> str:
+    """Root `kit` for `toplevel` (kit_link) as root, through nix-store's
+    indirect root, and drop the links of systems the store no longer
+    holds; `kit` "" drops `toplevel`'s link instead (switched plainly now)."""
+    prune = (f'for l in {KIT_DIR}/*; do [ -e "$l" ] && [ -e "/nix/store/${{l##*/}}" ] || rm -f "$l"; done')
+    if not kit:
+        return f"rm -f {kit_link(toplevel)}; {prune}"
+    return (f"mkdir -p {KIT_DIR} && nix-store --add-root {kit_link(toplevel)} --indirect -r {kit} >/dev/null && "
+            f"{prune}")
+
+
+def refresh_kit(target: str, toplevel: str, kit: str) -> str | None:
+    """A target already running `toplevel` whose rooted kit is not `kit`
+    (its policy or the kit sources moved): the kit copied and rooted in
+    place of the old, no switch.  The failure text, or None."""
+    print(f"refreshing the switch kit on {target}...")
+    if kit:
+        err = copy_closure(target, [kit], quiet=True, fatal=False)
+        if err:
+            return err
+    p = run(target_cmd(target, ["sh", "-c", kit_root_script(toplevel, kit)], sudo=True),
+            check=False, timeout=PROBE_TIMEOUT, merged=True)
+    if p.returncode != 0:
+        return (f"rooting the switch kit on {target} failed (exit {p.returncode})"
+                + (f":\n{p.stdout.strip()}" if p.stdout else ""))
+    return None
 
 
 def provenance_digest(text: str) -> str:
@@ -145,10 +185,11 @@ def provenance_digest(text: str) -> str:
 
 
 def parse_probe(stdout: str) -> Probe:
-    """The remote probe's output: the running system, then the provenance file
-    verbatim."""
-    cur, _, text = stdout.partition("\n")
-    return Probe(cur.strip() or None, text, provenance_digest(text))
+    """The remote probe's output: the running system, its kit link's target
+    (a line, empty when none), then the provenance file verbatim."""
+    cur, _, rest = stdout.partition("\n")
+    kit, _, text = rest.partition("\n")
+    return Probe(cur.strip() or None, text, provenance_digest(text), kit.strip())
 
 
 def probe(name: str) -> Probe:
@@ -163,8 +204,14 @@ def probe(name: str) -> Probe:
             text = Path(PROVENANCE_FILE).read_bytes().decode()
         except (OSError, UnicodeDecodeError):
             text = ""
-        return Probe(cur, text, provenance_digest(text))
-    script = f"readlink {CURRENT_SYSTEM} && {{ cat {PROVENANCE_FILE} 2>/dev/null || true; }}"
+        try:
+            kit = str(Path(kit_link(cur)).readlink())
+        except OSError:
+            kit = ""
+        return Probe(cur, text, provenance_digest(text), kit)
+    script = (f"cur=$(readlink {CURRENT_SYSTEM}) && echo \"$cur\" && "
+              f"{{ readlink \"{KIT_DIR}/${{cur##*/}}\" 2>/dev/null || echo; }} && "
+              f"{{ cat {PROVENANCE_FILE} 2>/dev/null || true; }}")
     p = run(target_cmd(name, ["sh", "-c", script]), check=False, timeout=PROBE_TIMEOUT)
     if p.returncode != 0:
         return Probe(None, "", "")
@@ -376,25 +423,31 @@ def off_lan(tgt: str) -> bool:
                for a in addrs)
 
 
-def copy_closure(target: str, toplevel: str, quiet: bool = False) -> None:
-    """Copy `toplevel`'s closure to `target`, outside the switch lock (a union
-    rebuilt after it merely leaves a few extra paths there).  `quiet` keeps
-    nix's progress output for the failure message."""
+def copy_closure(target: str, paths: list[str], quiet: bool = False, fatal: bool = True) -> str | None:
+    """Copy `paths`' closures (the toplevel, the switch kit) to `target`,
+    outside the switch lock (a union rebuilt after it merely leaves a few
+    extra paths there).  `quiet` keeps nix's progress output for the
+    failure message, which ends the deploy, or is returned with `fatal`
+    off."""
+    def failed(msg: str) -> str | None:
+        if fatal:
+            die(msg)
+        return msg
     b = store_host()
     sshopts = " ".join(ssh_opts())
     if target == b:
-        return  # built there
+        return None  # built there
     if target == proc.this_machine():
         if not b:
-            return
+            return None
         # The outputs live on the store host: fetched for the local switch.
         print(f"fetching the closure from {b}...")
-        p = run(["nix", "copy", "--no-check-sigs", "--from", f"ssh://{ssh_address(b)}", toplevel],
+        p = run(["nix", "copy", "--no-check-sigs", "--from", f"ssh://{ssh_address(b)}", *paths],
                 env={"NIX_SSHOPTS": sshopts}, check=False, capture=quiet, merged=True)
         if p.returncode != 0:
-            die(f"fetching the closure from {b} failed; {NOTHING_DONE} - the changes are still staged"
-                + (f"\n{p.stdout.strip()}" if p.stdout else ""))
-        return
+            return failed(f"fetching the closure from {b} failed; {NOTHING_DONE} - the changes are still staged"
+                          + (f"\n{p.stdout.strip()}" if p.stdout else ""))
+        return None
     tgt = ssh_address(target)
     print(f"copying closure to {target}...")
     # Off-LAN targets (a VPS over the tailnet) substitute what they can
@@ -405,14 +458,15 @@ def copy_closure(target: str, toplevel: str, quiet: bool = False) -> None:
         # The outputs live on the store host, not here.
         there = shlex.quote(" ".join(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *SSH_KEEPALIVE]))
         p = run(["ssh", *ssh_opts(), ssh_address(b),
-                 f"NIX_SSHOPTS={there} nix copy {' '.join(subst)} --to ssh://{tgt} {toplevel}"],
+                 f"NIX_SSHOPTS={there} nix copy {' '.join(subst)} --to ssh://{tgt} {' '.join(paths)}"],
                 check=False, capture=quiet, merged=True)
     else:
-        p = run(["nix", "copy", *subst, "--to", f"ssh://{tgt}", toplevel],
+        p = run(["nix", "copy", *subst, "--to", f"ssh://{tgt}", *paths],
                 env={"NIX_SSHOPTS": sshopts}, check=False, capture=quiet, merged=True)
     if p.returncode != 0:
-        die(f"copying the closure to {target} failed; {NOTHING_DONE} - the changes are still staged"
-            + (f"\n{p.stdout.strip()}" if p.stdout else ""))
+        return failed(f"copying the closure to {target} failed; {NOTHING_DONE} - the changes are still staged"
+                      + (f"\n{p.stdout.strip()}" if p.stdout else ""))
+    return None
 
 
 def check_store() -> None:

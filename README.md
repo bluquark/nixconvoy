@@ -105,14 +105,18 @@ no work.
   main): `git log --first-parent
   origin/nixconvoy-history/<target>` is the target's deploy history, and
   `git diff` between two such branches what two targets run differently.
-- **Confirmed switches.**  With the NixOS module, a switch activates the
-  new system with `switch-to-configuration test` under a dead-man timer,
-  verifies it from the deploying machine (a new ssh connection - a direct
-  read on a local target - finds the new system running, its own checks
-  pass, the internet is reachable where asked for), and only then sets the
-  profile and bootloader entry; otherwise the target rolls back to what it
-  ran.  No reboot is ever
-  automatic.
+- **Confirmed switches.**  A switch activates the new system with
+  `switch-to-configuration test` under a dead-man timer, verifies it from
+  the deploying machine (a new ssh connection - a direct read on a local
+  target - finds the new system running, its own checks pass, the internet
+  is reachable where asked for), and only then sets the profile and
+  bootloader entry; otherwise the target rolls back to what it ran.  No
+  reboot is ever automatic.  The helper that arms the timer and rolls back
+  is pushed with each deploy (the switch kit: built from the deploying
+  nixconvoy's own sources against the target's nixpkgs, copied beside the
+  toplevel and rooted under `/var/lib/nixconvoy/kits`), so a target's
+  configuration carries nothing of nixconvoy's and the helper never trails
+  the command driving it.
 - **Boot assessment** (optional, with lanzaboote).  systemd-boot's boot
   counting as a failover to the last proven generation; a generation the
   target fell back from is never switched to again.
@@ -122,9 +126,17 @@ no work.
 
 ## Installation
 
-nixconvoy is a flake.  Add it as an input, import the NixOS module on each
-target, and re-export the command from your own flake so nixconvoy and the
-target-side helper are pinned together by your `flake.lock`:
+nixconvoy is a flake, and the targets need nothing of it in their
+configuration: each deploy pushes the target side.  The quickest run is
+unpinned, from the repo root:
+
+```sh
+nix run github:bluquark/nixconvoy -- init
+nix run github:bluquark/nixconvoy -- deploy -m "describe this increment"
+```
+
+To pin it with your `flake.lock`, add it as an input and re-export the
+command from your own flake:
 
 ```nix
 {
@@ -135,22 +147,18 @@ target-side helper are pinned together by your `flake.lock`:
 
   outputs = { self, nixpkgs, nixconvoy, ... }: {
     nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
-      modules = [
-        nixconvoy.nixosModules.default
-        ./hosts/myhost/configuration.nix
-      ];
+      modules = [ ./hosts/myhost/configuration.nix ];
     };
     packages.x86_64-linux.nixconvoy = nixconvoy.packages.x86_64-linux.nixconvoy;
   };
 }
 ```
 
-Then, from the repo root, write its settings and deploy:
-
-```sh
-nix run .#nixconvoy -- init
-nix run .#nixconvoy -- deploy -m "describe this increment"
-```
+and run `nix run .#nixconvoy -- init`, then `nix run .#nixconvoy -- deploy
+-m "..."` (`nix run ./nixos#nixconvoy` when the flake lives in a
+subdirectory).  Scripts and the Claude Code plugin's hooks call
+`nixconvoy` by name, so a wrapper on PATH serves better than a shell
+alias.
 
 `init` writes `nixconvoy.toml`: the targets as `[targets.<name>]`
 tables, one per nixosConfiguration as nix evaluates them (so nix must
@@ -248,6 +256,14 @@ parallel = "auto"            # Determinate Nix's parallel evaluation: true, fals
 precheck = "repo-lint"       # optional: checks.<targets_arch>.<name>, a flake check proven before any build
                              # (a pass memoized on the union's tree)
 
+[switch]                     # how every target is switched, unless its [targets.<name>.switch] overrides
+confirmed = true             # false: switched plainly, as nixos-rebuild switch would
+deadline = 30                # seconds before an unconfirmed switch rolls back (activation included)
+internet_check = false       # the verification also wants the internet reachable from the target
+checks = """                 # bash, as root, errexit: the target's own assertions on the new system
+systemctl is-active -q nginx.service
+"""
+
 [build]
 store = { "*" = "bigbox", laptop = "laptop" }   # realise closures in that machine's store, by the hostname
                                      # nixconvoy runs on ("*": any other); a machine mapped to itself
@@ -261,6 +277,11 @@ skip_substituters = ["https://slow.cachix.org"]   # left out of deploy builds; t
 [targets.laptop]
 ssh_address = "root@10.0.0.9"   # overrides the template
 tags = ["portable"]          # `@portable` on the command line names every target tagged so
+
+[targets.router.switch]      # this target's switch policy over [switch]'s
+deadline = 20
+last = true                  # switched alone after every other target, verified only while
+                             # the deploying machine still reaches the internet
 dir = "nixos/machines/laptop"  # where its configuration lives, the eval memo's scan root for it
                              # (default: <targets_dir>/laptop, or a directory named laptop beside
                              # the other targets' - see the eval memo)
@@ -270,16 +291,26 @@ repo = "~/projects/mytool"   # its repository's checkout here; its origin is the
 pin_file = "pins/mytool.json"  # optional: the pinned rev and its committer date, kept beside the gitlink
 ```
 
-### The NixOS module
+### The switch kit
 
-```nix
-nixconvoy.confirmedSwitch.deadline = 30;        # seconds before an unconfirmed switch rolls back (activation included)
-nixconvoy.confirmedSwitch.internetCheck = true; # the check also wants the internet reachable (default off)
-nixconvoy.confirmedSwitch.checks = ''           # bash, as root, errexit: the target's own assertions
-  systemctl is-active -q nginx.service
-'';
-nixconvoy.switchLast = true;                # the router: switched alone, after everything else
-```
+A confirmed switch runs through the kit the deploy evaluates for the
+target (`nix/kit.nix`, from the sources the nixconvoy package carries,
+against the target's own `pkgs` and `config`): the `confirmed-switch`
+helper with its settings (`[switch]`'s deadline and internet check, the
+`checks` as a program on a PATH of coreutils, util-linux, systemd, curl,
+nix, iproute2, grep, sed, awk and findutils).  It is built with the
+toplevel, copied beside it and rooted at `/var/lib/nixconvoy/kits/<the
+toplevel's store name>` before the helper runs, so the rollback its timer
+fires survives a collection, and the booted system's kit's `checks` is
+what boot-assessment runs on a counted boot (a rolled-back switch leaves
+its kit beside, not in place of, the running system's).  A target with
+`confirmed = false` gets no kit.  The policy is the deploying checkout's
+`nixconvoy.toml`; a target up to date whose rooted kit differs from the
+one its eval makes (its policy or the kit sources moved) gets the kit
+refreshed in place, without a switch, and a change to a target's policy
+alone reaches it like a change to its configuration.
+
+### The boot-assessment module
 
 `nixconvoy.nixosModules.boot-assessment` adds `nixconvoy.bootAssessment.*`
 (requires lanzaboote): `enable`, `requiredUnits` (active for a boot to
@@ -307,7 +338,8 @@ flake.nix names them, but only with one such directory in the tree: a
 second is as likely a tree of shared profiles, so nothing is skipped then
 and `targets_dir` or `dir` has to say),
 transitively every repo path a scanned `.nix` file names by path literal,
-and the lock entries of the flake inputs those files mention.  The scan is
+the lock entries of the flake inputs those files mention, and its switch
+policy with the kit sources (the same eval makes the kit).  The scan is
 lexical, so the flake keeps two habits for the memo to hit:
 
 - **Import files, not directories.**  A directory named by a path
@@ -542,6 +574,8 @@ commit.  From a checkout on a work branch:
 - `tests/switch_test.py`: the switch driven end to end against a fake target,
   the provenance classification, and the git cores on scratch repositories;
   the package's check phase, so building the package runs it.
+- `nix/kit.nix`: the switch kit a deploy evaluates per target (see "The
+  switch kit"), from the sources the package links beside itself.
 - `nix flake check` builds the `lint` check: ruff, pyrefly, shellcheck,
   rustfmt and clippy alone, cheap enough for a deploy's precheck.
 

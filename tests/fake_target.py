@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 NEW = "/nix/store/new-system"
+KIT = "/nix/store/new-kit"
 
 
 def load(path: Path) -> dict[str, object]:
@@ -31,10 +32,12 @@ def fake_target(argv: list[str]) -> int:
     if argv[0] == "systemd-run":
         argv = [a for a in argv[1:] if not a.startswith("--")]
     rc = 0
-    helper = f"{NEW}/confirmed-switch"
+    helper = f"{KIT}/confirmed-switch"
     match argv:
-        case ["test", "-e", p]:
-            rc = 0 if state["helper"] and p == helper else 1
+        case ["sh", "-c", script] if f"--add-root /var/lib/nixconvoy/kits/new-system --indirect -r {KIT}" in script:
+            state["rooted"] = True
+        case ["sh", "-c", script] if script.startswith("rm -f /var/lib/nixconvoy/kits/new-system;"):
+            state["unrooted"] = True
         case ["readlink", "/run/current-system"]:
             print(state["running"])
         case [h, "deadline"] if h == helper:

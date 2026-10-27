@@ -139,10 +139,12 @@ def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> 
     return ["ssh", *ssh_opts(), targets.ssh_address(target), script]
 
 
-def switch(target: str, expected: str, toplevel: str, nixconvoy_switch: str,
+def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch: str,
            quiet: bool = False, provenance: str = "", digest: str = "",
            needs_internet: bool = False) -> None:
-    """Switch `target` to `toplevel` as nixconvoy-switch decides.  `quiet`
+    """Switch `target` to `toplevel` as nixconvoy-switch decides, confirmed
+    through `kit`'s helper (nix/kit.nix, already copied) or plainly when
+    `kit` is "".  `quiet`
     (several switches at once) prints the activation output afterwards,
     prefixed with the target.  Activation, confirm and rollback run in a
     transient unit on the target (as nixos-rebuild does), so they complete
@@ -154,7 +156,7 @@ def switch(target: str, expected: str, toplevel: str, nixconvoy_switch: str,
     this machine to reach the internet (the router)."""
     local = target == proc.this_machine()
     held = f"[{target}] " if quiet else None
-    helper = f"{toplevel}/confirmed-switch"
+    helper = f"{kit}/confirmed-switch"
     guard: subprocess.Popen[str] | None = None
 
     def detached(argv: list[str], unit: str | None = None,
@@ -198,8 +200,22 @@ def switch(target: str, expected: str, toplevel: str, nixconvoy_switch: str,
                     raise SwitchedMeanwhile(target, line.removeprefix("MOVED").strip() or "nothing readable")
                 return Guard(Failed(line))
             case ProbeHelper():
-                return Code(run(targets.target_cmd(target, ["test", "-e", helper]), check=False,
-                                timeout=PROBE_TIMEOUT).returncode)
+                # The kit (copied with the toplevel) rooted for it before
+                # the helper runs: a failure is the core's to end (Code 2).
+                # Switched plainly, a kit an earlier policy rooted for this
+                # toplevel is dropped, so no boot runs its checks.
+                p = run(targets.target_cmd(target, ["sh", "-c", targets.kit_root_script(toplevel, kit)],
+                                           sudo=True), check=False, timeout=PROBE_TIMEOUT, merged=True)
+                if not kit:
+                    if p.returncode != 0:
+                        print(f"warning: dropping {target}'s stale switch kit link failed (exit {p.returncode})",
+                              file=sys.stderr)
+                    return Code(1)
+                if p.returncode != 0:
+                    print(f"rooting the switch kit {kit} on {target} failed (exit {p.returncode})"
+                          + (f":\n{p.stdout.strip()}" if p.stdout else ""), file=sys.stderr)
+                    return Code(2)
+                return Code(0)
             case SetProfile():
                 return Code(stream(targets.target_cmd(target, ["nix-env", "-p", targets.SYSTEM_PROFILE,
                                                                "--set", toplevel], sudo=True), held_as=held))

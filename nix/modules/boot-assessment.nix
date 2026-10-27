@@ -1,7 +1,10 @@
 { config, lib, pkgs, ... }:
 let
   cfg = config.nixconvoy.bootAssessment;
-  cs = config.nixconvoy.confirmedSwitch;
+  # The switch kits nixconvoy roots, one per system by its store path's
+  # name (nix/kit.nix, targets.KIT_DIR): the booted system's checks are the
+  # switch's own, run on a counted boot too when its kit carries any.
+  kits = "/var/lib/nixconvoy/kits";
   # The judge raises a notice on a boot it is about to reboot out of, where
   # a publisher's network timeouts would keep the box down that much
   # longer.  A backstop over ntfy_notice.py's own 3 s per server.
@@ -74,14 +77,17 @@ let
   #   an initrd that waited for a manual LUKS unlock (or a slow fsck) must
   #   not eat into it.  The watch reboots on the gate unit's failure, and on
   #   the deadline only while the gate has not started.
-  # - switch_check: what a switch must prove, a boot must too: the very
-  #   program the confirmed-switch helper's `check` verb runs, reporting its
-  #   last stderr line.
+  # - state_dir: the confirmed-switch helper's record (nix/kit.nix's
+  #   state), whose `previous` the planner spares.
+  # - kits_dir: what a switch must prove, a boot must too: the very
+  #   program the confirmed-switch helper's `check` verb runs, at
+  #   <kits_dir>/<booted system's name>/checks, reporting its last stderr
+  #   line; skipped when the booted system has no kit, or one without checks.
   conf = pkgs.writeText "boot-assessment.conf" ''
     esp = ${esp}
     profile_dir = /nix/var/nix/profiles
     boot_log = ${bootLog}
-    state_dir = ${lib.optionalString cs.enable cs.stateDir}
+    state_dir = /run/confirmed-switch
     bootable = ${toString bootable}
     tiers = ${toString tiers}
     reserve = ${toString (32 * 1024 * 1024)}
@@ -100,11 +106,11 @@ let
     status_file = /run/boot-assessment/status
     count_path = ${countPath}
     checks = ${lib.getExe ownChecks}
-    switch_check = ${lib.optionalString (cs.enable && cs.checks != "") (lib.getExe cs.checksCommand)}
+    kits_dir = ${kits}
     initial_tries = ${toString initialTries}
     reported = ${reported}
   '';
-  run = verb: "${config.nixconvoy.switchGuardPackage}/bin/nixconvoy-boot-assessment --config ${conf} ${verb}";
+  run = verb: "${cfg.package}/bin/nixconvoy-boot-assessment --config ${conf} ${verb}";
 
   # Runs in place of lanzaboote's installer, for the toplevel
   # switch-to-configuration boot (or a confirmed switch's confirm) installs.
@@ -123,6 +129,10 @@ in
 {
   options.nixconvoy.bootAssessment = {
     enable = lib.mkEnableOption "systemd-boot boot counting as a failover to the last proven generation (lanzaboote installs the counted stubs)";
+    package = lib.mkOption {
+      type = lib.types.package;
+      description = "The switch-guard build whose nixconvoy-boot-assessment binary this target runs; the flake's nixosModules.boot-assessment sets it to its own.";
+    };
     requiredUnits = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];

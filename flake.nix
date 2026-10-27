@@ -24,15 +24,12 @@
       tests = self.packages.${pkgs.stdenv.hostPlatform.system}.nixconvoy;
     });
 
-    # The target side: the switch policy options nixconvoy reads at eval time,
-    # the confirmed-switch helper, and (optionally) boot assessment.
-    nixosModules = {
-      default = { pkgs, ... }: {
-        imports = [ ./nix/modules/options.nix ./nix/modules/confirmed-switch.nix ];
-        nixconvoy.switchGuardPackage = nixpkgs.lib.mkDefault
-          self.packages.${pkgs.stdenv.hostPlatform.system}.switch-guard;
-      };
-      boot-assessment = ./nix/modules/boot-assessment.nix;
+    # The target side is pushed by each deploy (nix/kit.nix); the one module
+    # left is boot assessment, whose units live in the system.
+    nixosModules.boot-assessment = { pkgs, ... }: {
+      imports = [ ./nix/modules/boot-assessment.nix ];
+      nixconvoy.bootAssessment.package = nixpkgs.lib.mkDefault
+        self.packages.${pkgs.stdenv.hostPlatform.system}.switch-guard;
     };
   };
 }

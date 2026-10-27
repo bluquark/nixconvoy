@@ -1,8 +1,7 @@
-"""The eval memo: each target's toplevel (and the switch policy its
-configuration declares) keyed by exactly what its evaluation can read, so a
-change to a module one target imports re-evaluates that target alone and a
-no-op redeploy evaluates nothing; the precheck's pass memoized on the
-union's tree."""
+"""The eval memo: each target's toplevel (and its switch kit) keyed by
+exactly what its evaluation can read, so a change to a module one target
+imports re-evaluates that target alone and a no-op redeploy evaluates
+nothing; the precheck's pass memoized on the union's tree."""
 
 from __future__ import annotations
 
@@ -23,7 +22,7 @@ from typing import NamedTuple
 from urllib.parse import quote
 
 from .checkout import lock_pid_alive, pid_started
-from .config import cfg, main_ref, root
+from .config import CONFIG_FILE, Config, ConfigError, SwitchPolicy, cfg, main_ref, parse, root
 from .proc import NOTHING_DONE, cache_dir, die, dump_json, is_ancestor, load_json, out, run
 
 # A target entry lives while its .drv does: unrooted once no checkout's
@@ -42,13 +41,14 @@ MEMO_LOCK = threading.Lock()
 
 
 class Top(NamedTuple):
-    """A target's evaluated toplevel and the switch policy its configuration
-    declares through the nixconvoy NixOS module."""
+    """A target's evaluated toplevel, its switch kit (nix/kit.nix, evaluated
+    against the target's own pkgs: "" for a target switched plainly) and
+    the policy its configuration declares through the boot-assessment
+    module."""
     out: str
     drv: str
-    # Switched after every other target, alone, with this machine's internet
-    # verified too (the router).
-    last: bool
+    kit: str
+    kit_drv: str
     # systemd-boot boot counting (the boot-assessment module): a generation
     # the target fell back from is never switched to.
     assessed: bool
@@ -59,9 +59,10 @@ def memo_entry(obj: object) -> Top | None:
     if not isinstance(obj, dict):
         return None
     o, drv = obj.get("out"), obj.get("drv")
-    if not (isinstance(o, str) and isinstance(drv, str)):
+    kit, kit_drv = obj.get("kit", ""), obj.get("kit_drv", "")
+    if not (isinstance(o, str) and isinstance(drv, str) and isinstance(kit, str) and isinstance(kit_drv, str)):
         return None
-    return Top(o, drv, obj.get("last") is True, obj.get("assessed") is True)
+    return Top(o, drv, kit, kit_drv, obj.get("assessed") is True)
 
 
 def memo_read(path: Path) -> Top | None:
@@ -75,27 +76,34 @@ def memo_write(path: Path, ent: Top) -> None:
     """Atomic rename, so concurrent deploys never see a partial entry."""
     try:
         tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
-        tmp.write_text(dump_json({"out": ent.out, "drv": ent.drv,
-                                  "last": ent.last, "assessed": ent.assessed}))
+        tmp.write_text(dump_json({"out": ent.out, "drv": ent.drv, "kit": ent.kit,
+                                  "kit_drv": ent.kit_drv, "assessed": ent.assessed}))
         tmp.replace(path)
     except OSError:
         pass
 
 
-def memo_root(path: Path) -> Path:
-    """A target entry's GC root: a symlink to its .drv under roots/ beside
-    the entries, registered with the store as an indirect root."""
-    return path.parent / "roots" / f"{path.stem}.drv"
+def memo_root(path: Path, kit: bool = False) -> Path:
+    """A target entry's GC root: a symlink to its .drv (`kit`: its kit's,
+    <stem>.kit.drv) under roots/ beside the entries, registered with the
+    store as an indirect root."""
+    return path.parent / "roots" / f"{path.stem}{'.kit' if kit else ''}.drv"
 
 
-def root_drv(path: Path, drv: str) -> bool:
+def root_entry(path: Path, ent: Top) -> bool:
+    """Whether `path`'s entry's .drvs (the toplevel's and the kit's) are
+    rooted, registering what is not (root_drv)."""
+    return root_drv(path, ent.drv) and (not ent.kit_drv or root_drv(path, ent.kit_drv, kit=True))
+
+
+def root_drv(path: Path, drv: str, kit: bool = False) -> bool:
     """Whether `path`'s entry's .drv is rooted, registering the root when
     it is not: nix-instantiate's --add-root on the imported .drv (no
     build), through the daemon, so on return the .drv closure is kept
     whole or gone - gone is False, the entry stale.  A root already
     pointing at a .drv still there holds without asking the daemon.  Any
     other failure is the deploy's."""
-    link = memo_root(path)
+    link = memo_root(path, kit)
     try:
         if str(link.readlink()) == drv and Path(drv).exists():
             return True
@@ -216,11 +224,13 @@ def memo_prune(d: Path) -> None:
             continue
         ent = memo_read(path)
         try:
-            if ent is None or not Path(ent.drv).exists():
+            if ent is None or not Path(ent.drv).exists() or (ent.kit_drv and not Path(ent.kit_drv).exists()):
                 path.unlink()
                 memo_root(path).unlink(missing_ok=True)
+                memo_root(path, kit=True).unlink(missing_ok=True)
             elif path.stem not in used:
                 memo_root(path).unlink(missing_ok=True)
+                memo_root(path, kit=True).unlink(missing_ok=True)
         except OSError:
             pass
     for stray in ((d / "users").iterdir() if (d / "users").is_dir() else ()):
@@ -228,9 +238,10 @@ def memo_prune(d: Path) -> None:
             drop_stale_tmp(stray)
     for link in (roots.iterdir() if roots.is_dir() else ()):
         try:
+            stem = link.stem.removesuffix(".kit")
             if link.suffix != ".drv":
                 drop_stale_tmp(link)
-            elif link.stem not in used and not (d / f"{link.stem}.json").exists():
+            elif stem not in used and not (d / f"{stem}.json").exists():
                 link.unlink()
         except OSError:
             pass
@@ -517,18 +528,48 @@ def path_inputs(wt: str) -> dict[str, str]:
     return found
 
 
+@functools.cache
+def union_config(wt: str) -> Config:
+    """nixconvoy.toml as the union tree checked out in `wt` holds it: the
+    switch policies a deploy builds its kits from and orders its switches
+    by, so every checkout deploying the same union makes the same kits,
+    and an edit reaches a target only once it is in the union (staged)."""
+    try:
+        return parse((Path(wt) / CONFIG_FILE).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ConfigError) as e:
+        die(f"the union's {CONFIG_FILE} cannot be read: {e}; {NOTHING_DONE}")
+
+
+def kit_inputs(pol: SwitchPolicy) -> tuple[object, ...]:
+    """What of a policy the kit is made from: nothing for a target
+    switched plainly (`last` only orders the switches)."""
+    return (pol.deadline, pol.internet_check, pol.checks) if pol.confirmed else ()
+
+
+def kit_part(wt: str, target: str) -> str:
+    """The switch kit's share of `target`'s key: the kit sources this
+    build carries and the target's policy (the union's nixconvoy.toml), as
+    the same eval makes the kit; "kit none" for a target switched plainly."""
+    pol = union_config(wt).switch_policy(target)
+    if not pol.confirmed:
+        return "kit none"
+    checks = hashlib.sha256(pol.checks.encode()).hexdigest()
+    return f"kit {kit_src()} {pol.deadline} {pol.internet_check} {checks}"
+
+
 def target_eval_key(wt: str, union: str, target: str) -> str:
     """Hash of everything `target`'s evaluation can read (target_eval_reads: the
-    paths by git object id, flake.lock pruned by lock_part), so it is
-    identical across checkouts and untouched by changes to unrelated
-    files; the whole tree when the scan cannot tell."""
+    paths by git object id, flake.lock pruned by lock_part; the switch
+    kit's sources and the target's policy, kit_part), so it is identical
+    across checkouts and untouched by changes to unrelated files; the
+    whole tree when the scan cannot tell."""
     reads = target_eval_reads(wt, union, target)
     if reads is None:
-        return hashlib.sha256(f"tree {out(['git', 'rev-parse', union + '^{tree}'])}"
+        return hashlib.sha256(f"tree {out(['git', 'rev-parse', union + '^{tree}'])}\n{kit_part(wt, target)}"
                               .encode()).hexdigest()
     objs = union_objects(union)
     paths, named = reads
-    parts = [f"{objs[q][1]} {q}" for q in paths]
+    parts = [*(f"{objs[q][1]} {q}" for q in paths), kit_part(wt, target)]
     lock_path = cfg().flake_file("flake.lock")
     if lock_path in objs:
         try:
@@ -555,16 +596,37 @@ def recorded_tip(provenance: str, branch: str) -> str | None:
     return tip if isinstance(tip, str) else None
 
 
+def policy_moved(targets: list[str], base: str, tip: str) -> set[str]:
+    """The targets whose kit inputs (kit_inputs of their switch policy)
+    differ between nixconvoy.toml at `base` and at `tip`; every target
+    when either file cannot be read as one."""
+    def policies(ref: str) -> dict[str, tuple[object, ...]] | None:
+        p = run(["git", "show", f"{ref}:{CONFIG_FILE}"], check=False)
+        if p.returncode != 0:
+            return None
+        try:
+            c = parse(p.stdout)
+        except ConfigError:
+            return None
+        return {h: kit_inputs(c.switch_policy(h)) for h in targets}
+    a, b = policies(base), policies(tip)
+    if a is None or b is None:
+        return set(targets)
+    return {h for h in targets if a[h] != b[h]}
+
+
 def reached_between(wt: str, union: str, targets: list[str], base: str, tip: str) -> set[str]:
     """The targets among `targets` whose evaluation reads something that
     differs between the commits `base` and `tip`: a path of
-    target_eval_reads (in the `union` commit checked out in `wt`), or a lock
-    entry of an input those files name."""
+    target_eval_reads (in the `union` commit checked out in `wt`), a lock
+    entry of an input those files name, or their switch policy in
+    nixconvoy.toml (policy_moved: the kit the same eval makes)."""
     lock_path = cfg().flake_file("flake.lock")
     # A rename lists both paths: the one a target read may be the old.
     delta = set(out(["git", "diff", "--name-only", "--no-renames", base, tip]).splitlines())
     if not delta:
         return set()
+    reached: set[str] = policy_moved(targets, base, tip) if CONFIG_FILE in delta else set()
     locks: dict[str, object] = {}
 
     def lock_at(ref: str) -> object:
@@ -577,7 +639,6 @@ def reached_between(wt: str, union: str, targets: list[str], base: str, tip: str
                 locks[ref] = p.stdout
         return locks[ref]
 
-    reached: set[str] = set()
     for h in targets:
         reads = target_eval_reads(wt, union, h)
         if reads is None:
@@ -624,22 +685,62 @@ def reached_targets(wt: str, union: str, targets: list[str], tip: str,
     return reached
 
 
-def eval_expr(target: str, parallel: bool) -> str:
-    """The --apply over nixosConfigurations: the toplevel's out/drv (not
-    outPath: toJSON collapses any attrset holding an outPath attribute to
-    that path string) and the switch policy the nixconvoy module declares.
-    With parallel evaluation the nspawn containers' toplevels (nested NixOS
-    evaluations, about a second each) are forced beside the target's - the
-    only parallelism one configuration offers.  tryEval passes over a
-    container declared by `path` alone, whose `config` is unset."""
-    head = (f'cs: let c = cs."{target}".config; top = c.system.build.toplevel; '
-            'ncv = c.nixconvoy or {}; '
+def nix_string(text: str) -> str:
+    """`text` as a Nix string literal."""
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("${", "\\${") + '"'
+
+
+@functools.cache
+def kit_src() -> str:
+    """The switch kit's sources (nix/kit.nix with the crate), the tree
+    nix/package.nix links beside this package under kit/: what a target's
+    eval imports (eval_expr), through fetchTree by its narHash, the one
+    way a pure evaluation reads a store path."""
+    src = Path(__file__).resolve().parent / "kit"
+    if not (src / "nix" / "kit.nix").is_file():
+        die(f"{src} is missing: nixconvoy runs from its nix package (nix run .#nixconvoy)")
+    return str(src.resolve())
+
+
+@functools.cache
+def kit_nar_hash() -> str:
+    p = run(["nix", "hash", "path", "--sri", kit_src()], check=False)
+    if p.returncode != 0 or not p.stdout.strip():
+        die(f"hashing the switch kit's sources {kit_src()} failed:\n{p.stderr.strip()}")
+    return p.stdout.strip()
+
+
+def kit_expr(pol: SwitchPolicy) -> str:
+    """The kit's derivation for a target (`c`, its nixosConfiguration):
+    nix/kit.nix over its pkgs and config with `pol`; null for one switched
+    plainly."""
+    if not pol.confirmed:
+        return "null"
+    tree = (f'builtins.fetchTree {{ type = "path"; path = {nix_string(kit_src())}; '
+            f'narHash = {nix_string(kit_nar_hash())}; }}')
+    return (f'import "${{{tree}}}/nix/kit.nix" {{ inherit (c) pkgs config; deadline = {pol.deadline}; '
+            f'internetCheck = {"true" if pol.internet_check else "false"}; checks = {nix_string(pol.checks)}; }}')
+
+
+def eval_expr(target: str, parallel: bool, pol: SwitchPolicy) -> str:
+    """The --apply over nixosConfigurations: the toplevel's and the kit's
+    out/drv (not outPath: toJSON collapses any attrset holding an outPath
+    attribute to that path string) and the policy the boot-assessment
+    module declares.  With parallel evaluation the nspawn containers'
+    toplevels (nested NixOS evaluations, about a second each) are forced
+    beside the target's - the only parallelism one configuration offers.
+    tryEval passes over a container declared by `path` alone, whose
+    `config` is unset."""
+    head = (f'cs: let c = cs."{target}"; top = c.config.system.build.toplevel; '
+            f'kit = {kit_expr(pol)}; '
+            'ncv = c.config.nixconvoy or {}; '
             'policy = { out = top.outPath; drv = top.drvPath; '
-            'last = ncv.switchLast or false; assessed = (ncv.bootAssessment or {}).enable or false; }; ')
+            'kit = if kit == null then "" else kit.outPath; kit_drv = if kit == null then "" else kit.drvPath; '
+            'assessed = (ncv.bootAssessment or {}).enable or false; }; ')
     if not parallel:
         return head + "in policy"
     return (head + "containers = map (x: (builtins.tryEval x.config.system.build.toplevel.outPath).value) "
-            "(builtins.attrValues c.containers); in "
+            "(builtins.attrValues c.config.containers); in "
             "builtins.parallel (containers ++ [ top.outPath ]) policy")
 
 
@@ -675,7 +776,7 @@ def eval_toplevels(wt: str, union: str, targets: list[str],
         memo_use(d, [p.stem for p in paths.values()])
         for h in targets:
             ent = memo_read(paths[h])
-            if ent is not None and not root_drv(paths[h], ent.drv):
+            if ent is not None and not root_entry(paths[h], ent):
                 paths[h].unlink(missing_ok=True)
                 ent = None
             if ent is None:
@@ -695,7 +796,7 @@ def eval_toplevels(wt: str, union: str, targets: list[str],
         par = (["--eval-cores", str(min(8, os.cpu_count() or 1)),
                 "--extra-experimental-features", "parallel-eval"] if parallel else [])
         p = run(["nix", "eval", "--json", *par, f"{flake}#nixosConfigurations",
-                 "--apply", eval_expr(h, parallel)], check=False)
+                 "--apply", eval_expr(h, parallel, union_config(wt).switch_policy(h))], check=False)
         if p.returncode != 0:
             return f"evaluating {h} failed:\n{p.stderr.strip()}"
         ent = memo_entry(load_json(p.stdout))
@@ -703,7 +804,7 @@ def eval_toplevels(wt: str, union: str, targets: list[str],
             return f"nix eval returned no toplevel for {h}:\n{p.stdout[:500]}"
         memo_write(paths[h], ent)
         with memo_lock(d):
-            if not root_drv(paths[h], ent.drv):
+            if not root_entry(paths[h], ent):
                 paths[h].unlink(missing_ok=True)
                 return f"{h}'s .drv was collected as soon as it was evaluated; re-run"
         return ent
