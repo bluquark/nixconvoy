@@ -1050,15 +1050,20 @@ def git_cases(d: Path) -> None:
         assert "cannot union work branch work/other/1;" in err, err
         assert "\n  b.txt\n" in err, err
 
-        # A sync from main: main fast-forwarded, the work branch rebased
-        # aside and pushed.
+        # A sync from main: a main checkout there, so main is fast-forwarded
+        # and the work branch left where it was; back on the branch, it is
+        # rebased and pushed.
         sh(co, "switch", "--quiet", "main")
         sh(seed, "switch", "--quiet", "main")
         put(seed, "a.txt", "ONE\nTWO-upstream\nthree\nfour\n", "upstream 3")
         sh(seed, "push", "--quiet", "origin", "HEAD:main")
+        tip = sh(co, "rev-parse", wb)
         good, status = checkout.update_checkout(co)
-        assert good and status.startswith("fast-forwarded main") and f"rebased {wb}" in status and \
-            status.endswith(f"pushed {wb}"), status
+        assert good and status == "fast-forwarded main onto origin/main", status
+        assert sh(co, "rev-parse", wb) == tip
+        sh(co, "switch", "--quiet", wb)
+        good, status = checkout.update_checkout(co)
+        assert good and f"rebased {wb}" in status and status.endswith(f"pushed {wb}"), status
         assert proc.is_ancestor("refs/remotes/origin/main", f"refs/remotes/origin/{wb}")
         assert checkout.update_checkout(co) == (True, "up to date")
 
@@ -1069,6 +1074,17 @@ def git_cases(d: Path) -> None:
         rv = co / "worktrees" / "review"
         sh(co, "worktree", "add", "--quiet", "--detach", str(rv), "origin/work/other/1")
         assert left_alone(got := checkout.update_checkout(rv)), got
+        # ...while its own work branch, not checked out, is rebased in a
+        # throwaway worktree and pushed.
+        own = checkout.identity_of(rv.resolve(), None).wb
+        assert own is not None
+        sh(co, "branch", own, "origin/work/other/1")
+        good, status = checkout.update_checkout(rv)
+        assert good and f"rebased {own}" in status and status.endswith(f"pushed {own}"), status
+        assert proc.is_ancestor("refs/remotes/origin/main", f"refs/remotes/origin/{own}")
+        sh(co, "push", "--quiet", "origin", f":{own}")
+        sh(co, "branch", "-D", own)
+        sh(co, "fetch", "--quiet", "--prune")
         # ...or at a tip since landed (its tree less COMMIT_MSG.md is
         # main's)...
         sh(seed, "switch", "--quiet", "work/other/1")
@@ -2238,6 +2254,11 @@ def open_cases(d: Path) -> None:
         assert "exists already" in dies(lambda: commands.open_checkout(d / "homelab5", None))
         assert "nested" in dies(lambda: commands.open_checkout(co / "inside", None))
         assert "not a work branch" in dies(lambda: commands.open_checkout(d / "x", "work/other/1"))
+        # A main checkout is never closed: off its work branch, that is what
+        # an agent checkout is.
+        sh(five, "switch", "--quiet", "--detach")
+        assert "is a main checkout (detached)" in dies(lambda: commands.close_checkout(d / "homelab5"))
+        sh(five, "switch", "--quiet", "work/tester/homelab5")
         # Removed once it holds nothing of its own, its branch with it.
         put(five, "b.txt", "b\n")
         assert "holds edits" in dies(lambda: commands.close_checkout(d / "homelab5"))

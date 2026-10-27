@@ -1141,10 +1141,10 @@ def open_checkout(path: Path, branch: str | None) -> Path:
 
 
 def close_checkout(path: Path, *, force: bool = False) -> None:
-    """`nixconvoy close <path>`: the agent checkout at `path` removed with
-    its work branch, here and on origin,
-    when it holds nothing of its own - no edits, nothing beyond
-    origin/main, no submodule holding anything - or `force`."""
+    """`nixconvoy close <path>`: the agent checkout at `path` (on its work
+    branch: a main checkout is refused) removed with its work branch, here
+    and on origin, when it holds nothing of its own - no edits, nothing
+    beyond origin/main, no submodule holding anything - or `force`."""
     here = Path.cwd().resolve()
     d = path.expanduser().resolve()
     if d == here:
@@ -1166,6 +1166,8 @@ def close_checkout(path: Path, *, force: bool = False) -> None:
         die(f"{lock_holder(d)} is running in {d}")
     cur = branch_at(d)
     wb = identity_of(d, cur).wb
+    if wb is None:
+        die(f"{d} is a main checkout ({'on ' + cur if cur else 'detached'}), not an agent's on its work branch")
     head = out(["git", "rev-parse", "HEAD"], cwd=str(d))
     # Its submodule worktrees are its own (removed with it): a pin they moved is not an edit.
     edits = [ln for ln in run(["git", "status", "--porcelain"], cwd=str(d), check=False).stdout.splitlines()

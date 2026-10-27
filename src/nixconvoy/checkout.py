@@ -217,6 +217,21 @@ def branch_at(d: Path) -> str | None:
     return p.stdout.strip() or None
 
 
+def branch_of(d: Path) -> str | None:
+    """The branch the checkout at `d` is on, or is rebasing in place (HEAD
+    detached meanwhile, the branch named in the rebase's state)."""
+    if (b := branch_at(d)) is not None:
+        return b
+    for state in ("rebase-merge", "rebase-apply"):
+        try:
+            name = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path", f"{state}/head-name"],
+                            cwd=str(d))).read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        return name.removeprefix("refs/heads/") or None
+    return None
+
+
 STATE_DIR = "nixconvoy"
 
 
@@ -240,27 +255,6 @@ def state_dir(d: Path) -> Path:
     with contextlib.suppress(OSError):
         d.mkdir(exist_ok=True)
     return d
-
-
-def note_path(d: Path) -> Path:
-    """The note in a checkout's git dir naming the work branch it owns:
-    the listed branch it last deployed or committed from, so switching to
-    main to look around does not orphan the branch (pull still rebases it
-    aside, status still shows it as this checkout's)."""
-    return state_path("work-branch", d)
-
-
-def noted_branch(d: Path) -> str | None:
-    try:
-        return note_path(d).read_text().strip() or None
-    except OSError:
-        return None
-
-
-def note_branch(d: Path, wb: str) -> None:
-    if noted_branch(d) != wb:
-        with contextlib.suppress(OSError):
-            note_path(d).write_text(wb + "\n")
 
 
 def note_prefix(top: Path) -> None:
@@ -289,28 +283,20 @@ def identity_of(here: Path, cur: str | None, pats: set[str] | None = None) -> Ch
     this machine's listed work branches it owns that branch (a subagent's
     when it is nested in another checkout); a subagent worktree on
     any other branch owns <parent's work branch>-<name> (<branch_prefix>main-<name>
-    under the main checkout); a checkout that owned a work branch before
-    (its note) still does; anything else is the main checkout, with no work
-    branch of its own."""
+    under the main checkout); anything else is the main checkout, with no
+    work branch of its own."""
     parent = sub_parent(here)
     if cur and owned(cur, pats):
         return Checkout("sub" if parent is not None else "agent", cur)
     if parent is not None:
-        pb = branch_at(parent) or noted_branch(parent)
+        pb = branch_of(parent)
         base = pb if pb and owned(pb, pats) else this_prefix() + "main"
         return Checkout("sub", f"{base}-{here.name}")
-    noted = noted_branch(here)
-    if noted and owned(noted, pats):
-        return Checkout("agent", noted)
     return Checkout("main", None)
 
 
 def checkout_identity() -> Checkout:
-    here = Path.cwd().resolve()
-    ident = identity_of(here, current_branch())
-    if ident.wb is not None and ident.kind == "agent":
-        note_branch(here, ident.wb)
-    return ident
+    return identity_of(Path.cwd().resolve(), current_branch())
 
 
 def work_branch_name() -> str | None:
@@ -668,7 +654,6 @@ def catch_up(paths: list[Path]) -> bool:
 def ensure_on_work_branch(wb: str) -> None:
     prev = current_branch()
     decide(OnWorkBranch(wb))
-    note_branch(Path.cwd().resolve(), wb)
     if (prev is not None and prev not in (wb, "main") and current_branch() == wb
             and checkout_identity().kind == "sub"):
         # The fresh branch a subagent's worktree was created on, replaced.
@@ -1204,7 +1189,7 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str])
     refs/heads/DEPLOYED_PREFIX/<target>; the branch's announcement deleted
     (this run's, or an earlier run's whose push failed; unleased, a
     missing one being nothing) - or, under another key than the branch's
-    (a main checkout's, a work checkout parked on main), settled.  Then,
+    (a main checkout's), settled.  Then,
     once that landed, the cleared announcements as fetched are deleted
     (not atomically), each leased on what it held, a refusal tolerated (a
     hand clear or another deploy got there first; what stays is swept by
@@ -1457,8 +1442,7 @@ def increment_fate(branch: str, tip: str, union: str, checkout: str | None) -> s
     if rev(up) is not None:
         if is_ancestor(tip, up):
             return "kept"
-    elif checkout and Path(checkout).is_dir() and (branch_at(Path(checkout)) == branch
-                                                   or noted_branch(Path(checkout)) == branch):
+    elif checkout and Path(checkout).is_dir() and branch_at(Path(checkout)) == branch:
         return "kept"
     p = run(["git", "merge-tree", "--write-tree", "--messages", union, tip], check=False)
     if p.returncode != 0:

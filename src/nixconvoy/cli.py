@@ -253,7 +253,7 @@ main.
 
 Status (nixconvoy status): after a fetch, every checkout on this machine as
 a tree (the main checkouts, the work-branch ones, each with its subagent
-worktrees): the branch or parked state, commits ahead of origin/main and
+worktrees): the branch or detached state, commits ahead of origin/main and
 whether they are pushed, staged/unstaged/untracked counts, the
 COMMIT_MSG.md subject, a deploy or git operation in progress - then the
 work branches only origin holds (other machines' checkouts).
@@ -381,7 +381,8 @@ while a pushed branch or deploy record pins it), unless that would lose
 work - edits, commits not on the default branch, a pin still off it -
 which --force overrides, the pin then put back to origin/main's, staged;
 the directory stays, empty, as an unpopulated submodule.  <path>: an
-agent checkout (never the primary worktree), with its work branch here
+agent checkout on its work branch (never a main checkout, nor the
+primary worktree), with its work branch here
 and on origin, when it holds nothing of its own - no edits, nothing
 beyond origin/main, no submodule holding anything - or --force.
 
@@ -426,8 +427,9 @@ relocked it - whether its session still runs or not.  worktree-resume
 worktree recreated, or relocked, as worktree-create does; the resume is
 refused (exit 2) when that fails.  session-start: detached, a sweep of
 what dead sessions left, then, once this session exits, a sweep of what
-its agents' stops kept (one waiter per session).  Both log to
-nixconvoy/prune.log in the common git dir.  worktree-remove: Claude
+its agents' stops kept (one waiter per session).  Both log to the
+repository's prune log, logs/prune-<common git dir, each / a %>.log in the
+cache dir (~/.cache/nixconvoy, or XDG_CACHE_HOME's).  worktree-remove: Claude
 Code letting go of a worktree the create hook made (a `claude
 --worktree` session's, at its exit), removed with its branch unless
 another live session holds it, it has changes, commits not on

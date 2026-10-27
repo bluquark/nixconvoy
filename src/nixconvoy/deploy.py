@@ -231,7 +231,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     elif wb is None and cur not in ("main", None):
         die(f"on branch {cur}, which nixconvoy.toml's work_branches does not list; the "
             "main checkout deploys from main (a hand commit there is claimed as main's "
-            "until pushed) or parked on origin/main")
+            "until pushed)")
 
     def increment_name() -> str:
         n = int(out(["git", "rev-list", "--count", "refs/remotes/origin/main..HEAD"])) + 1
@@ -273,7 +273,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     elif msg:
         die("nothing is staged; stage the change or drop -m")
     else:
-        if wb is not None and current_branch() == wb:  # parked on main, the branch is not pushed
+        if wb is not None and current_branch() == wb:  # a detached subagent worktree commits nothing onto it
             fetch.result()
             ensure_sole_writer(wb)
         ensure_rebased()

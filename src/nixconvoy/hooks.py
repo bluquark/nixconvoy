@@ -5,8 +5,8 @@ nearest claude ancestor of this process.  worktree-create opens the
 subagent worktree the session asks for, locked with the session's identity;
 worktree-resume does so again for an agent a message resumes;
 subagent-stop and session-start remove the worktrees the session's agents
-leave with nothing of their own, detached, logging to nixconvoy/prune.log
-in the common git dir; worktree-remove removes the one Claude Code itself
+leave with nothing of their own, detached, logging to the repository's
+prune log under the cache dir's logs/ (prune_log); worktree-remove removes the one Claude Code itself
 lets go of (a `claude --worktree` session's, at its exit)."""
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ from .commands import (
     transcript_cwd,
 )
 from .config import CONFIG_FILE
-from .proc import die, failure, git, ok, out, run
+from .proc import cache_dir, die, failure, git, ok, out, run
 
 EVENTS = ("session-start", "subagent-stop", "worktree-create", "worktree-remove", "worktree-resume")
 
@@ -278,14 +278,26 @@ def detached(top: Path) -> bool:
     return True
 
 
+def prune_log(common: Path) -> Path:
+    """The repository's prune log, under the cache dir's logs/
+    (~/.cache/nixconvoy/logs/, or XDG_CACHE_HOME's) by its common git
+    dir's path with each / a %."""
+    return cache_dir() / "logs" / f"prune-{str(common).replace('/', '%')}.log"
+
+
 def log_to(common: Path) -> None:
-    """stdout and stderr onto prune.log in the common git dir's nixconvoy/,
-    started over past 1 MiB."""
-    logf = common_state_path("prune.log", common)
-    with contextlib.suppress(OSError):
-        if logf.stat().st_size > 1 << 20:
-            logf.replace(logf.with_suffix(".log.old"))
-    log = logf.open("a")
+    """stdout and stderr onto the repository's prune log (prune_log),
+    started over past 1 MiB; left on /dev/null when there can be no log
+    (no resolvable HOME, a cache dir that cannot be written)."""
+    try:
+        logf = prune_log(common)
+        logf.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(OSError):
+            if logf.stat().st_size > 1 << 20:
+                logf.replace(logf.with_suffix(".log.old"))
+        log = logf.open("a")
+    except (OSError, RuntimeError):
+        return
     os.dup2(log.fileno(), 1)
     os.dup2(log.fileno(), 2)
 
