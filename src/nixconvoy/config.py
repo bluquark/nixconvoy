@@ -15,9 +15,9 @@ from . import proc
 
 CONFIG_FILE = "nixconvoy.toml"
 MSG_FILE = "COMMIT_MSG.md"
-# Where Claude Code puts a subagent worktree: the one place a repository
-# without nixconvoy.toml has for one (the plugin's create hook runs in every
-# repository).
+# Where Claude Code puts a subagent worktree, and the plugin's run.sh one
+# in a repository without nixconvoy.toml: the place `open --child` and
+# `hook` take there when run by hand.
 CLAUDE_WORKTREES = ".claude/worktrees"
 
 

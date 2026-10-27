@@ -309,8 +309,7 @@ step of a deploy in full.
 ## Child worktrees
 
 A git worktree nested in a checkout - `<checkout>/<child_worktrees>/<name>`,
-the directory nixconvoy.toml names (`.claude/worktrees/`, where Claude
-Code puts its own, in a repository that is no nixconvoy repository; `open` writes it into `.git/info/exclude` unless
+the directory nixconvoy.toml names (`open` writes it into `.git/info/exclude` unless
 it is ignored already), where `nixconvoy open --child <worktree>` makes one
 and the create hook below runs it - is that checkout's child, or subagent,
 worktree: it owns `<checkout's
@@ -360,13 +359,15 @@ prompt for a spawn they isolated.
 
 `--scope project`, run in the repository, writes the enablement into its
 tracked `.claude/settings.json`: every worktree of it has it, and each
-collaborator runs the install once.  The hooks belong to a repository
-with `nixconvoy.toml`: at user scope they run in every repository you
-open, where the create hook still makes a subagent's worktree (a plain
-`.claude/worktrees/<name>` on `worktree-<name>`) but the prunes, which
-read the work branches, leave it to `git worktree remove`.  `nixconvoy`
-must be on PATH where the hooks run (each is `hooks/run.sh <event>`, which runs
-`nixconvoy hook <event>`).
+collaborator runs the install once.  The hooks act in a repository
+with `nixconvoy.toml` alone: enabled at user scope, they run in every
+repository you open, but outside a nixconvoy repository `nixconvoy` is
+never called - the prunes and the resume do nothing, and the create and
+remove hooks, which Claude Code hands to a configured hook entirely, do
+what its own git would (a plain `.claude/worktrees/<name>` on
+`worktree-<name>` off origin's default branch, removed with that branch).
+`nixconvoy` must be on PATH where the hooks run (each is `hooks/run.sh
+<event>`, which runs `nixconvoy hook <event>`).
 
 ## Submodules
 

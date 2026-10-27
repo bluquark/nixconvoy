@@ -2448,6 +2448,51 @@ def open_cases(d: Path) -> None:
         hooks.worktree_remove(str(pw))
         assert not pw.exists() and not sh(plain, "branch", "--list", "worktree-x")
         os.chdir(co)
+        # The plugin's run.sh: in a nixconvoy repository the input goes to
+        # `nixconvoy hook <event>` (a stub here) with its status; in one
+        # nixconvoy does not manage nixconvoy never runs, the create and
+        # remove do what Claude Code's own git would, the rest say nothing.
+        put(plain, "q.txt", "q\n", "local only")
+        run_sh = Path(__file__).resolve().parent.parent / "integrations/claude-code/hooks/run.sh"
+        tools = {t: subprocess.run(["sh", "-c", f"command -v {t}"], capture_output=True, text=True, check=False)
+                 .stdout.strip() for t in ("sh", "bash", "git", "jq", "cat", "mkdir", "basename", "tail", "dirname")}
+        assert all(tools.values()), tools
+        stub = d / "stub"  # the tools by name alone: no directory of theirs, which may hold a nixconvoy
+        stub.mkdir()
+        for t, p in tools.items():
+            (stub / t).symlink_to(p)
+        (stub / "nixconvoy").write_text(f"#!{tools['sh']}\necho \"stub $*: $(cat)\"\nexit 99\n")
+        (stub / "nixconvoy").chmod(0o755)
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+        env["PATH"] = str(stub)
+
+        def hook(event: str, **given: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(["bash", str(run_sh), event], input=json.dumps(given), capture_output=True,
+                                  text=True, check=False, env=env, cwd=str(plain))
+        def cases() -> None:
+            r = hook("worktree-resume", cwd=str(co), tool_input={"to": "a1b2"})
+            assert r.returncode == 99 and r.stdout.startswith("stub hook worktree-resume: {") and "a1b2" in r.stdout, r
+            r = hook("session-start", cwd=str(co))
+            assert r.returncode == 0 and not r.stdout and not r.stderr, r  # the prune's say is dropped
+            for event in ("session-start", "subagent-stop", "worktree-resume"):
+                r = hook(event, cwd=str(plain), tool_input={"to": "a1b2"}, transcript_path=str(d / "none.jsonl"))
+                assert r.returncode == 0 and not r.stdout and not r.stderr, (event, r)
+            r = hook("worktree-create", cwd=str(plain), name="x")
+            assert r.returncode == 0 and r.stdout.strip() == str(pw), r
+            assert sh(pw, "symbolic-ref", "--short", "HEAD") == "worktree-x"
+            assert sh(pw, "rev-parse", "HEAD") == sh(plain, "rev-parse", "origin/main")  # not the local tip
+            assert sh(plain, "status", "--porcelain") == ""  # the nested worktree excluded
+            assert hook("worktree-create", cwd=str(plain), name="x").stdout.strip() == str(pw)  # reused
+            shutil.rmtree(pw)  # deleted by hand: pruned and made again
+            assert hook("worktree-create", cwd=str(plain), name="x").stdout.strip() == str(pw) and (pw / ".git").exists()
+            r = hook("worktree-create", cwd=str(plain), name="../y")
+            assert r.returncode == 1 and "worktree name" in r.stderr, r
+            r = hook("worktree-remove", worktree_path=str(pw))
+            assert r.returncode == 0, r
+            assert not pw.exists() and not sh(plain, "branch", "--list", "worktree-x")
+            assert hook("worktree-remove", worktree_path=str(pw)).returncode == 0  # gone already
+        cases()
+        os.chdir(co)
         # The session a hook acts for: the nearest ancestor named claude.
         if Path("/proc/self").exists():
             fake = d / "claude"

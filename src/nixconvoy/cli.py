@@ -297,8 +297,7 @@ worktree never deployed has nothing to undeploy: close --force discards it.
 Open (nixconvoy open <path> [--branch <leaf>] | --child <worktree>
 | --submodule <input>): a worktree.  --child <worktree>: a subagent
 worktree of that name, <root>/<child_worktrees>/<worktree> (the directory
-nixconvoy.toml's `child_worktrees` names; .claude/worktrees, Claude
-Code's own place, in a repository without nixconvoy.toml; a nested
+nixconvoy.toml's `child_worktrees` names; a nested
 worktree must be ignored, so the directory is
 written into .git/info/exclude unless it is already; root: the checkout
 this one's subagent worktrees hang off) on the fresh branch
@@ -430,9 +429,11 @@ nixconvoy-prune.log in the common git dir.  worktree-remove: Claude
 Code letting go of a worktree the create hook made (a `claude
 --worktree` session's, at its exit), removed with its branch unless
 another live session holds it, it has changes, commits not on
-origin/main or a submodule worktree planted in it, or (in a nixconvoy
-repository) close by name would keep it; a kept one fails the hook,
-which leaves it on disk.
+origin/main or a submodule worktree planted in it, or close by name
+would keep it; a kept one fails the hook, which leaves it on disk.
+Outside a nixconvoy repository run.sh never calls nixconvoy: the prunes
+and the resume do nothing there, and its create and remove do what
+Claude Code's own git would.
 
 --evict evicts every other work branch from the targets it switches: they
 run this checkout's view alone, the other branches left out of the union

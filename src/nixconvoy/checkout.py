@@ -143,8 +143,8 @@ class Checkout(NamedTuple):
 def sub_dir() -> Path:
     """Where `open --child <name>` puts a child worktree, under the
     checkout: nixconvoy.toml's child_worktrees, or Claude Code's own place
-    in a repository nixconvoy does not configure (the plugin's create hook
-    runs in every repository)."""
+    in a repository nixconvoy does not configure (the plugin's run.sh
+    makes one there without nixconvoy; by hand, nixconvoy does the same)."""
     if not Path(CONFIG_FILE).is_file():
         return Path(CLAUDE_WORKTREES)
     return Path(cfg().child_worktrees)
