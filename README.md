@@ -30,14 +30,14 @@ $ git add -A
 $ nixconvoy deploy
 $ nixconvoy land -m "Tighten firewall"
 
-# First feature complete: begin second feature
+$ # First feature complete: begin second feature
 $ git checkout main  
 $ git checkout -b nixconvoy/jellyfin
 $ vim configuration.nix jellyfin.nix
 $ git add -A
 $ nixconvoy deploy
 $ vim jellyfin.nix  # it installed but needs more configuration tweaks
-# git add -A
+$ # git add -A
 $ nixconvoy deploy
 $ nixconvoy land -m "Add Jellyfin"
 ```
@@ -54,8 +54,7 @@ $ nixconvoy open ~/homelab-firewall
 $ nixconvoy open ~/homelab-jellyfin
 ```
 
-> [!NOTE]
-> `nixconvoy open` creates a new work branch intended to be used exclusively by nixconvoy, then creates a new worktree that checks it out using `git worktree add`.
+(`nixconvoy open` creates a new work branch intended to be used exclusively by nixconvoy, then creates a new worktree that checks it out using `git worktree add`.)
 
 With this approach, you can safely work on both features at the same time:
 
@@ -65,7 +64,7 @@ $ vim nftables.nix
 $ git add -A
 $ nixconvoy deploy
 
-# Hmm, not quite done, I need to research this more, let's work on jellyfin for now
+$ # Hmm, not quite done, I need to research this more, let's work on jellyfin for now
 
 $ cd ~/homelab-jellyfin/nixos/hosts/minipc/
 $ vim -o configuration.nix jellyfin.nix
@@ -74,21 +73,20 @@ $ nixconvoy deploy  # !! this affects the same machine as the unfinished firewal
 $ nixconvoy land -m "Add Jellyfin"
 $ cd ~
 
-# Back to half-finished original task...
+$ # Back to half-finished original task...
 $ cd ~/homelab-firewall/nixos/hosts/minipc/
 $ vim nftables.nix  # add the missing bugfix
 $ git add -A
 $ nixconvoy deploy
 $ nixconvoy land -m "Tighten firewall"
 
-# Worktrees are now synced to origin/main, it's safe to remove them
+$ # Worktrees are now synced to origin/main, it's safe to remove them
 $ cd ~
 $ nixconvoy close ~/homelab-firewall
 $ nixconvoy close ~/homelab-jellyfin
 ```
 
-> [!IMPORTANT]
-> This is just an interleaved version of the sequential flow above... but notice the second deploy I highlighted with exclamation marks.  `~/homelab-jellyfin/` doesn't have the changes in `nftables.nix`, so if this were plain `nixos-rebuild`, the first round of firewall changes would accidentally get removed from the running system!
+This is just an interleaved version of the sequential flow above... but notice the second deploy I highlighted with exclamation marks.  `~/homelab-jellyfin/` doesn't have the changes in `nftables.nix`, so if this were plain `nixos-rebuild`, the first round of firewall changes would accidentally get removed from the running system!
 
 This is the property of NixOS that can make it tricky to multitask on without switching to a full GitOps-style pipeline (where even the smallest change is required to be pushed to GitHub before getting deployed to a machine).  But with nixconvoy, the problem "magically" doesn't happen!  How?  nixconvoy actually *does* have a full GitOps-style pipeline in its implementation details: it merely presents itself as a simple push-based deploy tool.
 
@@ -138,8 +136,7 @@ Some rules follow from this:
 - Most nixconvoy subcommands read from `main` or `origin/main`, but the only one that writes to `main` is `nixconvoy land`.
 - In a worktree, write only via `nixconvoy` commands, never raw `git`, and generally deploy before you land.
 
-> [!NOTE]
-> Strictly speaking, worktrees and workbranches are separate concepts, mapping to git worktrees and git branches respectively, but I prefer to keep them 1:1.
+(Strictly speaking, worktrees and workbranches are separate concepts, mapping to git worktrees and git branches respectively, but I prefer to keep them 1:1.)
 
 There are three ways to use worktrees, depending on your preference:
 - **Long-lived worktrees** with a generic name.  This is how I prefer to use nixconvoy most of the time.  For my homelab, my main checkout lives in `~/projects/homelab` while I have 4 nixconvoy worktrees `~/projects/homelab1`, ...,  `~/projects/homelab4`.  I created them with a command like:
@@ -294,7 +291,7 @@ Then, after any of the three methods, `cd` into your NixOS checkout (Nixconvoy r
 
 <details>
 <summary><b>Bash PS1 helper (optional)</b></summary>
-
+<br>
 Nixconvoy includes `nixconvoy/prompt.bash` defining `__nixconvoy_ps1`, a helper to display nixconvoy worktree status on your prompt.  Depending on install method, it is usually in `/run/current-system/sw/share/nixconvoy/prompt.bash` or .  In your `.bashrc`, write e.g.:
 
 ```bash
@@ -306,7 +303,7 @@ PS1='\h:$(__nixconvoy_ps1)\w\$ '  # simple example; adapt your existing PS1 inst
 
 <details>
 <summary><b>Claude code plugin (optional)</b></summary>
-
+<br>
 For the plugin to function, both `nixconvoy` and `jq` must be on the `PATH`.  Then:
 
 ```bash
@@ -325,8 +322,7 @@ Then divide them into 10 nonconflicting groups and launch one subagent to harden
 
 The 10 subagents will go off and work for a while, and as long as they don't touch literally the same lines of config, they should be able to `nixconvoy deploy` their respective changes to verify they didn't break anything on the real machine before terminating.  Then, from the parent worktree, you can examine their config changes as a whole with `nixconvoy review --with-children`, and then land all of it as one single commit on your main branch with `nixconvoy land --with-children`.
 
-> [!WARNING]
-> Claude Code doesn't guarantee a stable API for plugins, so this plugin is the most likely part of nixconvoy to break over time.  It may also conflict with other Claude Code hooks or plugins if you have any installed.  So I only recommend it for people who heavily use subagents to write code (not just to research or codereview).
+> **Warning:** Claude Code doesn't guarantee a stable API for plugins, so this plugin is the most likely part of nixconvoy to break over time.  It may also conflict with other Claude Code hooks or plugins if you have any installed.  So I only recommend it for people who heavily use subagents to write code (not just to research or codereview).
 
 </details>
 
@@ -479,8 +475,7 @@ Also, there are two special cases: a change touching only documentation skips ev
 	- A target in `Reaches` but not `Deploye`d block other work branches's `deploy` from touching that machine, to avoid accidentally deploying in work that wasn't intended to affect that machine yet.
 	- It will also block `land` from running, which can be overridden by running `nixconvoy land --not-yet-deployed`
 
-> [!TIP]
-> If that sounded confusing, just always run `nixconvoy deploy` without going out of your way to specify which target machine to restrict the change to.  Then, `Reaches` and `Deployed` will always be the same and you won't run into this scenario.  `nixconvoy` assumes you'll only manually specify targets when you have a good reason to restrict the deploy to only those targets (e.g. you only want to deploy a risky change to a test machine, not the prod machine).
+> **Tip:** If that sounded confusing, just always run `nixconvoy deploy` without going out of your way to specify which target machine to restrict the change to.  Then, `Reaches` and `Deployed` will always be the same and you won't run into this scenario.  `nixconvoy` assumes you'll only manually specify targets when you have a good reason to restrict the deploy to only those targets (e.g. you only want to deploy a risky change to a test machine, not the prod machine).
 
 </details>
 
@@ -524,7 +519,6 @@ The code was written via coding agent, mostly Fable.  However, this README was w
 <details>
 <summary><b>Submodules</b></summary>
 <br>
-<br>
 Nixconvoy has support for git submodules.  If you don't write your own software or substantially modify the software packages you use on your NixOS fleet, you can safely ignore this feature.
 
 Submodules are one of git's mechanisms for loading a dependency (whose source of truth is an external git repo) into one of your checkout's subdirectories.  This is particularly useful for developers who maintain a public repository and also run it as part of their private NixOS fleet (in my own environment, I use nixconvoy's submodule support to work on nixconvoy itself).  It can also be used for your private fork of a dependency --- although for that, git subtrees are a simpler alternative that also works.
@@ -537,7 +531,6 @@ Then, when you're ready to make a private change to it, open a nixconvoy worktre
 
 <details>
 <summary><b>Bootable generation assessment</b></summary>
-<br>
 <br>
 Nixconvoy includes an optional module to have smarter behavior for which NixOS generations are selectable on the boot screen.  Compatible with lanzaboote only, and not enabled by default.
 
