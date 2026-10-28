@@ -289,8 +289,11 @@ You run `deploy` after staging a change in a workbranch.  `nixconvoy deploy` bot
 **Guarantees:**
 - **Nothing you deploy is ever silently undone.**  What gets applied is not just what is in your current branch, but the union of everything previously deployed from every ongoing workbranch.
   - Deploy aborts on a true merge conflict between two workbranches. Because nixconvoy merges with mergiraf, adjacent-line edits aren't enough to cause an abort.
-- **No change will touch a target machine before passing lint, eval and build.**
-  - To reduce the performance cost of this guarantee, lint precheck runs in parallel with eval, and eval only reruns for targets whose included config files changed, via nixconvoy's "eval memo" feature. (You may need to split your Nix config into per-feature files to benefit from the eval memo.)
+- **No change will touch a target machine before passing prechecks (lint/static analysis).**
+  - To reduce the performance cost of this guarantee, precheck runs in parallel with eval.
+- **Nix configuration changes are simultaneously deployed to all target machines that they affect.**
+  - Unless you provide an explicit <target>/@<tag> parameter, which restrict the set of targets considered.
+  - To reduce the performance cost of this guarantee, eval only reruns for targets whose included config files changed, via a nixconvoy feature called the "eval memo". (You may need to split your Nix config into per-feature files to benefit from the eval memo.)
 - **A broken NixOS generation automatically rolls itself back.** If a target loses connectivity or fails its health check after switching, it rolls back automatically.
 
 **Optional flags:**
