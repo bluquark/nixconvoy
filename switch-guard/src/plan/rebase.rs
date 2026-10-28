@@ -19,6 +19,7 @@
 //! and the restore leaves the tmp commits behind (never pushed); the next
 //! run pops them first.
 use super::{failed, no_hints, Halt, Names, Query, Run, Script};
+use crate::text;
 use serde::Deserialize;
 
 pub const TMP_STAGED: &str = "tmp: staged (ensure_rebased)";
@@ -58,9 +59,9 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     match &p.op {
         Op::PopTmp => pop_tmp(s).map(|()| Ok(String::new())),
         Op::EnsureRebased => match onto_main(s, n)? {
-            Ok(status) if status == LEFT => Err(Halt::Die(format!("{LEFT}, not on {}; switch to a branch to deploy", n.main_short()))),
+            Ok(status) if status == LEFT => Err(Halt::Die(format!(text!(rebase_not_on_main), LEFT = LEFT, main = n.main_short()))),
             Ok(status) => {
-                if status != "up to date" {
+                if status != text!(rebase_up_to_date) {
                     s.print(status.clone());
                 }
                 Ok(Ok(status))
@@ -96,15 +97,15 @@ pub fn pop_tmp(s: &mut Script) -> Run<()> {
             TMP_STAGED => false,
             _ => return Ok(()),
         };
-        s.must(Query::Pop { mixed }, "unwinding a dead run's tmp commit")?;
+        s.must(Query::Pop { mixed }, text!(rebase_unwinding_tmp))?;
     }
 }
 
-fn verb(ff: bool) -> &'static str {
+fn moved(ff: bool, branch: &str, up: &str) -> String {
     if ff {
-        "fast-forwarded"
+        format!(text!(rebase_fast_forwarded), branch = branch, up = up)
     } else {
-        "rebased"
+        format!(text!(rebase_rebased), branch = branch, up = up)
     }
 }
 
@@ -120,10 +121,10 @@ pub fn onto_main(s: &mut Script, n: &Names) -> Run<Outcome> {
 pub fn onto(s: &mut Script, n: &Names, upstream: &str) -> Run<Outcome> {
     let up = short(upstream);
     if contains(s, upstream, "HEAD")? {
-        return Ok(Ok("up to date".into()));
+        return Ok(Ok(text!(rebase_up_to_date).into()));
     }
     if let Some(op) = s.text(Query::OpInProgress)? {
-        return Ok(Err(format!("a {op} is in progress; finish or abort it first")));
+        return Ok(Err(format!(text!(rebase_op_in_progress), op = op)));
     }
     let Some(br) = branch(s)? else {
         return detached_onto(s, n, upstream);
@@ -131,39 +132,36 @@ pub fn onto(s: &mut Script, n: &Names, upstream: &str) -> Run<Outcome> {
     let ff = contains(s, "HEAD", upstream)?;
     let staged = s.flag(Query::StagedDiffers)?;
     if staged {
-        s.must(Query::Commit { msg: TMP_STAGED.into() }, "committing the staged changes aside")?;
+        s.must(Query::Commit { msg: TMP_STAGED.into() }, text!(rebase_committing_staged))?;
     }
-    s.must(Query::AddAll, "staging the unstaged changes aside")?;
+    s.must(Query::AddAll, text!(rebase_staging_unstaged))?;
     let unstaged = s.flag(Query::StagedDiffers)?;
     if unstaged {
-        s.must(Query::Commit { msg: TMP_UNSTAGED.into() }, "committing the unstaged changes aside")?;
+        s.must(Query::Commit { msg: TMP_UNSTAGED.into() }, text!(rebase_committing_unstaged))?;
     }
     let rebased = s.ran(Query::Rebase { keep_empty: true, aside: false, upstream: upstream.into() })?;
     if rebased.is_err() {
         s.tolerate(Query::RebaseAbort { aside: false })?;
     }
     if unstaged {
-        s.must(Query::Pop { mixed: true }, "restoring the unstaged changes")?;
+        s.must(Query::Pop { mixed: true }, text!(rebase_restoring_unstaged))?;
     }
     if staged {
-        s.must(Query::Pop { mixed: false }, "restoring the staged changes")?;
+        s.must(Query::Pop { mixed: false }, text!(rebase_restoring_staged))?;
     }
     Ok(match rebased {
-        Ok(()) => Ok(format!("{} {br} onto {up}", verb(ff))),
-        Err(detail) => Err(format!("rebasing {br} onto {up} is not clean, left as it was: {}", no_hints(&detail))),
+        Ok(()) => Ok(moved(ff, &br, up)),
+        Err(detail) => Err(format!(text!(rebase_not_clean), branch = br, up = up, detail = no_hints(&detail))),
     })
 }
 
-pub const LEFT: &str = "detached HEAD left as is: nothing of its own, its commits are already pushed";
+pub const LEFT: &str = text!(rebase_left);
 
 /// Why a detached HEAD with commits of its own is left alone.
 fn stranded(n: &Names, upstream: &str) -> String {
     let up = short(upstream);
     let branch = up.strip_prefix(&format!("{}/", n.remote)).unwrap_or(up);
-    format!(
-        "the detached HEAD carries commits not on {up}; push them (git push {} HEAD:{branch}) or put them on a branch, then re-run",
-        n.remote
-    )
+    format!(text!(rebase_stranded), up = up, remote = n.remote, branch = branch)
 }
 
 /// A detached HEAD behind `upstream` moved onto it; one at commits that
@@ -174,8 +172,8 @@ fn detached_onto(s: &mut Script, n: &Names, upstream: &str) -> Run<Outcome> {
         return Ok(if s.flag(Query::OnOrigin)? { Ok(LEFT.into()) } else { Err(stranded(n, upstream)) });
     }
     Ok(match s.ran(Query::Detach { upstream: upstream.into() })? {
-        Ok(()) => Ok(format!("fast-forwarded the detached HEAD onto {up}")),
-        Err(detail) => Err(format!("cannot move the detached HEAD onto {up}, left as it was:\n{}", no_hints(&detail))),
+        Ok(()) => Ok(format!(text!(rebase_detached_moved), up = up)),
+        Err(detail) => Err(format!(text!(rebase_detached_stuck), up = up, detail = no_hints(&detail))),
     })
 }
 
@@ -187,16 +185,16 @@ pub fn aside(s: &mut Script, n: &Names, wb: &str) -> Run<Outcome> {
     let main = n.main_ref();
     let up = n.main_short();
     if contains(s, &main, &local)? {
-        return Ok(Ok("up to date".into()));
+        return Ok(Ok(text!(rebase_up_to_date).into()));
     }
     let ff = contains(s, &local, &main)?;
     let result = match s.ran(Query::AddWorktree { branch: wb.into() })? {
-        Err(detail) => Err(format!("cannot check out {wb} to rebase it:\n{}", detail.trim())),
+        Err(detail) => Err(format!(text!(rebase_cannot_check_out), branch = wb, detail = detail.trim())),
         Ok(()) => match s.ran(Query::Rebase { keep_empty: false, aside: true, upstream: main })? {
-            Ok(()) => Ok(format!("{} {wb} onto {up}", verb(ff))),
+            Ok(()) => Ok(moved(ff, wb, &up)),
             Err(detail) => {
                 s.tolerate(Query::RebaseAbort { aside: true })?;
-                Err(format!("rebasing {wb} onto {up} is not clean, left as it was: {}", no_hints(&detail)))
+                Err(format!(text!(rebase_not_clean), branch = wb, up = up, detail = no_hints(&detail)))
             }
         },
     };
@@ -206,7 +204,7 @@ pub fn aside(s: &mut Script, n: &Names, wb: &str) -> Run<Outcome> {
 
 fn sync(s: &mut Script, n: &Names, wb: Option<&str>) -> Run<Outcome> {
     if let Err(detail) = s.ran(Query::Fetch)? {
-        return Ok(Err(failed("fetch", &detail)));
+        return Ok(Err(failed(text!(rebase_fetch), &detail)));
     }
     pop_tmp(s)?;
     let mut done = vec![match onto_main(s, n)? {
@@ -228,19 +226,19 @@ fn sync(s: &mut Script, n: &Names, wb: Option<&str>) -> Run<Outcome> {
     }
     if rev(s, local)? != rev(s, n.remote_ref(wb))? {
         if let Err(detail) = s.ran(Query::Push { branch: wb.into() })? {
-            return Ok(Err(format!("pushing {wb} failed:\n{}", detail.trim())));
+            return Ok(Err(format!(text!(rebase_push_failed), branch = wb, detail = detail.trim())));
         }
-        done.push(format!("pushed {wb}"));
+        done.push(format!(text!(rebase_pushed), branch = wb));
     }
-    let steps: Vec<String> = done.into_iter().filter(|d| d != "up to date").collect();
-    Ok(Ok(if steps.is_empty() { "up to date".into() } else { steps.join("; ") }))
+    let steps: Vec<String> = done.into_iter().filter(|d| d != text!(rebase_up_to_date)).collect();
+    Ok(Ok(if steps.is_empty() { text!(rebase_up_to_date).into() } else { steps.join(text!(rebase_steps_joiner)) }))
 }
 
 /// Plain `git pull --rebase` on the work branch then means the same
 /// catch-up deploys do.  Pushes are unaffected: each names its refspec.
 fn ensure_upstream(s: &mut Script, n: &Names, wb: &str) -> Run<()> {
     if s.text(Query::Upstream { branch: wb.into() })?.as_deref() != Some(format!("{}\trefs/heads/{}", n.remote, n.main).as_str()) {
-        s.must(Query::SetUpstream { branch: wb.into() }, &format!("setting {wb}'s upstream"))?;
+        s.must(Query::SetUpstream { branch: wb.into() }, &format!(text!(rebase_setting_upstream), branch = wb))?;
     }
     Ok(())
 }
@@ -260,11 +258,7 @@ fn on_work_branch(s: &mut Script, n: &Names, wb: &str) -> Run<()> {
         _ if safe => {}
         None => return Err(Halt::Die(stranded(n, &main))),
         Some(other) => {
-            return Err(Halt::Die(format!(
-                "on branch {other}, which carries commits not on {}; deploys run from {wb} or from {}",
-                n.main_short(),
-                n.main
-            )));
+            return Err(Halt::Die(format!(text!(rebase_other_branch), other = other, main_short = n.main_short(), wb = wb, main = n.main)));
         }
     }
     let start = if rev(s, format!("refs/heads/{wb}"))?.is_some() {
@@ -275,13 +269,10 @@ fn on_work_branch(s: &mut Script, n: &Names, wb: &str) -> Run<()> {
         Some(if rev(s, remote.clone())?.is_some() { remote } else { "HEAD".into() })
     };
     if let Err(detail) = s.ran(Query::Switch { branch: wb.into(), start })? {
-        return Err(Halt::Die(format!(
-            "cannot switch to {wb} with the current staged/working-tree changes:\n{}\nresolve by hand, then re-run",
-            detail.trim()
-        )));
+        return Err(Halt::Die(format!(text!(rebase_switch_failed), wb = wb, detail = detail.trim())));
     }
     ensure_upstream(s, n, wb)?;
-    s.print(format!("switched to work branch {wb}"));
+    s.print(format!(text!(rebase_switched), wb = wb));
     Ok(())
 }
 

@@ -7,6 +7,7 @@ import sys
 from fnmatch import fnmatchcase
 from pathlib import Path
 
+from . import strings
 from .checkout import (
     SESSIONLESS,
     allowed_branches,
@@ -45,8 +46,7 @@ def find() -> list[tuple[str, Path | None, str]]:
     is a subagent worktree no live session holds."""
     fetched = git(*fetch_args("--no-auto-gc"), check=False)
     if fetched.returncode != 0:
-        print(f"note: git fetch failed, judging the refs fetched before: {(fetched.stderr or '').strip()}",
-              file=sys.stderr)
+        print(strings.ORPHANS_FETCH_FAILED(stderr=(fetched.stderr or "").strip()), file=sys.stderr)
     pats = allowed_branches()
     prefix = this_prefix()
     tips = origin_tips()
@@ -81,4 +81,4 @@ def main() -> None:
     """One tab-separated line per orphan: branch, worktree path or
     "(no worktree)", subject."""
     for b, d, subject in find():
-        print(f"{b}\t{d if d is not None else '(no worktree)'}\t{subject}")
+        print(f"{b}\t{d if d is not None else strings.ORPHANS_NO_WORKTREE}\t{subject}")

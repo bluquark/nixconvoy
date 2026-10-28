@@ -9,6 +9,7 @@
 //! run of a deploy that died cannot act on the record of the deploy that
 //! re-armed after it.
 use crate::record::{Phase, Record};
+use crate::text;
 use std::fmt::Display;
 
 pub const ROLLBACK_ATTEMPTS: u32 = 5;
@@ -196,10 +197,10 @@ pub struct Machine<S> {
     pc: Pc<S>,
 }
 
-const P: &str = "confirmed-switch";
+pub(crate) const P: &str = "confirmed-switch";
 
 fn opt<S: Display>(s: &Option<S>) -> String {
-    s.as_ref().map_or_else(|| "nothing".to_string(), |s| s.to_string())
+    s.as_ref().map_or_else(|| text!(switch_nothing).to_string(), |s| s.to_string())
 }
 
 impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
@@ -237,7 +238,7 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
 
             (ArmActive, Reply::Flag(active)) => {
                 if active {
-                    fx.push(Effect::Say(format!("{P}: waiting for an earlier rollback to finish")));
+                    fx.push(Effect::Say(format!(text!(switch_waiting_rollback), P = P)));
                 }
                 self.ask(ArmLocked, Query::Lock)
             }
@@ -264,10 +265,10 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
             }
             (ArmRunning(inherited), Reply::Running(cur)) => {
                 if let Some(prev) = inherited.as_ref().filter(|p| cur.as_ref() != Some(*p)) {
-                    fx.push(Effect::Say(format!("{P}: an unconfirmed switch from {prev} is still pending; taking over its rollback")));
+                    fx.push(Effect::Say(format!(text!(switch_taking_over), P = P, prev = prev)));
                 }
                 let Some(previous) = inherited.or(cur) else {
-                    fx.push(Effect::Warn(format!("{P}: cannot read /run/current-system")));
+                    fx.push(Effect::Warn(format!(text!(switch_no_current_system), P = P)));
                     return Next::Exit(1);
                 };
                 fx.push(Effect::StopTimer);
@@ -278,17 +279,17 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
             // dead deploy's delayed activation too.
             (ArmTimer(previous), Reply::Flag(ok)) => {
                 if !ok {
-                    fx.push(Effect::Warn(format!("{P}: could not start the rollback timer")));
+                    fx.push(Effect::Warn(format!(text!(switch_timer_failed), P = P)));
                     return self.rollback(previous, Then::Fail);
                 }
                 fx.push(Effect::Persist(Record { previous: previous.clone(), phase: Phase::Armed }));
-                fx.push(Effect::Say(format!("{P}: armed, rolling back to {previous} in {}s unless confirmed", self.deadline)));
+                fx.push(Effect::Say(format!(text!(switch_armed), P = P, previous = previous, deadline = self.deadline)));
                 Next::Exit(0)
             }
 
             (ActLocked, Reply::Locked(rec)) => match rec.map(|r| r.phase) {
                 Some(Phase::RolledBack) => {
-                    fx.push(Effect::Warn(format!("{P}: already rolled back (the deadline passed first?), not activating")));
+                    fx.push(Effect::Warn(format!(text!(switch_rolled_back_not_activating), P = P)));
                     Next::Exit(1)
                 }
                 Some(Phase::Armed) => {
@@ -297,7 +298,7 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
                     self.ask(ActSwitched, q)
                 }
                 Some(Phase::Confirmed(_)) | None => {
-                    fx.push(Effect::Warn(format!("{P}: not armed")));
+                    fx.push(Effect::Warn(format!(text!(switch_not_armed), P = P)));
                     Next::Exit(1)
                 }
             },
@@ -307,7 +308,7 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
                 let Verb::Confirm { new, reboot_pending } = &self.verb else { unreachable!() };
                 match rec {
                     Some(Record { phase: Phase::RolledBack, .. }) => {
-                        fx.push(Effect::Warn(format!("{P}: already rolled back (the deadline passed first?), not confirming")));
+                        fx.push(Effect::Warn(format!(text!(switch_rolled_back_not_confirming), P = P)));
                         Next::Exit(1)
                     }
                     Some(Record { previous, phase: Phase::Armed }) => {
@@ -315,14 +316,14 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
                         self.ask(ConfRunning { previous, want }, Query::Running)
                     }
                     Some(Record { phase: Phase::Confirmed(_), .. }) | None => {
-                        fx.push(Effect::Warn(format!("{P}: not armed")));
+                        fx.push(Effect::Warn(format!(text!(switch_not_armed), P = P)));
                         Next::Exit(1)
                     }
                 }
             }
             (ConfRunning { previous, want }, Reply::Running(cur)) => {
                 if cur.as_ref() != Some(&want) {
-                    fx.push(Effect::Warn(format!("{P}: running {}, not {want}", opt(&cur))));
+                    fx.push(Effect::Warn(format!(text!(switch_running_other), P = P, cur = opt(&cur), want = want)));
                     return Next::Exit(1);
                 }
                 self.ask(ConfBefore { previous }, Query::Generation)
@@ -343,7 +344,7 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
                     let new = self.target().clone();
                     fx.push(Effect::Persist(Record { previous, phase: Phase::Confirmed(new.clone()) }));
                     fx.push(Effect::StopTimer);
-                    fx.push(Effect::Say(format!("{P}: confirmed {new}")));
+                    fx.push(Effect::Say(format!(text!(switch_confirmed), P = P, new = new)));
                     return Next::Exit(0);
                 }
                 // The generation --set made never got a bootloader entry:
@@ -360,11 +361,11 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
 
             (RbLocked, Reply::Locked(rec)) => match rec {
                 Some(Record { phase: Phase::Confirmed(_), .. }) => {
-                    fx.push(Effect::Say(format!("{P}: already confirmed, nothing to roll back")));
+                    fx.push(Effect::Say(format!(text!(switch_already_confirmed), P = P)));
                     Next::Exit(ALREADY_CONFIRMED)
                 }
                 None => {
-                    fx.push(Effect::Warn(format!("{P}: not armed")));
+                    fx.push(Effect::Warn(format!(text!(switch_not_armed), P = P)));
                     Next::Exit(1)
                 }
                 // The record alone is not enough: an activation outside the
@@ -375,7 +376,7 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
             },
             (RbSettled { previous }, Reply::Running(cur)) => {
                 if cur.as_ref() == Some(&previous) {
-                    fx.push(Effect::Say(format!("{P}: already rolled back to {previous}")));
+                    fx.push(Effect::Say(format!(text!(switch_already_rolled_back), P = P, previous = previous)));
                     return Next::Exit(0);
                 }
                 self.rollback(previous, Then::Report)
@@ -391,7 +392,7 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
                 if cur.as_ref() == Some(&previous) {
                     return self.rolled_back(previous, then, fx);
                 }
-                fx.push(Effect::Say(format!("{P}: rolling back {} to {previous}", opt(&cur))));
+                fx.push(Effect::Say(format!(text!(switch_rolling_back), P = P, cur = opt(&cur), previous = previous)));
                 let q = Query::Switch(previous.clone(), Action::Test);
                 self.ask(RbSwitched { previous, n, then }, q)
             }
@@ -406,7 +407,7 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
                 if cur.as_ref() == Some(&previous) {
                     return self.rolled_back(previous, then, fx);
                 }
-                fx.push(Effect::Warn(format!("{P}: rollback failed, still running {}", opt(&cur))));
+                fx.push(Effect::Warn(format!(text!(switch_rollback_failed), P = P, cur = opt(&cur))));
                 Next::Exit(1)
             }
 
@@ -422,7 +423,7 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
     }
 
     fn confirm_failed(&mut self, previous: S, fx: &mut Vec<Effect<S>>) -> Next<S> {
-        fx.push(Effect::Warn(format!("{P}: could not confirm {}, rolling back", self.target())));
+        fx.push(Effect::Warn(format!(text!(switch_confirm_failed), P = P, target = self.target())));
         self.rollback(previous, Then::Fail)
     }
 
@@ -442,8 +443,8 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
     fn rolled_back(&mut self, previous: S, then: Then, fx: &mut Vec<Effect<S>>) -> Next<S> {
         fx.push(Effect::Persist(Record { previous: previous.clone(), phase: Phase::RolledBack }));
         fx.push(Effect::StopTimer);
-        fx.push(Effect::Log(format!("rolled back to {previous}")));
-        fx.push(Effect::Say(format!("{P}: rolled back to {previous}")));
+        fx.push(Effect::Log(format!(text!(switch_rolled_back_log), previous = previous)));
+        fx.push(Effect::Say(format!(text!(switch_rolled_back), P = P, previous = previous)));
         Next::Exit(match then {
             Then::Report => 0,
             Then::Fail => 1,

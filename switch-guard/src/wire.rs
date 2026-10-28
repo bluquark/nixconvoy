@@ -6,6 +6,7 @@
 //! class for type.  nixconvoy writes the parameters, then one reply per
 //! query; the binary answers each with one step until
 //! it asks nothing more.
+use crate::text;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::io::{BufRead, Write};
@@ -38,10 +39,10 @@ pub fn serve<C, R>(
     let mut lines = stdin.lock().lines();
     let mut out = std::io::stdout().lock();
     let fail = |msg: String| -> ! {
-        eprintln!("{binary}: {msg}");
+        eprintln!(text!(wire_failed), binary = binary, msg = msg);
         std::process::exit(2);
     };
-    let first = lines.next().and_then(Result::ok).unwrap_or_else(|| fail("no parameters".into()));
+    let first = lines.next().and_then(Result::ok).unwrap_or_else(|| fail(text!(wire_no_parameters).into()));
     let mut core = start(&first).unwrap_or_else(|e| fail(e));
     let mut last = None;
     loop {

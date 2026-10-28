@@ -18,6 +18,7 @@
 //! run (a wait is another deploy's progress, not a move, and counts for
 //! nothing).
 use super::{failed, listed, Halt, Names, Query, Run, Script, BRANCHES_KEY, MSG_FILE};
+use crate::text;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -75,7 +76,7 @@ fn select(s: &mut Script, p: &Params, seen: &mut Seen) -> Run<Vec<(String, Strin
         }
         if !listed(seen.listed.iter().map(String::as_str), &name) {
             if seen.warned.insert(name.clone()) {
-                s.warn(format!("warning: ignoring {}/{name}: not listed in {BRANCHES_KEY}", p.names.remote));
+                s.warn(format!(text!(union_unlisted), remote = p.names.remote, name = name, BRANCHES_KEY = BRANCHES_KEY));
             }
             continue;
         }
@@ -91,19 +92,19 @@ fn select(s: &mut Script, p: &Params, seen: &mut Seen) -> Run<Vec<(String, Strin
 fn build(s: &mut Script, branches: &[(String, String)]) -> Run<Result<String, Conflict>> {
     for (name, sha) in branches {
         let summary = s.text(Query::Summary { sha: sha.clone() })?.unwrap_or_default();
-        s.print(format!("union: merging {name}: {summary}"));
+        s.print(format!(text!(union_merging), name = name, summary = summary));
         let Err((files, detail)) = s.merge(Query::Merge { name: name.clone(), sha: sha.clone() })? else {
             continue;
         };
         if files.is_empty() {
-            return Err(Halt::Die(failed(&format!("merging {name} into the union"), &detail)));
+            return Err(Halt::Die(failed(&format!(text!(union_merge_what), name = name), &detail)));
         }
         let mut unresolved = Vec::new();
         for file in files {
             if file == MSG_FILE {
-                s.must(Query::DropFile { file }, &format!("dropping {MSG_FILE} from the union"))?;
+                s.must(Query::DropFile { file }, &format!(text!(union_dropping_msg_file), MSG_FILE = MSG_FILE))?;
             } else if s.flag(Query::Solve { file: file.clone() })? {
-                s.must(Query::Add { file: file.clone() }, &format!("adding {file}"))?;
+                s.must(Query::Add { file: file.clone() }, &format!(text!(union_adding), file = file))?;
             } else {
                 unresolved.push(file);
             }
@@ -112,17 +113,17 @@ fn build(s: &mut Script, branches: &[(String, String)]) -> Run<Result<String, Co
             s.tolerate(Query::AbortMerge)?;
             return Ok(Err(Conflict { name: name.clone(), sha: sha.clone(), files: unresolved }));
         }
-        s.must(Query::CommitMerge, &format!("committing the union with {name}"))?;
+        s.must(Query::CommitMerge, &format!(text!(union_committing_with), name = name))?;
     }
     let Some(tree) = s.text(Query::StripTree)? else {
-        return Err(Halt::Die("writing the union's tree failed".into()));
+        return Err(Halt::Die(text!(union_tree_failed).into()));
     };
     let as_is = branches.is_empty() && s.text(Query::HeadTree)?.as_ref() == Some(&tree);
     let union = if as_is { s.text(Query::Head)? } else { s.text(Query::CommitUnion { tree })? };
     let Some(union) = union else {
-        return Err(Halt::Die("committing the union failed".into()));
+        return Err(Halt::Die(text!(union_commit_failed).into()));
     };
-    s.must(Query::Checkout { union: union.clone() }, "checking out the union")?;
+    s.must(Query::Checkout { union: union.clone() }, text!(union_checking_out))?;
     Ok(Ok(union))
 }
 
@@ -130,10 +131,12 @@ fn guidance(s: &mut Script, n: &Names, c: &Conflict) -> Run<String> {
     let summary = s.text(Query::Summary { sha: c.sha.clone() })?.unwrap_or_default();
     let name = &c.name;
     Ok(format!(
-        "cannot union work branch {name}; mergiraf could not resolve:\n  {}\nits last deploy: {summary}\noptions:\n  - fix or rebase that branch in its own checkout, redeploy from there, re-run here\n  - if that work is abandoned: git push --force-with-lease {} {}:{name}\n  - --evict deploys ignoring all other branches (one-off; they return next deploy), reverting their work on every target it switches",
-        c.files.join(", "),
-        n.remote,
-        n.main_short()
+        text!(union_conflict),
+        name = name,
+        files = c.files.join(", "),
+        summary = summary,
+        remote = n.remote,
+        main_short = n.main_short()
     ))
 }
 
@@ -145,12 +148,12 @@ fn origin_moved(s: &mut Script, p: &Params, branches: &[(String, String)], fetch
     }
     *fetched = true;
     s.mark("fetch");
-    s.must(Query::CollectFetch, &format!("fetching {}", p.names.remote))?;
+    s.must(Query::CollectFetch, &format!(text!(union_fetching), remote = p.names.remote))?;
     if s.text(Query::Rev { name: p.names.main_ref() })? == p.main0 && select(s, p, seen)? == branches {
         return Ok(false);
     }
-    s.print(format!("{} moved since the last fetch; redoing the union", p.names.remote));
-    s.must(Query::Refresh, &format!("bringing the checkout onto {}", p.names.main_short()))?;
+    s.print(format!(text!(union_origin_moved), remote = p.names.remote));
+    s.must(Query::Refresh, &format!(text!(union_refreshing), main_short = p.names.main_short()))?;
     Ok(true)
 }
 
@@ -162,7 +165,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     while moves < ATTEMPTS {
         s.mark("union");
         let branches = select(s, p, &mut seen)?;
-        s.must(Query::Worktree, "creating the union worktree")?;
+        s.must(Query::Worktree, text!(union_creating_worktree))?;
         let union = match build(s, &branches)? {
             Ok(union) => union,
             Err(c) => {
@@ -180,20 +183,20 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         if !p.evict && s.flag(Query::AwaitPending { union: union.clone() })? {
             waits += 1;
             if waits > WAITS {
-                return Err(Halt::Die(format!("waited for {WAITS} deploys in one run; re-run")));
+                return Err(Halt::Die(format!(text!(union_waited_too_often), WAITS = WAITS)));
             }
-            s.print("redoing the union with what that deploy pushed");
-            s.must(Query::Refresh, &format!("bringing the checkout onto {}", p.names.main_short()))?;
+            s.print(text!(union_redo_after_wait));
+            s.must(Query::Refresh, &format!(text!(union_refreshing), main_short = p.names.main_short()))?;
             continue;
         }
         let stage = Query::Stage { union: union.clone(), listed: seen.listed.clone(), branches: branches.clone() };
         if s.flag(stage)? || select(s, p, &mut seen)? == branches {
             return Ok(Outcome { union, branches });
         }
-        s.print("work branches moved during the build; rebuilding the union");
+        s.print(text!(union_moved_during_build));
         moves += 1;
     }
-    Err(Halt::Die(format!("{} kept moving during {ATTEMPTS} attempts; re-run", p.names.remote)))
+    Err(Halt::Die(format!(text!(union_kept_moving), remote = p.names.remote, ATTEMPTS = ATTEMPTS)))
 }
 
 #[cfg(test)]

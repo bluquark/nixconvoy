@@ -18,7 +18,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from . import config, proc
+from . import config, proc, strings
 from .config import CONFIG_FILE
 from .proc import die, out, run
 
@@ -31,30 +31,29 @@ DEFAULT_BRANCH_PREFIX = "nixconvoy/"
 def main(flake_arg: str | None, start: Path) -> None:
     root = Path.cwd()
     if (root / CONFIG_FILE).exists():
-        die(f"{CONFIG_FILE} is already there; move it aside to generate a new one")
+        die(strings.INIT_EXISTS())
     notes: list[str] = []
     flake = find_flake(root, start / flake_arg if flake_arg else None)
     nix = NixProbe(notes)
     ref = "." if flake == "." else f"./{flake}"
-    hosts = nix.json(ref, "nixosConfigurations", "the nixosConfigurations' names", apply="builtins.attrNames")
+    hosts = nix.json(ref, "nixosConfigurations", strings.INIT_WHAT_HOSTS, apply="builtins.attrNames")
     if hosts is None and not nix.missing and (alt := committed_ref(root, flake)) is not None:
         # The working tree may not evaluate (a submodule's directory still
         # empty): the committed tree, whose submodules nix fetches itself.
-        hosts = nix.json(alt, "nixosConfigurations", "HEAD's nixosConfigurations' names", apply="builtins.attrNames")
+        hosts = nix.json(alt, "nixosConfigurations", strings.INIT_WHAT_HEAD_HOSTS, apply="builtins.attrNames")
         if hosts is not None:
             ref = alt
     targets = sorted(h for h in hosts if isinstance(h, str)) if isinstance(hosts, list) else None
     if targets is None:
-        die("the targets are the flake's nixosConfigurations, which could not be read:\n  "
-            + "\n  ".join(notes) + "\nfix that (nix on PATH, a flake that evaluates) and re-run")
+        die(strings.INIT_NO_TARGETS(notes="\n  ".join(notes)))
     if not targets:
-        die("the flake has no nixosConfigurations yet: nothing to deploy to; add one and re-run")
+        die(strings.INIT_NO_HOSTS)
     # Where the hosts' files are, for the system literal they may hold.
     hosts_dir = find_hosts_dir(root, flake, targets)
     system, system_how = detect_system(root, ref, hosts_dir, targets, nix)
     prefix = DEFAULT_BRANCH_PREFIX
-    checks = nix.json(ref, f"checks.{system}", "the flake's checks",
-                      apply="builtins.attrNames") if system_how != "guessed" else None
+    checks = nix.json(ref, f"checks.{system}", strings.INIT_WHAT_CHECKS,
+                      apply="builtins.attrNames") if system_how != strings.INIT_SYSTEM_GUESSED else None
     check_names = sorted(c for c in checks if isinstance(c, str)) if isinstance(checks, list) else []
     ssh = f"{this_user()}@{{target}}"
     remote, main = detect_names(notes)
@@ -64,14 +63,14 @@ def main(flake_arg: str | None, start: Path) -> None:
     try:
         config.parse(text)
     except config.ConfigError as e:  # a bug in render, never the user's
-        die(f"generated an invalid {CONFIG_FILE}: {e}")
+        die(strings.INIT_INVALID(error=e))
     (root / CONFIG_FILE).write_text(text, encoding="utf-8")
-    print(f"wrote {CONFIG_FILE}:")
-    print(f"  flake_dir = {flake!r}, targets: {', '.join(targets)}")
-    print(f"  targets_arch = {system!r} ({system_how}), ssh_address_template = {ssh!r}, branch_prefix = {prefix!r}")
-    print(f"  remote = {remote!r}, main_branch = {main!r}")
+    print(strings.INIT_WROTE())
+    print(strings.INIT_WROTE_FLAKE(flake=flake, targets=", ".join(targets)))
+    print(strings.INIT_WROTE_SYSTEM(system=system, how=system_how, ssh=ssh, prefix=prefix))
+    print(strings.INIT_WROTE_REMOTE(remote=remote, main=main))
     for n in notes:
-        print(f"  note: {n}")
+        print(strings.INIT_WROTE_NOTE(note=n))
 
 
 def detect_names(notes: list[str]) -> tuple[str, str]:
@@ -82,8 +81,7 @@ def detect_names(notes: list[str]) -> tuple[str, str]:
     if "origin" in remotes or len(remotes) != 1 or not config.valid_remote(remotes[0]):
         remote = "origin"
         if "origin" not in remotes:
-            notes.append(f"remote = \"origin\" assumed ({', '.join(remotes) or 'no remote yet'}); "
-                         "nixconvoy fetches and pushes it")
+            notes.append(strings.INIT_REMOTE_ASSUMED(remotes=", ".join(remotes) or strings.INIT_NO_REMOTE_YET))
     else:
         remote = remotes[0]
     head = run(["git", "symbolic-ref", "-q", "--short", f"refs/remotes/{remote}/HEAD"], check=False).stdout.strip()
@@ -92,7 +90,7 @@ def detect_names(notes: list[str]) -> tuple[str, str]:
     for b in ("main", "master"):
         if run(["git", "rev-parse", "-q", "--verify", f"refs/remotes/{remote}/{b}"], check=False).returncode == 0:
             return remote, b
-    notes.append(f"main_branch = \"main\" assumed ({remote} has no HEAD, main or master as fetched)")
+    notes.append(strings.INIT_MAIN_ASSUMED(remote=remote))
     return remote, "main"
 
 
@@ -129,12 +127,13 @@ class NixProbe:
             p = subprocess.run(cmd, capture_output=True, text=True, check=False)
         except FileNotFoundError:
             self.missing = True
-            self.notes.append(f"no nix on PATH: {what} not read")
+            self.notes.append(strings.INIT_NIX_MISSING(what=what))
             return None
         if p.returncode != 0:
             lines = [ln.strip() for ln in p.stderr.splitlines() if ln.strip()]
             errors = [ln for ln in lines if ln.startswith("error:")]
-            self.notes.append(f"{doing} failed, so {what} not read: {(errors or lines or ['(no output)'])[-1]}")
+            self.notes.append(strings.INIT_NIX_FAILED(doing=doing, what=what,
+                                                     error=(errors or lines or [strings.INIT_NIX_NO_OUTPUT])[-1]))
             return None
         return p.stdout
 
@@ -143,19 +142,19 @@ class NixProbe:
         inputs are fetched, fetching what it forces when the archive (every
         input, needed or not) failed."""
         if self.missing:
-            self.notes.append(f"{what} not read: nix is not on PATH")
+            self.notes.append(strings.INIT_NIX_NOT_ON_PATH(what=what))
             return None
         if ref not in self.fetched:
             self.fetched[ref] = self.nix(["nix", "flake", "archive", ref], what,
-                                         f"fetching the inputs of {ref}") is not None
+                                         strings.INIT_DOING_FETCH(ref=ref)) is not None
         got = self.nix(["nix", "eval", *(["--offline"] if self.fetched[ref] else []), "--json", f"{ref}#{attr}",
-                        *(["--apply", apply] if apply else [])], what, "nix eval")
+                        *(["--apply", apply] if apply else [])], what, strings.INIT_DOING_EVAL)
         if got is None:
             return None
         try:
             return json.loads(got)
         except ValueError:
-            self.notes.append(f"nix eval printed no JSON for {what}")
+            self.notes.append(strings.INIT_NIX_NO_JSON(what=what))
             return None
 
 
@@ -172,19 +171,19 @@ def find_flake(root: Path, given: Path | None) -> str:
     if given is not None:
         d, top = given.resolve(), root.resolve()
         if not (d / "flake.nix").is_file():
-            die(f"{given}: no flake.nix there")
+            die(strings.INIT_NO_FLAKE_THERE(given=given))
         if not d.is_relative_to(top):
-            die(f"{given} is outside the repository")
+            die(strings.INIT_FLAKE_OUTSIDE(given=given))
         return os.path.relpath(d, top) if d != top else "."
     if (root / "flake.nix").is_file():
         return "."
     found = sorted((f.count("/"), f[: -len("/flake.nix")]) for f in repo_files(root)
                    if f.endswith("/flake.nix") and f.count("/") <= MAX_DEPTH)
     if not found:
-        die("no flake.nix in this repository (nixconvoy init [<flake-dir>])")
+        die(strings.INIT_NO_FLAKE())
     top = [d for n, d in found if n == found[0][0]]
     if len(top) > 1:
-        die(f"several flakes: {', '.join(top)}; name one: nixconvoy init <flake-dir>")
+        die(strings.INIT_SEVERAL_FLAKES(flakes=", ".join(top)))
     return top[0]
 
 
@@ -234,16 +233,16 @@ def detect_system(root: Path, ref: str, hosts_dir: str | None, targets: list[str
                 if not line.lstrip().startswith("#") and PLATFORM_LINE_RE.search(line):
                     seen.update(SYSTEM_RE.findall(line))
     if len(seen) == 1:
-        return seen.pop(), f"from {hosts_dir}'s .nix files"
+        return seen.pop(), strings.INIT_SYSTEM_FROM_FILES(hosts_dir=hosts_dir)
     if targets:
         got = nix.json(ref, f'nixosConfigurations."{targets[0]}".config.nixpkgs.hostPlatform.system',
-                       f"{targets[0]}'s system")
+                       strings.INIT_WHAT_SYSTEM(target=targets[0]))
         if isinstance(got, str) and got:
-            return got, f"evaluated from {targets[0]}"
+            return got, strings.INIT_SYSTEM_EVALUATED(target=targets[0])
     arch = {"arm64": "aarch64", "amd64": "x86_64"}.get(platform.machine(), platform.machine()) or "x86_64"
-    several = f" ({', '.join(sorted(seen))} all appear under {hosts_dir})" if seen else ""
-    nix.notes.append(f"system guessed from this machine's architecture{several}: verify it")
-    return f"{arch}-linux", "guessed"
+    several = strings.INIT_SYSTEM_SEVERAL(systems=", ".join(sorted(seen)), hosts_dir=hosts_dir) if seen else ""
+    nix.notes.append(strings.INIT_SYSTEM_GUESS_NOTE(several=several))
+    return f"{arch}-linux", strings.INIT_SYSTEM_GUESSED
 
 
 def render(*, flake: str, system: str, ssh: str, prefix: str, branches: list[str],
@@ -257,50 +256,30 @@ def render(*, flake: str, system: str, ssh: str, prefix: str, branches: list[str
         f"flake_dir = {q(flake)}",
         f"targets_arch = {q(system)}",
         f"ssh_address_template = {q(ssh)}",
-        "# The remote the work branches are pushed to and main is landed on, and main's name there.",
+        strings.INIT_TOML_REMOTE,
         f"remote = {q(remote)}",
         f"main_branch = {q(main)}",
         "",
-        "# A checkout's work branch is <branch_prefix><leaf>, `open <path>` naming it after the path.",
-        "# {machine} in the prefix is this machine's hostname, a namespace per machine when you want one.",
+        strings.INIT_TOML_BRANCH_PREFIX,
         f"branch_prefix = {q(prefix)}",
-        "# The work branches nixconvoy may union into a deploy (and own, when named with the prefix), by",
-        "# the prefixes of their names; a pushed branch starting with none is ignored.",
+        strings.INIT_TOML_WORK_BRANCHES(),
         f"work_branches = [{', '.join(q(b) for b in branches)}]",
-        "# Child worktrees are an optional feature of nixconvoy that can be used by hand if desired,",
-        "# but is primarily intended to hook into worktrees that harnesses automatically create to isolate their subagents.",
-        "# The default directory is set to Claude Code's, so that nixconvoy's Claude Code plugin works out of the box.",
+        strings.INIT_TOML_CHILD_WORKTREES(),
         "child_worktrees = \".claude/worktrees\"",
         "",
         "[eval]",
-        "parallel = \"auto\"  # Determinate Nix's parallel evaluation: true, false or \"auto\" (on when nix has it)",
-        "# Optional: a flake check (checks.<targets_arch>.<name>) proven before any build"
-        + (f"; this flake's: {', '.join(checks)}" if checks else "") + ".",
+        "parallel = \"auto\"  " + strings.INIT_TOML_PARALLEL,
+        strings.INIT_TOML_PRECHECK(
+            these=strings.INIT_TOML_PRECHECK_THESE(checks=", ".join(checks)) if checks else ""),
         f"# precheck = {q(checks[0] if len(checks) == 1 else 'lint')}",
         "",
-        "# Optional: realise the closures in another machine's store, keyed by the hostname nixconvoy",
-        "# runs on (\"*\": any other machine; a machine mapped to itself realises locally); that",
-        "# machine's nix daemon builds them or hands them to its own remote builders.",
-        "# [build]",
-        "# store = { \"*\" = \"bigbox\" }",
-        "# skip_substituters = [\"https://slow.cachix.org\"]",
+        strings.INIT_TOML_BUILD,
         "",
-        "# How the targets are switched (every target's defaults; [targets.<name>.switch] overrides one's).",
-        "# Confirmed, unless `confirmed = false`: a rollback timer is armed on the target, the new system",
-        "# activated, verified over a new ssh connection (and its `checks`, bash run as root), and only then",
-        "# set as the profile and boot entry; otherwise it rolls back within `deadline` seconds.",
-        "# [switch]",
-        "# deadline = 30",
-        "# internet_check = false   # the verification also wants the internet reachable from the target",
-        "# checks = \"\"\"",
-        "# systemctl is-active -q nginx.service",
-        "# \"\"\"",
+        strings.INIT_TOML_SWITCH,
         "",
         *target_tables(targets, hosts_dir if hosts_dir is not None else os.path.normpath(f"{flake}/hosts")),
         "",
-        "# Optional support for git submodules. Feel free to ignore this if you don't have any submodules in your git repo.",
-        "# [submodules.<input>]",
-        "# repo = \"~/src/<input>\"",
+        strings.INIT_TOML_SUBMODULES,
     ]
     return "\n".join(lines) + "\n"
 
@@ -310,17 +289,10 @@ def target_tables(targets: list[str], hosts_dir: str) -> list[str]:
     each with the optional keys as comments, `dir`'s example under
     `hosts_dir`."""
     q = json.dumps
-    lines = ["# The targets: one table per nixosConfiguration (the inventory, as there is no targets_dir);",
-             "# a nixosConfiguration added later needs its table here.",
-             "# A deploy re-evaluates a target only when flake.nix, a file it names (transitively) or the",
-             "# target's own directory changed: a directory named after it beside the other targets' is",
-             "# found on its own, `dir` names one elsewhere."]
+    lines = [strings.INIT_TOML_TARGETS]
     for i, t in enumerate(targets):
         lines += [f"[targets.{t if re.fullmatch(r'[A-Za-z0-9_-]+', t) else q(t)}]",
                   f"# dir = {q(f'{hosts_dir}/{t}')}"]
         if i == 0:
-            lines += ["# # overrides ssh_address_template, if one target has an unusual username or domain-name",
-                      "# ssh_address = \"root@10.0.0.9\"",
-                      "# # For larger fleets, tags can be used to refer to several machines as a group in `nixconvoy deploy`",
-                      "# tags = [\"vps\"]"]
+            lines += [strings.INIT_TOML_FIRST_TARGET()]
     return lines

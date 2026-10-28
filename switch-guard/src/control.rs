@@ -15,6 +15,7 @@
 mod model;
 pub mod wire;
 
+use crate::text;
 use serde::{Deserialize, Serialize};
 
 /// No verification round starts, nor pause ends, within this long of the
@@ -49,7 +50,7 @@ pub struct Params {
     pub quiet: bool,
     /// The router: verification also needs this machine on the internet.
     pub router: bool,
-    /// DEPLOY_FAIL_VERIFY=1: fail verification at once.
+    /// NIXCONVOY_FAIL_VERIFY=1: fail verification at once.
     pub fail_verify: bool,
 }
 
@@ -228,17 +229,14 @@ impl Machine {
     }
 
     fn failed(&self) -> String {
-        format!(
-            "the build succeeded but the switch of {} failed; nothing was committed or pushed - the changes are still staged.  Fix the problem and re-run the deploy from this checkout.",
-            self.p.target
-        )
+        format!(text!(control_switch_failed), target = self.p.target)
     }
 
     /// The verified, confirmed target: the activation's own report decides
     /// the run, unless its session was lost.
     fn confirmed(&self, rc: i32, fx: &mut Vec<Effect>) -> Next {
         if rc == SESSION_LOST {
-            fx.push(Effect::Print(format!("{}: the activation's ssh session was lost; verified and confirmed", self.p.target)));
+            fx.push(Effect::Print(format!(text!(control_session_lost), target = self.p.target)));
             return Next::Done;
         }
         if rc != 0 {
@@ -270,26 +268,23 @@ impl Machine {
             (Pc::Start, Reply::Start) => self.ask(Pc::Guarding, Query::TakeGuard),
             (Pc::Guarding, Reply::Guard(g)) => match g {
                 Guard::Locked => self.ask(Pc::Probing, Query::ProbeHelper),
-                Guard::Moved(cur) => Next::Die(format!(
-                    "{target} was switched by another deploy while this one ran (now running {cur}).  Nothing was committed; re-run to converge with it."
-                )),
+                Guard::Moved(cur) => Next::Die(format!(text!(control_moved), target = target, cur = cur)),
                 Guard::Failed(line) => Next::Die(format!(
-                    "could not take {target}'s switch lock ({}); nothing was committed",
-                    if line.is_empty() { "connection failed" } else { &line }
+                    text!(control_guard_failed),
+                    target = target,
+                    reason = if line.is_empty() { text!(control_connection_failed) } else { &line }
                 )),
             },
             (Pc::Probing, Reply::Code(rc)) => {
                 if rc != 0 && rc != 1 {
-                    return Next::Die(format!(
-                        "could not root {target}'s switch kit (exit {rc}); nothing was switched or committed"
-                    ));
+                    return Next::Die(format!(text!(control_probe_failed), target = target, rc = rc));
                 }
                 let confirmed = rc == 0;
-                fx.push(Effect::Print(format!(
-                    "switching {target} ({}){}...",
-                    self.p.place,
-                    if confirmed { ", confirmed" } else { "" }
-                )));
+                fx.push(Effect::Print(if confirmed {
+                    format!(text!(control_switching_confirmed), target = target, place = self.p.place)
+                } else {
+                    format!(text!(control_switching), target = target, place = self.p.place)
+                }));
                 if confirmed {
                     self.ask(Pc::ReadingDeadline, Query::Deadline)
                 } else {
@@ -310,7 +305,7 @@ impl Machine {
             }
             (Pc::ReadingDeadline, Reply::Text(t)) => match t.trim().parse::<u64>() {
                 Ok(secs) => self.ask(Pc::Clocking { deadline_ms: secs * 1000 }, Query::Clock),
-                Err(_) => Next::Die(format!("{target}'s confirmed-switch helper gave no deadline ({t:?})")),
+                Err(_) => Next::Die(format!(text!(control_no_deadline), target = target, text = t)),
             },
             // Taken before arming, so the target's timer, started later, is
             // never due before this side's reckoning of it.
@@ -327,9 +322,7 @@ impl Machine {
             }
             (Pc::Arming { w }, Reply::Code(rc)) => {
                 if rc != 0 {
-                    return Next::Die(format!(
-                        "could not arm {target}'s rollback timer; nothing was switched or committed"
-                    ));
+                    return Next::Die(format!(text!(control_arm_failed), target = target));
                 }
                 fx.push(Effect::Armed);
                 let q = self.helper(&["activate", &self.p.toplevel]);
@@ -340,28 +333,23 @@ impl Machine {
                     fx.push(Effect::Mark(format!("verify:{target}")));
                 }
                 if rc == 100 {
-                    fx.push(Effect::Print(format!(
-                        "{target}'s new system takes effect only at a reboot; staging it"
-                    )));
+                    fx.push(Effect::Print(format!(text!(control_staging), target = target)));
                     let q = self.helper(&["confirm", &self.p.toplevel, "reboot-pending"]);
                     return self.ask(Pc::Staging, q);
                 }
-                fx.push(Effect::Print(format!("verifying {target}...")));
+                fx.push(Effect::Print(format!(text!(control_verifying), target = target)));
                 if self.p.fail_verify {
-                    return self.verify_failed("DEPLOY_FAIL_VERIFY=1".to_string(), fx);
+                    return self.verify_failed(text!(control_fail_verify).to_string(), fx);
                 }
                 self.ask(Pc::VerifyNow { w, rc }, Query::Clock)
             }
             (Pc::Staging, Reply::Code(c)) => {
                 fx.push(Effect::Disarmed);
-                Next::Die(format!(
-                    "the new system of {target} has an init incompatible with the running one, so it takes effect only at a reboot, which a confirmed switch never does.  {}Nothing was committed or pushed.",
-                    if c == 0 {
-                        format!("Its profile and bootloader entry are set: reboot {target}, then re-run.  ")
-                    } else {
-                        "Staging it failed (see above).  ".to_string()
-                    }
-                ))
+                Next::Die(if c == 0 {
+                    format!(text!(control_staged), target = target)
+                } else {
+                    format!(text!(control_staging_failed), target = target)
+                })
             }
 
             // One round of verification: a new ssh connection finds the
@@ -381,8 +369,9 @@ impl Machine {
                 }
                 if cur.as_deref() != Some(self.p.toplevel.as_str()) {
                     let problem = format!(
-                        "{target} runs {}, not the new system",
-                        cur.as_deref().unwrap_or("nothing reachable")
+                        text!(control_runs_other),
+                        target = target,
+                        cur = cur.as_deref().unwrap_or(text!(control_nothing_reachable))
                     );
                     return self.verify_internet(w, rc, vec![problem]);
                 }
@@ -396,9 +385,13 @@ impl Machine {
                 let mut problems = Vec::new();
                 if code < 0 {
                     self.cut |= tmo < PROBE_TIMEOUT_MS;
-                    problems.push(format!("{target}: check timed out after {:.0}s", tmo as f64 / 1000.0));
+                    problems.push(format!(text!(control_check_timed_out), target = target, secs = tmo as f64 / 1000.0));
                 } else if code != 0 {
-                    problems.push(format!("{target}: {}", last.as_deref().unwrap_or("check failed")));
+                    problems.push(format!(
+                        text!(control_check_problem),
+                        target = target,
+                        last = last.as_deref().unwrap_or(text!(control_check_failed))
+                    ));
                 }
                 self.verify_internet(w, rc, problems)
             }
@@ -412,7 +405,7 @@ impl Machine {
             (Pc::VerifyInternet { w, rc, mut problems, tmo }, Reply::Flag(ok)) => {
                 if !ok {
                     self.cut |= tmo < INTERNET_TIMEOUT_MS;
-                    problems.push("this machine cannot reach the internet".to_string());
+                    problems.push(text!(control_no_internet).to_string());
                 }
                 self.verify_end(w, rc, problems)
             }
@@ -433,10 +426,7 @@ impl Machine {
                     let pc = Pc::Reporting { fallout: Fallout::VerifyFailed, problem };
                     return self.ask(pc, Query::Running { timeout_ms: None });
                 }
-                Next::Die(format!(
-                    "the switch of {target} did not verify ({problem}); rolled back to {}.  Nothing was committed or pushed - the changes are still staged.",
-                    self.rollback_to
-                ))
+                Next::Die(format!(text!(control_did_not_verify), target = target, problem = problem, previous = self.rollback_to))
             }
             (Pc::Confirming { rc }, Reply::Code(c)) => {
                 if c == 0 {
@@ -447,7 +437,7 @@ impl Machine {
                 // a timer that fired first, this undoes the activation it
                 // may have missed.  Exit 3: the confirm did land, only its
                 // relay died.
-                fx.push(Effect::Print(format!("{target} could not be confirmed; rolling back")));
+                fx.push(Effect::Print(format!(text!(control_unconfirmed), target = target)));
                 let q = self.helper(&["rollback"]);
                 self.ask(Pc::ConfirmRollingBack { rc }, q)
             }
@@ -457,23 +447,16 @@ impl Machine {
                     return self.confirmed(rc, fx);
                 }
                 if r == 0 {
-                    return Next::Die(format!(
-                        "{target} verified but could not be confirmed (see above: its deadline passed first, or persisting the new system failed); rolled back to {}.  Nothing was committed or pushed.",
-                        self.rollback_to
-                    ));
+                    return Next::Die(format!(text!(control_confirm_rolled_back), target = target, previous = self.rollback_to));
                 }
                 let pc = Pc::Reporting { fallout: Fallout::ConfirmFailed, problem: String::new() };
                 self.ask(pc, Query::Running { timeout_ms: None })
             }
             (Pc::Reporting { fallout, problem }, Reply::System(cur)) => {
-                let cur = cur.unwrap_or_else(|| "nothing reachable".to_string());
+                let cur = cur.unwrap_or_else(|| text!(control_nothing_reachable).to_string());
                 Next::Die(match fallout {
-                    Fallout::VerifyFailed => format!(
-                        "the switch of {target} did not verify ({problem}) and rolling it back failed too (see above): it runs {cur}; its timer retries if still pending.  Nothing was committed or pushed."
-                    ),
-                    Fallout::ConfirmFailed => format!(
-                        "{target} verified but could not be confirmed (see above: its deadline passed first, or persisting the new system failed); rolling it back failed too, it runs {cur}.  Nothing was committed or pushed."
-                    ),
+                    Fallout::VerifyFailed => format!(text!(control_rollback_failed), target = target, problem = problem, cur = cur),
+                    Fallout::ConfirmFailed => format!(text!(control_confirm_rollback_failed), target = target, cur = cur),
                 })
             }
             (pc, reply) => panic!("nixconvoy-switch: reply {reply:?} does not answer {pc:?}"),
@@ -488,7 +471,7 @@ impl Machine {
     }
 
     fn out_of_time(&self) -> String {
-        format!("{}: no time left to verify before its rollback deadline", self.p.target)
+        format!(text!(control_out_of_time), target = self.p.target)
     }
 
     fn verify_internet(&mut self, w: Window, rc: i32, problems: Vec<String>) -> Next {
@@ -516,7 +499,7 @@ impl Machine {
     }
 
     fn verify_failed(&mut self, problem: String, fx: &mut Vec<Effect>) -> Next {
-        fx.push(Effect::Print(format!("{} failed verification ({problem}); rolling back", self.p.target)));
+        fx.push(Effect::Print(format!(text!(control_verify_failed), target = self.p.target, problem = problem)));
         let q = self.helper(&["rollback"]);
         self.ask(Pc::RollingBack { problem }, q)
     }

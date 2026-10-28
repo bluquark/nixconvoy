@@ -12,7 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NoReturn, overload
 
-from . import proc, wire
+from . import proc, strings, wire
 from .proc import die, dump_json, load_json
 from .wire import (
     DriftOutcome,
@@ -41,7 +41,7 @@ def binary(name: str) -> str:
     carries (nix/package.nix links them under bin/ here), nowhere else."""
     exe = Path(__file__).resolve().parent / "bin" / name
     if not exe.is_file():
-        die(f"{exe} is missing: nixconvoy runs from its nix package (nix run .#nixconvoy)")
+        die(strings.GUARD_MISSING(exe=exe))
     return str(exe)
 
 
@@ -54,19 +54,19 @@ def drive(exe: str, params: object, perform: Perform, query: object, outcome: ob
     try:
         core = subprocess.Popen([exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     except OSError as e:
-        die(f"cannot run {name} ({exe}): {e}; nothing was committed")
+        die(strings.GUARD_CANNOT_RUN(name=name, exe=exe, error=e))
     assert core.stdin is not None and core.stdout is not None
     core_in, core_out = core.stdin, core.stdout
 
     def lost(what: str) -> NoReturn:
-        die(f"{name} {what}{during}; nothing was committed")
+        die(strings.GUARD_LOST(name=name, what=what, during=during))
 
     def send(msg: object) -> None:
         try:
             core_in.write(dump_json(msg) + "\n")
             core_in.flush()
         except OSError:
-            lost(f"stopped answering (exit {core.poll()})")
+            lost(strings.GUARD_STOPPED(code=core.poll()))
 
     try:
         send(params)
@@ -75,11 +75,11 @@ def drive(exe: str, params: object, perform: Perform, query: object, outcome: ob
             if not line:
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     core.wait(timeout=5)
-                lost(f"stopped answering (exit {core.poll()})")
+                lost(strings.GUARD_STOPPED(code=core.poll()))
             try:
                 effects, kind, payload = wire.step(load_json(line), query, outcome)
             except ValueError as e:  # not JSON, or not a step (WireError)
-                lost(f"sent {line.strip()!r} ({e})")
+                lost(strings.GUARD_SENT(line=line.strip(), error=e))
             for e in effects:
                 match e:
                     case Print(s):
@@ -129,4 +129,4 @@ def decide(params: DriftParams | RebaseParams | UnionParams | PruneParams, perfo
 
     core, outcome = CORES[type(params)]
     return drive(binary("nixconvoy-plan"), {core: wire.encode(params)}, perform or GitQueries(), PlanQuery, outcome,
-                 "nixconvoy-plan", f" deciding {core}")
+                 "nixconvoy-plan", strings.GUARD_DECIDING(core=core))

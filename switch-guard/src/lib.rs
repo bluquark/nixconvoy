@@ -9,5 +9,6 @@ pub mod control;
 pub mod plan;
 pub mod proc;
 pub mod record;
+pub mod strings;
 pub mod switch;
 pub mod wire;

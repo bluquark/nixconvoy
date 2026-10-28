@@ -19,6 +19,7 @@
 //! refuses; a process working in it without its lock (a shell cd'd there)
 //! keeps it too.
 use super::{Names, Query, Run, Script};
+use crate::text;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -86,10 +87,10 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     }
     // Before any lock: a slow fetch holds up no create of this name.
     if let Err(detail) = s.ran(Query::Fetch)? {
-        return Ok(Outcome::Kept(format!("{} could not be fetched to judge it:\n{}", p.names.remote, detail.trim())));
+        return Ok(Outcome::Kept(format!(text!(prune_fetch_failed), remote = p.names.remote, detail = detail.trim())));
     }
     if !s.flag(Query::TakeNameLock)? {
-        return Ok(Outcome::Kept("its name is locked: a create or another removal is at it; re-run".into()));
+        return Ok(Outcome::Kept(text!(prune_name_locked).into()));
     }
     let outcome = if s.flag(Query::TakeDeployLock)? {
         let o = match judge(s, p)? {
@@ -99,7 +100,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         s.tolerate(Query::ReleaseDeployLock)?;
         o
     } else {
-        Outcome::Kept("a nixconvoy runs in it".into())
+        Outcome::Kept(text!(prune_deploy_lock_held).into())
     };
     s.tolerate(Query::ReleaseNameLock)?;
     Ok(outcome)
@@ -110,26 +111,22 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
 fn holder(s: &mut Script, p: &Params) -> Run<Result<(), Outcome>> {
     let lock = s.text(Query::Lock)?;
     match lock.as_deref() {
-        None if !p.named => return kept(format!("unlocked: no session to outlive; `nixconvoy close {}` judges it", p.name)),
+        None if !p.named => return kept(format!(text!(prune_unlocked), name = p.name)),
         None => {}
         // Undeploy ends the session that would have unlocked it.
         Some(reason) if p.own_session_ends && reason.ends_with(SESSIONLESS) => {}
         Some(reason) => match session(reason) {
             None if reason.ends_with(SESSIONLESS) => {
-                return kept(format!(
-                    "its create found no claude session to outlive: `nixconvoy close {}` removes it (undeploy --back-to {} first when it holds increments), or `git worktree unlock` it to let prune judge it",
-                    p.name,
-                    p.names.main_short()
-                ));
+                return kept(format!(text!(prune_sessionless), name = p.name, main_short = p.names.main_short()));
             }
             None => {
-                let why = if reason.is_empty() { "no reason given" } else { reason };
-                return kept(format!("locked by hand ({why}): `git worktree unlock` it to let prune judge it"));
+                let why = if reason.is_empty() { text!(prune_no_reason) } else { reason };
+                return kept(format!(text!(prune_hand_lock), why = why));
             }
             Some((pid, start)) => {
                 let ended = p.stopped.as_ref().is_some_and(|st| st.pid == pid && st.lock.as_deref() == Some(reason));
                 if !ended && s.flag(Query::Alive { pid, start, own_ends: p.own_session_ends })? {
-                    return kept("the claude session that spawned its agent still runs");
+                    return kept(text!(prune_session_runs));
                 }
             }
         },
@@ -143,60 +140,53 @@ fn judge(s: &mut Script, p: &Params) -> Run<Result<(String, Option<String>), Out
         return Ok(Err(o));
     }
     if let Some(op) = s.text(Query::OpInProgress)? {
-        return kept(format!("a {op} is in progress"));
+        return kept(format!(text!(prune_op_in_progress), op = op));
     }
     if s.flag(Query::PushInFlight)? {
-        return kept("a push of its work branch is in flight");
+        return kept(text!(prune_push_in_flight));
     }
     if s.flag(Query::Nested)? {
-        return kept("another worktree lives inside it");
+        return kept(text!(prune_nested));
     }
     let cur = s.text(Query::CurrentBranch)?;
     let Some(wb) = s.text(Query::OwnBranch)? else {
-        return kept("it owns no work branch");
+        return kept(text!(prune_no_work_branch));
     };
     // On its own work branch it is judged like any checkout: idle once the
     // branch is reset onto main (a land, or an undeploy back to it), holding work before.
     let on_wb = cur.as_deref() == Some(wb.as_str());
     if on_wb && !wb.ends_with(&format!("-{}", p.name)) {
-        return kept(format!("it has {wb}, another checkout's work branch, checked out"));
+        return kept(format!(text!(prune_foreign_branch), wb = wb));
     }
     if let Some(tip) = s.text(Query::Rev { name: p.names.remote_ref(&wb) })? {
         if !s.flag(Query::Contains { a: tip, b: p.names.main_ref() })? {
             return kept(if on_wb {
-                format!("its work branch {wb} carries pushed increments: land or undeploy decides it")
+                format!(text!(prune_pushed_increments), wb = wb)
             } else {
-                format!("it is not on {wb}, which carries pushed increments; `git switch {wb}` there to discard them")
+                format!(text!(prune_off_pushed_branch), wb = wb)
             });
         }
     }
     if let Some(local) = s.text(Query::Rev { name: format!("refs/heads/{wb}") })? {
         if s.flag(Query::Unpushed { sha: local })? {
-            return kept(format!(
-                "it owns {wb}, which carries commits not on {} (a deploy whose push failed?); push it or `git switch {wb}` there and undeploy --back-to {}",
-                p.names.remote,
-                p.names.main_short()
-            ));
+            return kept(format!(text!(prune_unpushed), wb = wb, remote = p.names.remote, main_short = p.names.main_short()));
         }
     }
     if s.flag(Query::Dirty)? {
-        return kept("it has uncommitted or untracked changes, which the removal would lose; commit or discard them (git status there)");
+        return kept(text!(prune_dirty));
     }
     if !s.flag(Query::OnOrigin)? {
-        return kept(format!(
-            "it carries commits not on {}, which the removal would lose; push them (git push {} HEAD:{}) or deploy from the work branch",
-            p.names.remote, p.names.remote, p.names.main
-        ));
+        return kept(format!(text!(prune_not_on_origin), remote = p.names.remote, main = p.names.main));
     }
     Ok(Ok((wb, cur)))
 }
 
 fn remove(s: &mut Script, wb: &str, cur: Option<String>) -> Run<Outcome> {
     if s.flag(Query::Occupied)? {
-        return Ok(Outcome::Kept("a process works in it".into()));
+        return Ok(Outcome::Kept(text!(prune_occupied).into()));
     }
     if let Err(detail) = s.ran(Query::RemoveWorktree)? {
-        return Ok(Outcome::Kept(format!("git refused to remove it:\n{}", detail.trim())));
+        return Ok(Outcome::Kept(format!(text!(prune_remove_refused), detail = detail.trim())));
     }
     if let Err(detail) = s.ran(Query::DropBranches { wb: wb.into(), cur })? {
         s.warn(detail);

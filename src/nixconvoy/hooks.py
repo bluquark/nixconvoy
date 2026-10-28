@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, names
+from . import config, names, strings
 from .checkout import (
     SESSIONLESS,
     ancestors,
@@ -73,7 +73,7 @@ def run_hook(event: str) -> None:
     root = toplevel(where)
     if root is None:
         if event == "worktree-create":
-            die(f"hook worktree-create: {where} is not in a git repository")
+            die(strings.HOOK_CREATE_NO_REPO(where=where))
         return
     os.chdir(root)
     config.set_root(root)
@@ -120,7 +120,7 @@ def worktree_create(name: str, session: int | None) -> None:
     session found the lock names none, which the sweeps keep like a hand
     lock.  Prints the path, as the hook's output."""
     if not name:
-        die("hook worktree-create: the input names no worktree")
+        die(strings.HOOK_CREATE_NO_NAME)
     if session is None:
         reason = f"claude agent {name} {SESSIONLESS}"
     else:
@@ -158,8 +158,7 @@ def worktree_resume(given: dict[str, object]) -> None:
         with contextlib.redirect_stdout(sys.stderr):
             worktree_create(d.name, claude_session())
     except Exception as e:  # noqa: BLE001 - every failure blocks the resume
-        print(f"worktree-resume: could not recreate or relock agent {to}'s worktree ({failure(e)}), "
-              "so it is not resumed; retry", file=sys.stderr)
+        print(strings.HOOK_RESUME_FAILED(agent=to, error=failure(e)), file=sys.stderr)
         sys.exit(2)
 
 
@@ -197,10 +196,10 @@ def worktree_remove(path: str) -> None:
     finally:
         held.close()
     if why is None:
-        why = "it is no subagent worktree" if sub_parent(d) is None else prune_one(
+        why = strings.HOOK_REMOVE_NOT_SUBAGENT if sub_parent(d) is None else prune_one(
             d, named=True, own_session_ends=True)
     if why is not None:
-        die(f"hook worktree-remove: {d} kept: {why}")
+        die(strings.HOOK_REMOVE_KEPT(path=d, why=why))
 
 
 def removal_keeps(d: Path) -> str | None:
@@ -211,18 +210,18 @@ def removal_keeps(d: Path) -> str | None:
     (`nixconvoy close` judges and removes both)."""
     reason = worktree_lock(d)
     if reason is not None and lock_pid_alive(reason) and lock_live(reason):
-        return f"another claude session holds it ({reason})"
+        return strings.HOOK_KEEP_LOCKED(reason=reason)
     if out(["git", "status", "--porcelain", "--ignored"], cwd=str(d)):
-        return "it has uncommitted, untracked or ignored changes"
+        return strings.HOOK_KEEP_CHANGES
     n = config.names_at(d)
     main = run(["git", "rev-parse", "-q", "--verify", n.main_ref], cwd=str(d), check=False)
     landed = n.main_ref if main.returncode == 0 else "--remotes"
     if out(["git", "rev-list", "-n", "1", "HEAD", "--not", landed], cwd=str(d)):
-        return f"it carries commits not on {n.main_short}"
+        return strings.HOOK_KEEP_COMMITS(main=n.main_short)
     for ln in out(["git", "ls-files", "-s"], cwd=str(d)).splitlines():
         meta, _, sub = ln.partition("\t")
         if meta.startswith("160000") and (d / sub / ".git").exists():
-            return f"it holds a submodule worktree ({sub}), left to nixconvoy close"
+            return strings.HOOK_KEEP_SUBMODULE(path=sub)
     return None
 
 
@@ -246,18 +245,18 @@ def session_start(pid: int) -> None:
         os._exit(0)
     log_to(common)
 
-    def sweep(what: str) -> None:
-        print(f"{time.strftime('%F %T')} claude session {pid} {what} ({top})", flush=True)
+    def sweep(said: strings.M) -> None:
+        print(said(time=time.strftime("%F %T"), pid=pid, top=top), flush=True)
         try:
             close_worktrees([])
         except Exception as e:  # noqa: BLE001 - the waiter outlives a failed sweep
-            print(f"prune failed: {failure(e)}", flush=True)
+            print(strings.HOOK_PRUNE_FAILED(error=failure(e)), flush=True)
 
     try:
-        sweep("started: pruning dead sessions'")
+        sweep(strings.HOOK_SWEEP_STARTED)
         while lock_pid_alive(session) is not False:
             time.sleep(5)
-        sweep("exited: pruning its own")
+        sweep(strings.HOOK_SWEEP_EXITED)
     finally:
         waiter.unlink(missing_ok=True)
         sys.stdout.flush()
@@ -346,17 +345,19 @@ def subagent_stop(session: int, stop: dict[str, object]) -> None:
                   and (cwd := transcript_cwd(transcript.with_name(f"agent-{t.get('id')}.jsonl"), last=True))
                   and (cwd == d or d in cwd.parents)]
         if started:
-            verdict = f"kept, its background task {started[0]} still runs"
+            verdict = strings.HOOK_STOP_KEPT_TASK(task=started[0])
         elif forked:
-            verdict = f"kept, agent {forked[0]} works in it"
+            verdict = strings.HOOK_STOP_KEPT_AGENT(agent=forked[0])
         else:
             time.sleep(STOP_GRACE)
             with prune_lock(common).open("w") as serial:
                 fcntl.flock(serial, fcntl.LOCK_EX)
                 gone = not d.is_dir()
                 why = None if gone else prune_one(d, named=True, stopped=Stop(session, stop_lock), wait_name=False)
-            verdict = "removed meanwhile" if gone else "empty, removed" if why is None else f"kept, {why}"
+            verdict = strings.HOOK_STOP_GONE if gone else strings.HOOK_STOP_REMOVED if why is None \
+                else strings.HOOK_STOP_KEPT(why=why)
     except Exception as e:  # noqa: BLE001 - reported in the log
-        verdict = f"kept, its check failed: {failure(e)}"
-    print(f"{time.strftime('%F %T')} agent {agent} stopped: {sub_label(d)}: {verdict}", flush=True)
+        verdict = strings.HOOK_STOP_CHECK_FAILED(error=failure(e))
+    print(strings.HOOK_STOP_LINE(time=time.strftime("%F %T"), agent=agent, label=sub_label(d), verdict=verdict),
+          flush=True)
     os._exit(0)

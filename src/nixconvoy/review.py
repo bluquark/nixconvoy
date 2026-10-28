@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 from typing import IO
 
-from . import config, names, submodule
+from . import config, names, strings, submodule
 from .checkout import listed, sub_parent
 from .config import MSG_FILE, ConfigError, load
 from .proc import die, painter, run
@@ -81,7 +81,7 @@ def targets(args: list[str], here: Path) -> tuple[list[Path | Sub | str], list[s
             break
         got = names.resolve(a, here)
         if got is None:
-            die(f"review: no subagent worktree, submodule, branch or path named {a}")
+            die(strings.REVIEW_UNKNOWN_NAME(name=a))
         found.append(got)
         rest.pop(0)
     if with_children:
@@ -149,7 +149,7 @@ class Out:
 
 
 def message(o: Out, text: str) -> None:
-    o.line(f"── {MSG_FILE} ──", "bold")
+    o.line(strings.REVIEW_MSG_HEADER(), "bold")
     for ln in text.splitlines():
         o.line(ln, "cyan")
     o.line("")
@@ -159,7 +159,7 @@ def show_branch(o: Out, here: Path, branch: str, args: list[str]) -> None:
     p = run(["git", "merge-base", default_of(here), branch], cwd=str(here), check=False)
     base = p.stdout.strip()
     if p.returncode != 0 or not base:
-        o.line(f"review: {branch} has no merge-base with {default_of(here)}")
+        o.line(strings.REVIEW_NO_MERGE_BASE(branch=branch, default=default_of(here)))
         return
     msg = run(["git", "show", f"{branch}:{MSG_FILE}"], cwd=str(here), check=False)
     if msg.returncode == 0:
@@ -186,7 +186,7 @@ def show(o: Out, d: Path, args: list[str], all_wts: dict[Path, str | None]) -> N
         if p.returncode != 0:
             continue
         o.line("")
-        o.line(f"── submodule {sub.name} ──", "bold")
+        o.line(strings.REVIEW_SUBMODULE_HEADER(name=sub.name), "bold")
         o.diff(a, "--cached", p.stdout.strip(), "--", EXCLUDE_MSG)
 
 
@@ -200,14 +200,15 @@ def main(args: list[str]) -> int:
             show(o, here, rest, all_wts)
         for t in found:
             if isinstance(t, str):
-                o.line(f"══ branch {t} ══", "heading")
+                o.line(strings.REVIEW_BRANCH_HEADING(branch=t), "heading")
                 show_branch(o, here, t, rest)
             elif isinstance(t, Sub):
-                o.line(f"══ submodule {t.name} ══", "heading")
+                o.line(strings.REVIEW_SUBMODULE_HEADING(name=t.name), "heading")
                 show(o, t.dir, rest, all_wts)
             else:
                 parent = sub_parent(t)
-                o.line(f"══ {parent.name + '/' if parent else ''}{t.name} ══", "heading")
+                o.line(strings.REVIEW_WORKTREE_HEADING(label=f"{parent.name + '/' if parent else ''}{t.name}"),
+                       "heading")
                 show(o, t, rest, all_wts)
             o.line("")
     except BrokenPipeError:

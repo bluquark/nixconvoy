@@ -5,6 +5,7 @@ use super::plan::{self, Boot, Ctx, Esp, File, Gen, Generation, Policy, Profile, 
 use crate::config::Config;
 use crate::proc::{self, say, warn};
 use crate::record::Record;
+use crate::text;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -200,7 +201,7 @@ impl Esp for RealEsp<'_> {
 /// switch-to-configuration boot (or a confirmed switch's confirm).
 fn install(s: &Settings, target: &str) -> i32 {
     let Some(target) = canonical(target) else {
-        warn(&format!("boot-assessment: {target} does not exist"));
+        warn(&format!(text!(boot_target_missing), target = target));
         return 1;
     };
     let ctx = ctx(s, target);
@@ -213,9 +214,7 @@ fn install(s: &Settings, target: &str) -> i32 {
 fn ctx(s: &Settings, target: String) -> Ctx<String> {
     let record = match s.state_dir.as_deref().map(Record::load) {
         Some(Err(e)) => {
-            warn(&format!(
-                "boot-assessment: {e}; not sparing a pending rollback's system - remove that file once no confirmed switch is in flight"
-            ));
+            warn(&format!(text!(boot_bad_record), e = e));
             None
         }
         r => r.and_then(Result::ok).flatten(),
@@ -232,13 +231,8 @@ fn esp_notice(s: &Settings, shortfall: Option<u64>) {
     let marker = s.boot_log.with_file_name("esp-full");
     match shortfall {
         Some(bytes) => {
-            let body = format!(
-                "{host}'s ESP lacks {mib} MiB for the generations its failover needs (target, booted, running, previous): every switch fails to install its boot entry until space is made on {esp}.\n",
-                host = s.hostname,
-                mib = bytes.div_ceil(1 << 20),
-                esp = s.esp.display(),
-            );
-            warn(&format!("boot-assessment: the ESP lacks {bytes} bytes even for the generations the failover needs"));
+            let body = format!(text!(boot_esp_full_notice), host = s.hostname, mib = bytes.div_ceil(1 << 20), esp = s.esp.display());
+            warn(&format!(text!(boot_esp_full), bytes = bytes));
             notice(s, "set", "esp-full", Some(&body));
             let _ = std::fs::write(&marker, "");
         }
@@ -255,11 +249,11 @@ fn esp_notice(s: &Settings, shortfall: Option<u64>) {
 /// bootable, and the newest generations.
 fn prune(s: &Settings, dry_run: bool) -> i32 {
     let Some(target) = canonical(s.profile()) else {
-        warn(&format!("boot-assessment: {} does not exist, not pruning", s.profile().display()));
+        warn(&format!(text!(boot_prune_no_profile), profile = s.profile().display()));
         return 1;
     };
     if let Err(e) = std::fs::read_dir(s.stub_dir()) {
-        warn(&format!("boot-assessment: cannot read {}, not pruning: {e}", s.stub_dir().display()));
+        warn(&format!(text!(boot_prune_no_esp), dir = s.stub_dir().display(), e = e));
         return 1;
     }
     let profile = read_profile(s);
@@ -270,14 +264,13 @@ fn prune(s: &Settings, dry_run: bool) -> i32 {
     let list = |v: &[Gen]| v.iter().map(Gen::to_string).collect::<Vec<_>>().join(" ");
     let anchors = plan::anchors(&profile, &boots, &stubs, ctx.now, &s.policy.tiers);
     let kept: Vec<Gen> = profile.gens().iter().map(|x| x.num).filter(|g| !drop.contains(g)).collect();
-    say(&format!(
-        "boot-assessment: {} generations {} (keeping {}: the bootable set, the stubbed, anchors {}, and the newest {})",
-        if dry_run { "would prune" } else { "pruning" },
-        if drop.is_empty() { "none".to_string() } else { list(&drop) },
-        list(&kept),
-        list(&anchors),
-        s.keep_newest
-    ));
+    let dropped = if drop.is_empty() { text!(boot_none).to_string() } else { list(&drop) };
+    let (kept, anchors) = (list(&kept), list(&anchors));
+    say(&if dry_run {
+        format!(text!(boot_would_prune), drop = dropped, kept = kept, anchors = anchors, newest = s.keep_newest)
+    } else {
+        format!(text!(boot_pruning), drop = dropped, kept = kept, anchors = anchors, newest = s.keep_newest)
+    });
     if drop.is_empty() || dry_run {
         return 0;
     }
@@ -288,7 +281,7 @@ fn prune(s: &Settings, dry_run: bool) -> i32 {
 }
 
 fn date(s: &Settings) -> String {
-    proc::output(&s.date, &["-Iseconds"]).map_or_else(|| "?".to_string(), |d| d.trim().to_string())
+    proc::output(&s.date, &["-Iseconds"]).map_or_else(|| text!(boot_unknown).to_string(), |d| d.trim().to_string())
 }
 
 /// `notice set|clear <name>` under a timeout: a publisher's network
@@ -315,7 +308,7 @@ fn report(s: &Settings) -> i32 {
         let appended =
             std::fs::OpenOptions::new().create(true).append(true).open(&s.boot_log).and_then(|mut f| f.write_all(line.as_bytes()));
         if let Err(e) = appended {
-            warn(&format!("boot-assessment: {}: {e}", s.boot_log.display()));
+            warn(&format!(text!(boot_log_failed), path = s.boot_log.display(), e = e));
         }
     }
     if canonical(CURRENT) != booted {
@@ -328,18 +321,16 @@ fn report(s: &Settings) -> i32 {
     let ngen = std::fs::read_link(s.profile())
         .ok()
         .and_then(|l| crate::switch::driver::link_generation(&l.to_string_lossy()))
-        .map_or_else(|| "?".to_string(), |g| g.to_string());
+        .map_or_else(|| text!(boot_unknown).to_string(), |g| g.to_string());
     let rejected: Vec<String> = stub_names(s).into_iter().filter(|n| Stub::parse(n).is_some_and(|st| st.tries_left == Some(0))).collect();
-    let rejected = if rejected.is_empty() { "none".to_string() } else { rejected.join("\n") };
+    let rejected = if rejected.is_empty() { text!(boot_none).to_string() } else { rejected.join("\n") };
     let body = format!(
-        "{host} booted generation {bgen} at {date}, not the newest ({ngen}).\n\
-         Rejected entries on the ESP: {rejected}\n\
-         nixconvoy refuses to switch back onto a rejected generation: change the configuration (a new generation gets its own tries), or re-arm the stub to retry it as is (sudo mv of the +0-N stub to +{tries}, then deploy).\n\
-         The boot-assessment notice, if set, says why the newest one failed.\n\
-         Log: journalctl -u boot-assessment-watch -u boot-assessment\n",
+        text!(boot_failover_notice),
         host = s.hostname,
-        bgen = bgen.map_or_else(|| "?".to_string(), |g| g.to_string()),
+        bgen = bgen.map_or_else(|| text!(boot_unknown).to_string(), |g| g.to_string()),
         date = date(s),
+        ngen = ngen,
+        rejected = rejected,
         tries = s.initial_tries,
     );
     notice(s, "set", "boot-failover", Some(&body));
@@ -372,11 +363,11 @@ fn failures(s: &Settings) -> Vec<String> {
         Ok(o) => {
             let mut f: Vec<String> = String::from_utf8_lossy(&o.stdout).lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
             if !o.status.success() {
-                f.push(format!("the boot-assessment checks exited {}", proc::code(Ok(o.status))));
+                f.push(format!(text!(boot_checks_exited), code = proc::code(Ok(o.status))));
             }
             f
         }
-        Err(e) => vec![format!("cannot run the checks: {e}")],
+        Err(e) => vec![format!(text!(boot_checks_cannot_run), e = e)],
     };
     // The booted system's kit's checks; none rooted for it (switched
     // plainly), or a kit without checks, is nothing more to prove.
@@ -390,9 +381,9 @@ fn failures(s: &Settings) -> Vec<String> {
             Ok(o) => {
                 let err = String::from_utf8_lossy(&o.stderr);
                 let last = err.lines().rev().find(|l| !l.trim().is_empty());
-                fails.push(last.map_or_else(|| "switch checks failed".to_string(), str::to_string));
+                fails.push(last.map_or_else(|| text!(boot_switch_checks_failed).to_string(), str::to_string));
             }
-            Err(e) => fails.push(format!("cannot run the switch checks: {e}")),
+            Err(e) => fails.push(format!(text!(boot_switch_checks_cannot_run), e = e)),
         }
     }
     fails
@@ -437,7 +428,7 @@ fn run_gate(s: &Settings) -> i32 {
         let pending = t.saturating_sub(last_busy) < gate::SETTLE_SECS;
         match gate::gate(&fails, pending, t, s.deadline) {
             Gate::Pass => {
-                say("reachable: sshd, tailscaled, the boot-assessment checks pass");
+                say(text!(boot_gate_passed));
                 let _ = std::fs::remove_file(&s.status_file);
                 return 0;
             }
@@ -448,9 +439,9 @@ fn run_gate(s: &Settings) -> i32 {
             Gate::Fail { status } => {
                 let _ = std::fs::write(&s.status_file, format!("{status}\n"));
                 if pending {
-                    say(&format!("not reachable by the {}s deadline: {status}", s.deadline));
+                    say(&format!(text!(boot_gate_deadline), deadline = s.deadline, status = status));
                 } else {
-                    say(&format!("not reachable with nothing left starting, {t}s into stage 2: {status}"));
+                    say(&format!(text!(boot_gate_settled), t = t, status = status));
                 }
                 return 1;
             }
@@ -505,7 +496,7 @@ fn run_watch(s: &Settings) -> i32 {
     let clock = Clock::new(s);
     let entry = entry(s);
     if unit_state(s, BLESS).0 == "active" {
-        say(&format!("{entry} already blessed this boot"));
+        say(&format!(text!(boot_already_blessed), entry = entry));
         return 0;
     }
     let reboot_wd = get_manager(s, "RebootWatchdogUSec").unwrap_or(600_000_000);
@@ -516,11 +507,11 @@ fn run_watch(s: &Settings) -> i32 {
         let _ = std::fs::write("/proc/sys/kernel/panic", panic.trim());
     };
     if !set_manager(s, "RuntimeWatchdogUSec", s.runtime_watchdog * 1_000_000) {
-        warn("hardware watchdog not armed");
+        warn(text!(boot_no_watchdog));
     }
     set_manager(s, "RebootWatchdogUSec", 120_000_000);
     let _ = std::fs::write("/proc/sys/kernel/panic", s.panic.to_string());
-    say(&format!("assessing {entry}: watchdog {}s, panic reboot, deadline {}s", s.runtime_watchdog, s.deadline));
+    say(&format!(text!(boot_assessing), entry = entry, watchdog = s.runtime_watchdog, deadline = s.deadline));
     loop {
         let bless = match unit_state(s, BLESS) {
             (a, _) if a == "active" => Bless::Active,
@@ -535,39 +526,28 @@ fn run_watch(s: &Settings) -> i32 {
                 if canonical(BOOTED) == canonical(s.profile()) {
                     notice(s, "clear", "boot-assessment", None);
                 }
-                say(&format!("passed: {entry} is blessed"));
+                say(&format!(text!(boot_blessed), entry = entry));
                 return 0;
             }
             Watch::BlessFailed => {
                 disarm();
-                let body = format!(
-                    "{}'s boot of {entry} passed its assessment at {} but systemd-bless-boot failed, hangs or never ran: the stub keeps its tries counter, and each reboot spends one until the ESP takes the rename.\n\
-                     Log: journalctl -u systemd-bless-boot\n",
-                    s.hostname,
-                    date(s)
-                );
+                let body = format!(text!(boot_bless_failed_notice), host = s.hostname, entry = entry, date = date(s));
                 notice(s, "set", "boot-assessment", Some(&body));
-                say("reachable, but not blessed: systemd-bless-boot failed or never ran");
+                say(text!(boot_not_blessed));
                 return 0;
             }
             Watch::Reboot => break,
         }
     }
-    let status = std::fs::read_to_string(&s.status_file).map_or_else(|_| "the gate never ran".to_string(), |t| t.trim().to_string());
-    let body = format!(
-        "{}'s boot of {entry} failed its assessment at {}: {status}\n\
-         Rebooting: systemd-boot retries the entry until its tries are spent, then boots the generation deployed before it (if it was never booted), then the last blessed one.\n\
-         Log: journalctl -u boot-assessment-watch -u boot-assessment\n",
-        s.hostname,
-        date(s)
-    );
+    let status = std::fs::read_to_string(&s.status_file).map_or_else(|_| text!(boot_gate_never_ran).to_string(), |t| t.trim().to_string());
+    let body = format!(text!(boot_failed_notice), host = s.hostname, entry = entry, date = date(s), status = status);
     notice(s, "set", "boot-assessment", Some(&body));
     // SAFETY: sync has no preconditions.
     unsafe { libc::sync() };
     proc::run(&s.systemctl, &["reboot"])
 }
 
-pub const USAGE: &str = "usage: nixconvoy-boot-assessment --config <file> install <toplevel> | prune [--dry-run] | report | gate | watch";
+pub const USAGE: &str = text!(boot_usage);
 
 pub fn main(args: &[String]) -> i32 {
     let (config, rest) = match args {
@@ -580,7 +560,7 @@ pub fn main(args: &[String]) -> i32 {
     let s = match Settings::load(config) {
         Ok(s) => s,
         Err(e) => {
-            warn(&format!("boot-assessment: {e}"));
+            warn(&format!(text!(boot_bad_config), e = e));
             return 1;
         }
     };

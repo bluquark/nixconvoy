@@ -404,8 +404,8 @@ worktree, so a branch with none here is refused, while `review`, which only
 reads, takes any `<branch>` (against its merge-base) and a `<submodule>`'s
 name too.
 
-`nixconvoy --help` and the docstring of `src/nixconvoy/cli.py` describe each
-step of a deploy in full.
+`nixconvoy --help` (the text is `HELP` in `src/nixconvoy/strings.py`) describes
+each step of a deploy in full.
 
 ## Child worktrees
 
@@ -565,6 +565,9 @@ commit.  From a checkout on a work branch:
 ## How it is built
 
 - `src/nixconvoy/`: the Python driver, which performs git, nix and ssh.
+  Every message it prints for people is a template in `strings.py` (a
+  protocol violation's, which only a bug raises, stays in code); the crate's
+  are in `switch-guard/src/strings.rs`.
 - `switch-guard/`: a Rust crate holding the decisions as Sans-I/O state
   machines, with stateright models and property tests: `nixconvoy-plan` (the
   rebase, the union, the drift verdicts, a subagent worktree's pruning

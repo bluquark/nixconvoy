@@ -17,7 +17,8 @@ from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import IO, NoReturn
 
-TOOL = "nixconvoy"
+from . import strings
+from .strings import TOOL
 
 
 def xdg_dir(var: str, default: str) -> Path:
@@ -95,9 +96,9 @@ class Perf:
                 f.write(dump_json(rec) + "\n")
         except (OSError, RuntimeError):  # RuntimeError: no resolvable HOME
             return
-        summary = " ".join(f"{k} {v}s" for k, v in phases.items()
+        summary = " ".join(strings.PROC_PERF_PHASE(phase=k, secs=v) for k, v in phases.items()
                            if k not in ("startup", "end"))
-        print(f"perf: total {rec['total']}s ({summary}) -> {path}")
+        print(strings.PROC_PERF(total=rec["total"], summary=summary, path=path))
 
 
 PERF = Perf()
@@ -115,10 +116,6 @@ class Fail(Exception):
     """A failure die() has said: the run's end, unless a loop going on
     past one item's failure catches it."""
 
-
-# The tail of every failure before any target is switched (the work
-# branch is committed only after the switches).
-NOTHING_DONE = "nothing was switched or committed"
 
 # Every run() child in flight, killed by die(): an exit must not wait for a
 # nix eval or precheck build another thread started (executors join their
@@ -193,10 +190,9 @@ def die(msg: str) -> NoReturn:
         EXITING = msg
     kill_children(msg)
     sys.stdout.flush()  # keep the order straight when both streams are piped
-    print(f"{TOOL}: {msg}", file=sys.stderr)
+    print(strings.PROC_DIE(msg=msg), file=sys.stderr)
     if ARMED:
-        print(f"{TOOL}: {', '.join(sorted(ARMED))} still armed: each finishes verifying "
-              f"and is then confirmed or rolled back", file=sys.stderr)
+        print(strings.PROC_STILL_ARMED(targets=", ".join(sorted(ARMED))), file=sys.stderr)
     raise Fail(msg)
 
 
@@ -269,7 +265,7 @@ def run(
     PERF.call(cmd, time.monotonic() - t0)
     if check and p.returncode != 0:
         detail = (p.stderr or "").strip() if capture else ""
-        die(f"`{' '.join(cmd)}` failed" + (f":\n{detail}" if detail else ""))
+        die(strings.PROC_CMD_FAILED(cmd=" ".join(cmd), detail=strings.PROC_DETAIL(output=detail) if detail else ""))
     return p
 
 
@@ -334,7 +330,7 @@ def squash_agenix(lines: Iterable[str]) -> Iterator[str]:
         elif not line.startswith("[agenix] ") or "WARNING" in line:
             yield line
         elif m := re.search(r"symlinking new secrets .*\(generation (\d+)\)", line):
-            yield f"[agenix] decrypted {n} secrets (generation {m.group(1)})"
+            yield strings.PROC_AGENIX_DECRYPTED(n=n, generation=m.group(1))
 
 
 def stream(cmd: list[str], *, held_as: str | None = None,

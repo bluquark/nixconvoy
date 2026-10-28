@@ -43,7 +43,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import NamedTuple
 
-from . import proc
+from . import proc, strings
 from .checkout import (
     MACHINE_ENV,
     PENDING_REFS,
@@ -61,7 +61,7 @@ from .checkout import (
 )
 from .config import MSG_FILE, cfg, main_ref, main_short
 from .guard import decide
-from .proc import NOTHING_DONE, Fail, die, git, is_ancestor, ok, out, run, solve_with_mergiraf
+from .proc import Fail, die, git, is_ancestor, ok, out, run, solve_with_mergiraf
 from .wire import Ok, Onto, RebaseParams, RepoNames
 
 # On a submodule's origin: every tip a branch left behind (a reset, a
@@ -167,7 +167,7 @@ def default_branch_of(repo: Path) -> str | None:
 
 
 def default_branch(repo: Path) -> str:
-    return default_branch_of(repo) or die(f"{repo}: origin has neither a HEAD, main nor master branch")
+    return default_branch_of(repo) or die(strings.SUBMODULE_NO_DEFAULT_BRANCH(repo=repo))
 
 
 def has_own(sub: Sub, default: str) -> bool:
@@ -253,7 +253,7 @@ def commit_time(sub: Sub, sha: str, url: str) -> int:
         p = run(["git", "show", "-s", "--format=%ct", f"{sha}^{{commit}}", "--"], cwd=str(repo), check=False)
         if p.returncode == 0 and p.stdout.strip().isdigit():
             return int(p.stdout.strip())
-    return die(f"submodule {sub.name}: {sha[:12]} is not in {repo}, so its pin file cannot name the commit's date")
+    return die(strings.SUBMODULE_PIN_DATE_MISSING(name=sub.name, sha=sha[:12], repo=repo))
 
 
 def heal_pin_files(top: Path, wb: str | None, dry: bool) -> list[str]:
@@ -270,11 +270,10 @@ def heal_pin_files(top: Path, wb: str | None, dry: bool) -> list[str]:
         if cur is None or pin_file_rev(sub, top) == cur:
             continue
         if wb is None or dry:
-            print(f"warning: {sub.pin_file} does not name {cur[:12]}, which the tree pins submodule {n} on: "
-                  f"a deploy from a checkout on a work branch rewrites it", file=sys.stderr)
+            print(strings.SUBMODULE_PIN_FILE_STALE(pin_file=sub.pin_file, rev=cur[:12], name=n), file=sys.stderr)
             continue
         set_pin(sub, cur, top)
-        told.append(f"submodule {n}: {sub.pin_file} rewritten for {cur[:12]}")
+        told.append(strings.SUBMODULE_PIN_FILE_REWRITTEN(name=n, pin_file=sub.pin_file, rev=cur[:12]))
     return told
 
 
@@ -336,7 +335,7 @@ def fetch_refs(name: str, repo: Path) -> bool:
     union refs, the gone ones pruned; whether it is fetched (else said)."""
     p = git("fetch", "--quiet", "--prune", "origin", *REFSPECS, cwd=str(repo), check=False)
     if p.returncode != 0:
-        print(f"note: submodule {name}: fetching its origin failed:\n{(p.stderr or '').strip()}", file=sys.stderr)
+        print(strings.SUBMODULE_FETCH_FAILED(name=name, stderr=(p.stderr or "").strip()), file=sys.stderr)
         return False
     FETCHED.add(repo)
     return True
@@ -383,8 +382,8 @@ def prune_past_refs(sub: Sub) -> None:
         return
     p = git("push", "--quiet", "origin", *(f":{r}" for r in stale), cwd=str(sub.repo), check=False)
     if p.returncode != 0:
-        print(f"warning: submodule {sub.name}: deleting its past refs on its origin failed:\n"
-              f"{(p.stderr or '').strip()}", file=sys.stderr)
+        print(strings.SUBMODULE_PAST_REFS_DELETE_FAILED(name=sub.name, stderr=(p.stderr or "").strip()),
+              file=sys.stderr)
         return
     for r in stale:
         git("update-ref", "-d", r, cwd=str(sub.repo), check=False)
@@ -420,7 +419,8 @@ def merge_commit(name: str, repo: Path, ours: str, theirs: str, subject: str) ->
                 elif solve_with_mergiraf(wt, f):
                     git("add", "--", f, cwd=wt, check=False)
                 else:
-                    print(f"note: submodule {name}: {ours[:12]} and {theirs[:12]} conflict in {f}", file=sys.stderr)
+                    print(strings.SUBMODULE_MERGE_CONFLICT(name=name, ours=ours[:12], theirs=theirs[:12], path=f),
+                          file=sys.stderr)
                     return None
             git("commit", "--quiet", "--no-edit", "--no-verify", cwd=wt, env=env)
         return out(["git", "rev-parse", "HEAD"], cwd=wt)
@@ -446,7 +446,7 @@ def store(name: str, url: str) -> Path:
         cache.parent.mkdir(parents=True, exist_ok=True)
         p = git("clone", "--quiet", "--bare", url, str(cache), check=False)
         if p.returncode != 0:
-            die(f"submodule {name}: cloning {url} to union its branches failed:\n{(p.stderr or '').strip()}")
+            die(strings.SUBMODULE_MIRROR_CLONE_FAILED(name=name, url=url, stderr=(p.stderr or "").strip()))
     return cache
 
 
@@ -462,21 +462,21 @@ def union_rev(sub: Sub, url: str, ours: str, theirs: str) -> str | None:
             return None
         for sha in (ours, theirs):
             if rev_in(repo, f"{sha}^{{commit}}") is None:
-                print(f"note: submodule {sub.name}: {sha[:12]} is not on its origin", file=sys.stderr)
+                print(strings.SUBMODULE_NOT_ON_ORIGIN(name=sub.name, sha=sha[:12]), file=sys.stderr)
                 return None
         if is_ancestor(theirs, ours, cwd=str(repo)):
             return ours
         if is_ancestor(ours, theirs, cwd=str(repo)):
             return theirs
-        sha = merge_commit(sub.name, repo, ours, theirs, f"union of {sub.name}")
+        sha = merge_commit(sub.name, repo, ours, theirs, strings.SUBMODULE_UNION_SUBJECT(name=sub.name))
         if sha is None:
             return None
         ref = f"{UNION_REFS}/{sub.name}/{sha}"
         p = git("push", "--quiet", "--force", "origin", f"{sha}:{ref}", cwd=str(repo), check=False)
         if p.returncode != 0:
-            die(f"submodule {sub.name}: pushing its union to {ref} failed:\n{(p.stderr or '').strip()}")
+            die(strings.SUBMODULE_UNION_PUSH_FAILED(name=sub.name, ref=ref, stderr=(p.stderr or "").strip()))
         git("update-ref", ref, sha, cwd=str(repo), check=False)
-    print(f"submodule {sub.name}: union of {ours[:12]} and {theirs[:12]} is {sha[:12]}, on {ref}")
+    print(strings.SUBMODULE_UNION_DONE(name=sub.name, ours=ours[:12], theirs=theirs[:12], sha=sha[:12], ref=ref))
     return sha
 
 
@@ -538,21 +538,20 @@ def solve_rebase(wt: Path, checkout: Path, upstream: str) -> str | None:
             continue
         done.add(sub.name)
         stages = gitlink_stages(wt, sub.path)
-        why = (f"{upstream} and {wb} both moved submodule {sub.name}'s pin (a landing there), which git "
-               f"cannot merge itself: nixconvoy rebases the submodule's branch onto the landed one instead, but ")
+        why = strings.SUBMODULE_REBASE_WHY(upstream=upstream, wb=wb, name=sub.name)
         if not stages:  # the pin file alone: rewritten from the gitlink
             cur = pin(sub, wt)
             if cur is None:
-                return f"{sub.pin_file} conflicts with no gitlink to rewrite it from: resolve the rebase by hand"
+                return strings.SUBMODULE_REBASE_PIN_FILE_ALONE(pin_file=sub.pin_file)
             set_pin(sub, cur, wt)
             continue
         if 3 not in stages:  # mine (stage 3) is the replayed commit's pin
-            return why + f"one side deleted the pin: resolve the rebase by hand (`git rebase {upstream}` there)"
+            return why + strings.SUBMODULE_REBASE_PIN_DELETED(upstream=upstream)
         pending = PENDING.get((sub.name, wb))
         if pending is None:
             pending, problem = rebase_sub(sub, wb, stages[3], wt, checkout)
             if pending is None:
-                return why + f"{problem}; then `nixconvoy pull`"
+                return why + strings.SUBMODULE_REBASE_THEN_PULL(problem=problem)
         set_pin(sub, counterpart(pending, stages[3], stages.get(2)), wt)
     return None
 
@@ -605,22 +604,21 @@ def rebase_sub(sub: Sub, wb: str, mine: str, wt: Path, checkout: Path) -> tuple[
     as recorded in PENDING - or None and why it cannot be, with what to do."""
     found = [s for s in present(checkout) if s.name == sub.name]
     if not found or branch_at(found[0].dir) != wb:
-        return None, (f"no worktree of it on {wb} is under {checkout} to rebase: "
-                      f"`nixconvoy open --submodule {sub.name}` there")
+        return None, strings.SUBMODULE_REBASE_NO_WORKTREE(wb=wb, checkout=checkout, name=sub.name)
     here = found[0]
     d = str(here.dir)
     if out(["git", "status", "--porcelain", "-uno"], cwd=d):
-        return None, f"its worktree ({here.dir}) has edits, which that rebase cannot keep: stash or commit them"
+        return None, strings.SUBMODULE_REBASE_EDITS(dir=here.dir)
     tip_pinned = tip_pin(wt, sub.path) or mine
     gone = reset_below_deployed(here, tip_pinned)
     if gone:  # a hand reset: pinning HEAD would drop them in silence
         return None, dropped_message(here, wb, tip_pinned, gone)
     behind = left_behind(here, tip_pinned)
     if behind:
-        print(f"note: submodule {sub.name}: pinning its worktree leaves {len(behind)} deployed commit(s) "
-              f"behind as such (rebased, amended or dropped):\n  " + "\n  ".join(behind), file=sys.stderr)
+        print(strings.SUBMODULE_REBASE_LEAVES_BEHIND(name=sub.name, n=len(behind), commits="\n  ".join(behind)),
+              file=sys.stderr)
     if not fetch_once(sub.name, here.repo):
-        return None, "its origin could not be fetched (above)"
+        return None, strings.SUBMODULE_REBASE_UNFETCHED
     was = rev_in(here.dir, "HEAD")
     default = default_branch(here.repo)
     upstream = f"refs/remotes/origin/{default}"
@@ -631,18 +629,17 @@ def rebase_sub(sub: Sub, wb: str, mine: str, wt: Path, checkout: Path) -> tuple[
     landing = (landing_of(base, upstream, d) if base else None) or onto
     rewritten: dict[str, str] = {}
     if not rebase_solving(here.dir, upstream, base, rewritten):
-        return None, (f"its {wb} does not rebase cleanly onto origin/{default}: "
-                      f"`git -C {here.dir} {rebase_hint(upstream, d)}`, resolve")
+        return None, strings.SUBMODULE_REBASE_NOT_CLEAN(wb=wb, default=default, dir=here.dir,
+                                                       hint=rebase_hint(upstream, d))
     head = rev_in(here.dir, "HEAD")
     assert head is not None
     if not rewritten and head != was and out(["git", "rev-list", "-n", "1", f"{upstream}..HEAD"], cwd=d):
         # Commits replayed and none reported: pinning by the fallbacks
         # alone would collapse the increments' pins.
         git("reset", "--quiet", "--hard", was, cwd=d)
-        return None, ("its rebase reported no rewritten commits (git's post-rewrite hook did not run): "
-                      f"rebase it by hand, `git -C {here.dir} {rebase_hint(upstream, d)}`")
+        return None, strings.SUBMODULE_REBASE_NO_REWRITES(dir=here.dir, hint=rebase_hint(upstream, d))
     pending = PENDING[sub.name, wb] = Pending(here, wb, was, head, rewritten, landed, landing, onto)
-    print(f"submodule {sub.name}: {wb} rebased onto origin/{default} ({head[:12]})")
+    print(strings.SUBMODULE_REBASED(name=sub.name, wb=wb, default=default, head=head[:12]))
     return pending, ""
 
 
@@ -650,7 +647,7 @@ def push_pending() -> None:
     """The rebase succeeded: the rebased submodule branches pushed."""
     for pending in PENDING.values():
         push_branch(pending.sub, pending.wb)
-        print(f"submodule {pending.sub.name}: pushed {pending.wb}")
+        print(strings.SUBMODULE_PUSHED(name=pending.sub.name, wb=pending.wb))
     PENDING.clear()
 
 
@@ -658,7 +655,7 @@ def undo_pending() -> None:
     """The rebase aborted: each rebased submodule put back where it was."""
     for pending in PENDING.values():
         git("reset", "--quiet", "--hard", pending.was, cwd=str(pending.sub.dir), check=False)
-        print(f"submodule {pending.sub.name}: {pending.wb} put back to {pending.was[:12]}", file=sys.stderr)
+        print(strings.SUBMODULE_PUT_BACK(name=pending.sub.name, wb=pending.wb, rev=pending.was[:12]), file=sys.stderr)
     PENDING.clear()
 
 
@@ -680,37 +677,34 @@ def create(name: str, wb: str) -> Path:
     default."""
     repo = configured_repo(name)
     if not (repo.is_dir() and ok(["git", "rev-parse", "--git-dir"], cwd=str(repo))):
-        die(f"submodule {name}: {repo} is not a git repository")
+        die(strings.SUBMODULE_NOT_A_REPO(name=name, repo=repo))
     top = Path.cwd()
     entry = entries(top).get(name)
     if entry is None:
-        die(f"{name} is no submodule of this repository: `git submodule add --name {name} <url> <path>` "
-            f"first, with flake.nix taking it as a relative path input")
+        die(strings.SUBMODULE_NOT_A_SUBMODULE(name=name))
     origin = run(["git", "remote", "get-url", "origin"], cwd=str(repo), check=False).stdout.strip()
     if not same_repo(origin, entry.url):
-        die(f"submodule {name}: {repo}'s origin is {origin}, not .gitmodules' {entry.url}, "
-            f"which the build fetches the pushed branch from")
+        die(strings.SUBMODULE_ORIGIN_MISMATCH(name=name, repo=repo, origin=origin, url=entry.url))
     d = top / entry.path
     if (d / ".git").exists():
         cur = branch_at(d)
         if cur != wb:
-            die(f"submodule {name} at {d} is on {cur or 'a detached HEAD'}, not {wb}: "
-                f"`git -C {d} switch {wb}`")
-        print(f"submodule {name}: {d} (on {wb})")
+            die(strings.SUBMODULE_AT_OFF_BRANCH(name=name, dir=d, cur=cur or strings.SUBMODULE_DETACHED, wb=wb))
+        print(strings.SUBMODULE_ALREADY_OPEN(name=name, dir=d, wb=wb))
         return d
     if d.exists() and any(d.iterdir()):
-        die(f"{d} is not empty and no worktree: move it away")
+        die(strings.SUBMODULE_DIR_NOT_EMPTY(dir=d))
     git("worktree", "prune", cwd=str(repo), check=False)
     p = git("fetch", "--quiet", "origin", cwd=str(repo), check=False)
     if p.returncode != 0:
-        die(f"submodule {name}: fetching {repo}'s origin failed:\n{(p.stderr or '').strip()}")
+        die(strings.SUBMODULE_CREATE_FETCH_FAILED(name=name, repo=repo, stderr=(p.stderr or "").strip()))
     default = default_branch(repo)
     d.parent.mkdir(parents=True, exist_ok=True)
     remote, local = rev_in(repo, f"refs/remotes/origin/{wb}"), rev_in(repo, f"refs/heads/{wb}")
     if remote is not None and local is not None and not is_ancestor(local, remote, cwd=str(repo)):
         if not is_ancestor(remote, local, cwd=str(repo)):
-            die(f"submodule {name}: the local branch {wb} ({local[:12]}) and origin's ({remote[:12]}) diverged: "
-                f"reconcile them in {repo} first")
+            die(strings.SUBMODULE_BRANCH_DIVERGED(name=name, wb=wb, local=local[:12], remote=remote[:12],
+                                                  repo=repo))
         remote = None  # the local branch is ahead (a push that failed): kept
     if remote is not None:
         git("branch", "--quiet", "-f", wb, remote, cwd=str(repo), check=False)
@@ -718,7 +712,7 @@ def create(name: str, wb: str) -> Path:
         where = f"origin/{wb}"
     elif local is not None:
         git("worktree", "add", "--quiet", str(d), wb, cwd=str(repo))
-        where = f"the local branch {wb}"
+        where = strings.SUBMODULE_FROM_LOCAL(wb=wb)
     else:
         git("worktree", "add", "--quiet", "-b", wb, str(d), f"refs/remotes/origin/{default}",
             cwd=str(repo))
@@ -726,16 +720,15 @@ def create(name: str, wb: str) -> Path:
     # `git status` there counts against the branch it will land on.
     git("branch", "--quiet", f"--set-upstream-to=origin/{default}", wb, cwd=str(d), check=False)
     mark(repo)
-    print(f"submodule {name}: {d} on {wb} (from {where})")
+    print(strings.SUBMODULE_OPENED(name=name, dir=d, wb=wb, where=where))
     return d
 
 
 def configured_repo(name: str) -> Path:
     repos = configured()
     if name not in repos:
-        die(f"{name} is not a configured submodule" + (
-            f" (they are: {', '.join(sorted(repos))})" if repos else
-            " (nixconvoy.toml: [submodules.<input>] repo = \"...\")"))
+        die(strings.SUBMODULE_NOT_CONFIGURED(name=name, hint=strings.SUBMODULE_CONFIGURED_ARE(
+            names=", ".join(sorted(repos))) if repos else strings.SUBMODULE_NONE_CONFIGURED()))
     return repos[name]
 
 
@@ -744,8 +737,8 @@ def present_one(top: Path, name: str) -> Sub:
     if not found:
         configured_repo(name)
         entry = entries(top).get(name)
-        die(f"no worktree of submodule {name} under this checkout"
-            + (f" ({top / entry.path})" if entry else " (nor a .gitmodules entry)"))
+        die(strings.SUBMODULE_NO_WORKTREE(name=name, where=strings.SUBMODULE_NO_WORKTREE_AT(
+            path=top / entry.path) if entry else strings.SUBMODULE_NO_GITMODULES_ENTRY))
     return found[0]
 
 
@@ -780,10 +773,8 @@ def reset_below_deployed(sub: Sub, pinned: str | None) -> list[str]:
 
 
 def dropped_message(sub: Sub, wb: str, pinned: str, gone: list[str]) -> str:
-    return (f"submodule {sub.name}'s worktree ({sub.dir}) was reset below the work the tree deploys on {wb}; "
-            f"{len(gone)} commit(s) would leave the pin and the targets:\n  " + "\n  ".join(gone)
-            + f"\nput them back (git -C {sub.dir} reset --keep {pinned[:12]}), or drop them deliberately: "
-            f"nixconvoy close {sub.name} --force")
+    return strings.SUBMODULE_DROPPED(name=sub.name, dir=sub.dir, wb=wb, n=len(gone), commits="\n  ".join(gone),
+                                     pinned=pinned[:12])
 
 
 def left_behind(sub: Sub, pinned: str | None) -> list[str]:
@@ -835,7 +826,7 @@ def catch_up(top: Path, wb: str) -> list[str]:
         try:
             problem = catch_up_one(sub, wb, top)
         except Fail:  # said: this submodule's alone
-            problem = f"submodule {sub.name}: failed (above)"
+            problem = strings.SUBMODULE_FAILED_ABOVE(name=sub.name)
         if problem is not None:
             problems.append(problem)
     return problems
@@ -859,28 +850,26 @@ def catch_up_one(sub: Sub, wb: str, top: Path) -> str | None:
     """catch_up for one submodule: the problem, or None."""
     cur = branch_at(sub.dir)
     if cur != wb:
-        return (f"submodule {sub.name} ({sub.dir}) is on {cur or 'a detached HEAD'}, not {wb}: "
-                f"`git -C {sub.dir} switch {wb}`")
+        return strings.SUBMODULE_OFF_BRANCH_SWITCH(name=sub.name, dir=sub.dir, cur=cur or strings.SUBMODULE_DETACHED, wb=wb)
     if not fetch_once(sub.name, sub.repo):
         if carries_one(sub, top):
-            return (f"submodule {sub.name}: its origin could not be fetched (above), so its branch "
-                    f"cannot be brought onto the default branch before it is pinned")
+            return strings.SUBMODULE_CATCH_UP_UNFETCHED(name=sub.name)
         return None
     default = default_branch(sub.repo)
     was = rev_in(sub.dir, "HEAD")
     own = has_own(sub, default)
     good, status = onto(sub.dir, default)
     if not good:
-        return f"submodule {sub.name}: {status}"
+        return strings.SUBMODULE_STATUS(name=sub.name, status=status)
     head = rev_in(sub.dir, "HEAD")
     if head is None or was is None or head == was:
         return None
-    print(f"submodule {sub.name}: {status}")
+    print(strings.SUBMODULE_STATUS(name=sub.name, status=status))
     if own and rev_in(sub.dir, f"refs/remotes/origin/{wb}") is not None:
         push_branch(sub, wb)
     if pin(sub, top) == was:
         set_pin(sub, head, top)
-        print(f"submodule {sub.name}: pinned on {head[:12]} ({wb})")
+        print(strings.SUBMODULE_PINNED_ON(name=sub.name, rev=head[:12], wb=wb))
     return None
 
 
@@ -901,7 +890,7 @@ def catch_up_repos() -> bool:
         try:
             problem = catch_up_repo(name, repo)
         except Fail:
-            problem = f"{repo} (submodule {name}): failed (above)"
+            problem = strings.SUBMODULE_REPO_FAILED_ABOVE(repo=repo, name=name)
         if problem is not None:
             print(problem, file=sys.stderr)
             good = False
@@ -918,11 +907,12 @@ def catch_up_repo(name: str, repo: Path) -> str | None:
         return None
     default = default_branch(repo)
     with repo_lock(repo):  # another checkout's sweep, reaching the same repository
+        was = rev_in(repo, "HEAD")
         good, status = onto(repo, default)
     if not good:
-        return f"{repo} (submodule {name}): {status}"
-    if status != "up to date":
-        print(f"{repo} (submodule {name}): {status}")
+        return strings.SUBMODULE_REPO_STATUS(repo=repo, name=name, status=status)
+    if rev_in(repo, "HEAD") != was:
+        print(strings.SUBMODULE_REPO_STATUS(repo=repo, name=name, status=status))
     return None
 
 
@@ -939,27 +929,24 @@ def sync(wb: str | None, msg: str | None, *, dry: bool = False) -> list[str]:
     if not found:
         return told
     if wb is None:
-        die("a submodule worktree in the main checkout, which has no work branch to carry it: "
-            "remove it, or work in a checkout on a work branch")
+        die(strings.SUBMODULE_IN_MAIN_CHECKOUT)
     for sub in found:
         cur = branch_at(sub.dir)
         if cur != wb:
-            die(f"submodule {sub.name} ({sub.dir}) is on {cur or 'a detached HEAD'}, not {wb}: "
-                f"`git -C {sub.dir} switch {wb}`")
+            die(strings.SUBMODULE_OFF_BRANCH_SWITCH(name=sub.name, dir=sub.dir, cur=cur or strings.SUBMODULE_DETACHED, wb=wb))
         refuse_dropped(sub, wb, top)
     if not dry:  # a dry activation rebases, pushes and pins nothing
         for problem in catch_up(top, wb):
-            die(f"{problem}; {NOTHING_DONE}")
+            die(strings.PROC_WITH_NOTHING_DONE(problem=problem))
     for sub in found:
         mark(sub.repo)
         if out(["git", "diff", "--name-only"], cwd=str(sub.dir)):
-            print(f"note: submodule {sub.name} has unstaged edits, which are not deployed", file=sys.stderr)
+            print(strings.SUBMODULE_UNSTAGED_NOT_DEPLOYED(name=sub.name), file=sys.stderr)
         if staged(sub.dir):
             if dry:
-                die(f"submodule {sub.name} has staged changes, which a dry activation cannot carry "
-                    f"(the build fetches the submodule from its origin): deploy, or unstage them")
+                die(strings.SUBMODULE_STAGED_DRY(name=sub.name))
             if not msg:
-                die(f'submodule {sub.name} has staged changes; describe this increment with -m "..."')
+                die(strings.SUBMODULE_STAGED_NO_MSG(name=sub.name))
             git("commit", "--quiet", "-m", msg, cwd=str(sub.dir))
         head = rev_in(sub.dir, "HEAD")
         assert head is not None
@@ -971,22 +958,22 @@ def sync(wb: str | None, msg: str | None, *, dry: bool = False) -> list[str]:
         # Behind the landed default branch, the pin would move the input
         # backwards for every target main's tree reaches.
         if not ok(["git", "merge-base", "--is-ancestor", f"refs/remotes/origin/{default}", head], cwd=str(sub.dir)):
-            die(f"submodule {sub.name}'s {wb} does not contain origin/{default}"
-                + (" (a dry activation brings no submodule along): deploy first" if dry
-                   else f": rebase it in {sub.dir}, then re-run"))
+            die(strings.SUBMODULE_BEHIND_DEFAULT(
+                name=sub.name, wb=wb, default=default,
+                fix=strings.SUBMODULE_BEHIND_DEFAULT_DRY if dry
+                else strings.SUBMODULE_BEHIND_DEFAULT_REBASE(dir=sub.dir)))
         if dry and (rev_in(sub.dir, f"refs/remotes/origin/{wb}") != head or pin(sub, top) != head):
-            die(f"submodule {sub.name} has commits not deployed yet, which a dry activation cannot carry: "
-                f"deploy first")
+            die(strings.SUBMODULE_UNDEPLOYED_DRY(name=sub.name))
         if rev_in(sub.dir, f"refs/remotes/origin/{wb}") != head:
             push_branch(sub, wb)
-            told.append(f"submodule {sub.name}: pushed {wb} ({head[:12]})")
+            told.append(strings.SUBMODULE_PUSHED_AT(name=sub.name, wb=wb, rev=head[:12]))
         behind = left_behind(sub, pin(sub, top))
         if behind:
-            print(f"note: submodule {sub.name}: pinning {head[:12]} leaves {len(behind)} deployed commit(s) "
-                  f"behind as such (rebased, amended or dropped):\n  " + "\n  ".join(behind), file=sys.stderr)
+            print(strings.SUBMODULE_PIN_LEAVES_BEHIND(name=sub.name, rev=head[:12], n=len(behind),
+                                                      commits="\n  ".join(behind)), file=sys.stderr)
         if pin(sub, top) != head:
             set_pin(sub, head, top)
-            told.append(f"submodule {sub.name}: pinned on {head[:12]} ({wb})")
+            told.append(strings.SUBMODULE_PINNED_ON(name=sub.name, rev=head[:12], wb=wb))
     return told
 
 
@@ -1033,8 +1020,9 @@ def check_pins(tree: str, landings: list[Landing], top: Path) -> None:
         end = line_end(landings, landing.sub.repo)
         want = pin_at(tree, landing.sub.path, top)
         if end is not None and want != end:
-            die(f"submodule {landing.sub.name}: the landed tree pins {(want or 'nothing')[:12]}, not the end of "
-                f"its landings {end[:12]}; nothing landed")
+            die(strings.SUBMODULE_LANDED_TREE_PIN(name=landing.sub.name,
+                                                  want=want[:12] if want else strings.SUBMODULE_PIN_NONE,
+                                                  end=end[:12]))
 
 
 def finish_all(landings: list[Landing]) -> None:
@@ -1044,9 +1032,8 @@ def finish_all(landings: list[Landing]) -> None:
         try:
             finish_one(landing)
         except Fail as e:
-            print(f"warning: submodule {landing.sub.name}: finishing its landing failed: {e}; main pins "
-                  f"{landing.landed[:12]}; bring its worktree and {landing.wb} onto that rev by hand "
-                  f"(in {landing.sub.dir})", file=sys.stderr)
+            print(strings.SUBMODULE_FINISH_FAILED(name=landing.sub.name, error=e, landed=landing.landed[:12],
+                                                  wb=landing.wb, dir=landing.sub.dir), file=sys.stderr)
 
 
 def abandon_all(landings: list[Landing]) -> None:
@@ -1076,17 +1063,16 @@ def prepare_one(sub: Sub, wb: str, fallback_msg: str, base: str | None = None) -
     top = Path.cwd()
     cur = branch_at(sub.dir)
     if cur != wb:
-        die(f"submodule {sub.name} ({sub.dir}) is on {cur or 'a detached HEAD'}, not {wb}")
+        die(strings.SUBMODULE_OFF_BRANCH(name=sub.name, dir=sub.dir, cur=cur or strings.SUBMODULE_DETACHED, wb=wb))
     if staged(sub.dir, less_msg=True):
-        die(f"submodule {sub.name} has staged but undeployed changes; deploy or unstage them first")
+        die(strings.SUBMODULE_LAND_STAGED(name=sub.name))
     # The rebase onto the default branch needs a clean tree.
     loose = [ln for ln in out(["git", "status", "--porcelain", "-uno"], cwd=str(sub.dir)).splitlines()
              if not ln.endswith(f" {MSG_FILE}")]
     if loose:
-        die(f"submodule {sub.name} has unstaged edits, which its rebase onto the default branch cannot keep: "
-            f"stage and deploy them, or put them aside ({len(loose)} path(s))")
+        die(strings.SUBMODULE_LAND_UNSTAGED(name=sub.name, n=len(loose)))
     if not fetch_refs(sub.name, sub.repo):
-        die(f"submodule {sub.name}: cannot land it unfetched")
+        die(strings.SUBMODULE_LAND_UNFETCHED(name=sub.name))
     refuse_dropped(sub, wb, top)
     default = default_branch(sub.repo)
     main = base or rev_in(sub.dir, f"refs/remotes/origin/{default}")
@@ -1110,18 +1096,17 @@ def prepare_one(sub: Sub, wb: str, fallback_msg: str, base: str | None = None) -
         settle = True
         deployed = pinned
         if deployed != head:
-            die(f"submodule {sub.name}'s HEAD ({head[:12]}) is not what the tree pins "
-                f"({(deployed or 'nothing')[:12]}): deploy it first")
-        merged = merge_commit(sub.name, sub.repo, main, head, f"landing of {wb}")
+            die(strings.SUBMODULE_LAND_NOT_DEPLOYED(
+                name=sub.name, head=head[:12], pinned=deployed[:12] if deployed else strings.SUBMODULE_PIN_NONE))
+        merged = merge_commit(sub.name, sub.repo, main, head, strings.SUBMODULE_LANDING_SUBJECT(wb=wb))
         if merged is None:
-            die(f"submodule {sub.name}'s {wb} conflicts with origin/{default}: rebase it there "
-                f"(in {sub.dir}), deploy, then re-run")
+            die(strings.SUBMODULE_LAND_CONFLICT(name=sub.name, wb=wb, default=default, dir=sub.dir))
         tree = tree_less_msg(merged, cwd=str(sub.dir))
         try:
             on_file = (sub.dir / MSG_FILE).read_text(encoding="utf-8")
         except OSError:
             on_file = ""
-        msg = landing_message(None, on_file, "", f"submodule {sub.name}") or fold_subject(fallback_msg)
+        msg = landing_message(None, on_file, "", strings.SUBMODULE_LABEL(name=sub.name)) or fold_subject(fallback_msg)
         if tree == out(["git", "rev-parse", f"{main}^{{tree}}"], cwd=str(sub.dir)):
             landed = main
         else:
@@ -1129,11 +1114,10 @@ def prepare_one(sub: Sub, wb: str, fallback_msg: str, base: str | None = None) -
             p = git("push", "--quiet", "origin", f"{landed}:{PAST_REFS}/{wb}/{landed}",
                     cwd=str(sub.dir), check=False)
             if p.returncode != 0:
-                die(f"pushing submodule {sub.name}'s landing commit to its origin failed:\n"
-                    f"{(p.stderr or '').strip()}")
+                die(strings.SUBMODULE_LAND_PUSH_FAILED(name=sub.name, stderr=(p.stderr or "").strip()))
     if pin(sub, top) != landed:
         set_pin(sub, landed, top)
-        git("commit", "--quiet", "-m", f"submodule {sub.name}: pinned on {default}")
+        git("commit", "--quiet", "-m", strings.SUBMODULE_PIN_COMMIT(name=sub.name, default=default))
     return Landing(sub, wb, default, landed, pending, settle)
 
 
@@ -1146,12 +1130,11 @@ def finish_one(landing: Landing) -> None:
     if pending is not None:
         p = git("push", "--quiet", "origin", f"{pending}:refs/heads/{default}", cwd=str(sub.dir), check=False)
         if p.returncode != 0:
-            print(f"warning: submodule {sub.name}: pushing {default} failed (moved since fetch?); main pins "
-                  f"{pending[:12]}, kept on its origin as {landing_ref(landing)} until a landing carries it: "
-                  f"in {sub.dir}, fetch and merge origin/{default}, deploy, then land again:\n"
-                  f"{(p.stderr or '').strip()}", file=sys.stderr)
+            print(strings.SUBMODULE_PUSH_DEFAULT_FAILED(name=sub.name, default=default, rev=pending[:12],
+                                                        ref=landing_ref(landing), dir=sub.dir,
+                                                        stderr=(p.stderr or "").strip()), file=sys.stderr)
         else:
-            print(f"submodule {sub.name}: landed on {default} ({pending[:12]})")
+            print(strings.SUBMODULE_LANDED(name=sub.name, default=default, rev=pending[:12]))
             git("push", "--quiet", "origin", f":{landing_ref(landing)}", cwd=str(sub.dir), check=False)
             git("update-ref", "-d", landing_ref(landing), cwd=str(sub.repo), check=False)
     if settle:
@@ -1175,8 +1158,7 @@ def push_branch(sub: Sub, wb: str) -> None:
     p = git("push", "--quiet", "--atomic", "origin", f"+{head}:refs/heads/{wb}", *past,
             f"--force-with-lease=refs/heads/{wb}:{old or ''}", cwd=str(sub.dir), check=False)
     if p.returncode != 0:
-        die(f"pushing submodule {sub.name}'s {wb} failed - it moved on its origin, but this worktree is "
-            f"its only writer.  Investigate:\n{(p.stderr or '').strip()}")
+        die(strings.SUBMODULE_PUSH_BRANCH_FAILED(name=sub.name, wb=wb, stderr=(p.stderr or "").strip()))
 
 
 def reset_one(sub: Sub, wb: str) -> None:
@@ -1184,7 +1166,7 @@ def reset_one(sub: Sub, wb: str) -> None:
     branch (untracked files survive), the branch pushed so."""
     cur = branch_at(sub.dir)
     if cur != wb:
-        die(f"submodule {sub.name} ({sub.dir}) is on {cur or 'a detached HEAD'}, not {wb}")
+        die(strings.SUBMODULE_OFF_BRANCH(name=sub.name, dir=sub.dir, cur=cur or strings.SUBMODULE_DETACHED, wb=wb))
     fetch_once(sub.name, sub.repo)
     default = default_branch(sub.repo)
     main = rev_in(sub.dir, f"refs/remotes/origin/{default}")
@@ -1194,8 +1176,8 @@ def reset_one(sub: Sub, wb: str) -> None:
     (sub.dir / MSG_FILE).unlink(missing_ok=True)
     if rev_in(sub.dir, f"refs/remotes/origin/{wb}") is not None:
         push_branch(sub, wb)
-    print(f"submodule {sub.name}: {wb} reset onto origin/{default}" + (
-        f" (was {prev[:12]}, see its reflog)" if prev != main else ""))
+    print(strings.SUBMODULE_RESET(name=sub.name, wb=wb, default=default,
+                                  was=strings.SUBMODULE_RESET_WAS(rev=prev[:12]) if prev != main else ""))
 
 
 def moved_pins(top: Path, wb: str, tip: str, parent: str) -> list[tuple[Sub, str]]:
@@ -1213,24 +1195,21 @@ def moved_pins(top: Path, wb: str, tip: str, parent: str) -> list[tuple[Sub, str
         if was == now:
             continue
         if was is None:
-            die(f"the increment added submodule {sub.name}, whose worktree and branch would stay behind: "
-                f"`nixconvoy close {sub.name} --force` first")
+            die(strings.SUBMODULE_UNDEPLOY_ADDED(name=sub.name))
         cur = branch_at(sub.dir)
         if cur != wb:
-            die(f"submodule {sub.name} ({sub.dir}) is on {cur or 'a detached HEAD'}, not {wb}")
+            die(strings.SUBMODULE_OFF_BRANCH(name=sub.name, dir=sub.dir, cur=cur or strings.SUBMODULE_DETACHED, wb=wb))
         if staged(sub.dir):
-            die(f"submodule {sub.name} has staged changes, which the deploy would carry; "
-                f"deploy or unstage them first")
+            die(strings.SUBMODULE_UNDEPLOY_STAGED(name=sub.name))
         fetch_once(sub.name, sub.repo)
         if rev_in(sub.dir, f"{was}^{{commit}}") is None:
-            die(f"submodule {sub.name}: the pin to put back, {was[:12]}, is not in {sub.repo}")
+            die(strings.SUBMODULE_UNDEPLOY_PIN_MISSING(name=sub.name, rev=was[:12], repo=sub.repo))
         default = f"refs/remotes/origin/{default_branch(sub.repo)}"
         if is_ancestor(was, default, cwd=str(sub.dir)):
             was = rev_in(sub.dir, default) or was
         edited = lost_edits(was, "HEAD", sub.dir)
         if edited:
-            die(f"submodule {sub.name}: the increments' files have unstaged edits, which the reset "
-                f"would lose; stash or discard them in {sub.dir} first: {', '.join(edited)}")
+            die(strings.SUBMODULE_UNDEPLOY_LOST_EDITS(name=sub.name, dir=sub.dir, files=", ".join(edited)))
         moved.append((sub, was))
     return moved
 
@@ -1243,12 +1222,11 @@ def undeploy_pins(moved: list[tuple[Sub, str]], wb: str) -> None:
         prev = rev_in(sub.dir, "HEAD") or ""
         p = git("reset", "--quiet", "--keep", was, cwd=str(sub.dir), check=False)
         if p.returncode != 0:
-            die(f"submodule {sub.name}: the reset onto {was[:12]} failed (the checkout is reset below "
-                f"the increment already): `git -C {sub.dir} reset --keep {was[:12]}`, then deploy:\n"
-                f"{(p.stderr or '').strip()}")
+            die(strings.SUBMODULE_UNDEPLOY_RESET_FAILED(name=sub.name, rev=was[:12], dir=sub.dir,
+                                                        stderr=(p.stderr or "").strip()))
         if rev_in(sub.dir, f"refs/remotes/origin/{wb}") is not None:
             push_branch(sub, wb)
-        print(f"submodule {sub.name}: {wb} reset onto {was[:12]} (was {prev[:12]}, see its reflog)")
+        print(strings.SUBMODULE_UNDEPLOY_RESET(name=sub.name, wb=wb, rev=was[:12], prev=prev[:12]))
 
 
 def remove_all(top: Path) -> None:
@@ -1261,14 +1239,14 @@ def remove_all(top: Path) -> None:
 def keeps(sub: Sub, top: Path) -> str | None:
     """Why `close <input>` keeps the worktree: what its removal would lose."""
     if out(["git", "status", "--porcelain"], cwd=str(sub.dir)):
-        return "it has uncommitted or untracked changes"
+        return strings.SUBMODULE_KEEP_CHANGES
     default = default_branch_of(sub.repo)
     if default is None:
-        return "its repository's origin has no default branch to judge it against"
+        return strings.SUBMODULE_KEEP_NO_DEFAULT
     if has_own(sub, default):
-        return f"it carries commits not on origin/{default}; land or undeploy this checkout"
+        return strings.SUBMODULE_KEEP_COMMITS(default=default)
     if off_default(sub, top):
-        return f"the tree still pins a rev not on origin/{default}; land or undeploy this checkout"
+        return strings.SUBMODULE_KEEP_PIN(default=default)
     return None
 
 
@@ -1282,7 +1260,7 @@ def remove_one(sub: Sub) -> None:
     sub.dir.mkdir(parents=True, exist_ok=True)
     git("worktree", "prune", cwd=str(sub.repo), check=False)
     if cur is not None and not listed(cur):
-        print(f"submodule {sub.name}: {cur} is no work branch of this machine's; kept")
+        print(strings.SUBMODULE_BRANCH_NOT_OURS(name=sub.name, branch=cur))
         cur = None
     if cur is not None:
         git("branch", "--quiet", "-D", cur, cwd=str(sub.repo), check=False)
@@ -1292,15 +1270,16 @@ def remove_one(sub: Sub) -> None:
             p = git("push", "--quiet", "--atomic", "origin", f"+{old}:{PAST_REFS}/{cur}/{old}", f":refs/heads/{cur}",
                     f"--force-with-lease=refs/heads/{cur}:{old}", cwd=str(sub.repo), check=False)
             if p.returncode != 0:
-                print(f"warning: deleting submodule {sub.name}'s {cur} on its origin failed:\n"
-                      f"{(p.stderr or '').strip()}", file=sys.stderr)
-    print(f"submodule {sub.name}: worktree removed" + (f" with {cur}" if cur else ""))
+                print(strings.SUBMODULE_BRANCH_DELETE_FAILED(name=sub.name, branch=cur,
+                                                             stderr=(p.stderr or "").strip()), file=sys.stderr)
+    print(strings.SUBMODULE_REMOVED(name=sub.name,
+                                    with_branch=strings.SUBMODULE_REMOVED_WITH(branch=cur) if cur else ""))
 
 
 def main_pin(sub: Sub, top: Path) -> str:
     """What origin/main pins the submodule on, or die."""
     return pin_at(main_ref(), sub.path, top) or \
-        die(f"{main_short()} pins no {sub.path} to restore {sub.name}'s pin from")
+        die(strings.SUBMODULE_MAIN_PINS_NONE(main=main_short(), path=sub.path, name=sub.name))
 
 
 def restore(sub: Sub, top: Path) -> bool:
@@ -1310,8 +1289,7 @@ def restore(sub: Sub, top: Path) -> bool:
     if pin(sub, top) == want:
         return False
     set_pin(sub, want, top)
-    print(f"submodule {sub.name}: pinned on {main_short()}'s {want[:12]}, staged (deploy to revert it "
-          f"on the targets)")
+    print(strings.SUBMODULE_RESTORED(name=sub.name, main=main_short(), rev=want[:12]))
     return True
 
 
@@ -1347,18 +1325,18 @@ def notes(d: Path) -> list[str]:
         n_unstaged = len(out(["git", "diff", "--name-only"], cwd=str(sub.dir)).splitlines())
         n_untracked = len(out(["git", "ls-files", "--others", "--exclude-standard"],
                               cwd=str(sub.dir)).splitlines())
-        parts = [f"submodule {sub.name}"]
+        parts = [strings.SUBMODULE_LABEL(name=sub.name)]
         if ahead != "0":
-            parts.append(f"+{ahead}")
+            parts.append(strings.SUBMODULE_NOTE_AHEAD(n=ahead))
         if n_staged:
-            parts.append(f"staged {n_staged}")
+            parts.append(strings.SUBMODULE_NOTE_STAGED(n=n_staged))
         if n_unstaged:
-            parts.append(f"unstaged {n_unstaged}")
+            parts.append(strings.SUBMODULE_NOTE_UNSTAGED(n=n_unstaged))
         if n_untracked:
-            parts.append(f"untracked {n_untracked}")
+            parts.append(strings.SUBMODULE_NOTE_UNTRACKED(n=n_untracked))
         cur = branch_at(sub.dir)
         if cur is None:
-            parts.append("detached!")
+            parts.append(strings.SUBMODULE_NOTE_DETACHED)
         found.append(" ".join(parts))
     return found
 
@@ -1373,6 +1351,5 @@ def repo_notes() -> list[str]:
         dirty = run(["git", "status", "--porcelain", "-uno"], cwd=str(repo), check=False).stdout
         if dirty.strip():
             n = len(dirty.strip().splitlines())
-            found.append(f"{repo} ({name}): {n} edited file{'s' if n > 1 else ''} - no deploy "
-                         f"picks these up; `nixconvoy open --submodule {name}` is where {name} is worked on")
+            found.append(strings.SUBMODULE_REPO_EDITED(repo=repo, name=name, n=n, s="s" if n > 1 else ""))
     return found

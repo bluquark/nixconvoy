@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import proc, targets
+from . import proc, strings, targets
 from .checkout import current_branch
 from .config import cfg, main_ref, remote_ref
 from .guard import drive
@@ -95,7 +95,7 @@ class SwitchedMeanwhile(Exception):
     for the deploy to probe again and redo its plan."""
 
     def __init__(self, target: str, running: str) -> None:
-        super().__init__(f"{target} was switched by another deploy while this one ran (now running {running})")
+        super().__init__(strings.SWITCH_MOVED_MEANWHILE(target=target, running=running))
         self.target = target
         self.running = running
 
@@ -123,7 +123,7 @@ def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> 
         f'[ "$cur" = "{expected}" ] || {{ echo "MOVED $cur"; exit 1; }}; '
         f"lin=$(cat {f} 2>/dev/null | sha256sum); "
         f'[ "${{lin%% *}}" = "{digest}" ] || '
-        '{ echo "MOVED $cur, its provenance rewritten by another deploy"; exit 1; }; '
+        f'{{ echo "MOVED $cur"{shlex.quote(strings.SWITCH_PROVENANCE_REWRITTEN)}; exit 1; }}; '
         "echo LOCKED; IFS= read -r rec || exit 0; claimed=; "
         'if [ -z "$rec" ]; then echo SKIPPED; '
         f"elif printf '%s\\n' \"$rec\" | {w} sh -c {shlex.quote(claim)}; then echo WROTE; claimed=1; "
@@ -192,12 +192,12 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
                     except OSError:
                         claimed = ""
                     if provenance and claimed != "WROTE":
-                        print(f"note: could not claim {target}'s provenance in {targets.PROVENANCE_FILE}; until "
-                              f"its next switch, other deploys treat its system as untracked",
+                        print(strings.SWITCH_UNCLAIMED(target=target, file=targets.PROVENANCE_FILE),
                               file=sys.stderr)
                     return Guard(Locked())
                 if line.startswith("MOVED"):
-                    raise SwitchedMeanwhile(target, line.removeprefix("MOVED").strip() or "nothing readable")
+                    raise SwitchedMeanwhile(target, line.removeprefix("MOVED").strip()
+                                            or strings.SWITCH_NOTHING_READABLE)
                 return Guard(Failed(line))
             case ProbeHelper():
                 # The kit (copied with the toplevel) rooted for it before
@@ -208,12 +208,13 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
                                            sudo=True), check=False, timeout=PROBE_TIMEOUT, merged=True)
                 if not kit:
                     if p.returncode != 0:
-                        print(f"warning: dropping {target}'s stale switch kit link failed (exit {p.returncode})",
+                        print(strings.SWITCH_STALE_KIT_DROP_FAILED(target=target, code=p.returncode),
                               file=sys.stderr)
                     return Code(1)
                 if p.returncode != 0:
-                    print(f"rooting the switch kit {kit} on {target} failed (exit {p.returncode})"
-                          + (f":\n{p.stdout.strip()}" if p.stdout else ""), file=sys.stderr)
+                    detail = strings.PROC_DETAIL(output=p.stdout.strip()) if p.stdout else ""
+                    print(strings.SWITCH_KIT_ROOT_FAILED(kit=kit, target=target, code=p.returncode, detail=detail),
+                          file=sys.stderr)
                     return Code(2)
                 return Code(0)
             case SetProfile():
@@ -248,7 +249,7 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
                 try:
                     p = run(targets.target_cmd(target, [helper, "check"], sudo=True), check=False, timeout=t)
                 except Fail as e:
-                    return Checked(1, f"check interrupted: {e}")
+                    return Checked(1, strings.SWITCH_CHECK_INTERRUPTED(error=e))
                 lines = (p.stderr or "").strip().splitlines()
                 return Checked(p.returncode, lines[-1] if lines else None)
             case Internet(timeout_ms):
@@ -276,7 +277,7 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
         params = SwitchParams(target, toplevel, expected, "local" if local else targets.ssh_address(target), quiet,
                               needs_internet, os.environ.get("NIXCONVOY_FAIL_VERIFY") == "1")
         drive(nixconvoy_switch, encode(params), perform, SwitchQuery, type(None),
-              "nixconvoy-switch", f" while switching {target}", effect)
+              "nixconvoy-switch", strings.SWITCH_DURING(target=target), effect)
     finally:
         proc.set_finishing(was_finishing)
         if guard is not None:

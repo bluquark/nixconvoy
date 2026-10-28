@@ -17,6 +17,7 @@
 //!
 //! Generic over the store path type `P` and file identity `F`, so the tests
 //! can use small integers.
+use crate::text;
 
 pub type Gen = u64;
 
@@ -337,11 +338,11 @@ pub fn install<E: Esp>(esp: &mut E, boots: &[Boot], ctx: &Ctx<E::P>, policy: &Po
     let mut dropped = Vec::new();
     for i in drops(&profile, boots, &stubs, ctx, &anchors) {
         let g = stubs[i].gen;
-        esp.say(&format!("boot-assessment: dropping never-proven generation {g} ({})", stub_files[i].1));
+        esp.say(&format!(text!(boot_dropping), g = g, stub = stub_files[i].1));
         if esp.delete_generation(g) {
             dropped.push(g);
         } else {
-            esp.warn(&format!("boot-assessment: could not drop generation {g}, leaving it"));
+            esp.warn(&format!(text!(boot_drop_failed), g = g));
         }
     }
     let profile = esp.profile();
@@ -378,10 +379,10 @@ pub fn install<E: Esp>(esp: &mut E, boots: &[Boot], ctx: &Ctx<E::P>, policy: &Po
             break;
         };
         let g = sel.remove(i);
-        esp.say(&format!("boot-assessment: generation {g} would not fit the ESP, leaving it out"));
+        esp.say(&format!(text!(boot_not_fit), g = g));
     }
     let list = |v: &[Gen]| v.iter().map(Gen::to_string).collect::<Vec<_>>().join(" ");
-    esp.say(&format!("boot-assessment: installing generations {} (anchors: {})", list(&sel.chosen), list(&anchors)));
+    esp.say(&format!(text!(boot_installing), chosen = list(&sel.chosen), anchors = list(&anchors)));
     let code = esp.install(&sel.chosen);
     // Measured before the stubs left out are collected, so only a failed
     // install proves it.

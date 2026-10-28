@@ -21,9 +21,10 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote
 
+from . import strings
 from .checkout import lock_pid_alive, pid_started
 from .config import CONFIG_FILE, Config, ConfigError, SwitchPolicy, cfg, main_ref, parse, root
-from .proc import NOTHING_DONE, cache_dir, die, dump_json, is_ancestor, load_json, out, run
+from .proc import cache_dir, die, dump_json, is_ancestor, load_json, out, run
 
 # A target entry lives while its .drv does: unrooted once no checkout's
 # last deploy used it (memo_prune), the store's collector decides.
@@ -123,18 +124,18 @@ def root_drv(path: Path, drv: str, kit: bool = False) -> bool:
                  "-E", f'import "{drv}"'], check=False, timeout=ROOT_TIMEOUT)
         rooted = p.returncode == 0 and Path(drv).exists()
     except FileNotFoundError:
-        die("nix-instantiate is not on PATH: a memoized .drv cannot be rooted")
+        die(strings.MEMO_NO_NIX_INSTANTIATE)
     finally:
         if not rooted:
             with contextlib.suppress(OSError):
                 if prior is None or link.readlink() != prior:
                     link.unlink()
     if p.returncode == -signal.SIGKILL:
-        die(f"rooting {drv} timed out after {ROOT_TIMEOUT} s: is the daemon stuck?")
+        die(strings.MEMO_ROOT_TIMEOUT(drv=drv, timeout=ROOT_TIMEOUT))
     if not Path(drv).exists():
         return False
     if p.returncode != 0:
-        die(f"rooting {drv} failed:\n{p.stderr.strip()}")
+        die(strings.MEMO_ROOT_FAILED(drv=drv, stderr=p.stderr.strip()))
     return True
 
 
@@ -151,7 +152,7 @@ def memo_lock(d: Path) -> Iterator[None]:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            print("waiting for another deploy's turn at the eval memo...", flush=True)
+            print(strings.MEMO_LOCK_WAIT, flush=True)
             fcntl.flock(f, fcntl.LOCK_EX)
         yield
 
@@ -298,8 +299,7 @@ def scan_sound(wt: str) -> bool:
     for m in re.finditer(r"specialArgs\s*=\s*(\{[^{}]*\}|[^;]*);", flake):
         if not (re.fullmatch(r"\{\s*inherit(\s+[\w\-]+)+\s*;\s*\}", m.group(1))
                 and not re.search(r"\b(self|inputs)\b", m.group(1))):
-            print("eval memo: flake.nix's specialArgs is not an inherit list; "
-                  "keying every target on the whole tree", file=sys.stderr)
+            print(strings.MEMO_SPECIAL_ARGS, file=sys.stderr)
             return False
     return True
 
@@ -450,13 +450,12 @@ def target_eval_reads(wt: str, union: str, target: str) -> tuple[frozenset[str],
     todo = [flake_nix, *([root] if root else [])]
     via: dict[str, str] = {}
     if root:
-        via[root] = f"nixconvoy.toml's targets.{target}" if c.target(target).dir else f"{target}'s directory"
+        via[root] = (strings.MEMO_VIA_CONFIG if c.target(target).dir else strings.MEMO_VIA_DIRECTORY)(target=target)
     named: set[str] = set()
     while todo:
         path = todo.pop()
         if path == ".":
-            print(f"eval memo: {target} keys on the whole repository: {via[path]} names its root "
-                  f"(a directory named by a path counts whole)", file=sys.stderr)
+            print(strings.MEMO_WHOLE_REPO(target=target, via=via[path]), file=sys.stderr)
             return None
         if path in seen or path not in objs:
             continue
@@ -476,8 +475,7 @@ def target_eval_reads(wt: str, union: str, target: str) -> tuple[frozenset[str],
                 todo.append(ref)
     for q in sorted(seen):
         if objs[q][0] == "tree" and (q == flake_dir or flake_dir.startswith(q + "/")):
-            print(f"eval memo: {target} keys on the whole {q}/ tree: {via[q]} names it "
-                  f"(a directory named by a path counts whole)", file=sys.stderr)
+            print(strings.MEMO_WHOLE_TREE(target=target, tree=q, via=via[q]), file=sys.stderr)
     # An input taken as a relative path is read from the tree: its
     # directory, or the gitlink of a submodule (a commit object in objs).
     seen.update(q for n, q in path_inputs(wt).items() if n in named and q in objs)
@@ -537,7 +535,7 @@ def union_config(wt: str) -> Config:
     try:
         return parse((Path(wt) / CONFIG_FILE).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, ConfigError) as e:
-        die(f"the union's {CONFIG_FILE} cannot be read: {e}; {NOTHING_DONE}")
+        die(strings.MEMO_UNION_CONFIG(error=e))
 
 
 def kit_inputs(pol: SwitchPolicy) -> tuple[object, ...]:
@@ -698,7 +696,7 @@ def kit_src() -> str:
     way a pure evaluation reads a store path."""
     src = Path(__file__).resolve().parent / "kit"
     if not (src / "nix" / "kit.nix").is_file():
-        die(f"{src} is missing: nixconvoy runs from its nix package (nix run .#nixconvoy)")
+        die(strings.MEMO_KIT_MISSING(src=src))
     return str(src.resolve())
 
 
@@ -706,7 +704,7 @@ def kit_src() -> str:
 def kit_nar_hash() -> str:
     p = run(["nix", "hash", "path", "--sri", kit_src()], check=False)
     if p.returncode != 0 or not p.stdout.strip():
-        die(f"hashing the switch kit's sources {kit_src()} failed:\n{p.stderr.strip()}")
+        die(strings.MEMO_KIT_HASH_FAILED(src=kit_src(), stderr=p.stderr.strip()))
     return p.stdout.strip()
 
 
@@ -752,7 +750,7 @@ def parallel_eval_known() -> bool:
     p = run(["nix", "eval", "--extra-experimental-features", "parallel-eval",
              "--expr", "builtins ? parallel"], check=False, timeout=10)
     if p.returncode != 0:
-        die(f"probing nix for parallel evaluation failed:\n{p.stderr.strip()}")
+        die(strings.MEMO_PARALLEL_PROBE_FAILED(stderr=p.stderr.strip()))
     return p.stdout.strip() == "true"
 
 
@@ -786,7 +784,7 @@ def eval_toplevels(wt: str, union: str, targets: list[str],
     if not stale:
         return tops
     if len(stale) < len(targets):
-        print(f"  (memoized: {', '.join(h for h in targets if h not in stale)})")
+        print(strings.MEMO_MEMOIZED(targets=", ".join(h for h in targets if h not in stale)))
     c = cfg()
     flake = f"{wt}/{c.flake_path}" if c.flake_path != "." else wt
     parallel = parallel_eval_known() if c.parallel_eval is None else c.parallel_eval
@@ -798,15 +796,15 @@ def eval_toplevels(wt: str, union: str, targets: list[str],
         p = run(["nix", "eval", "--json", *par, f"{flake}#nixosConfigurations",
                  "--apply", eval_expr(h, parallel, union_config(wt).switch_policy(h))], check=False)
         if p.returncode != 0:
-            return f"evaluating {h} failed:\n{p.stderr.strip()}"
+            return strings.MEMO_EVAL_FAILED(target=h, stderr=p.stderr.strip())
         ent = memo_entry(load_json(p.stdout))
         if ent is None:
-            return f"nix eval returned no toplevel for {h}:\n{p.stdout[:500]}"
+            return strings.MEMO_NO_TOPLEVEL(target=h, stdout=p.stdout[:500])
         memo_write(paths[h], ent)
         with memo_lock(d):
             if not root_entry(paths[h], ent):
                 paths[h].unlink(missing_ok=True)
-                return f"{h}'s .drv was collected as soon as it was evaluated; re-run"
+                return strings.MEMO_DRV_COLLECTED(target=h)
         return ent
 
     with ThreadPoolExecutor(len(stale)) as pool:
@@ -818,7 +816,7 @@ def eval_toplevels(wt: str, union: str, targets: list[str],
             done, _ = wait(pending, timeout=0.2 if waiting else None, return_when=FIRST_COMPLETED)
             pending -= done
             if check is not None and check.done() and check.result():
-                die(f"{check.result()}; {NOTHING_DONE}")
+                die(strings.MEMO_CHECK_FAILED(failure=check.result()))
     for h in stale:
         r = evals[h].result()
         if isinstance(r, str):
@@ -879,12 +877,11 @@ def prove_tree(log: Path, check: str, tree: str, ent: Top) -> None:
             if os.lseek(fd, 0, os.SEEK_END) and os.pread(fd, 1, os.lseek(fd, -1, os.SEEK_END)) != b"\n":
                 data = b"\n" + data
             if os.write(fd, data) != len(data):
-                raise OSError("short write")
+                raise OSError(strings.MEMO_SHORT_WRITE)
         finally:
             os.close(fd)
     except OSError as e:
-        print(f"eval memo: recording the precheck's pass in {log} failed ({e}); "
-              "the next deploy runs it again", file=sys.stderr)
+        print(strings.MEMO_PROOF_WRITE_FAILED(log=log, error=e), file=sys.stderr)
 
 
 def precheck_gate(wt: str, rev: str) -> str | None:
@@ -905,11 +902,11 @@ def precheck_gate(wt: str, rev: str) -> str | None:
     p = run(["nix", "eval", "--json", f"{flake}#checks.{c.targets_arch}.{c.precheck}",
              "--apply", "c: { out = c.outPath; drv = c.drvPath; }"], check=False)
     if p.returncode != 0:
-        return f"evaluating the precheck failed:\n{p.stderr.strip()}"
+        return strings.MEMO_PRECHECK_EVAL_FAILED(stderr=p.stderr.strip())
     ent = memo_entry(load_json(p.stdout))
     if ent is None:
-        return f"nix eval returned no derivation for the precheck:\n{p.stdout[:500]}"
-    err = build_drvs([ent.drv], f"precheck {c.precheck}", ("-L",), capture=True)
+        return strings.MEMO_PRECHECK_NO_DRV(stdout=p.stdout[:500])
+    err = build_drvs([ent.drv], strings.MEMO_PRECHECK_WHAT(check=c.precheck), ("-L",), capture=True)
     if err is None:
         prove_tree(log, c.precheck, tree, ent)
     return err

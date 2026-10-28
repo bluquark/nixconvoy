@@ -10,7 +10,7 @@ from concurrent.futures import Future
 from fnmatch import fnmatchcase
 from pathlib import Path
 
-from . import submodule
+from . import strings, submodule
 from .checkout import (
     MACHINE_ENV,
     GitQueries,
@@ -96,7 +96,8 @@ class UnionQueries(GitQueries):
             case Summary(sha):
                 return Text(summarize(sha))
             case Merge(name, sha):
-                p = git("merge", "--quiet", "--no-edit", "-m", f"union {name}", sha, cwd=wt, env=MACHINE_ENV, check=False)
+                p = git("merge", "--quiet", "--no-edit", "-m", strings.UNION_MERGE_SUBJECT(name=name), sha, cwd=wt,
+                        env=MACHINE_ENV, check=False)
                 files: list[str] = [] if p.returncode == 0 else out(
                     ["git", "diff", "--name-only", "--diff-filter=U"], cwd=wt).splitlines()
                 return Merged(p.returncode == 0, files, (p.stderr or "").strip())
@@ -122,7 +123,7 @@ class UnionQueries(GitQueries):
                 return Text(out(["git", "rev-parse", "HEAD^{tree}"], cwd=wt))
             case CommitUnion(tree):
                 p = run(["git", "commit-tree", tree, "-p", rev(main_ref()) or "HEAD",
-                         "-m", "deploy union of work branches"], env=MACHINE_ENV, check=False)
+                         "-m", strings.UNION_COMMIT_SUBJECT], env=MACHINE_ENV, check=False)
                 return Text(p.stdout.strip() if p.returncode == 0 else None)
             case Checkout(union):
                 return ran(git("reset", "--hard", "--quiet", union, cwd=wt, check=False))

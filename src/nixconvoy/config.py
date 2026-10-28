@@ -11,11 +11,10 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import proc
+from . import proc, strings
+from .strings import CONFIG_FILE, MSG_FILE  # noqa: F401 - other modules import MSG_FILE from here
 from .wire import RepoNames
 
-CONFIG_FILE = "nixconvoy.toml"
-MSG_FILE = "COMMIT_MSG.md"
 # Where Claude Code puts a subagent worktree, and the plugin's run.sh one
 # in a repository without nixconvoy.toml: the place `open --child` and
 # `hook` take there when run by hand.
@@ -187,14 +186,14 @@ def valid_branch(name: str, remote: str) -> bool:
 
 def _table(v: object, where: str) -> dict[str, object]:
     if not isinstance(v, dict):
-        raise ConfigError(f"{where} must be a table")
+        raise ConfigError(strings.CONFIG_NOT_A_TABLE(where=where))
     return v
 
 
 def _required(t: dict[str, object], k: str, where: str) -> object:
     if k not in t:
         key = k if where == CONFIG_FILE else f"{where}.{k}"
-        raise ConfigError(f"{CONFIG_FILE}: {key} is required (`nixconvoy init` writes a complete file)")
+        raise ConfigError(strings.CONFIG_REQUIRED(key=key))
     return t[k]
 
 
@@ -202,7 +201,7 @@ def _str(t: dict[str, object], k: str, where: str, default: str | None = "") -> 
     """A string key; default None makes it required."""
     v = _required(t, k, where) if default is None else t.get(k, default)
     if not isinstance(v, str):
-        raise ConfigError(f"{where}.{k} must be a string")
+        raise ConfigError(strings.CONFIG_NOT_A_STRING(where=where, key=k))
     return v
 
 
@@ -211,14 +210,14 @@ def _auto_bool(t: dict[str, object], k: str, where: str) -> bool | None:
     if v == "auto":
         return None
     if not isinstance(v, bool):
-        raise ConfigError(f'{where}.{k} must be true, false or "auto"')
+        raise ConfigError(strings.CONFIG_NOT_AUTO_BOOL(where=where, key=k))
     return v
 
 
 def _bool(t: dict[str, object], k: str, where: str, default: bool) -> bool:
     v = t.get(k, default)
     if not isinstance(v, bool):
-        raise ConfigError(f"{CONFIG_FILE}: {where}.{k} must be true or false")
+        raise ConfigError(strings.CONFIG_NOT_A_BOOL(where=where, key=k))
     return v
 
 
@@ -228,11 +227,11 @@ def _switch(t: dict[str, object], where: str, base: SwitchPolicy, per_target: bo
     keys = ("confirmed", "deadline", "internet_check", "checks", *(("last",) if per_target else ()))
     for k in t:
         if k not in keys:
-            raise ConfigError(f"{CONFIG_FILE}: unknown key {where}.{k}"
-                              + (" (last is a target's setting: [targets.<name>.switch])" if k == "last" else ""))
+            unknown = strings.CONFIG_UNKNOWN_KEY_LAST if k == "last" else strings.CONFIG_UNKNOWN_KEY
+            raise ConfigError(unknown(key=f"{where}.{k}"))
     d = t.get("deadline", base.deadline)
     if isinstance(d, bool) or not isinstance(d, int) or d <= 0:
-        raise ConfigError(f"{CONFIG_FILE}: {where}.deadline is a number of seconds, above 0")
+        raise ConfigError(strings.CONFIG_DEADLINE(where=where))
     return SwitchPolicy(confirmed=_bool(t, "confirmed", where, base.confirmed), deadline=d,
                         internet_check=_bool(t, "internet_check", where, base.internet_check),
                         checks=_str(t, "checks", where, base.checks),
@@ -242,7 +241,7 @@ def _switch(t: dict[str, object], where: str, base: SwitchPolicy, per_target: bo
 def _strs(t: dict[str, object], k: str, where: str) -> tuple[str, ...]:
     v = t.get(k, [])
     if not isinstance(v, list) or not all(isinstance(s, str) for s in v):
-        raise ConfigError(f"{where}.{k} must be a list of strings")
+        raise ConfigError(strings.CONFIG_NOT_STRINGS(where=where, key=k))
     return tuple(v)
 
 
@@ -260,7 +259,7 @@ def _template(t: dict[str, object], k: str, placeholder: str) -> str:
     try:
         v.format(**{placeholder: "x"})
     except (KeyError, IndexError, ValueError) as e:
-        raise ConfigError(f"{CONFIG_FILE}: {k} is a template over {{{placeholder}}} alone ({e!r})") from e
+        raise ConfigError(strings.CONFIG_NOT_A_TEMPLATE(key=k, placeholder=placeholder, error=e)) from e
     return v
 
 
@@ -268,16 +267,16 @@ def parse(text: str) -> Config:
     try:
         doc = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
-        raise ConfigError(f"{CONFIG_FILE}: {e}") from e
+        raise ConfigError(strings.CONFIG_TOML(error=e)) from e
     version = _required(doc, "config_version", CONFIG_FILE)
     if isinstance(version, bool) or version != 1:
-        raise ConfigError(f"{CONFIG_FILE}: config_version {version} is not supported (1 is)")
+        raise ConfigError(strings.CONFIG_VERSION(version=version))
     known = {"config_version", "flake_dir", "targets_dir", "targets_arch", "ssh_address_template", "branch_prefix",
              "work_branches", "child_worktrees", "remote", "main_branch",
              "eval", "build", "switch", "targets", "submodules"}
     for k in doc:
         if k not in known:
-            raise ConfigError(f"{CONFIG_FILE}: unknown key {k}")
+            raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=k))
     # The required keys in the file's order, so a hand-written file is
     # told of its first gap first.
     flake_dir = _str(doc, "flake_dir", CONFIG_FILE, None)
@@ -286,56 +285,51 @@ def parse(text: str) -> Config:
     ssh_template = _template(doc, "ssh_address_template", "target")
     branch_prefix = _template(doc, "branch_prefix", "machine")
     if "work_branches" not in doc:
-        raise ConfigError(f"{CONFIG_FILE}: work_branches is required: the prefixes of the work branches' "
-                          f"names, e.g. [\"{branch_prefix}\"]")
+        raise ConfigError(strings.CONFIG_WORK_BRANCHES_REQUIRED(branch_prefix=branch_prefix))
     pats = doc["work_branches"]
     if not isinstance(pats, list) or not all(isinstance(s, str) for s in pats) or not pats:
-        raise ConfigError(f"{CONFIG_FILE}: work_branches must be a non-empty list of strings")
+        raise ConfigError(strings.CONFIG_WORK_BRANCHES_LIST())
     # A trailing `*` is the glob this once was, read as the prefix before it.
     pats = [p.removesuffix("*") for p in pats]
     bad = [p for p in pats if not re.fullmatch(r"[\w./-]+", p)]
     if bad:
-        raise ConfigError(f"{CONFIG_FILE}: work_branches: a prefix may hold letters, digits, '.', '-', '_' "
-                          f"and '/' only: {', '.join(repr(p) for p in bad)}")
+        raise ConfigError(strings.CONFIG_WORK_BRANCHES_CHARS(bad=", ".join(repr(p) for p in bad)))
     children = _str(doc, "child_worktrees", CONFIG_FILE, None).strip("/")
     if not children or ".." in children.split("/"):
-        raise ConfigError(f"{CONFIG_FILE}: child_worktrees is a directory inside the checkout")
+        raise ConfigError(strings.CONFIG_CHILD_WORKTREES())
     remote = _str(doc, "remote", CONFIG_FILE, "origin")
     if not valid_remote(remote):
-        raise ConfigError(f"{CONFIG_FILE}: remote is a git remote's name (letters, digits, '.', '-', '_', "
-                          f"not starting with '-'), not {remote!r}")
+        raise ConfigError(strings.CONFIG_REMOTE(remote=remote))
     main_branch = _str(doc, "main_branch", CONFIG_FILE, "main")
     if not valid_branch(main_branch, remote):
-        raise ConfigError(f"{CONFIG_FILE}: main_branch is a branch's name (main, not {remote}/main or refs/...), "
-                          f"not {main_branch!r}")
+        raise ConfigError(strings.CONFIG_MAIN_BRANCH(remote=remote, main_branch=main_branch))
     ev = _table(_required(doc, "eval", CONFIG_FILE), "eval")
     for k in ev:
         if k not in ("parallel", "precheck"):
-            raise ConfigError(f"{CONFIG_FILE}: unknown key eval.{k}")
+            raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"eval.{k}"))
     build = _table(doc.get("build", {}), "build")
     for k in build:
         if k not in ("store", "builder", "skip_substituters"):
-            raise ConfigError(f"{CONFIG_FILE}: unknown key build.{k}")
+            raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"build.{k}"))
     # `builder` is the key's older name, still read.
     if "store" in build and "builder" in build:
-        raise ConfigError(f"{CONFIG_FILE}: build.store and build.builder are the same setting; keep build.store")
+        raise ConfigError(strings.CONFIG_STORE_AND_BUILDER())
     key = "builder" if "builder" in build else "store"
     raw_store = build.get(key, {})
     if isinstance(raw_store, str):
         store = {"*": raw_store}
     elif not isinstance(raw_store, dict):
-        raise ConfigError(f"{CONFIG_FILE}: build.{key} is a machine name, or a table of them keyed by "
-                          "the hostname nixconvoy runs on")
+        raise ConfigError(strings.CONFIG_STORE_TYPE(key=key))
     else:
         store = {}
         for k, v in raw_store.items():
             if not isinstance(v, str):
-                raise ConfigError(f"{CONFIG_FILE}: build.{key}.{k} must be a string")
+                raise ConfigError(strings.CONFIG_STORE_ENTRY(key=key, name=k))
             store[k] = v
     skip = []
     for s in _strs(build, "skip_substituters", "build"):
         if s.split() != [s]:
-            raise ConfigError(f"{CONFIG_FILE}: build.skip_substituters entry {s!r} is not a substituter URL")
+            raise ConfigError(strings.CONFIG_SKIP_SUBSTITUTER(entry=s))
         skip.append(_bare_url(s))
     switch = _switch(_table(doc.get("switch", {}), "switch"), "switch", SwitchPolicy(), per_target=False)
     targets: dict[str, TargetConfig] = {}
@@ -343,32 +337,31 @@ def parse(text: str) -> Config:
         t = _table(h, f"targets.{name}")
         for k in t:
             if k not in ("ssh_address", "tags", "dir", "switch"):
-                raise ConfigError(f"{CONFIG_FILE}: unknown key targets.{name}.{k}")
+                raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"targets.{name}.{k}"))
         own = (_switch(_table(t["switch"], f"targets.{name}.switch"), f"targets.{name}.switch", switch, per_target=True)
                if "switch" in t else None)
         d = _str(t, "dir", f"targets.{name}")
         if d.startswith("/") or ".." in d.split("/"):
-            raise ConfigError(f"{CONFIG_FILE}: targets.{name}.dir is a directory inside the repository, "
-                              f"relative to its root, not {d!r}")
+            raise ConfigError(strings.CONFIG_TARGET_DIR(name=name, dir=d))
         d = os.path.normpath(d) if d else ""
         if d == ".":
-            raise ConfigError(f"{CONFIG_FILE}: targets.{name}.dir names the repository root: leave it out instead")
+            raise ConfigError(strings.CONFIG_TARGET_DIR_ROOT(name=name))
         targets[name] = TargetConfig(ssh_address=_str(t, "ssh_address", f"targets.{name}"),
                                      tags=_strs(t, "tags", f"targets.{name}"), dir=d, switch=own)
     if not targets_dir and not targets:
-        raise ConfigError(f"{CONFIG_FILE}: targets_dir, or a [targets.<name>] table per target, is required")
+        raise ConfigError(strings.CONFIG_NO_TARGETS())
     submodules: dict[str, SubmoduleConfig] = {}
     for name, a in _table(doc.get("submodules", {}), "submodules").items():
         t = _table(a, f"submodules.{name}")
         for k in t:
             if k not in ("repo", "pin_file"):
-                raise ConfigError(f"{CONFIG_FILE}: unknown key submodules.{name}.{k}")
+                raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"submodules.{name}.{k}"))
         repo = _str(t, "repo", f"submodules.{name}")
         if not repo:
-            raise ConfigError(f"{CONFIG_FILE}: submodules.{name}.repo is required")
+            raise ConfigError(strings.CONFIG_SUBMODULE_REPO(name=name))
         pin_file = _str(t, "pin_file", f"submodules.{name}")
         if pin_file.startswith("/") or ".." in pin_file.split("/"):
-            raise ConfigError(f"{CONFIG_FILE}: submodules.{name}.pin_file must be a path inside the repository")
+            raise ConfigError(strings.CONFIG_SUBMODULE_PIN_FILE(name=name))
         submodules[name] = SubmoduleConfig(repo=repo, pin_file=pin_file)
     return Config(
         flake_dir=flake_dir,
@@ -394,7 +387,7 @@ def load(root: Path) -> Config:
     try:
         text = (root / CONFIG_FILE).read_text(encoding="utf-8")
     except FileNotFoundError:
-        raise ConfigError(f"no {CONFIG_FILE} at {root}: `nixconvoy init` writes one") from None
+        raise ConfigError(strings.CONFIG_MISSING(root=root)) from None
     return parse(text)
 
 

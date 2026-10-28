@@ -10,6 +10,7 @@
 //! none yet.  `Replay` re-runs the program from the start on every reply, so
 //! the program reads like the procedure it decides and holds no state of its
 //! own; it is pure, so each re-run retraces the same queries.
+use crate::text;
 use serde::{Deserialize, Serialize};
 
 pub mod drift;
@@ -19,7 +20,7 @@ pub mod union;
 pub mod wire;
 
 pub const MSG_FILE: &str = "COMMIT_MSG.md";
-pub const BRANCHES_KEY: &str = "nixconvoy.toml's work_branches";
+pub const BRANCHES_KEY: &str = text!(plan_branches_key);
 #[cfg(test)]
 pub const MAIN: &str = "refs/remotes/origin/main";
 
@@ -398,14 +399,14 @@ impl Script<'_> {
 
 pub fn failed(what: &str, detail: &str) -> String {
     if detail.trim().is_empty() {
-        format!("{what} failed")
+        format!(text!(plan_failed), what = what)
     } else {
-        format!("{what} failed:\n{}", detail.trim())
+        format!(text!(plan_failed_detail), what = what, detail = detail.trim())
     }
 }
 
 fn mismatch(q: &Query, r: &Reply) -> Halt {
-    Halt::Die(format!("nixconvoy-plan asked {q:?} and got {r:?}"))
+    Halt::Die(format!(text!(plan_mismatch), q = q, r = r))
 }
 
 /// A stderr without git's hint: lines.

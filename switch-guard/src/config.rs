@@ -1,5 +1,6 @@
 //! The `key = value` file a module renders, so per-target settings and tool
 //! paths reach the binary without a wrapper environment.
+use crate::text;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -16,19 +17,19 @@ impl Config {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let (k, v) = line.split_once('=').ok_or_else(|| format!("config line {}: no '='", n + 1))?;
+            let (k, v) = line.split_once('=').ok_or_else(|| format!(text!(config_no_equals), n = n + 1))?;
             map.insert(k.trim().to_string(), v.trim().to_string());
         }
         Ok(Config { map })
     }
 
     pub fn load(path: &Path) -> Result<Config, String> {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let text = std::fs::read_to_string(path).map_err(|e| format!(text!(config_cannot_read), path = path.display(), e = e))?;
         Config::parse(&text)
     }
 
     pub fn str(&self, key: &str) -> Result<&str, String> {
-        self.map.get(key).map(String::as_str).ok_or_else(|| format!("config lacks {key}"))
+        self.map.get(key).map(String::as_str).ok_or_else(|| format!(text!(config_missing), key = key))
     }
 
     pub fn opt(&self, key: &str) -> Option<&str> {
@@ -36,11 +37,14 @@ impl Config {
     }
 
     pub fn num<T: std::str::FromStr>(&self, key: &str) -> Result<T, String> {
-        self.str(key)?.parse().map_err(|_| format!("config {key} is not a number"))
+        self.str(key)?.parse().map_err(|_| format!(text!(config_not_a_number), key = key))
     }
 
     pub fn nums<T: std::str::FromStr>(&self, key: &str) -> Result<Vec<T>, String> {
-        self.str(key)?.split_whitespace().map(|w| w.parse().map_err(|_| format!("config {key}: {w} is not a number"))).collect()
+        self.str(key)?
+            .split_whitespace()
+            .map(|w| w.parse().map_err(|_| format!(text!(config_word_not_a_number), key = key, w = w)))
+            .collect()
     }
 }
 

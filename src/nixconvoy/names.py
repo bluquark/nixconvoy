@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import submodule
+from . import strings, submodule
 from .checkout import branch_at, git_common, sibling_checkouts, sub_parent
 from .proc import die, run
 from .submodule import Sub
@@ -48,7 +48,7 @@ def resolve(name: str, here: Path, *, submodules: bool = True) -> Path | Sub | s
 
 def unique(name: str, hits: list[Path]) -> Path | None:
     if len(hits) > 1:
-        die(f"{name} is ambiguous among the subagent worktrees {', '.join(label(d) for d in hits)}")
+        die(strings.NAMES_AMBIGUOUS(name=name, worktrees=", ".join(label(d) for d in hits)))
     return hits[0] if hits else None
 
 
@@ -56,17 +56,16 @@ def worktree(name: str, here: Path, verb: str, *, subagent: bool = True) -> Path
     """The worktree `name` names, for `verb` to act in; `subagent`: a
     subagent worktree alone.  Anything else dies saying what `name` is."""
     if name in gitmodule_names(toplevel(here)):
-        die(f"{name} is a submodule of this checkout: {verb} acts on it with the checkout "
-            f"(`close {name} --force` discards it)")
+        die(strings.NAMES_IS_SUBMODULE(name=name, verb=verb))
     got = resolve(name, here, submodules=False)
     if isinstance(got, str):
-        die(f"no worktree on this machine is on branch {name}: {verb} acts in a checkout of it")
+        die(strings.NAMES_NO_WORKTREE_ON_BRANCH(name=name, verb=verb))
     if got is None or isinstance(got, Sub):
         subs = [d for d in sibling_checkouts(here) if sub_parent(d) is not None]
-        die(f"no subagent worktree or branch named {name}"
-            + (f"; the subagent worktrees here: {', '.join(label(d) for d in subs)}" if subs else ""))
+        listing = strings.NAMES_NOT_FOUND_LISTING(worktrees=", ".join(label(d) for d in subs)) if subs else ""
+        die(strings.NAMES_NOT_FOUND(name=name, listing=listing))
     if subagent and sub_parent(got) is None:
-        die(f"{name} is the checkout {got}, not a subagent worktree")
+        die(strings.NAMES_NOT_SUBAGENT(name=name, path=got))
     return got
 
 

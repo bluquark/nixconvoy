@@ -54,6 +54,7 @@
 //! other branch, so nothing is held under it: the target gets this
 //! checkout's view alone, the hold standing.
 use super::{listed, Halt, Names, Query, Run, Script, BRANCHES_KEY};
+use crate::text;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -226,9 +227,9 @@ pub fn classify(lin: Option<&Provenance>, running: &str, cx: &Context) -> (Kind,
     };
     let when = clock(lin.at, cx.tz_offset);
     if (&lin.machine, &lin.checkout) == (&cx.me.0, &cx.me.1) {
-        return (Kind::ThisBranch, format!("over this checkout's deploy of {when}"));
+        return (Kind::ThisBranch, format!(text!(drift_this_branch), when = when));
     }
-    let who = format!("{}:{} (pid {}) at {when}", lin.machine, lin.checkout, lin.pid);
+    let who = format!(text!(drift_who), machine = lin.machine, checkout = lin.checkout, pid = lin.pid, when = when);
     let unknown: Vec<&str> = lin
         .branches
         .iter()
@@ -236,34 +237,22 @@ pub fn classify(lin: Option<&Provenance>, running: &str, cx: &Context) -> (Kind,
         .map(String::as_str)
         .collect();
     if !unknown.is_empty() {
-        return (
-            Kind::Unlisted,
-            format!(
-                "runs work of {} deployed by {who}, which {BRANCHES_KEY} here does not list, so no union here contains it",
-                unknown.join(", ")
-            ),
-        );
+        return (Kind::Unlisted, format!(text!(drift_unlisted), branches = unknown.join(", "), who = who, BRANCHES_KEY = BRANCHES_KEY));
     }
     let Some((branch, base)) = &lin.pending else {
-        return (Kind::CatchUp, format!("runs pushed work deployed by {who}"));
+        return (Kind::CatchUp, format!(text!(drift_catch_up), who = who));
     };
     if cx.tips.get(branch) != base.as_ref() {
-        return (Kind::CatchUp, format!("runs {branch}'s increment deployed by {who}, pushed since"));
+        return (Kind::CatchUp, format!(text!(drift_pushed_since), branch = branch, who = who));
     }
-    let at: String = base.as_deref().unwrap_or("nothing").chars().take(12).collect();
-    let mut why = format!(
-        "runs an increment of {branch} deployed by {who} whose push has not landed ({}/{branch} is still at {at})",
-        cx.names.remote
-    );
+    let at: String = base.as_deref().unwrap_or(text!(drift_no_base)).chars().take(12).collect();
+    let mut why = format!(text!(drift_in_flight), branch = branch, who = who, remote = cx.names.remote, at = at);
     if let Some(key) = lin.announce_key() {
         if !cx.in_flight.contains_key(key) {
-            return (
-                Kind::Abandoned,
-                format!("{why}; its deploy is over, the announcement cleared without the push, so taken as abandoned"),
-            );
+            return (Kind::Abandoned, format!(text!(drift_abandoned), why = why));
         }
         if cx.dead.contains(key) {
-            why = format!("{why}; that deploy looks dead, its announcement no longer renewed");
+            why = format!(text!(drift_looks_dead), why = why);
         }
     }
     (Kind::InFlight, why)
@@ -278,10 +267,10 @@ pub fn demote(kind: Kind, why: String, take_over: bool, reached: bool) -> (Kind,
         return (kind, why);
     }
     if take_over {
-        return (Kind::Overridden, format!("{why}; taken over by {EVICT_FLAG}"));
+        return (Kind::Overridden, format!(text!(drift_taken_over), why = why, EVICT_FLAG = EVICT_FLAG));
     }
     if !reached {
-        return (Kind::LeftAlone, format!("{why}; this checkout's work does not reach it"));
+        return (Kind::LeftAlone, format!(text!(drift_not_reached), why = why));
     }
     (kind, why)
 }
@@ -290,12 +279,12 @@ pub fn demote(kind: Kind, why: String, take_over: bool, reached: bool) -> (Kind,
 /// refused when `reached` by a work branch's own work, left alone
 /// otherwise (a main checkout's own work being main's advance).
 pub fn held(by: &[String], reached: bool, work_branch: bool) -> (Kind, String) {
-    let why = format!("held back by {}: the union carries its work, deployed from that checkout to other targets alone", by.join(", "));
+    let why = format!(text!(drift_held), by = by.join(", "));
     if !reached {
-        return (Kind::LeftAlone, format!("{why}; this checkout's work does not reach it"));
+        return (Kind::LeftAlone, format!(text!(drift_not_reached), why = why));
     }
     if !work_branch {
-        return (Kind::LeftAlone, format!("{why}; left behind on main's advance"));
+        return (Kind::LeftAlone, format!(text!(drift_left_behind), why = why));
     }
     (Kind::Held, why)
 }
@@ -357,45 +346,40 @@ pub fn refusal(refused: &[(String, Kind, Option<String>)], remote: &str) -> Stri
     if targets.is_empty() {
         let one = held.len() == 1;
         return format!(
-            "nothing switched or committed: {} {} held back by another branch (see above): the union carries work that checkout deployed to other targets alone, and this checkout's work reaches {} too.  Deploy it there (nixconvoy deploy {} from that checkout) or land it with --not-yet-deployed; or deploy with {EVICT_FLAG} {} to switch {} to this checkout's view alone, without the held work (and without every other branch's), the hold standing.",
-            held.join(", "),
-            if one { "is" } else { "are" },
-            if one { "it" } else { "them" },
-            held.join(" "),
-            held.join(" "),
-            if one { "it" } else { "them" }
+            text!(drift_refused_held),
+            held = held.join(", "),
+            are = if one { "is" } else { "are" },
+            them = if one { "it" } else { "them" },
+            args = held.join(" "),
+            EVICT_FLAG = EVICT_FLAG
         );
     }
     let mut fixes = Vec::new();
     if refused.iter().any(|(_, k, d)| *k == Kind::InFlight && d.is_none()) {
-        fixes.push("re-run once that deploy ends, or push its branch from its checkout".to_string());
+        fixes.push(text!(drift_fix_in_flight).to_string());
     }
     let dead: BTreeSet<&str> = refused.iter().filter_map(|(_, _, d)| d.as_deref()).collect();
     for key in dead {
         let branch = key.split('@').next().unwrap_or(key);
-        fixes.push(format!(
-            "the deploy of {branch} looks dead (its announcement is no longer renewed): clear it to have the next deploy revert its increment - git push {remote} :{PENDING_REFS}/{key} - or push {branch} from its checkout to keep it"
-        ));
+        fixes.push(format!(text!(drift_fix_dead), branch = branch, remote = remote, PENDING_REFS = PENDING_REFS, key = key));
     }
     if refused.iter().any(|(_, k, _)| *k == Kind::Unlisted) {
-        fixes.push(format!("list its branch in {BRANCHES_KEY} (`nixconvoy pull` once that line is on main)"));
+        fixes.push(format!(text!(drift_fix_unlisted), BRANCHES_KEY = BRANCHES_KEY));
     }
     if !held.is_empty() {
-        fixes.push(format!(
-            "{} held back by another branch: deploy it there (nixconvoy deploy {} from that checkout) or land it with --not-yet-deployed",
-            held.join(", "),
-            held.join(" ")
-        ));
+        fixes.push(format!(text!(drift_fix_held), held = held.join(", "), args = held.join(" ")));
     }
-    let fix = fixes.join("; or ");
+    let fix = fixes.join(text!(drift_fix_joiner));
     let mut c = fix.chars();
     let fix: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
     format!(
-        "nothing switched or committed: {} {} another checkout's work this union lacks, and this checkout's work reaches {} too (see above).  {fix}; or deploy with {EVICT_FLAG} {} to revert it deliberately - along with every other branch's work there, which {EVICT_FLAG} leaves out.",
-        targets.join(", "),
-        if targets.len() == 1 { "runs" } else { "run" },
-        if targets.len() == 1 { "it" } else { "them" },
-        targets.first().copied().unwrap_or("")
+        text!(drift_refused),
+        targets = targets.join(", "),
+        run = if targets.len() == 1 { "runs" } else { "run" },
+        them = if targets.len() == 1 { "it" } else { "them" },
+        fix = fix,
+        EVICT_FLAG = EVICT_FLAG,
+        first = targets.first().copied().unwrap_or("")
     )
 }
 
@@ -432,7 +416,7 @@ fn reverted(s: &mut Script, lin: &Provenance, p: &Params, fates: &mut BTreeMap<(
         }
         let short: String = tip.chars().take(12).collect();
         if fate(s, b, tip, lin, p, fates)? == "abandoned" {
-            notes.push(format!("{b}'s abandoned increment {short}"));
+            notes.push(format!(text!(drift_abandoned_increment), branch = b, short = short));
         }
     }
     Ok(notes)
@@ -443,7 +427,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     for h in switch_order(&p.targets, &p.router) {
         let Some(Some(running)) = p.running.get(&h) else { continue };
         let Some(built) = p.built.get(&h) else {
-            return Err(Halt::Die(format!("nixconvoy-plan was given no evaluated toplevel for {h}")));
+            return Err(Halt::Die(format!(text!(drift_no_toplevel), target = h)));
         };
         if built != running {
             affected.push(h);
@@ -470,8 +454,8 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
                 if !p.cx.tips.contains_key(b) {
                     if let Some(tip) = lin.tips.get(b) {
                         if fate(s, b, tip, lin, p, &mut fates)? != "kept" {
-                            let who = format!("{}:{} (pid {})", lin.machine, lin.checkout, lin.pid);
-                            (kind, why) = (Kind::CatchUp, format!("runs {b}'s increment deployed by {who}, the branch gone since"));
+                            let who = format!(text!(drift_who_untimed), machine = lin.machine, checkout = lin.checkout, pid = lin.pid);
+                            (kind, why) = (Kind::CatchUp, format!(text!(drift_branch_gone), branch = b, who = who));
                         }
                     }
                 }
@@ -498,24 +482,24 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         if let (Kind::ThisBranch | Kind::CatchUp, Some(lin)) = (kind, lin.as_ref()) {
             let notes = reverted(s, lin, p, &mut fates)?;
             if !notes.is_empty() {
-                why = format!("{why}; reverting {}", notes.join(", "));
+                why = format!(text!(drift_reverting), why = why, notes = notes.join(", "));
             }
         }
         drift.insert(h.clone(), (kind, why));
     }
     for h in switch_order(&p.candidates, &p.router) {
         s.print(match drift.get(&h) {
-            Some((k, why)) if k.refused() => format!("  {h}: refused: {why}"),
-            None => format!("  {h}: up to date"),
-            Some((Kind::Abandoned | Kind::Overridden, why)) => format!("  {h}: will switch, reverting it: {why}"),
-            Some((Kind::LeftAlone, why)) => format!("  {h}: left alone: {why}"),
-            Some((k, why)) if !why.is_empty() => format!("  {h}: will switch ({}: {why})", k.name()),
-            Some(_) => format!("  {h}: will switch"),
+            Some((k, why)) if k.refused() => format!(text!(drift_line_refused), target = h, why = why),
+            None => format!(text!(drift_line_up_to_date), target = h),
+            Some((Kind::Abandoned | Kind::Overridden, why)) => format!(text!(drift_line_reverting), target = h, why = why),
+            Some((Kind::LeftAlone, why)) => format!(text!(drift_line_left_alone), target = h, why = why),
+            Some((k, why)) if !why.is_empty() => format!(text!(drift_line_switch_kind), target = h, kind = k.name(), why = why),
+            Some(_) => format!(text!(drift_line_switch), target = h),
         });
     }
     for h in &affected {
         if !drift.contains_key(h) {
-            s.print(format!("  {h}: differs but excluded by the target filter"));
+            s.print(format!(text!(drift_line_excluded), target = h));
         }
     }
     if !refused.is_empty() {

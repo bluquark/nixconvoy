@@ -13,9 +13,9 @@ import urllib.request
 from pathlib import Path
 from typing import NamedTuple
 
-from . import proc
+from . import proc, strings
 from .config import _bare_url, cfg, store_host
-from .proc import NOTHING_DONE, die, load_json, run
+from .proc import die, load_json, run
 
 # Seconds one probe of a target may take, so a stalled ssh session holds
 # neither a deploy's start nor verification past the deadline.
@@ -79,9 +79,9 @@ def flake_target_names() -> list[str]:
     try:
         names = sorted(e.name for e in Path(d).iterdir() if e.is_dir())
     except OSError as error:
-        die(f"cannot read the target inventory under {d}/: {error}")
+        die(strings.TARGETS_INVENTORY_UNREADABLE(dir=d, error=error))
     if not names:
-        die(f"no targets found under {d}/")
+        die(strings.TARGETS_NONE_FOUND(dir=d))
     return names
 
 
@@ -93,17 +93,17 @@ def expand_targets(names: list[str], all_targets: list[str]) -> list[str]:
         if n.startswith("@"):
             tagged = cfg().tagged(n[1:])
             if not tagged:
-                die(f"no target carries the tag {n[1:]} (nixconvoy.toml: targets.<name>.tags)")
+                die(strings.TARGETS_NO_TAG(tag=n[1:]))
             phantom = [h for h in tagged if h not in all_targets]
             if phantom:
-                die(f"nixconvoy.toml tags {', '.join(phantom)} as {n[1:]}, but the inventory "
-                    f"has no such target (it has: {', '.join(all_targets)})")
+                die(strings.TARGETS_PHANTOM_TAG(phantom=", ".join(phantom), tag=n[1:],
+                                                inventory=", ".join(all_targets)))
             found.extend(tagged)
         else:
             found.append(n)
     unknown = [h for h in found if h not in all_targets]
     if unknown:
-        die(f"unknown target(s) {', '.join(unknown)}; the inventory has: {', '.join(all_targets)}")
+        die(strings.TARGETS_UNKNOWN(unknown=", ".join(unknown), inventory=", ".join(all_targets)))
     return list(dict.fromkeys(found))
 
 
@@ -163,7 +163,7 @@ def refresh_kit(target: str, toplevel: str, kit: str) -> str | None:
     """A target already running `toplevel` whose rooted kit is not `kit`
     (its policy or the kit sources moved): the kit copied and rooted in
     place of the old, no switch.  The failure text, or None."""
-    print(f"refreshing the switch kit on {target}...")
+    print(strings.TARGETS_REFRESHING_KIT(target=target))
     if kit:
         err = copy_closure(target, [kit], quiet=True, fatal=False)
         if err:
@@ -171,8 +171,9 @@ def refresh_kit(target: str, toplevel: str, kit: str) -> str | None:
     p = run(target_cmd(target, ["sh", "-c", kit_root_script(toplevel, kit)], sudo=True),
             check=False, timeout=PROBE_TIMEOUT, merged=True)
     if p.returncode != 0:
-        return (f"rooting the switch kit on {target} failed (exit {p.returncode})"
-                + (f":\n{p.stdout.strip()}" if p.stdout else ""))
+        return strings.TARGETS_KIT_ROOT_FAILED(
+            target=target, code=p.returncode,
+            detail=strings.PROC_DETAIL(output=p.stdout.strip()) if p.stdout else "")
     return None
 
 
@@ -288,9 +289,9 @@ def store_substituters(via: tuple[str, ...], prefix: tuple[str, ...]) -> tuple[b
     cmd = [*via, *prefix, "nix", *(ROOT_NIX[2:] if prefix else ()), "config", "show", "substituters"]
     p = run(cmd, check=False, timeout=BUILDER_TIMEOUT)
     if p.timed_out:
-        return False, f"`nix config show substituters` timed out after {BUILDER_TIMEOUT} s"
+        return False, strings.TARGETS_SUBSTITUTERS_TIMEOUT(secs=BUILDER_TIMEOUT)
     if p.returncode != 0:
-        return False, f"reading the substituters failed:\n{p.stderr.strip()}"
+        return False, strings.TARGETS_SUBSTITUTERS_FAILED(error=p.stderr.strip())
     return True, p.stdout
 
 
@@ -305,19 +306,19 @@ def store_info(prefix: tuple[str, ...], via: tuple[str, ...]) -> dict[str, objec
         p = run([*via, *prefix, "nix", *(ROOT_NIX if prefix else ROOT_NIX[2:]), "store", verb, "--json"],
                 check=False, timeout=t)
         if p.timed_out:
-            return f"`nix store {verb}` timed out after {t} s"
+            return strings.TARGETS_STORE_TIMEOUT(verb=verb, secs=t)
         if p.returncode == 0:
             try:
                 info = load_json(p.stdout)
             except ValueError:
                 info = None
             if not isinstance(info, dict):
-                return f"`nix store {verb}` printed no JSON object:\n{p.stdout.strip()}"
+                return strings.TARGETS_STORE_NO_JSON(verb=verb, output=p.stdout.strip())
             return info
         err = p.stderr.strip()
         if "not a recognised command" not in err:
             break
-    return f"`nix store {verb}` failed:\n{err}"
+    return strings.TARGETS_STORE_FAILED(verb=verb, error=err)
 
 
 def trusts(info: dict[str, object]) -> bool:
@@ -342,11 +343,10 @@ def builder_prefix(via: tuple[str, ...]) -> list[str] | str:
         return []
     pre = (*SUDO, "--preserve-env=NIX_CONFIG") if not via and os.environ.get("NIX_CONFIG") else SUDO
     rooted = store_info(pre, via)
-    untrusted = "the nix daemon does not trust the user (nix.settings.trusted-users)"
     if isinstance(rooted, str):
-        return f"{untrusted}, and nix as root ({shlex.join(pre)}) failed: {rooted}"
+        return strings.TARGETS_UNTRUSTED_ROOT_FAILED(sudo=shlex.join(pre), error=rooted)
     if not trusts(rooted):
-        return f"{untrusted}, nor root"
+        return strings.TARGETS_UNTRUSTED_NOR_ROOT
     return list(pre)
 
 
@@ -379,16 +379,17 @@ def build_on(host: str, drvs: list[str], what: str,
     p = run(["nix", "copy", "--derivation", "--to", f"ssh://{tgt}", *drvs],
             env={"NIX_SSHOPTS": " ".join(ssh_opts())}, check=False, capture=capture, merged=True)
     if p.returncode != 0:
-        return f"copying derivations to {host} failed" + (f":\n{p.stdout}" if capture else "")
+        return strings.TARGETS_COPY_DRVS_FAILED(host=host, detail=strings.PROC_DETAIL(output=p.stdout) if capture else "")
     via = ["ssh", *ssh_opts(), tgt]
     cmd = build_cmd(opts, via)
     if isinstance(cmd, str):
-        return f"{what} failed on {host}: {cmd}"
+        return strings.TARGETS_BUILD_FAILED_ON_BECAUSE(what=what, host=host, error=cmd)
     build = [*via, shlex.join(cmd)]
     p = run([*build, *sandbox_opts(build, drvs), *(f"{d}^out" for d in drvs)],
             check=False, capture=capture, merged=True)
     if p.returncode != 0:
-        return f"{what} failed on {host}" + (f":\n{p.stdout}" if capture else "")
+        return strings.TARGETS_BUILD_FAILED_ON(what=what, host=host,
+                                               detail=strings.PROC_DETAIL(output=p.stdout) if capture else "")
     return None
 
 
@@ -403,11 +404,11 @@ def build_drvs(drvs: list[str], what: str, opts: tuple[str, ...] = (),
         return build_on(b, drvs, what, opts, capture)
     build = build_cmd(opts, [])
     if isinstance(build, str):
-        return f"{what} failed: {build}"
+        return strings.TARGETS_BUILD_FAILED_BECAUSE(what=what, error=build)
     p = run([*build, *sandbox_opts(build, drvs), *(f"{d}^out" for d in drvs)],
             check=False, capture=capture, merged=True)
     if p.returncode != 0:
-        return f"{what} failed" + (f":\n{p.stdout}" if capture else "")
+        return strings.TARGETS_BUILD_FAILED(what=what, detail=strings.PROC_DETAIL(output=p.stdout) if capture else "")
     return None
 
 
@@ -441,15 +442,16 @@ def copy_closure(target: str, paths: list[str], quiet: bool = False, fatal: bool
         if not b:
             return None
         # The outputs live on the store host: fetched for the local switch.
-        print(f"fetching the closure from {b}...")
+        print(strings.TARGETS_FETCHING_CLOSURE(host=b))
         p = run(["nix", "copy", "--no-check-sigs", "--from", f"ssh://{ssh_address(b)}", *paths],
                 env={"NIX_SSHOPTS": sshopts}, check=False, capture=quiet, merged=True)
         if p.returncode != 0:
-            return failed(f"fetching the closure from {b} failed; {NOTHING_DONE} - the changes are still staged"
-                          + (f"\n{p.stdout.strip()}" if p.stdout else ""))
+            return failed(strings.TARGETS_FETCH_CLOSURE_FAILED(
+                host=b,
+                detail=strings.PROC_DETAIL_LINES(output=p.stdout.strip()) if p.stdout else ""))
         return None
     tgt = ssh_address(target)
-    print(f"copying closure to {target}...")
+    print(strings.TARGETS_COPYING_CLOSURE(target=target))
     # Off-LAN targets (a VPS over the tailnet) substitute what they can
     # themselves, so only custom-built paths cross the slow uplink; on a
     # LAN a straight copy beats any download and per-path probe.
@@ -464,8 +466,9 @@ def copy_closure(target: str, paths: list[str], quiet: bool = False, fatal: bool
         p = run(["nix", "copy", *subst, "--to", f"ssh://{tgt}", *paths],
                 env={"NIX_SSHOPTS": sshopts}, check=False, capture=quiet, merged=True)
     if p.returncode != 0:
-        return failed(f"copying the closure to {target} failed; {NOTHING_DONE} - the changes are still staged"
-                      + (f"\n{p.stdout.strip()}" if p.stdout else ""))
+        return failed(strings.TARGETS_COPY_CLOSURE_FAILED(
+            target=target,
+            detail=strings.PROC_DETAIL_LINES(output=p.stdout.strip()) if p.stdout else ""))
     return None
 
 
@@ -481,7 +484,7 @@ def check_store() -> None:
         return
     pre = builder_prefix(("ssh", *ssh_opts(), ssh_address(b)))
     if isinstance(pre, str):
-        die(f"store host {b}: {pre}; {NOTHING_DONE}")
+        die(strings.TARGETS_STORE_HOST_UNUSABLE(host=b, problem=pre))
 
 
 def rejected_generation(target: str, toplevel: str) -> str | None:
@@ -496,8 +499,7 @@ def rejected_generation(target: str, toplevel: str) -> str | None:
     )
     p = run(target_cmd(target, ["sh", "-c", script], sudo=True), check=False, timeout=PROBE_TIMEOUT)
     if p.returncode != 0:
-        die(f"could not scan {target}'s ESP for rejected generations (exit {p.returncode}); "
-            f"{NOTHING_DONE}")
+        die(strings.TARGETS_ESP_SCAN_FAILED(target=target, code=p.returncode))
     return p.stdout.strip() or None
 
 
@@ -531,12 +533,13 @@ def dry_activate(target: str, toplevel: str) -> str | None:
     p = run(target_cmd(target, [f"{toplevel}/bin/switch-to-configuration", "dry-activate"],
                      sudo=True), check=False, merged=True)
     if p.returncode != 0:
-        return (f"dry-activating the new system on {target} failed (exit {p.returncode}); "
-                f"{NOTHING_DONE}" + (f"\n{p.stdout.strip()}" if p.stdout else ""))
+        return strings.TARGETS_DRY_ACTIVATE_FAILED(
+            target=target, code=p.returncode,
+            detail=strings.PROC_DETAIL_LINES(output=p.stdout.strip()) if p.stdout else "")
     changes = unit_changes(p.stdout)
     for verb, units in changes.items():
-        print(f"  {target}: would {verb} {', '.join(units)}")
+        print(strings.TARGETS_WOULD(target=target, verb=verb, units=", ".join(units)))
     if not changes:
-        print(f"  {target}: would stop, restart or reload no unit")
+        print(strings.TARGETS_WOULD_NOTHING(target=target))
     return None
 

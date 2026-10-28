@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import IO, NamedTuple
 
-from . import config, proc
+from . import config, proc, strings
 from .config import (
     CLAUDE_WORKTREES,
     CONFIG_FILE,
@@ -320,17 +320,14 @@ def work_branch_name() -> str | None:
 def work_branch() -> str | None:
     wb = work_branch_name()
     if wb is not None and not listed(wb):
-        die(f"this checkout's work branch {wb} starts with no prefix in {CONFIG_FILE}'s work_branches; "
-            "add this machine's prefix there (and land it on main so other "
-            "checkouts union its branches) before deploying")
+        die(strings.CHECKOUT_UNLISTED_WB(wb=wb))
     return wb
 
 
 def require_work_branch(what: str) -> str:
     wb = work_branch()
     if wb is None:
-        die(f"{what} needs a work branch, and this checkout has none: "
-            f"`git checkout -b {this_prefix()}<leaf>` (a branch {CONFIG_FILE}'s work_branches lists) and re-run")
+        die(strings.CHECKOUT_NEEDS_WB(what=what, prefix=this_prefix()))
     return wb
 
 
@@ -388,9 +385,9 @@ def lock_holder(d: Path | None = None) -> str:
         line = ""
     held = holder_of(line)
     if held is None:
-        return "another nixconvoy"
+        return strings.CHECKOUT_LOCK_UNKNOWN_HOLDER()
     what, alive, _ = held
-    return what if alive else f"a child of {what}"
+    return what if alive else strings.CHECKOUT_LOCK_CHILD_OF(what=what)
 
 
 def flock_holder(path: Path) -> int | None:
@@ -427,11 +424,13 @@ def holder_of(line: str) -> tuple[str, bool, int] | None:
         return None
     pid, started, start = int(fields[0]), int(fields[1]), fields[2]
     age = max(0, int(time.time()) - started)
-    for_ = f"{age} s" if age < 90 else f"{round(age / 60)} min" if age < 5400 else f"{age / 3600:.1f} h"
-    what = f"`nixconvoy {fields[3]}`" if len(fields) == 4 and fields[3] else "`nixconvoy`"
+    for_ = (strings.CHECKOUT_AGE_SECONDS(n=age) if age < 90 else strings.CHECKOUT_AGE_MINUTES(n=round(age / 60))
+            if age < 5400 else strings.CHECKOUT_AGE_HOURS(h=age / 3600))
+    what = (strings.CHECKOUT_HOLDER_CMD(args=fields[3]) if len(fields) == 4 and fields[3]
+            else strings.CHECKOUT_HOLDER_CMD_BARE())
     if lock_pid_alive(f"pid {pid}" + (f" start {start}" if start != "0" else "")) is False:
-        return f"{what} (pid {pid}, gone; started {for_} ago)", False, pid
-    return f"{what} (pid {pid}, running for {for_})", True, pid
+        return strings.CHECKOUT_HOLDER_GONE(what=what, pid=pid, age=for_), False, pid
+    return strings.CHECKOUT_HOLDER_RUNNING(what=what, pid=pid, age=for_), True, pid
 
 
 def deploy_running(d: Path) -> bool:
@@ -578,7 +577,7 @@ class GitQueries:
                              if ln.strip() and not ln.startswith(noise) and not ln.startswith("hint:"))
             return Ran(False, why + (f"\n{rest}" if rest else ""))
         there = f"git {rebase_hint(upstream, where)}" + (f" {self.aside_branch}" if where else "")
-        hint = f"run `{there}` there, resolve, then re-run"
+        hint = strings.CHECKOUT_REBASE_HINT(command=there)
         if met:  # git checkout --theirs leaves a gitlink unmerged: the stage is written outright
             wt = Path(where or Path.cwd()).resolve()
             fixes = []
@@ -587,10 +586,8 @@ class GitQueries:
                 sub = submodule.owner(wt, g)
                 if sub is not None and sub.pin_file:
                     fixes.append(f"git checkout --theirs -- {sub.pin_file}")
-            hint += (f"; at a stop on {', '.join(met)} keep this branch's own pin, the landing merging the "
-                     f"submodule onto its default branch itself (a deploy rebases it there first):\n  "
-                     + "\n  ".join(fixes))
-        return Ran(False, f"{hint}:\n{(p.stderr or '').strip()}")
+            hint += strings.CHECKOUT_REBASE_GITLINK_HINT(gitlinks=", ".join(met), fixes="\n  ".join(fixes))
+        return Ran(False, strings.CHECKOUT_REBASE_FAILED(hint=hint, stderr=(p.stderr or "").strip()))
 
 
 def pop_tmp_commits() -> None:
@@ -648,7 +645,7 @@ def update_checkout(path: Path) -> tuple[bool, str]:
     try:
         lock = lock_checkout()
         if lock is None:
-            return False, f"skipped: {lock_holder()} is running there"
+            return False, strings.CHECKOUT_SKIPPED_LOCKED(holder=lock_holder())
         try:
             wb = work_branch_name()
             done = decide(RebaseParams(cfg().names, Sync(wb)))
@@ -674,10 +671,10 @@ def catch_up(paths: list[Path]) -> bool:
         except FileNotFoundError as e:
             if not d.is_dir():
                 continue  # a subagent worktree pruned meanwhile
-            done, status = False, f"not caught up: {e}"
+            done, status = False, strings.CHECKOUT_NOT_CAUGHT_UP(error=e)
         if not done and not d.is_dir():
             continue
-        print(f"{d.name}: {status}", file=sys.stdout if done else sys.stderr,
+        print(strings.CHECKOUT_CATCH_UP_LINE(name=d.name, status=status), file=sys.stdout if done else sys.stderr,
               flush=True)
         good &= done
     return good
@@ -710,12 +707,10 @@ def landing_message(given: str | None, on_file: str, draft: str, where: str) -> 
     if given is None:
         return fold_subject(on_file.strip())
     if on_file.strip() or draft.strip():
-        die(f"{where} has a {MSG_FILE} and -m was given: land -m is for a branch without one, "
-            f"so remove the file or drop -m")
+        die(strings.CHECKOUT_LAND_MSG_AND_M(where=where))
     return fold_subject(given.strip())
 
 
-SCISSORS = "# ------------------------ >8 ------------------------"
 KEPT_EDIT = "landmsg"  # in the git dir (state_path): a landing's edited message, until it lands
 
 
@@ -745,12 +740,12 @@ def edit_message(draft: str, wb: str, tips: list[tuple[str, str]] | None = None)
     if cmd is None:
         return None
     main = main_ref()
-    notes = [f"Landing {wb} on {cfg().main_branch}."]
+    notes = [strings.CHECKOUT_NOTE_LANDING(wb=wb, main_branch=cfg().main_branch)]
     for label, tip in tips or [("", "HEAD")]:
-        of = f" of {label}" if label else ""
-        notes += [f"Increments{of}:",
+        of = strings.CHECKOUT_NOTE_OF(label=label) if label else ""
+        notes += [strings.CHECKOUT_NOTE_INCREMENTS(of=of),
                   *(f"  {ln}" for ln in out(["git", "log", "--format=%s", f"{main}..{tip}"]).splitlines()),
-                  f"Changes{of}:",
+                  strings.CHECKOUT_NOTE_CHANGES(of=of),
                   *(f"  {ln}" for ln in out(["git", "diff", "--name-status", f"{main}...{tip}", "--", ".",
                                               f":!{MSG_FILE}"]).splitlines())]
     note_lines = {f"# {n}" for n in notes}
@@ -758,33 +753,32 @@ def edit_message(draft: str, wb: str, tips: list[tuple[str, str]] | None = None)
     path = Path(tmpdir) / "COMMIT_EDITMSG"  # the name editors style as a commit message
     handlers = {sig: signal.signal(sig, lambda *_: None) for sig in (signal.SIGINT, signal.SIGQUIT)}
     try:
-        path.write_text("".join([draft.rstrip("\n"), "\n\n", SCISSORS, "\n", *(f"# {n}\n" for n in notes)]),
-                        encoding="utf-8")
+        path.write_text("".join([draft.rstrip("\n"), "\n\n", strings.CHECKOUT_SCISSORS, "\n",
+                                 *(f"# {n}\n" for n in notes)]), encoding="utf-8")
         with PERF.excluded():
             p = run(["sh", "-c", f'{cmd} "$@"', cmd, str(path)], capture=False, check=False)
         if p.returncode != 0:
-            die(f"editor {cmd} exited with {p.returncode}; landing aborted")
+            die(strings.CHECKOUT_EDITOR_FAILED(cmd=cmd, rc=p.returncode))
         lines = [ln.rstrip() for ln in path.read_text(encoding="utf-8").splitlines()]
     finally:
         for sig, h in handlers.items():
             signal.signal(sig, h)
         shutil.rmtree(tmpdir, ignore_errors=True)
-    if SCISSORS in lines:
-        del lines[lines.index(SCISSORS):]
+    if strings.CHECKOUT_SCISSORS in lines:
+        del lines[lines.index(strings.CHECKOUT_SCISSORS):]
     lines = [ln for ln in lines if ln not in note_lines]
     while lines and not lines[0]:
         lines.pop(0)
     while lines and not lines[-1]:
         lines.pop()
     if not lines:
-        die("empty message; landing aborted")
+        die(strings.CHECKOUT_EMPTY_MESSAGE)
     return fold_subject("\n".join(lines))
 
 
 def warn_no_msgfile(wb: str) -> None:
     if rev(f"HEAD:{MSG_FILE}") is None:
-        print(f"note: {wb} carries work but no {MSG_FILE} yet - landing needs "
-              "it, or land -m <msg>", file=sys.stderr)
+        print(strings.CHECKOUT_NO_MSG_FILE_YET(wb=wb), file=sys.stderr)
 
 
 def index_tree(cwd: str | None = None, *, less_msg: bool = False) -> str:
@@ -800,7 +794,7 @@ def index_tree(cwd: str | None = None, *, less_msg: bool = False) -> str:
             git("update-index", "--force-remove", MSG_FILE, env=env, cwd=cwd)
         p = run(["git", "write-tree"], env=env, cwd=cwd, check=False)
         if p.returncode != 0:
-            die(f"cannot snapshot the index{f' of {cwd}' if cwd else ''} (unmerged paths?)")
+            die(strings.CHECKOUT_INDEX_UNMERGED(of=strings.CHECKOUT_INDEX_OF(cwd=cwd) if cwd else ""))
         return p.stdout.strip()
     finally:
         Path(tmpidx).unlink()
@@ -810,7 +804,7 @@ def staged_snapshot() -> str:
     """Ephemeral deterministic commit of the staged state on top of HEAD:
     what gets built and switched, never what lands on a branch."""
     return out(["git", "commit-tree", index_tree(), "-p", "HEAD",
-                "-m", "staged snapshot (not yet committed)"], env=MACHINE_ENV)
+                "-m", strings.CHECKOUT_SNAPSHOT_SUBJECT], env=MACHINE_ENV)
 
 
 def deployed_commit(snap: str, msg: str) -> str:
@@ -861,7 +855,7 @@ def await_background_push() -> None:
     if statusf.exists():
         status = statusf.read_text().strip()
     else:
-        status = "timed out" if pid > 0 else "no pid"
+        status = strings.CHECKOUT_PUSH_TIMED_OUT if pid > 0 else strings.CHECKOUT_PUSH_NO_PID
         if pid > 0:
             with contextlib.suppress(OSError):
                 os.killpg(pid, signal.SIGTERM)
@@ -870,8 +864,8 @@ def await_background_push() -> None:
         with contextlib.suppress(OSError):
             f.unlink()
     if status != "0":
-        print(f"note: the previous run's background push failed ({status}); this run's "
-              f"push retries it" + (f":\n{log}" if log else ""), file=sys.stderr)
+        print(strings.CHECKOUT_PUSH_BG_FAILED(status=status, log=strings.CHECKOUT_PUSH_BG_LOG(log=log) if log else ""),
+              file=sys.stderr)
 
 
 # The tip this repository last pushed onto a work branch (or took from
@@ -917,11 +911,8 @@ def sole_writer_problem(wb: str) -> str | None:
     held = run(["git", "reflog", "show", "--format=%H", f"refs/heads/{wb}"], check=False).stdout.split()
     if not held or up in held:
         return None
-    return (f"{wb} moved on {cfg().remote} ({up[:12]}): another checkout deployed on it, but a work branch has one "
-            f"writer.  `git log refs/heads/{wb}..{remote_ref(wb)}` shows what it holds; in that "
-            f"branch's checkout, `git rebase --autostash {remote_ref(wb)}` carries this checkout's "
-            f"increments onto it, or `git checkout -b {this_prefix()}<leaf>` moves them to a branch of their "
-            f"own; then re-run")
+    return strings.CHECKOUT_SOLE_WRITER(wb=wb, remote=cfg().remote, sha=up[:12], up_ref=remote_ref(wb),
+                                        prefix=this_prefix())
 
 
 def ensure_sole_writer(wb: str) -> str:
@@ -954,13 +945,12 @@ def push_work_branch(wb: str) -> None:
         return
     p = git(*push_cmd(wb, ensure_sole_writer(wb)), check=False)
     if p.returncode != 0:
-        die(f"pushing {wb} failed - it moved on {cfg().remote}, but this checkout is its "
-            f"only writer.  Investigate:\n{p.stderr.strip()}")
+        die(strings.CHECKOUT_PUSH_WB_FAILED(wb=wb, remote=cfg().remote, stderr=p.stderr.strip()))
     note_pushed(wb, head)
     clear = clear_refspec(wb)
     if clear:
         git("push", "--quiet", cfg().remote, *clear, check=False)
-    print(f"pushed {wb} ({head[:12] if head else '?'})")
+    print(strings.CHECKOUT_PUSHED(wb=wb, sha=head[:12] if head else "?"))
 
 
 DATELESS_ENV = {k: v for k, v in MACHINE_ENV.items() if not k.endswith("_DATE")}
@@ -1032,13 +1022,13 @@ class Announce:
         """The announcement's commit as it stands: "" when it failed
         (self.detail says why).  Under the lock."""
         parent, tree = self.target
-        subject = (f"pending increment of {self.branch} from {proc.this_machine()}:{Path.cwd()} "
-                   f"(pid {os.getpid()})" + (SETTLED if settled else ""))
+        subject = (strings.CHECKOUT_ANNOUNCE_SUBJECT(branch=self.branch, machine=proc.this_machine(), cwd=Path.cwd(),
+                                                     pid=os.getpid()) + (SETTLED if settled else ""))
         parents = [a for p in (parent, *self.records) for a in ("-p", p)]
         commit = run(["git", "commit-tree", tree, *parents, "-m", subject],
                      env={**DATELESS_ENV, "GIT_AUTHOR_DATE": f"{self.since} +0000"}, check=False)
         if commit.returncode != 0:
-            self.detail = (commit.stderr or "").strip() or "commit-tree failed"
+            self.detail = (commit.stderr or "").strip() or strings.CHECKOUT_COMMIT_TREE_FAILED
             return ""
         return commit.stdout.strip()
 
@@ -1053,7 +1043,7 @@ class Announce:
             p = git("push", "--quiet", "--force", cfg().remote, f"{sha}:{PENDING_REFS}/{self.key}",
                     check=False, timeout=PUSH_TIMEOUT)
             if p.returncode != 0:
-                self.detail = (p.stderr or "").strip() or "push failed"
+                self.detail = (p.stderr or "").strip() or strings.CHECKOUT_PUSH_FAILED
                 return False
             self.sha = sha
             return True
@@ -1068,8 +1058,7 @@ class Announce:
         while self._ok and not self._stop.wait(HEARTBEAT):
             try:
                 if not self._push():
-                    print(f"note: renewing this deploy's announcement failed; a deploy "
-                          f"elsewhere may take this one for dead:\n{self.detail}", file=sys.stderr)
+                    print(strings.CHECKOUT_RENEW_FAILED(detail=self.detail), file=sys.stderr)
             except Exception:  # noqa: BLE001
                 return
 
@@ -1208,7 +1197,8 @@ def record_commit(target: str, union: str, parents: list[str], subject: str, doc
     for p in parents:
         if p and p not in ps and rev(f"{p}^{{commit}}") is not None:
             ps.extend(["-p", p])
-    return out(["git", "commit-tree", tree, *ps, "-m", f"deploy {target}: {subject}\n\n{doc}\n"],
+    return out(["git", "commit-tree", tree, *ps, "-m", strings.CHECKOUT_RECORD_MESSAGE(target=target, subject=subject,
+                                                                                     doc=doc)],
                env=DATELESS_ENV)
 
 
@@ -1242,7 +1232,7 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str])
         if problem is None:
             refspecs += push_refspecs(wb, rev(remote_ref(wb)) or "")
             pushed_note = ["git", "update-ref", f"{PUSHED_REFS}/{wb}", head]
-            what.append(f"{wb} ({head[:12]})")
+            what.append(strings.CHECKOUT_PUSHING_BRANCH(wb=wb, sha=head[:12]))
     refspecs += [f"+{sha}:refs/heads/{DEPLOYED_PREFIX}/{h}" for h, sha in records.items()]
     what += [f"{DEPLOYED_PREFIX}/{h}" for h in records]
     if ann is not None and ann.key == wb:
@@ -1273,7 +1263,7 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str])
         child = subprocess.Popen(["sh", "-c", script, str(statusf)], stdin=subprocess.DEVNULL,
                                  stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     pidf.write_text(str(child.pid))
-    print(f"pushing {', '.join(what) or 'the cleared announcement'} in the background")
+    print(strings.CHECKOUT_PUSHING_BG(what=", ".join(what) or strings.CHECKOUT_PUSHING_CLEARED))
     return problem
 
 
@@ -1601,12 +1591,9 @@ def require_unlocked(here: Path) -> None:
     if reason is not None and reason.endswith(SESSIONLESS):
         return
     if reason is not None and lock_pid_alive(reason) is None:
-        die(f"this worktree is locked by hand ({reason or 'no reason given'}): "
-            "`git worktree unlock` it, then re-run")
+        die(strings.CHECKOUT_LOCKED_BY_HAND(reason=reason or strings.CHECKOUT_NO_LOCK_REASON))
     if reason is not None and lock_live(reason):
-        die(f"this worktree is locked ({reason or 'no reason given'}): the claude session that "
-            "spawned its agent still runs; wait for it to exit, or `git worktree unlock` it, "
-            "then re-run")
+        die(strings.CHECKOUT_LOCKED_LIVE(reason=reason or strings.CHECKOUT_NO_LOCK_REASON))
 
 
 def add_worktree(ref: str) -> str:

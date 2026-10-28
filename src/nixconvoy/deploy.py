@@ -1,7 +1,7 @@
 """A deploy: probe, snapshot and its announcement, union (waiting for a
 deploy under way that reaches the same targets), eval, precheck, build,
 copy and the records' push, switch, then commit and push - in the order the
-module docstring of cli.py gives."""
+help (strings.HELP) gives."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
-from . import checkout, memo, proc, submodule, targets
+from . import checkout, memo, proc, strings, submodule, targets
 from .checkout import (
     DEPLOYED_PREFIX,
     PENDING_REFS,
@@ -48,7 +48,7 @@ from .checkout import (
 from .config import cfg, main_ref, remote_ref, repo_names, store_host
 from .guard import binary, decide
 from .memo import Top
-from .proc import NOTHING_DONE, PERF, Fail, die, dump_json, is_ancestor, load_json, out, rev
+from .proc import PERF, Fail, die, dump_json, is_ancestor, load_json, out, rev
 from .switch import SwitchedMeanwhile, provenance_record, switch
 from .targets import Probe, expand_targets, flake_target_names
 from .union import UnionQueries
@@ -76,16 +76,14 @@ def news_of(p: Pending, now: float, fetched: float, seen: dict[str, tuple[str, f
         seen[p.key] = (p.sha, now)
         changed = now
         if p.key in dead:
-            print(f"{p.key}'s deploy is under way again: waited for after all", flush=True)
+            print(strings.DEPLOY_ALIVE_AGAIN(key=p.key), flush=True)
             dead.discard(p.key)
     if p.key in dead:
         return False
     if first and fetched and fetched - p.at > STALE_STAMP:
-        print(f"warning: {p.key}'s deploy last renewed its announcement {(fetched - p.at) / 60:.0f} min "
-              f"ago (by its machine's clock): taken as dead, going on without it", flush=True)
+        print(strings.DEPLOY_STALE_STAMP(key=p.key, minutes=(fetched - p.at) / 60), flush=True)
     elif now - changed > WAIT_STALE:
-        print(f"warning: no news of {p.key}'s deploy for {WAIT_STALE} s (its announcement is no "
-              f"longer renewed): taken as dead, going on without it", flush=True)
+        print(strings.DEPLOY_NO_NEWS(key=p.key, secs=WAIT_STALE), flush=True)
     else:
         return True
     dead.add(p.key)
@@ -97,7 +95,7 @@ def exit_on_signal(signum: int, _frame: object) -> None:
     and SystemExit raised, so a deploy's finally clauses (the
     announcement's withdrawal) still run.  A switch armed by then is left
     to its rollback timer."""
-    proc.kill_children(f"killed by signal {signum}")
+    proc.kill_children(strings.DEPLOY_KILLED_BY_SIGNAL(signum=signum))
     raise SystemExit(128 + signum)
 
 
@@ -168,16 +166,16 @@ def commit_unreached(wb: str, msg: str, snap: str) -> None:
         targets.check_store()
         wt = add_worktree(snap)
         try:
-            print("running the precheck...")
+            print(strings.DEPLOY_RUNNING_PRECHECK)
             err = memo.precheck_gate(wt, snap)
         finally:
             drop_worktree(wt)
         if err:
-            die(f"{err}; {NOTHING_DONE}")
+            die(strings.PROC_WITH_NOTHING_DONE(problem=err))
     PERF.mark("commit-push")
     commit_deployed(wb, snap, f"{msg}\n\nReaches: none\nDeployed: none")
     push_work_branch(wb)
-    print(f"reaches no target: committed onto {wb} and pushed; nothing built or switched (the probes' results dropped)")
+    print(strings.DEPLOY_REACHES_NONE(wb=wb))
 
 
 def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = False) -> None:
@@ -221,21 +219,17 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
             # Recovered from origin only while empty there (a removed
             # worktree's): increments there are another worktree's of
             # this name (a machine sharing the prefix).
-            die(f"{cfg().remote} holds {wb} with increments this worktree never pushed: another worktree of "
-                f"this name?  `git log {main_ref()}..{remote_ref(wb)}` shows them; "
-                f"open this worktree under another name, or `git branch {wb} {remote_ref(wb)}` "
-                f"to take them over")
+            die(strings.DEPLOY_FOREIGN_INCREMENTS(remote=cfg().remote, wb=wb, main_ref=main_ref(),
+                                                  remote_wb=remote_ref(wb)))
         ensure_on_work_branch(wb)
         if not had and (made := rev(f"refs/heads/{wb}")) is not None:
             note_pushed(wb, made)  # the branch as taken from origin's empty copy, or fresh
     elif wb is None and cur not in (cfg().main_branch, None):
-        die(f"on branch {cur}, which nixconvoy.toml's work_branches does not list; the "
-            f"main checkout deploys from {cfg().main_branch} (a hand commit there is claimed as "
-            f"{cfg().main_branch}'s until pushed)")
+        die(strings.DEPLOY_UNLISTED_BRANCH(branch=cur, main_branch=cfg().main_branch))
 
     def increment_name() -> str:
         n = int(out(["git", "rev-list", "--count", f"{main_ref()}..HEAD"])) + 1
-        return f"{Path.cwd().name}: increment {n}"
+        return strings.DEPLOY_INCREMENT_NAME(checkout=Path.cwd().name, n=n)
 
     if msg is None and wb is not None and not dry and (
             staged_differs() or any(submodule.staged(sub.dir, less_msg=True) for sub in submodule.present(Path.cwd()))):
@@ -251,8 +245,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     PERF.mark("snapshot")
     if staged_differs():
         if wb is None:
-            die("staged changes in the main checkout, which has no work branch: commit "
-                "them by hand here, or stage them in a checkout on a work branch")
+            die(strings.DEPLOY_STAGED_ON_MAIN)
         ensure_on_work_branch(wb)  # the increment must land (and union) on wb
         # A snapshot's tree is HEAD + staged, so one taken on a stale HEAD
         # would commit main's changes away.
@@ -267,11 +260,11 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
         if msg and not (dry or skip or evict or filter_targets) and not increment_reaches(snap, all_targets):
             # The probes are never collected: an ssh to a dark target must
             # not hold the exit.
-            proc.kill_children("the increment reaches no target")
+            proc.kill_children(strings.DEPLOY_REACHES_NO_TARGET)
             commit_unreached(wb, msg, snap)
             return
     elif msg:
-        die("nothing is staged; stage the change or drop -m")
+        die(strings.DEPLOY_NOTHING_STAGED)
     else:
         if wb is not None and current_branch() == wb:  # a detached subagent worktree commits nothing onto it
             fetch.result()
@@ -304,9 +297,8 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
                 # Those targets run (or may run) the records it carries:
                 # kept, for their history to chain on them.
                 ann.stop()
-                print(f"note: {', '.join(ann.claimed)} were switched (or a switch was started), so "
-                      f"this deploy's announcement stays, carrying their deploy records: re-run to "
-                      f"finish the deploy, or clear it (git push {cfg().remote} :{PENDING_REFS}/{ann.key})",
+                print(strings.DEPLOY_ANNOUNCEMENT_KEPT_RECORDS(targets=", ".join(ann.claimed), remote=cfg().remote,
+                                                              pending_refs=PENDING_REFS, key=ann.key),
                       file=sys.stderr)
             elif ann.claimed:
                 # Those targets run the increment (or a switch onto it was
@@ -314,10 +306,8 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
                 # elsewhere is refused there rather than reverting it,
                 # until a re-run here ends with the push.
                 ann.stop()
-                print(f"note: {', '.join(ann.claimed)} run this checkout's unpushed increment "
-                      f"(or a switch onto it was started), so its announcement stays: re-run "
-                      f"to finish the deploy, or clear it to have the increment reverted by the "
-                      f"next deploy there (git push {cfg().remote} :{PENDING_REFS}/{ann.key})",
+                print(strings.DEPLOY_ANNOUNCEMENT_KEPT_INCREMENT(targets=", ".join(ann.claimed), remote=cfg().remote,
+                                                                pending_refs=PENDING_REFS, key=ann.key),
                       file=sys.stderr)
             else:
                 ann.withdraw()
@@ -339,8 +329,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         running = {n: p.running for n, p in probed.items()}
         unreachable = [h for h in candidates if running.get(h) is None]
         if unreachable:
-            die(f"unreachable: {', '.join(unreachable)}; {NOTHING_DONE}; "
-                f"fix connectivity (or restrict targets) and re-run")
+            die(strings.DEPLOY_UNREACHABLE(targets=", ".join(unreachable)))
         if ann is not None:
             # A target running this checkout's announced increment from
             # an earlier run that ended without its push: still its claim.
@@ -431,11 +420,10 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             for b, hs in waiting.items():
                 if b not in told:
                     told.add(b)
-                    print(f"waiting for {b}'s deploy under way: its increment and this "
-                          f"checkout's both reach {', '.join(hs)}...", flush=True)
+                    print(strings.DEPLOY_WAITING(key=b, targets=", ".join(hs)), flush=True)
             if now - status_at >= 60:
                 status_at = now
-                print(f"still waiting for {', '.join(waiting)} ({(now - started) / 60:.0f} min)",
+                print(strings.DEPLOY_STILL_WAITING(keys=", ".join(waiting), minutes=(now - started) / 60),
                       flush=True)
             waited = True
             # Announcements are judged as of a successful look at origin:
@@ -447,9 +435,9 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                     break
                 failed_polls += 1
                 if failed_polls >= 12:
-                    die(f"{cfg().remote} stopped answering while waiting for the deploy under way; {NOTHING_DONE}")
+                    die(strings.DEPLOY_REMOTE_SILENT(remote=cfg().remote))
         if waited:
-            print("...ended; probing the targets again and redoing the union", flush=True)
+            print(strings.DEPLOY_WAIT_ENDED, flush=True)
             PERF.mark("probe")
             with ThreadPoolExecutor(max(1, len(probes))) as pool:
                 probes = {n: pool.submit(targets.probe, n) for n in probes}
@@ -463,17 +451,17 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         nonlocal plan, affected, left_alone, tops, committed, records, provenances, ann, last_targets
         if skip:
             if dry:
-                print(f"NIXCONVOY_SKIP_SWITCH=1 --dry-activate: union {union}; nothing done")
+                print(strings.DEPLOY_SKIP_DRY(union=union))
                 return True
             if wb is not None:
                 if snap:
                     commit_deployed(wb, snap, msg or "")
                 push_work_branch(wb)
-            print(f"NIXCONVOY_SKIP_SWITCH=1: skipping probe+eval+switch (union {union})")
+            print(strings.DEPLOY_SKIP(union=union))
             return True
 
         if ann is not None and not ann.collect():
-            die(f"announcing this deploy on {cfg().remote} failed; {NOTHING_DONE}:\n{ann.detail}")
+            die(strings.DEPLOY_ANNOUNCE_FAILED(remote=cfg().remote, detail=ann.detail))
         PERF.mark("eval")
         with memo.memo_lock(memo.memo_dir()):
             memo.memo_prune(memo.memo_dir())
@@ -485,13 +473,13 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             check_pool = ThreadPoolExecutor(1)
             check = check_pool.submit(memo.precheck_gate, wt, union)
             check_pool.shutdown(wait=False)
-        print("evaluating targets..." if check is None else "evaluating targets, running the precheck...")
+        print(strings.DEPLOY_EVALUATING if check is None else strings.DEPLOY_EVALUATING_PRECHECK)
         tops = memo.eval_toplevels(wt, union, [h for h in all_targets if running.get(h) is not None],
                                    check)
         if check is not None:
             err = check.result()
             if err:
-                die(f"{err}; {NOTHING_DONE}")
+                die(strings.PROC_WITH_NOTHING_DONE(problem=err))
         reached = memo.reached_targets(wt, union, sorted(tops), snap or "HEAD",
                                      {h: probed[h].provenance for h in tops if h in probed})
         # The targets the other unioned branches hold back (held_targets):
@@ -508,8 +496,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         last_targets = set(last)
         for h in sorted(tops):
             if tops[h].assessed and not tops[h].kit:
-                print(f"warning: {h} is switched plainly (confirmed = false) but carries the boot-assessment "
-                      "module: a counted boot there runs no switch checks", file=sys.stderr)
+                print(strings.DEPLOY_ASSESSED_PLAIN(target=h), file=sys.stderr)
         cx = Context(names=repo_names(), me=(me, str(Path.cwd())), listed=sorted(listed), tips=origin_tips(),
                      in_flight=announced(ann.key if ann is not None else None), dead=sorted(dead),
                      tz_offset=time.localtime().tm_gmtoff)
@@ -529,20 +516,14 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                 continue
             stub = targets.rejected_generation(name, tops[name].out)
             if stub:
-                die(f"{name}'s bootloader rejected the very generation this "
-                    f"deploy would switch it to ({stub}): it failed its boot "
-                    f"assessment and the target fell back.  Nothing was built, "
-                    f"switched or committed.  See `journalctl -u boot-assessment-watch "
-                    f"-u boot-assessment` on {name}; then change the configuration, or "
-                    f"re-arm the stub to retry it as is (sudo mv of the +0-N stub to +2 "
-                    f"under /boot/EFI/Linux).")
+                die(strings.DEPLOY_REJECTED_GENERATION(target=name, stub=stub))
 
         # Nothing pending, but targets to switch: announced now, for the
         # records to ride (and the provenance to name).
         if ann is None and plan and not dry:
             ann = run.ann = Announce(current_branch() or cfg().main_branch, "HEAD")
             if not ann.collect():
-                die(f"announcing this deploy on {cfg().remote} failed; {NOTHING_DONE}:\n{ann.detail}")
+                die(strings.DEPLOY_ANNOUNCE_FAILED(remote=cfg().remote, detail=ann.detail))
 
         # The increment's commit and each target's record, before the
         # switch: the provenance the targets get names the commit origin will
@@ -556,7 +537,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         # the second is held back (held_targets) until a deploy here
         # switches it.
         committed = ""
-        subject = cfg().main_branch + "".join(f" + {n}" for n, _ in branches)
+        subject = cfg().main_branch + "".join(strings.DEPLOY_SUBJECT_BRANCH(branch=n) for n, _ in branches)
         fmt = ", ".join
         deployed = sorted(h for h in tops if h in plan or h not in affected)
         if snap and not dry:
@@ -573,7 +554,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             # read from the branch's trailers alone.
             ends = sorted(held_targets(f"{main_ref()}..HEAD") & set(deployed))
             if ends:
-                subject = f"deployed to {fmt(ends)}, held back until now"
+                subject = strings.DEPLOY_HOLD_ENDED_SUBJECT(targets=fmt(ends))
                 committed = deployed_commit("HEAD", f"{subject}\n\nReaches: none\nDeployed: {fmt(deployed)}")
         doc = provenance_record(union, branches, committed, ann.sha if ann else "", ann.key if ann else "")
         records, provenances = {}, {}
@@ -602,18 +583,19 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         refresh = [h for h in sorted(tops) if h in candidates and h not in plan and h not in left_alone
                    and running.get(h) == tops[h].out and probed[h].kit != tops[h].kit]
         if dry and refresh:
-            print(f"--dry-activate: the switch kit on {', '.join(refresh)} would be refreshed")
+            print(strings.DEPLOY_DRY_KIT_REFRESH(targets=", ".join(refresh)))
             refresh = []
         if plan or refresh:
             b = store_host()
-            where = f" on {b}" if b else ""
+            where = strings.DEPLOY_BUILD_WHERE(host=b) if b else ""
             PERF.mark("build")
-            what = ", ".join([*plan, *(f"{h}'s switch kit" for h in refresh)])
-            print(f"building {what}{where}...")
+            what = ", ".join([*plan, *(strings.DEPLOY_BUILD_KIT(target=h) for h in refresh)])
+            print(strings.DEPLOY_BUILDING(what=what, where=where))
             err = targets.build_drvs([d for h in plan for d in (tops[h].drv, tops[h].kit_drv) if d]
-                                     + [tops[h].kit_drv for h in refresh if tops[h].kit_drv], f"build of {what}")
+                                     + [tops[h].kit_drv for h in refresh if tops[h].kit_drv],
+                                     strings.DEPLOY_BUILD_OF(what=what))
             if err:
-                die(f"{err}; {NOTHING_DONE}")
+                die(strings.PROC_WITH_NOTHING_DONE(problem=err))
 
         # Another machine may have pushed a work branch while we built;
         # switching without it would revert its deployed changes (the union
@@ -625,7 +607,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             return targets.dry_activate(name, top.out) if dry else None
 
         if dry and plan:
-            print(f"dry-activating {', '.join(plan)}...")
+            print(strings.DEPLOY_DRY_ACTIVATING(targets=", ".join(plan)))
         with ThreadPoolExecutor(2 + len(plan) + len(refresh)) as pool:
             refetch = pool.submit(fetch_origin)
             # Carried, or a redone stage's stale records dropped.
@@ -636,25 +618,22 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             # The old kit stays rooted there: the next deploy tries again.
             for err in (r.result() for r in refreshes):
                 if err:
-                    print(f"warning: {err}", file=sys.stderr)
+                    print(strings.DEPLOY_KIT_REFRESH_FAILED(err=err), file=sys.stderr)
             refetch.result()
             unpushed = pushed.result() if pushed is not None else None
         if dry:
             if failures:
-                die(f"--dry-activate: {NOTHING_DONE}; a dry activation failed:\n"
-                    + "\n".join(failures))
+                die(strings.DEPLOY_DRY_FAILED(failures="\n".join(failures)))
             if plan:
-                print(f"--dry-activate: {', '.join(plan)} would be switched (union {union}); "
-                      f"{NOTHING_DONE}")
+                print(strings.DEPLOY_DRY_WOULD_SWITCH(targets=", ".join(plan), union=union))
             elif left_alone:
-                print(f"--dry-activate: nothing would be switched: {', '.join(left_alone)} left "
-                      f"alone, running another checkout's work this checkout's does not reach "
-                      f"(union {union})")
+                print(strings.DEPLOY_DRY_LEFT_ALONE(targets=", ".join(left_alone), union=union))
             else:
-                print(f"--dry-activate: nothing drifts from the union ({union}); nothing to switch")
+                print(strings.DEPLOY_DRY_NO_DRIFT(union=union))
             return True
         if unpushed:
-            die(f"announcing the deploy records on {cfg().remote} failed; {NOTHING_DONE}:\n{unpushed}")
+            die(strings.DEPLOY_RECORDS_ANNOUNCE_FAILED(remote=cfg().remote,
+                                                       detail=unpushed))
         return False
 
     def switch_all(nixconvoy_switch: str) -> None:
@@ -709,11 +688,11 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                 switch_all(binary("nixconvoy-switch") if plan else "")
             except SwitchedMeanwhile as e:
                 if redo == SWITCH_REDOS:
-                    die(f"{e}, {redo + 1} times over; nothing was committed: re-run to converge with it")
+                    die(strings.DEPLOY_MOVED_TOO_OFTEN(moved=e, times=redo + 1))
                 # Its deploy's push may still be on its way: the union redone
                 # with what origin has by then (await_pending waits for a
                 # deploy still announced), the targets probed afresh.
-                print(f"{e}: probing the targets again and redoing the plan", flush=True)
+                print(strings.DEPLOY_MOVED_REDO(moved=e), flush=True)
                 PERF.mark("probe")
                 with ThreadPoolExecutor(1 + len(probes)) as pool:
                     fetch = pool.submit(fetch_origin)
@@ -733,12 +712,11 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
     problem = push_deployed(wb, ann, records)
 
     if plan:
-        print(f"deployed {', '.join(plan)}: union {union}")
+        print(strings.DEPLOY_DONE(targets=", ".join(plan), union=union))
     elif left_alone:
-        print(f"nothing switched: {', '.join(left_alone)} left alone, running another "
-              f"checkout's work this checkout's does not reach (union {union})")
+        print(strings.DEPLOY_LEFT_ALONE(targets=", ".join(left_alone), union=union))
     else:
-        print(f"nothing drifts from the union ({union}); nothing to switch")
+        print(strings.DEPLOY_NO_DRIFT(union=union))
     if problem is not None:
-        die(f"{wb} is not pushed (the targets run it; its announcement stays for the re-run): {problem}")
+        die(strings.DEPLOY_UNPUSHED(wb=wb, problem=problem))
     return True

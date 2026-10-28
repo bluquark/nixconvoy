@@ -1,6 +1,7 @@
 //! The armed switch's state: one file, replaced by rename under the helper's
 //! lock, read by the helper and by boot-assessment's planner (which spares
 //! `previous`).
+use crate::text;
 use std::fmt;
 use std::io::Write;
 use std::path::Path;
@@ -40,7 +41,7 @@ impl Record<String> {
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut lines = text.lines();
         if lines.next() != Some(MAGIC) {
-            return Err("not a confirmed-switch state file".into());
+            return Err(text!(record_bad_magic).into());
         }
         let (mut previous, mut phase, mut confirmed) = (None, None, None);
         for line in lines {
@@ -48,15 +49,15 @@ impl Record<String> {
                 Some(("previous", v)) => previous = Some(v.to_string()),
                 Some(("phase", v)) => phase = Some(v.to_string()),
                 Some(("confirmed", v)) => confirmed = Some(v.to_string()),
-                _ => return Err(format!("unexpected line {line:?}")),
+                _ => return Err(format!(text!(record_unexpected_line), line = line)),
             }
         }
-        let previous = previous.ok_or("no previous")?;
+        let previous = previous.ok_or(text!(record_no_previous))?;
         let phase = match (phase.as_deref(), confirmed) {
             (Some("armed"), None) => Phase::Armed,
             (Some("rolled-back"), None) => Phase::RolledBack,
             (Some("confirmed"), Some(t)) => Phase::Confirmed(t),
-            _ => return Err("bad phase".into()),
+            _ => return Err(text!(record_bad_phase).into()),
         };
         Ok(Record { previous, phase })
     }
@@ -65,9 +66,9 @@ impl Record<String> {
     pub fn load(dir: &Path) -> Result<Option<Self>, String> {
         let path = dir.join(FILE);
         match std::fs::read_to_string(&path) {
-            Ok(text) => Record::parse(&text).map(Some).map_err(|e| format!("{}: {e}", path.display())),
+            Ok(text) => Record::parse(&text).map(Some).map_err(|e| format!(text!(record_path_error), path = path.display(), e = e)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(format!("{}: {e}", path.display())),
+            Err(e) => Err(format!(text!(record_path_error), path = path.display(), e = e)),
         }
     }
 

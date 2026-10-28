@@ -1,10 +1,11 @@
 //! Performs a Machine's effects: `System` is the I/O boundary (systemd,
 //! nix-env, switch-to-configuration), and `drive` the loop that feeds
 //! replies back.
-use super::core::{Action, Effect, Machine, Next, Query, Reply, Verb};
+use super::core::{Action, Effect, Machine, Next, Query, Reply, Verb, P};
 use crate::config::Config;
 use crate::proc;
 use crate::record::Record;
+use crate::text;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -34,7 +35,7 @@ pub fn drive(host: &mut System<'_>, mut m: Machine<String>) -> i32 {
                 Effect::ResetFailedRollback => host.reset_failed(),
                 Effect::Persist(r) => {
                     if let Err(e) = host.persist(&r) {
-                        host.warn(&format!("confirmed-switch: cannot record the state: {e}"));
+                        host.warn(&format!(text!(switch_cannot_record), P = P, e = e));
                         return 1;
                     }
                 }
@@ -49,10 +50,7 @@ pub fn drive(host: &mut System<'_>, mut m: Machine<String>) -> i32 {
                 Query::Lock => match host.lock() {
                     Ok(r) => Reply::Locked(r),
                     Err(e) => {
-                        host.warn(&format!(
-                            "confirmed-switch: {e}; a state file it cannot parse refuses every verb: once no switch is in flight, remove it (sudo rm {})",
-                            host.state_file().display()
-                        ));
+                        host.warn(&format!(text!(switch_unparsable_state), P = P, e = e, path = host.state_file().display()));
                         return 1;
                     }
                 },
@@ -158,10 +156,15 @@ impl System<'_> {
     /// Held until the run ends.
     fn lock(&mut self) -> Result<Option<Record<String>>, String> {
         let dir = &self.s.state_dir;
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        std::fs::create_dir_all(dir).map_err(|e| format!(text!(record_path_error), path = dir.display(), e = e))?;
         let path = dir.join("lock");
-        let f = OpenOptions::new().create(true).truncate(false).write(true).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        f.lock().map_err(|e| format!("lock {}: {e}", path.display()))?;
+        let f = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|e| format!(text!(record_path_error), path = path.display(), e = e))?;
+        f.lock().map_err(|e| format!(text!(switch_lock_error), path = path.display(), e = e))?;
         self.held = Some(f);
         Record::load(dir)
     }
@@ -230,21 +233,27 @@ impl System<'_> {
                 unseen_since = None;
                 let comm = || std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default().trim().to_owned();
                 if seen != Some(pid) {
-                    self.say(&format!("confirmed-switch: waiting for switch-to-configuration's lock, held by pid {pid} ({})", comm()));
+                    self.say(&format!(text!(switch_lock_waiting), P = P, pid = pid, comm = comm()));
                     seen = Some(pid);
                     reminded = Instant::now();
                 } else if reminded.elapsed() >= HELD_REMINDER {
-                    self.say(&format!("confirmed-switch: still waiting for pid {pid} ({}), {:.0}s", comm(), start.elapsed().as_secs_f64()));
+                    self.say(&format!(
+                        text!(switch_lock_still_waiting),
+                        P = P,
+                        pid = pid,
+                        comm = comm(),
+                        secs = start.elapsed().as_secs_f64()
+                    ));
                     reminded = Instant::now();
                 }
             } else if unseen_since.get_or_insert_with(Instant::now).elapsed() >= UNSEEN_HOLDER_WAIT {
-                self.warn("confirmed-switch: switch-to-configuration's lock is held, by no live process /proc/locks identifies; rolling back anyway");
+                self.warn(&format!(text!(switch_lock_unseen), P = P));
                 return;
             }
             std::thread::sleep(LOCK_POLL);
         }
         if seen.is_some() {
-            self.say(&format!("confirmed-switch: switch-to-configuration's lock released after {:.1}s", start.elapsed().as_secs_f64()));
+            self.say(&format!(text!(switch_lock_released), P = P, secs = start.elapsed().as_secs_f64()));
         }
     }
 
@@ -281,8 +290,7 @@ impl System<'_> {
     }
 }
 
-pub const USAGE: &str =
-    "usage: nixconvoy-confirmed-switch arm | activate <toplevel> | confirm <toplevel> [reboot-pending] | rollback | check | deadline";
+pub const USAGE: &str = text!(switch_usage);
 
 /// The `check` verb: the internet probe when configured, then the target's
 /// checks; nixconvoy reports its last stderr line.  Root, so the checks can
@@ -290,17 +298,17 @@ pub const USAGE: &str =
 fn check(s: &Settings) -> i32 {
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } != 0 {
-        proc::warn("check must run as root");
+        proc::warn(text!(switch_check_not_root));
         return 1;
     }
     let probe = ["-fsS", "--max-time", "10", "-o", "/dev/null", "https://www.google.com/generate_204"];
     if s.internet_check && proc::run(&s.curl, &probe) != 0 {
-        proc::warn("cannot reach the internet");
+        proc::warn(text!(switch_check_no_internet));
         return 1;
     }
     use std::os::unix::process::CommandExt;
     let e = std::process::Command::new(&s.checks).exec();
-    proc::warn(&format!("cannot run {}: {e}", s.checks));
+    proc::warn(&format!(text!(switch_check_cannot_run), checks = s.checks, e = e));
     1
 }
 
@@ -320,7 +328,7 @@ pub fn main(args: &[String]) -> i32 {
     let s = match Settings::load(config) {
         Ok(s) => s,
         Err(e) => {
-            proc::warn(&format!("confirmed-switch: {e}"));
+            proc::warn(&format!(text!(switch_bad_config), P = P, e = e));
             return 1;
         }
     };
