@@ -96,9 +96,24 @@ Parallel-use scenarios are especially likely to arise if you manage your NixOS f
 
 After an agent reports that it's done, review the diff of all of the code changes it has deployed for this task using `nixconvoy  review`.  If it still needs more work, prompt the agent some more.  If it's irredeemable garbage, wipe your machines clean of it with `nixconvoy undeploy  --back-to origin/main`.  Finally, when you're happy with its work, `nixconvoy land` to promote the change to your main git branch and rebase all local worktrees on top of it (which will make every other agent notice it and consider it authoritative).
 
+```console
+# After an agent reports that it's done
+$ nixconvoy review
+# If it's irredeemable garbage
+$ nixconvoy undeploy --back-to origin/main
+# When you're happy with its work
+$ nixconvoy land
+```
+
 Alternatively, `nixconvoy land` can also be used early and proactively to multitask on not-fully-independent config changes, at the price of a bit of git-main-branch tidiness.  For example, if you notice one agent's deploys are starting to fail because it ended up touching the same line of config as another agent, you can `nixconvoy land` one side early to end the deadlock.  Later on, `nixconvoy land` that same agent a second time when its work is fully complete.
 
 For people who like to work with swarms of subagents, `nixconvoy` also includes an optional Claude Code plugin that hooks subagents to spawn inside a nixconvoy-managed "child" worktree.  With it, you can fire off a sweeping prompt like "Audit all of my miniPC's systemd units for security hardening opportunities.  Then divide them into 10 nonconflicting groups and launch one subagent to harden each group."  The 10 subagents will go off and work for a while, and as long as they don't touch literally the same lines of config, they should be able to `nixconvoy deploy` their respective changes to verify they didn't break anything on the real machine before terminating.  Then, from the parent worktree, you can examine their config changes as a whole with `nixconvoy review --with-children`, and then land all of it as one single commit on your main branch with `nixconvoy land --with-children`.
+
+```console
+# From the parent worktree, once the subagents have terminated
+$ nixconvoy review --with-children
+$ nixconvoy land --with-children
+```
 
 
 # Nixconvoy basic concepts
@@ -132,8 +147,22 @@ For each git remote, nixconvoy tracks an arbitrary large number of checkouts of 
 Secondly, there are nixconvoy worktrees with associated workbranches.  Strictly speaking, worktrees and workbranches are separate concepts mapping to git worktrees and git branches respectively, but personally I prefer to keep worktrees and workbranches 1:1.  These are created using `nixconvoy open <worktree-path> [--branch <workbranch-name>]` and removed with `nixconvoy close`.  On these, you should use only `nixconvoy` commands, not raw `git` commands to write to them, and the expected workflow is deploy-before-land.
 
 There are three ways to use worktrees, depending on your preference:
-- Long-lived worktrees with a generic name.  This is how I prefer to use nixconvoy most of the time.  For my homelab, my main checkout lives in `~/projects/homelab` while I have 6 nixconvoy worktrees `~/projects/homelab1`, `~/projects/homelab2`, ... `~/projects/homelab6`.  I created them with a command like `cd ~/projects/homelab; nixconvoy open ../homelab6 --branch 6` and I never `nixconvoy close` them.  `nixconvoy land` brings all 7 checkouts up to date automatically, and then I reuse a numbered worktree at random for the next change.
-- Short-lived top-level worktrees with a task-specific name.  For example, `cd ~/projects/homelab; nixconvoy open ../homelab-jellyfin`.  Once the feature is deployed and landed, close them.  This is about as fast and easy to work with as long-lived worktrees --- the choice between them comes down to taste.
+- Long-lived worktrees with a generic name.  This is how I prefer to use nixconvoy most of the time.  For my homelab, my main checkout lives in `~/projects/homelab` while I have 6 nixconvoy worktrees `~/projects/homelab1`, `~/projects/homelab2`, ... `~/projects/homelab6`.  I created them with a command like:
+
+  ```console
+  $ cd ~/projects/homelab
+  $ nixconvoy open ../homelab6 --branch 6
+  ```
+
+  I never `nixconvoy close` them.  `nixconvoy land` brings all 7 checkouts up to date automatically, and then I reuse a numbered worktree at random for the next change.
+- Short-lived top-level worktrees with a task-specific name.  For example:
+
+  ```console
+  $ cd ~/projects/homelab
+  $ nixconvoy open ../homelab-jellyfin
+  ```
+
+  Once the feature is deployed and landed, close them.  This is about as fast and easy to work with as long-lived worktrees --- the choice between them comes down to taste.
 - Child worktrees.  Child worktrees are opened from another nixconvoy worktree either using `nixconvoy open --child` or the Claude Code subagent plugin.  Their files live in a subdirectory of their parent worktree.  This is a more advanced feature that can be useful to manage independent portions of one larger task.  All the child worktrees for a task can be undeployed, reviewed or landed as a group from the parent worktree using the `--with-children` parameter.  
 
 ## Deploying and undeploying
@@ -156,21 +185,21 @@ Guarantees:
 
 Optional flags:
 
-| Flag | Description |
+| `deploy` flag | |
 |---|---|
-| `<target>` | Restrict the deploy to only this machine.  If none is specified, all affected machines will be deployed to.  Can list more than one, separated by spaces.  (In general, I recommend not going out of your way to specify targets unless it's important for safety reasons not to deploy to certain machines.) |
-| `@<tag>` | Similar to `<target>` -- restrict the deploy to only machines with this tag. |
+| `<target>` | Restrict the deploy to only this machine.  If none is specified, all affected machines will be deployed to.  Can list more than one, separated by spaces.<br><br>(In general, I recommend not going out of your way to specify targets unless it's important for safety reasons not to deploy to certain machines.) |
+| `@<tag>` | Similar to `<target>` --- restrict the deploy to only machines with this tag. |
 | `-m <msg>` | The commit message on the workbranch for this deploy increment.  (Note that these commit messages get hidden in nixconvoy's internal branches after `nixconvoy land` so it's optional.) |
-| `--evict` | Deploy exactly what's on this branch, skipping over nixconvoy's usual union-of-workbranches step and in general aggressively forcing the target to match it even if that would violate nixconvoy's normal guarantees.  Called "evict" because it evicts all other workbranches's ongoing work from the target.  This is a recovery command in case something went wrong and nixconvoy's union mechanism or safety systems are wedged. |
+| `--evict` | Deploy exactly what's on this branch, skipping over nixconvoy's usual union-of-workbranches step and forcing the target to match it even if that would violate nixconvoy's normal guarantees.<br><br>Called "evict" because it evicts all other workbranches's ongoing work from the target.  This is a recovery command in case something went wrong and nixconvoy's union mechanism or safety systems are wedged. |
 | `--dry-activate` | Run prechecks, evaluation, and build, but don't actually switch the machines to the new NixOS generation. |
 
-`nixconvoy undeploy` is the reverse of deploy.  Run without flags, it undoes the latest deploy.  Optional flags:
+`nixconvoy undeploy` is the reverse of deploy.  Run without flags, it undoes the latest deploy.
 
-| Flag | Description |
+| `undeploy` flag | |
 |---|---|
 | `<worktree>` | the name of a specific child worktree to undeploy. |
-| `--with-children` | undeploy all child worktrees of this parent worktree.  Same effect as listing all child worktrees one by one. |
-| `--back-to <rev>` | the revision to undeploy back to.  `--back-to HEAD^1` does the same as no flags.  `--back-to origin/main` undeploys all unlanded changes in this workbranch, effectively  turning it back into a freshly opened workbranch. |
+| `--with-children` | undeploy all child worktrees of this parent worktree.<br><br>Same effect as listing all child worktrees one by one. |
+| `--back-to <rev>` | the revision to undeploy back to.<br><br>`--back-to HEAD^1` does the same as no flags.  `--back-to origin/main` undeploys all unlanded changes in this workbranch, effectively  turning it back into a freshly opened workbranch. |
 
 ## Reviewing and landing
 
@@ -182,10 +211,13 @@ Optional flags:
 `nixconvoy review` shows the diff all changes that were deployed on this workbranch since it diverged from `main`.  With a simple workbranch, this is mostly a convenience sugar roughly equivalent to `git diff origin/main`.  If you are using submodules or child worktrees, it's more valuable, as it lets you review the changes on all of them in one diff.
 
 `nixconvoy land` squashes all changes on the workbranch into one commit, lands it on `main`, and pushes it to `origin/main`.  It also rebases all other worktrees to include the commit, if possible to do without conflict.  (If there is a conflict, the other worktree will be untouched and flagged in `land`'s stdout, and the next deploy on that worktree will try again to rebase onto `main` before it does anything else.)  Flags:
-* `<worktree>`: the name of a specific child worktree to land, if you're using child worktrees.
-* `--with-children`: land all child worktrees of this parent worktree.  Same effect as listing all child worktrees one by one.
-* `-m <msg>`.  A one-liner commit message.  Will prevent the EDITOR from showing up.  Note that the EDITOR also won't come up if a `COMMIT_MSG.md` is present and the terminal is not interactive (this behavior is intended to allow agents to write up their own commit message while you approve by typing `!land`.)
-* `--not-yet-deployed`.  Override a default safety feature of nixconvoy designed to avoid unpleasant surprises --- namely, that `nixconvoy land` will refuse if not all affected targets are deployed to yet.  If you want to land anyway (e.g. because that machine is powered off at the moment and it is safe to implicitly deploy that change later), then specify this flag.
+
+| `land` flag | |
+|---|---|
+| `<worktree>` | the name of a specific child worktree to land, if you're using child worktrees. |
+| `--with-children` | land all child worktrees of this parent worktree.  Same effect as listing all child worktrees one by one. |
+| `-m <msg>` | A one-liner commit message.  Will prevent the EDITOR from showing up.  Note that the EDITOR also won't come up if a `COMMIT_MSG.md` is present and the terminal is not interactive (this behavior is intended to allow agents to write up their own commit message while you approve by typing `!land`.) |
+| `--not-yet-deployed` | Override a default safety feature of nixconvoy designed to avoid unpleasant surprises --- namely, that `nixconvoy land` will refuse if not all affected targets are deployed to yet.  If you want to land anyway (e.g. because that machine is powered off at the moment and it is safe to implicitly deploy that change later), then specify this flag. |
 
 # Installation and requirements
 
@@ -456,7 +488,9 @@ Nixconvoy includes an optional module to have smarter behavior for which NixOS g
 
 Using nixconvoy as intended can rapidly create a rather large number of NixOS generations, so if your `/boot` partition is on the smaller side, lanzaboote's default "preserve latest N generations" will preserve a bunch of near-identical generations --- not a terribly useful backup plan if the change that broke boot was deployed, say, N+5 generations ago.  So on each nixconvoy deploy, the module performs its own custom generation pruning by age and by proven bootability.
 
-# Limitations
+# Limitations and alternatives
+
+## Missing features
 
 There are some features that other NixOS deployment tools support but nixconvoy doesn't, either because I didn't get around to them yet or because they're fundamentally hard to square with nixconvoy's design goals:
 
@@ -468,8 +502,9 @@ There are some features that other NixOS deployment tools support but nixconvoy 
 
 If one of these is a hard blocker for you, consider an alternative NixOS deployment tool, such as deploy-rs or colmena.
 
+## Deploy-then-land bias
 
-Additionally, nixconvoy has a "soft" limitation in its overall design: generally speaking, it assumes that you'll deploy changes onto your fleet first, and land them onto your main branch once they're proven to work.  In other words, a "test in production & rollback if it breaks" kind of workflow.  That is how I prefer to work, at least when I'm not maintaining mission-critical infrastructure (and currently I'm not).  It's just faster, and one of nixconvoy's primary goals is to enable you to work fast.
+nixconvoy has a "soft" limitation in its overall design: generally speaking, it assumes that you'll deploy changes onto your fleet first, and land them onto your main branch once they're proven to work.  In other words, a "test in production & rollback if it breaks" kind of workflow.  That is how I prefer to work, at least when I'm not maintaining mission-critical infrastructure (and currently I'm not).  It's just faster, and one of nixconvoy's primary goals is to enable you to work fast.
 
 The reverse order (land then deploy) is certainly supported --- two ways to do it are:
 
