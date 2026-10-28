@@ -94,11 +94,10 @@ This is the property of NixOS that can make it tricky to multitask on without sw
 
 Parallel-use scenarios are especially likely to arise if you manage your NixOS fleet with coding agents.  In an agent workflow, the example might look something like this: start one coding agent per worktree in separate windows, prompt each of them with their respective task, then walk away to make some tea.  Given access to nixconvoy and instructions to use it, a decent agent will make sure to deploy their changes to your fleet and verify it actually works before declaring their work finished.
 
-After an agent reports that it's done, review the diff of all of the code changes it has deployed for this task using `nixconvoy  review`.  If it still needs more work, prompt the agent some more.  If it's irredeemable garbage, wipe your machines clean of it with `nixconvoy undeploy  --back-to origin/main`.  Finally, when you're happy with its work, `nixconvoy land` to promote the change to your main git branch and rebase all local worktrees on top of it (which will make every other agent notice it and consider it authoritative).
+After an agent reports that it's done, review the diff of all of the code changes it has deployed for this task using `nixconvoy review`.  If it still needs more work, prompt the agent some more.  If it's irredeemable garbage, wipe your machines clean of it with `nixconvoy undeploy --back-to origin/main`.  Finally, when you're happy with its work, `nixconvoy land` to promote the change to your main git branch and rebase all local worktrees on top of it (which will make every other agent notice it and consider it authoritative).
 
-Alternatively, `nixconvoy land` can also be used early and proactively to multitask on not-fully-independent config changes, at the price of a bit of git-main-branch tidiness.  For example, if you notice one agent's deploys are starting to fail because it ended up touching the same line of config as another agent, you can `nixconvoy land` one side early to end the deadlock.  Later on, `nixconvoy land` that same agent a second time when its work is fully complete.
-
-For people who like to work with swarms of subagents, `nixconvoy` also includes an optional Claude Code plugin that hooks subagents to spawn inside a nixconvoy-managed "child" worktree.  With it, you can fire off a sweeping prompt like "Audit all of my miniPC's systemd units for security hardening opportunities.  Then divide them into 10 nonconflicting groups and launch one subagent to harden each group."  The 10 subagents will go off and work for a while, and as long as they don't touch literally the same lines of config, they should be able to `nixconvoy deploy` their respective changes to verify they didn't break anything on the real machine before terminating.  Then, from the parent worktree, you can examine their config changes as a whole with `nixconvoy review --with-children`, and then land all of it as one single commit on your main branch with `nixconvoy land --with-children`.
+> [!TIP]
+> `nixconvoy land` can also be used early and proactively to multitask on not-fully-independent config changes, at the price of a bit of git-main-branch tidiness.  For example, if you notice one agent's deploys are starting to fail because it ended up touching the same line of config as another agent, you can `nixconvoy land` one side early to end the deadlock.  Later on, `nixconvoy land` that same agent a second time when its work is fully complete.
 
 
 # Nixconvoy basic concepts
@@ -310,7 +309,16 @@ claude plugin install nixconvoy@nixconvoy --scope project
 
 This will cause subagents to spawn inside a nixconvoy-managed child worktree.  It has no effect on normal top-level agents.
 
-Claude Code doesn't guarantee a stable API for plugins, so this plugin is the most likely part of nixconvoy to break over time.  It may also conflict with other Claude Code hooks or plugins if you have any installed.  So I only recommend it for people who heavily use subagents to write code (not just to research or codereview).
+With the plugin, you can fire off a sweeping prompt like:
+
+```markdown
+Audit all of my miniPC's systemd units for security hardening opportunities.  Then divide them into 10 nonconflicting groups and launch one subagent to harden each group.
+```
+
+The 10 subagents will go off and work for a while, and as long as they don't touch literally the same lines of config, they should be able to `nixconvoy deploy` their respective changes to verify they didn't break anything on the real machine before terminating.  Then, from the parent worktree, you can examine their config changes as a whole with `nixconvoy review --with-children`, and then land all of it as one single commit on your main branch with `nixconvoy land --with-children`.
+
+> [!WARNING]
+> Claude Code doesn't guarantee a stable API for plugins, so this plugin is the most likely part of nixconvoy to break over time.  It may also conflict with other Claude Code hooks or plugins if you have any installed.  So I only recommend it for people who heavily use subagents to write code (not just to research or codereview).
 
 # Configuration
 
