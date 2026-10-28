@@ -581,10 +581,13 @@ HOOK_STOP_LINE = M("{time} agent {agent} stopped: {label}: {verdict}")
 # --- submodule.py: repository and pin
 SUBMODULE_LABEL = M("submodule {name}")
 SUBMODULE_NO_DEFAULT_BRANCH = M("{repo}: origin has neither a HEAD, main nor master branch")
-SUBMODULE_PINS_STALE = M("warning: {file} does not match the tree's gitlinks: "
-                         "a deploy from a checkout on a work branch rewrites it")
-SUBMODULE_PINS_REWRITTEN = M("{file} rewritten from the tree's gitlinks")
-SUBMODULE_PINS_REMOVED = M("{file} removed: no submodule pinned")
+SUBMODULE_PIN_FILE_STALE = M("warning: {file} does not name the rev the tree pins submodule {name} on: "
+                             "a deploy from a checkout on a work branch rewrites it")
+SUBMODULE_PIN_FILE_REWRITTEN = M("submodule {name}: {file} rewritten for {rev}")
+SUBMODULE_PIN_FILE_REMOVED = M("submodule {name}: {file} removed, its gitlink gone")
+SUBMODULE_PIN_FILE_UNCLAIMED = M("warning: {file} is no configured submodule's pin file: "
+                                 "a deploy from a checkout on a work branch removes it")
+SUBMODULE_PIN_FILE_UNCLAIMED_REMOVED = M("{file} removed: no configured submodule's pin file")
 SUBMODULE_FETCH_FAILED = M("note: submodule {name}: fetching its origin failed:\n{stderr}")
 SUBMODULE_PAST_REFS_DELETE_FAILED = M("warning: submodule {name}: deleting its past refs on its origin failed:\n"
                                       "{stderr}")
@@ -608,6 +611,7 @@ SUBMODULE_UNION_DONE = M("submodule {name}: union of {ours} and {theirs} is {sha
 # --- submodule.py: rebase
 SUBMODULE_REBASE_WHY = M("{upstream} and {wb} both moved submodule {name}'s pin (a landing there), which git "
                          "cannot merge itself: {TOOL} rebases the submodule's branch onto the landed one instead, but ")
+SUBMODULE_REBASE_PIN_FILE_ALONE = M("{file} conflicts with no gitlink to rewrite it from: resolve the rebase by hand")
 SUBMODULE_REBASE_PIN_DELETED = M("one side deleted the pin: resolve the rebase by hand (`git rebase {upstream}` there)")
 SUBMODULE_REBASE_THEN_PULL = M("{problem}; then `{TOOL} pull`")
 SUBMODULE_REBASE_NO_WORKTREE = M("no worktree of it on {wb} is under {checkout} to rebase: "

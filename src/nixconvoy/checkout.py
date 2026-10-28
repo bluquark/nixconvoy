@@ -611,11 +611,13 @@ class GitQueries:
         there = f"git {rebase_hint(upstream, where)}" + (f" {self.aside_branch}" if where else "")
         hint = strings.CHECKOUT_REBASE_HINT(command=there)
         if met:  # git checkout --theirs leaves a gitlink unmerged: the stage is written outright
+            wt = Path(where or Path.cwd()).resolve()
             fixes = []
             for g in met:
                 fixes.append(f"git update-index --cacheinfo {submodule.GITLINK},$(git rev-parse :3:{g}),{g}")
-            if submodule.PINS_FILE in out(["git", "diff", "--name-only", "--diff-filter=U"], cwd=where).splitlines():
-                fixes.append(f"git checkout --theirs -- {submodule.PINS_FILE}")  # the next deploy rewrites it
+                sub = submodule.owner(wt, g)
+                if sub is not None:  # both moved its pin file too; the next deploy rewrites it
+                    fixes.append(f"git checkout --theirs -- {sub.pin_file}")
             hint += strings.CHECKOUT_REBASE_GITLINK_HINT(gitlinks=", ".join(met), fixes="\n  ".join(fixes))
         return Ran(False, strings.CHECKOUT_REBASE_FAILED(hint=hint, stderr=(p.stderr or "").strip()))
 
@@ -1387,7 +1389,7 @@ def unmerged_gitlinks(where: str | None) -> list[str]:
 def solve_stop(where: str | None, upstream: str) -> str | None:
     """A stopped rebase's conflicts solved where nixconvoy can: the text
     files both sides have (conflict markers) structurally (mergiraf), then
-    the gitlinks and the pins file by the submodule's own rebase
+    the gitlinks and pin files by the submodule's own rebase
     (submodule.solve_rebase).  None once every conflict is solved; "" for
     a file beyond both (a side's deletion, a language mergiraf lacks), a
     hand's; else why a submodule could not follow."""

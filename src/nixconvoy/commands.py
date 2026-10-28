@@ -1269,7 +1269,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
                     for f in out(["git", "diff", "--name-only", "--diff-filter=U"], cwd=wt).splitlines():
                         if f == MSG_FILE:
                             git("rm", "--quiet", "-f", f, cwd=wt, check=False)
-                        elif (submodule.solve_union(Path(wt), f) if submodule.at_path(Path(wt), f)
+                        elif (submodule.solve_union(Path(wt), f) if submodule.is_pin_path(Path(wt), f)
                               else solve_with_mergiraf(wt, f)):
                             git("add", "--", f, cwd=wt, check=False)
                         else:
