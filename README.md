@@ -5,7 +5,7 @@
 Nixconvoy is a NixOS deployment tool with a simple command-line interface.  Its distinguishing features are:
 
 * Nixconvoy tracks the history of every change ever applied to your NixOS fleet --- allowing you to easily reconstruct what happened and revert to an exact previous state.   It does this largely behind the scenes using its own git branches, so your main git branch stays tidy.
-* Nixconvoy is designed for quick, iterative experiments on live machines.  Deploying a change is quick and lightweight.  If your change breaks ssh connectivity (or any other health check of your choice), then nixconvoy automatically rolls back to the previous NixOS generation.
+* Nixconvoy is designed for quick, iterative experiments on live machines.  If your change breaks ssh connectivity (or any other health check of your choice), then nixconvoy automatically rolls back to the previous NixOS generation.
 * Nixconvoy enables multitasking.  It tracks increments of work deployed from multiple git worktrees and automatically merges them together.
 
 Overall, nixconvoy is especially well-suited to NixOS fleets managed primarily by a single person, with a rapid pace of changes.  It especially shines for vibe-coded NixOS configurations: it effectively provides each agent its own lane, allowing them to iterate side by side on the same machine, without unforced conflicts.
@@ -54,7 +54,8 @@ $ nixconvoy open ~/homelab-firewall
 $ nixconvoy open ~/homelab-jellyfin
 ```
 
-(`nixconvoy open`  creates a new work branch intended to be used exclusively by nixconvoy, then creates a new worktree that checks it out using `git worktree add`.)
+> [!NOTE]
+> `nixconvoy open` creates a new work branch intended to be used exclusively by nixconvoy, then creates a new worktree that checks it out using `git worktree add`.
 
 With this approach, you can safely work on both features at the same time:
 
@@ -86,7 +87,8 @@ $ nixconvoy close ~/homelab-firewall
 $ nixconvoy close ~/homelab-jellyfin
 ```
 
-This is just an interleaved version of the sequential flow above... but notice the second deploy I highlighted with exclamation marks.  `~/homelab-jellyfin/` doesn't have the changes in `nftables.nix`, so if this were plain `nixos-rebuild`, the first round of firewall changes would accidentally get removed from the running system!
+> [!IMPORTANT]
+> This is just an interleaved version of the sequential flow above... but notice the second deploy I highlighted with exclamation marks.  `~/homelab-jellyfin/` doesn't have the changes in `nftables.nix`, so if this were plain `nixos-rebuild`, the first round of firewall changes would accidentally get removed from the running system!
 
 This is the property of NixOS that can make it tricky to multitask on without switching to a full GitOps-style pipeline (where even the smallest change is required to be pushed to GitHub before getting deployed to a machine).  But with nixconvoy, the problem "magically" doesn't happen!  How?  nixconvoy actually *does* have a full GitOps-style pipeline in its implementation details: it merely presents itself as a simple push-based deploy tool.
 
@@ -136,7 +138,8 @@ Some rules follow from this:
 - Most nixconvoy subcommands read from `main` or `origin/main`, but the only one that writes to `main` is `nixconvoy land`.
 - In a worktree, write only via `nixconvoy` commands, never raw `git`, and generally deploy before you land.
 
-(Strictly speaking, worktrees and workbranches are separate concepts, mapping to git worktrees and git branches respectively, but I prefer to keep them 1:1.)
+> [!NOTE]
+> Strictly speaking, worktrees and workbranches are separate concepts, mapping to git worktrees and git branches respectively, but I prefer to keep them 1:1.
 
 There are three ways to use worktrees, depending on your preference:
 - **Long-lived worktrees** with a generic name.  This is how I prefer to use nixconvoy most of the time.  For my homelab, my main checkout lives in `~/projects/homelab` while I have 4 nixconvoy worktrees `~/projects/homelab1`, ...,  `~/projects/homelab4`.  I created them with a command like:
@@ -289,7 +292,8 @@ nix.settings = {
 
 Then, after any of the three methods, `cd` into your NixOS checkout (Nixconvoy refuses to run unless it's within a git checkout) and run **`nixconvoy init`**.  Then review the generated `nixconvoy.toml` and commit it to your main branch.  If all the config represents your setup correctly, then you are ready to go.
 
-### Bash PS1 helper (optional)
+<details>
+<summary><b>Bash PS1 helper (optional)</b></summary>
 
 Nixconvoy includes `nixconvoy/prompt.bash` defining `__nixconvoy_ps1`, a helper to display nixconvoy worktree status on your prompt.  Depending on install method, it is usually in `/run/current-system/sw/share/nixconvoy/prompt.bash` or .  In your `.bashrc`, write e.g.:
 
@@ -298,7 +302,10 @@ source /run/current-system/sw/share/nixconvoy/prompt.bash
 PS1='\h:$(__nixconvoy_ps1)\w\$ '  # simple example; adapt your existing PS1 instead
 ```
 
-### Claude code plugin (optional)
+</details>
+
+<details>
+<summary><b>Claude code plugin (optional)</b></summary>
 
 For the plugin to function, both `nixconvoy` and `jq` must be on the `PATH`.  Then:
 
@@ -312,13 +319,16 @@ This will cause subagents to spawn inside a nixconvoy-managed child worktree.  I
 With the plugin, you can fire off a sweeping prompt like:
 
 ```markdown
-Audit all of my miniPC's systemd units for security hardening opportunities.  Then divide them into 10 nonconflicting groups and launch one subagent to harden each group.
+Audit all of my miniPC's systemd units for security hardening opportunities.
+Then divide them into 10 nonconflicting groups and launch one subagent to harden each.
 ```
 
 The 10 subagents will go off and work for a while, and as long as they don't touch literally the same lines of config, they should be able to `nixconvoy deploy` their respective changes to verify they didn't break anything on the real machine before terminating.  Then, from the parent worktree, you can examine their config changes as a whole with `nixconvoy review --with-children`, and then land all of it as one single commit on your main branch with `nixconvoy land --with-children`.
 
 > [!WARNING]
 > Claude Code doesn't guarantee a stable API for plugins, so this plugin is the most likely part of nixconvoy to break over time.  It may also conflict with other Claude Code hooks or plugins if you have any installed.  So I only recommend it for people who heavily use subagents to write code (not just to research or codereview).
+
+</details>
 
 # Configuration
 
@@ -413,7 +423,8 @@ Repo rules:
   eval, build and switch.
 ```
 
-This text is just an initial suggestion based on what I've found nudges agents in the right direction, it is not magic sauce to make them behave perfectly.  Adjust to taste if you have different preferences, and add clarifications whenever you notice one of them got confused about something.
+> [!NOTE]
+> This text is just an initial suggestion based on what I've found nudges agents in the right direction, it is not magic sauce to make them behave perfectly.  Adjust to taste if you have different preferences, and add clarifications whenever you notice one of them got confused about something.
 
 # How it works
 
@@ -467,7 +478,9 @@ Also, there are two special cases: a change touching only documentation skips ev
 - Default message for work branch commits generated by `nixconvoy deploy`: `<checkout>: increment <n>`. Trailers: `Reaches:` (targets whose evaluation reads a changed file) and `Deployed:` (targets actually switched to the latest configuration).
 	- A target in `Reaches` but not `Deploye`d block other work branches's `deploy` from touching that machine, to avoid accidentally deploying in work that wasn't intended to affect that machine yet.
 	- It will also block `land` from running, which can be overridden by running `nixconvoy land --not-yet-deployed`
-	- If that sounded confusing, just always run `nixconvoy deploy` without going out of your way to specify which target machine to restrict the change to.  Then, `Reaches` and `Deployed` will always be the same and you won't run into this scenario.  `nixconvoy` assumes you'll only manually specify targets when you have a good reason to restrict the deploy to only those targets (e.g. you only want to deploy a risky change to a test machine, not the prod machine).
+
+> [!TIP]
+> If that sounded confusing, just always run `nixconvoy deploy` without going out of your way to specify which target machine to restrict the change to.  Then, `Reaches` and `Deployed` will always be the same and you won't run into this scenario.  `nixconvoy` assumes you'll only manually specify targets when you have a good reason to restrict the deploy to only those targets (e.g. you only want to deploy a risky change to a test machine, not the prod machine).
 
 </details>
 
