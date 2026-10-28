@@ -96,24 +96,9 @@ Parallel-use scenarios are especially likely to arise if you manage your NixOS f
 
 After an agent reports that it's done, review the diff of all of the code changes it has deployed for this task using `nixconvoy  review`.  If it still needs more work, prompt the agent some more.  If it's irredeemable garbage, wipe your machines clean of it with `nixconvoy undeploy  --back-to origin/main`.  Finally, when you're happy with its work, `nixconvoy land` to promote the change to your main git branch and rebase all local worktrees on top of it (which will make every other agent notice it and consider it authoritative).
 
-```console
-# After an agent reports that it's done
-$ nixconvoy review
-# If it's irredeemable garbage
-$ nixconvoy undeploy --back-to origin/main
-# When you're happy with its work
-$ nixconvoy land
-```
-
 Alternatively, `nixconvoy land` can also be used early and proactively to multitask on not-fully-independent config changes, at the price of a bit of git-main-branch tidiness.  For example, if you notice one agent's deploys are starting to fail because it ended up touching the same line of config as another agent, you can `nixconvoy land` one side early to end the deadlock.  Later on, `nixconvoy land` that same agent a second time when its work is fully complete.
 
 For people who like to work with swarms of subagents, `nixconvoy` also includes an optional Claude Code plugin that hooks subagents to spawn inside a nixconvoy-managed "child" worktree.  With it, you can fire off a sweeping prompt like "Audit all of my miniPC's systemd units for security hardening opportunities.  Then divide them into 10 nonconflicting groups and launch one subagent to harden each group."  The 10 subagents will go off and work for a while, and as long as they don't touch literally the same lines of config, they should be able to `nixconvoy deploy` their respective changes to verify they didn't break anything on the real machine before terminating.  Then, from the parent worktree, you can examine their config changes as a whole with `nixconvoy review --with-children`, and then land all of it as one single commit on your main branch with `nixconvoy land --with-children`.
-
-```console
-# From the parent worktree, once the subagents have terminated
-$ nixconvoy review --with-children
-$ nixconvoy land --with-children
-```
 
 
 # Nixconvoy basic concepts
@@ -147,7 +132,7 @@ For each git remote, nixconvoy tracks an arbitrary large number of checkouts of 
 Secondly, there are nixconvoy worktrees with associated workbranches.  Strictly speaking, worktrees and workbranches are separate concepts mapping to git worktrees and git branches respectively, but personally I prefer to keep worktrees and workbranches 1:1.  These are created using `nixconvoy open <worktree-path> [--branch <workbranch-name>]` and removed with `nixconvoy close`.  On these, you should use only `nixconvoy` commands, not raw `git` commands to write to them, and the expected workflow is deploy-before-land.
 
 There are three ways to use worktrees, depending on your preference:
-- Long-lived worktrees with a generic name.  This is how I prefer to use nixconvoy most of the time.  For my homelab, my main checkout lives in `~/projects/homelab` while I have 6 nixconvoy worktrees `~/projects/homelab1`, `~/projects/homelab2`, ... `~/projects/homelab6`.  I created them with a command like:
+- **Long-lived worktrees with a generic name.**  This is how I prefer to use nixconvoy most of the time.  For my homelab, my main checkout lives in `~/projects/homelab` while I have 6 nixconvoy worktrees `~/projects/homelab1`, `~/projects/homelab2`, ... `~/projects/homelab6`.  I created them with a command like:
 
   ```console
   $ cd ~/projects/homelab
@@ -155,7 +140,7 @@ There are three ways to use worktrees, depending on your preference:
   ```
 
   I never `nixconvoy close` them.  `nixconvoy land` brings all 7 checkouts up to date automatically, and then I reuse a numbered worktree at random for the next change.
-- Short-lived top-level worktrees with a task-specific name.  For example:
+- **Short-lived top-level worktrees with a task-specific name.**  For example:
 
   ```console
   $ cd ~/projects/homelab
@@ -163,7 +148,7 @@ There are three ways to use worktrees, depending on your preference:
   ```
 
   Once the feature is deployed and landed, close them.  This is about as fast and easy to work with as long-lived worktrees --- the choice between them comes down to taste.
-- Child worktrees.  Child worktrees are opened from another nixconvoy worktree either using `nixconvoy open --child` or the Claude Code subagent plugin.  Their files live in a subdirectory of their parent worktree.  This is a more advanced feature that can be useful to manage independent portions of one larger task.  All the child worktrees for a task can be undeployed, reviewed or landed as a group from the parent worktree using the `--with-children` parameter.  
+- **Child worktrees.**  Child worktrees are opened from another nixconvoy worktree either using `nixconvoy open --child` or the Claude Code subagent plugin.  Their files live in a subdirectory of their parent worktree.  This is a more advanced feature that can be useful to manage independent portions of one larger task.  All the child worktrees for a task can be undeployed, reviewed or landed as a group from the parent worktree using the `--with-children` parameter.  
 
 ## Deploying and undeploying
 
@@ -176,14 +161,14 @@ These are the fundamental actions to apply changes to your running fleet.
 
 You run `deploy` after staging a change in a workbranch.  `nixconvoy deploy` both commits it to the workbranch and applies it to your machines.
 
-Guarantees:
+**Guarantees:**
 - What gets applied is not just what is in your current branch, but the union of everything that's been previously deployed from every ongoing workbranch.
   - Deploy will abort if there's a merge conflict between two workbranches.  Because nixconvoy uses `mergiraf` to merge, this will only happen for true conflicts, not just changes on adjacent lines.
 - Deploys happens in three main phases: lint precheck+Nix evals (in parallel), build+test, switch+activate.
   - The evaluation phase is optimized to only run on targets touched by config files they actually include, using an "eval memo" feature.  (Configs organized into smaller files where target machines only read the config files for the features they need will especially benefit.)
   - The switch+activate phase includes several safety features, including automatic rollback on connectivity loss.
 
-Optional flags:
+**Optional flags:**
 
 | `deploy` flag | |
 |---|---|
@@ -198,8 +183,8 @@ Optional flags:
 | `undeploy` flag | |
 |---|---|
 | `<worktree>` | the name of a specific child worktree to undeploy. |
-| `--with-children` | undeploy all child worktrees of this parent worktree.<br><br>Same effect as listing all child worktrees one by one. |
-| `--back-to <rev>` | the revision to undeploy back to.<br><br>`--back-to HEAD^1` does the same as no flags.  `--back-to origin/main` undeploys all unlanded changes in this workbranch, effectively  turning it back into a freshly opened workbranch. |
+| `--with-children` | undeploy all child worktrees of this parent worktree.  Same effect as listing all child worktrees one by one. |
+| `--back-to <rev>` | the revision to undeploy back to.  `--back-to HEAD^1` does the same as no flags.  `--back-to origin/main` undeploys all unlanded changes in this workbranch, effectively  turning it back into a freshly opened workbranch. |
 
 ## Reviewing and landing
 
@@ -225,7 +210,7 @@ Optional flags:
 
 Conceptually, nixconvoy involves a fleet of several machines: a runner, a builder, and at least one target.  However, all 3 can be one and the same physical machine if you simply have a NixOS workstation deploying changes to itself.
 
-Basic requirements by machine type:
+**Basic requirements by machine type:**
 
 - Runner (runs the `nixconvoy` process):
 	- Linux, WSL, or macOS.
@@ -245,16 +230,21 @@ Basic requirements by machine type:
 
 There are three ways to get started with nixconvoy.  Do any one of the following on your runner machine:
 
-### 1. Quick no-config use
+<details>
+<summary><b>1. Quick no-config use</b></summary>
 
 ```bash
 nix profile install github:bluquark/nixconvoy
 alias nixconvoy='nix run github:bluquark/nixconvoy -- '
 ```
-### 2. Pinned flake
+
+</details>
+
+<details>
+<summary><b>2. Pinned flake</b></summary>
 
 1. At the top level of your flake:
-   ```
+   ```nix
    nixConfig = {
      extra-substituters = [ "https://nixconvoy.cachix.org" ];
      extra-trusted-public-keys = [ "nixconvoy.cachix.org-1:8HCQ3qVkg+lUbouy8s7aWzWoDoGDrm0lkg07VvD8RwQ=" ];
@@ -262,27 +252,33 @@ alias nixconvoy='nix run github:bluquark/nixconvoy -- '
    inputs.nixconvoy.url = "github:bluquark/nixconvoy";
    inputs.nixconvoy.inputs.nixpkgs.follows = "nixpkgs";
    ```
-2. ```
-   # in outputs:
+2. In outputs:
+   ```nix
    packages.x86_64-linux.nixconvoy = nixconvoy.packages.x86_64-linux.nixconvoy;
    ```
 3. Add this small wrapper script called `nixconvoy` somewhere on your PATH:
-   ```
+   ```sh
    #!/bin/sh
    exec nix run "$(git rev-parse --show-toplevel)/nixos#nixconvoy" -- "$@"
    ```
 
-### 3. NixOS system package
-1. ```
-   nix.settings = {
-     substituters = [ "https://nixconvoy.cachix.org" ];
-     trusted-public-keys = [ "nixconvoy.cachix.org-1:8HCQ3qVkg+lUbouy8s7aWzWoDoGDrm0lkg07VvD8RwQ=" ];
-   };
-   { nixconvoy, pkgs, ... }: {
-     environment.systemPackages = [ nixconvoy.packages.${pkgs.stdenv.hostPlatform.system}.nixconvoy ];
-     environment.pathsToLink = [ "/share/nixconvoy" ];
-   }
-   ```
+</details>
+
+<details>
+<summary><b>3. NixOS system package</b></summary>
+
+```nix
+nix.settings = {
+  substituters = [ "https://nixconvoy.cachix.org" ];
+  trusted-public-keys = [ "nixconvoy.cachix.org-1:8HCQ3qVkg+lUbouy8s7aWzWoDoGDrm0lkg07VvD8RwQ=" ];
+};
+{ nixconvoy, pkgs, ... }: {
+  environment.systemPackages = [ nixconvoy.packages.${pkgs.stdenv.hostPlatform.system}.nixconvoy ];
+  environment.pathsToLink = [ "/share/nixconvoy" ];
+}
+```
+
+</details>
 
 Then, after any of the three methods, `cd` into your NixOS checkout (Nixconvoy refuses to run unless it's within a git checkout) and run **`nixconvoy init`**.  Then review the generated `nixconvoy.toml` and commit it to your main branch.  If all the config represents your setup correctly, then you are ready to go.
 
@@ -431,17 +427,17 @@ In general, every configuration a machine has ever run is a commit that gets pus
 
 ### Git-managed state
 
-Branches:
+**Branches:**
 - **`main`.**  Contains landed commits only.  Written by `nixconvoy land` (or by hand using a normal `git commit`, usually from the primary checkout).
 - **Work branches `nixconvoy/<branch>`.** One per checkout, conceptually "owned" by the checkout that has it checked out.  One commit per successful deploy.  Reset onto main by `land` and `undeploy`.  Nixconvoy expects that you'll never commit or force-push to one of these using raw `git` --- always use `nixconvoy`'s subcommands to interact with one of these branches, or nixconvoy may get confused later.
 - **Child branches `<parent branch>-<name>`** (`nixconvoy/<host>/main-<name>` under a main checkout).  This optional feature of nixconvoy comes into play if you use `nixconvoy open --child` or if you have the Claude Code nixconvoy plugin installed and kick off work inside a subagent.  Created on the child worktree’s first deploy, can be interacted `--with-children`.
 - **`nixconvoy-history/<target>`.** Each machine’s full deploy history, updated on every deploy which affected that target.  Each record is a commit of the exact configuration the target runs, whose parents are the previous record, origin/main, and each mergiraf'ed work branch’s tip.  It also described what was merged to produce it and who deployed it.  With this, you can examine the history of everything nixconvoy has ever applied to your machines: for example, using `git log --first-parent origin/nixconvoy-history/<target>` and `git diff origin/nixconvoy-history/<a> origin/nixconvoy-history/<b>`.
 
-Refs:
+**Refs:**
 - **`refs/nixconvoy/deploying/branch/<branch>`.** An "announcement" mechanism registering the fact that a nixconvoy deploy is in progress, renewed every 10s.  This is used to inform other invocations of nixconvoy that they should wait instead of running in parallel.
 	- Normally, this is removed after a deploy completes, but I can't rule out the possibility (e.g. due to a power outage or a bug in nixconvoy) that one of these may accidentally persist and block all deploys indefinitely.  In that case, the failure message will suggest to you a `git push` command to clear it by hand.
 
-Commit message convention:
+**Commit message convention:**
 - Default message for work branch commits generated by `nixconvoy deploy`: `<checkout>: increment <n>`. Trailers: `Reaches:` (targets whose evaluation reads a changed file) and `Deployed:` (targets actually switched to the latest configuration).
 	- A target in `Reaches` but not `Deploye`d block other work branches's `deploy` from touching that machine, to avoid accidentally deploying in work that wasn't intended to affect that machine yet.
 	- It will also block `land` from running, which can be overridden by running `nixconvoy land --not-yet-deployed`
@@ -449,7 +445,7 @@ Commit message convention:
 
 ### Filesystem state (ordinary files)
 
-Files in your git checkout:
+**Files in your git checkout:**
 - **`nixconvoy.toml`.**  Nixconvoy's main user-editable config file.  The usual workflow is to create this with `nixconvoy init` on first install, then manually edit it as needed thereafter.  (This is intended to be committed into git main branch.)
 - **`COMMIT_MSG.md.`** This optional file stores the draft of the `nixconvoy land` commit message for the current task.  Since the recommended AGENTS.md clause discourages agents from calling `nixconvoy land` themselves, this provides them a place to prewrite the final commit message that will go onto the main branch.   (This file is intended to only be committed to workbranches.  Nixconvoy never commits this file to the main branch, and also specially excludes it from the mergiraf, so it cannot cause a deploy to fail with a merge conflict.)
 
@@ -460,7 +456,7 @@ Local state elsewhere on the machine running nixconvoy:
 - ``<main-checkout>/.git/worktrees/<name>/nixconvoy/``. A deploy lock & background push state file.
 - **`<main-checkout>/.git/nixconvoy/`**.  Worktree open/close locks, a copy of the branch prefix --- as well as the main checkout's deploy lock & background push state file.
 
-Local state on the target NixOS machines:
+**Local state on the target NixOS machines:**
 - `/var/lib/nixconvoy/provenance.json`: a record of the mergiraf union, each branch tip, which machine and checkout deployed it, and when.  (Used for safety checks at the switch stage of `nixconvoy deploy`.  Unless something went wrong, this file entirely duplicative of state tracked in git.)
 
 ## Codebase
