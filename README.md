@@ -254,7 +254,8 @@ Some rules follow from this:
 - Most nixconvoy subcommands read from `main` or `origin/main`, but the only one that writes to `main` is `nixconvoy land`.
 - In a worktree, write only via `nixconvoy` commands, never raw `git`, and generally deploy before you land.
 
-(Strictly speaking, worktrees and workbranches are separate concepts, mapping to git worktrees and git branches respectively, but I prefer to keep them 1:1.)
+> [!NOTE]
+> Strictly speaking, worktrees and workbranches are separate concepts, corresponding to git worktrees and git branches respectively.  Some nixconvoy subcommands operate on git worktrees, some on git branches, and some both at the same time.  But in the nixconvoy mental model, these are mostly 1:1.   `nixconvoy open` creates both a worktree and its dedicated branch, `nixconvoy close` removes both, and the other subcommands generally assume each worktree hasn't been switched away from the branch that nixconvoy created for it.
 
 There are three ways to use worktrees, depending on your preference:
 - **Long-lived worktrees** with a generic name.  This is how I prefer to use nixconvoy most of the time.  For my homelab, my main checkout lives in `~/projects/homelab` while I have 4 nixconvoy worktrees `~/projects/homelab1`, ...,  `~/projects/homelab4`.  I created them with a command like:
