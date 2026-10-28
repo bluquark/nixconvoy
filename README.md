@@ -148,24 +148,46 @@ These are the fundamental actions to apply changes to your running fleet.
 You run `deploy` after staging a change in a workbranch.  `nixconvoy deploy` both commits it to the workbranch and applies it to your machines.
 
 Guarantees:
-* What gets applied is not just what is in your current branch, but the union of everything that's been previously deployed from every ongoing workbranch.
-	* Deploy will abort if there's a merge conflict between two workbranches.  Because nixconvoy uses `mergiraf` to merge, this will only happen for true conflicts, not just changes on adjacent lines.
-* Deploys happens in three main phases: lint precheck+Nix evals (in parallel), build+test, switch+activate.
-	* The evaluation phase is optimized to only run on targets touched by config files they actually include, using an "eval memo" feature.  (Configs organized into smaller files where target machines only read the config files for the features they need will especially benefit.)
-	* The switch+activate phase includes several safety features, including automatic rollback on connectivity loss.
+- What gets applied is not just what is in your current branch, but the union of everything that's been previously deployed from every ongoing workbranch.
+  - Deploy will abort if there's a merge conflict between two workbranches.  Because nixconvoy uses `mergiraf` to merge, this will only happen for true conflicts, not just changes on adjacent lines.
+- Deploys happens in three main phases: lint precheck+Nix evals (in parallel), build+test, switch+activate.
+  - The evaluation phase is optimized to only run on targets touched by config files they actually include, using an "eval memo" feature.  (Configs organized into smaller files where target machines only read the config files for the features they need will especially benefit.)
+  - The switch+activate phase includes several safety features, including automatic rollback on connectivity loss.
 
 Optional flags:
-- `<target>`.  Restrict the deploy to only this machine.  If none is specified, all affected machines will be deployed to.  Can list more than one, separated by spaces.  (In general, I recommend not going out of your way to specify targets unless it's important for safety reasons not to deploy to certain machines.)
-- `@<tag>`.  Similar to `<target>` -- restrict the deploy to only machines with this tag.
-- `-m <msg>`.  The commit message on the workbranch for this deploy increment.  (Note that these commit messages get hidden in nixconvoy's internal branches after `nixconvoy land` so it's optional.)
-- `--evict`.  Deploy exactly what's on this branch, skipping over nixconvoy's usual union-of-workbranches step and in general aggressively forcing the target to match it even if that would violate nixconvoy's normal guarantees.  Called "evict" because it evicts all other workbranches's ongoing work from the target.  This is a recovery command in case something went wrong and nixconvoy's union mechanism or safety systems are wedged.
-- `--dry-activate`.  Run prechecks, evaluation, and build, but don't actually switch the machines to the new NixOS generation.
+- `<target>`
+
+  Restrict the deploy to only this machine.  If none is specified, all affected machines will be deployed to.  Can list more than one, separated by spaces.  (In general, I recommend not going out of your way to specify targets unless it's important for safety reasons not to deploy to certain machines.)
+
+- `@<tag>`
+
+  Similar to `<target>` -- restrict the deploy to only machines with this tag.
+
+- `-m <msg>`
+
+  The commit message on the workbranch for this deploy increment.  (Note that these commit messages get hidden in nixconvoy's internal branches after `nixconvoy land` so it's optional.)
+
+- `--evict`
+
+  Deploy exactly what's on this branch, skipping over nixconvoy's usual union-of-workbranches step and in general aggressively forcing the target to match it even if that would violate nixconvoy's normal guarantees.  Called "evict" because it evicts all other workbranches's ongoing work from the target.  This is a recovery command in case something went wrong and nixconvoy's union mechanism or safety systems are wedged.
+
+- `--dry-activate`
+
+  Run prechecks, evaluation, and build, but don't actually switch the machines to the new NixOS generation.
 
 `nixconvoy undeploy` is the reverse of deploy.  Run without flags, it undoes the latest deploy.  Optional flags:
 
-* `<worktree>`: the name of a specific child worktree to undeploy.
-* `--with-children`: undeploy all child worktrees of this parent worktree.  Same effect as listing all child worktrees one by one.
-* `--back-to <rev>`: the revision to undeploy back to.  `--back-to HEAD^1` does the same as no flags.  `--back-to origin/main` undeploys all unlanded changes in this workbranch, effectively  turning it back into a freshly opened workbranch.
+- `<worktree>`
+
+  the name of a specific child worktree to undeploy.
+
+- `--with-children`
+
+  undeploy all child worktrees of this parent worktree.  Same effect as listing all child worktrees one by one.
+
+- `--back-to <rev>`
+
+  the revision to undeploy back to.  `--back-to HEAD^1` does the same as no flags.  `--back-to origin/main` undeploys all unlanded changes in this workbranch, effectively  turning it back into a freshly opened workbranch.
 
 ## Reviewing and landing
 
@@ -214,7 +236,7 @@ There are three ways to get started with nixconvoy.  Do any one of the following
 nix profile install github:bluquark/nixconvoy
 alias nixconvoy='nix run github:bluquark/nixconvoy -- '
 ```
-### 2. Pinned flake:
+### 2. Pinned flake
 
 1. At the top level of your flake:
    ```
@@ -235,7 +257,7 @@ alias nixconvoy='nix run github:bluquark/nixconvoy -- '
    exec nix run "$(git rev-parse --show-toplevel)/nixos#nixconvoy" -- "$@"
    ```
 
-### 3. NixOS system package:
+### 3. NixOS system package
 1. ```
    nix.settings = {
      substituters = [ "https://nixconvoy.cachix.org" ];
@@ -339,16 +361,29 @@ pin_file = "nixos/submodules/home-widget.json"
 Add some text such as the following into the `AGENTS.md` file in your repo root:
 
 ```markdown
-In this repo, `nixconvoy` (github.com/bluquark/nixconvoy) is the
-only sanctioned way to invoke nixos-rebuild switch and git commit.  It is possible there are other agents that are deploying their changes in parallel in other worktrees on this machine (you can survey what they're doing with `nixconvoy status`).  Nixconvoy will make sure all not-yet landed changes deployed from each worktree are automatically merged together into a union commit by mergiraf before getting applied to target machines, and also that changes landed to origin/main are automatically rebased on your checkout (can also be done manually using `nixconvoy pull`).
+In this repo, `nixconvoy` (github.com/bluquark/nixconvoy) is the only sanctioned way to invoke
+nixos-rebuild switch and git commit.  It is possible there are other agents that are deploying their
+changes in parallel in other worktrees on this machine (you can survey what they're doing with
+`nixconvoy status`).  Nixconvoy will make sure all not-yet landed changes deployed from each
+worktree are automatically merged together into a union commit by mergiraf before getting applied to
+target machines, and also that changes landed to origin/main are automatically rebased on your
+checkout (can also be done manually using `nixconvoy pull`).
 
 Repo rules:
-- Go ahead and deploy (`nixconvoy deploy -m "what this increment changed"`) as soon
-as a change that affects a NixOS target is staged.
-- Never run git commit yourself: stage your changes and let `nixconvoy deploy` commit them onto this checkout's work branch.
-- Maintain a staged file called COMMIT_MSG.md at the repo root: a concise summary of this checkout's work since it started to diverge from `origin/main`.  It will be consumed by `nixconvoy land`.  The format is a max 100 character subject line: and if that work spans multiple unrelated tasks, a max 100 character bullet point per subtask.
-- Do not run `nixconvoy land` yourself without explicit authorization.  Instead, when your change is finalized, ask the user to review the sum of all deployed increments using `nixconvoy review` and decide whether to land them onto the main branch using `nixconvoy land`.
-- Increasing NixOS deploy time by 1s or more is not acceptable without a good reason.  If your change carries a risk of this, examine `.cache/nixconvoy/logs/perf.jsonl` to verify impact on eval, build and switch.
+- Go ahead and deploy (`nixconvoy deploy -m "what this increment changed"`) as soon as a change that
+  affects a NixOS target is staged.
+- Never run git commit yourself: stage your changes and let `nixconvoy deploy` commit them onto this
+  checkout's work branch.
+- Maintain a staged file called COMMIT_MSG.md at the repo root: a concise summary of this checkout's
+  work since it started to diverge from `origin/main`.  It will be consumed by `nixconvoy land`.
+  The format is a max 100 character subject line: and if that work spans multiple unrelated tasks, a
+  max 100 character bullet point per subtask.
+- Do not run `nixconvoy land` yourself without explicit authorization.  Instead, when your change is
+  finalized, ask the user to review the sum of all deployed increments using `nixconvoy review` and
+  decide whether to land them onto the main branch using `nixconvoy land`.
+- Increasing NixOS deploy time by 1s or more is not acceptable without a good reason.  If your
+  change carries a risk of this, examine `.cache/nixconvoy/logs/perf.jsonl` to verify impact on
+  eval, build and switch.
 ```
 
 This text is just an initial suggestion based on what I've found nudges agents in the right direction, it is not magic sauce to make them behave perfectly.  Adjust to taste if you have different preferences, and add clarifications whenever you notice one of them got confused about something.
@@ -454,8 +489,9 @@ If one of these is a hard blocker for you, consider an alternative NixOS deploym
 Additionally, nixconvoy has a "soft" limitation in its overall design: generally speaking, it assumes that you'll deploy changes onto your fleet first, and land them onto your main branch once they're proven to work.  In other words, a "test in production & rollback if it breaks" kind of workflow.  That is how I prefer to work, at least when I'm not maintaining mission-critical infrastructure (and currently I'm not).  It's just faster, and one of nixconvoy's primary goals is to enable you to work fast.
 
 The reverse order (land then deploy) is certainly supported --- two ways to do it are:
-	* committing using plain `git commit` on the `main` branch followed by `nixconvoy deploy`
-	* running e.g. `nixconvoy deploy @test-vms` first, followed by `nixconvoy land --not-yet-deployed`, followed by `nixconvoy deploy`
+
+* committing using plain `git commit` on the `main` branch followed by `nixconvoy deploy`
+* running e.g. `nixconvoy deploy @test-vms` first, followed by `nixconvoy land --not-yet-deployed`, followed by `nixconvoy deploy`
 
 As the `@test-vms` example gestures at, one reason you might want to "land before deploying" is if you want to test a change in an experimental environment before it makes it to any production machine.  Another reason is if you have teammates that are required to code-review your change.
 
