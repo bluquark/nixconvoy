@@ -6,7 +6,7 @@ Nixconvoy is a NixOS deployment tool with a simple command-line interface.  Its 
 
 * Nixconvoy tracks the history of every change ever deployed to your NixOS fleet --- allowing you to easily reconstruct what happened and revert to an exact previous state.   It does this largely behind the scenes using its own git branches, so your main git branch stays tidy.
 * Nixconvoy is designed for quick, iterative experiments on live machines.  If your change breaks ssh connectivity (or any other health check of your choice), then nixconvoy automatically rolls back to the previous NixOS generation.
-* Nixconvoy enables multitasking.  It deploys the merge of every worktree’s work-in-progress, so one half-finished change never undoes another.
+* Nixconvoy enables multitasking.  It deploys the merge of every worktree’s work-in-progress, so one half-finished change never undoes another.  It also has been tested to work correctly when two or more nixconvoy instances are running simultaneously on the same machines.
 
 Overall, nixconvoy is well-suited to NixOS fleets managed primarily by a single person, with a rapid pace of changes.  It especially shines for vibe-coded NixOS configurations: it effectively provides each agent its own lane, allowing them to iterate side by side on the same machine, without unforced conflicts.
 
@@ -294,6 +294,7 @@ You run `deploy` after staging a change in a workbranch.  `nixconvoy deploy` bot
 - **Nix configuration changes are simultaneously deployed to all target machines that they affect.**
   - Unless you provide an explicit `<target>`/`@<tag>` parameter, which restrict the set of targets considered.
   - To reduce the performance cost of this guarantee, eval only reruns for targets whose included config files changed, via a nixconvoy feature called the "eval memo". (You may need to split your Nix config into per-feature files to benefit from the eval memo.)
+- **A deploy running at the same time as another `deploy` (or `land`) will serialize correctly.** In most cases, deploys will queue after one another; in some cases, nixconvoy will abort one side and ask you to retry.  Either way, your git repo and NixOS fleet will remain in a consistent state throughout.
 - **A broken NixOS generation automatically rolls itself back.** If a target loses connectivity or fails its health check after switching, it rolls back automatically.
 
 **Optional flags:**
@@ -303,7 +304,7 @@ You run `deploy` after staging a change in a workbranch.  `nixconvoy deploy` bot
 | `<target>` | Restrict the deploy to only this machine.  If none is specified, all affected machines will be deployed to.  Can list more than one, separated by spaces.<br><br>(In general, I recommend not going out of your way to specify targets unless it's important for safety reasons not to deploy to certain machines.) |
 | `@<tag>` | Similar to `<target>` --- restrict the deploy to only machines with this tag. |
 | `-m <msg>` | The commit message on the workbranch for this deploy increment.  (Note that these commit messages get hidden in nixconvoy's internal branches after `nixconvoy land` so it's optional.) |
-| `--evict` | Deploy exactly what's on this branch, skipping over nixconvoy's usual union-of-workbranches step and forcing the target to match it even if that would violate nixconvoy's normal guarantees.<br><br>Called "evict" because it evicts all other workbranches's ongoing work from the target.  This is a recovery command in case something went wrong and nixconvoy's union mechanism or safety systems are wedged. |
+| `--evict` | Deploy exactly what's on this branch, skipping over nixconvoy's usual union-of-workbranches step and forcing the target to match it even if that would violate nixconvoy's normal guarantees.<br><br>Called "evict" because it evicts all other workbranches's ongoing work from the target.  This is a recovery command in case something went wrong and nixconvoy's union mechanism or safety systems are wedged.  |
 | `--dry-activate` | Run prechecks, evaluation, and build, but don't actually switch the machines to the new NixOS generation. |
 
 `nixconvoy undeploy` is the reverse of deploy.  Run without flags, it undoes the latest deploy.
