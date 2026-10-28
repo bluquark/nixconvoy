@@ -6,9 +6,122 @@ Nixconvoy is a NixOS deployment tool with a simple command-line interface.  Its 
 
 * Nixconvoy tracks the history of every change ever applied to your NixOS fleet --- allowing you to easily reconstruct what happened and revert to an exact previous state.   It does this largely behind the scenes using its own git branches, so your main git branch stays tidy.
 * Nixconvoy is designed for quick, iterative experiments on live machines.  If your change breaks ssh connectivity (or any other health check of your choice), then nixconvoy automatically rolls back to the previous NixOS generation.
-* Nixconvoy enables multitasking.  It tracks increments of work deployed from multiple git worktrees and automatically merges them together.
+* Nixconvoy enables multitasking.  It deploys the merge of every worktree’s work-in-progress, so one half-finished change never undoes another.
 
-Overall, nixconvoy is especially well-suited to NixOS fleets managed primarily by a single person, with a rapid pace of changes.  It especially shines for vibe-coded NixOS configurations: it effectively provides each agent its own lane, allowing them to iterate side by side on the same machine, without unforced conflicts.
+Overall, nixconvoy is well-suited to NixOS fleets managed primarily by a single person, with a rapid pace of changes.  It especially shines for vibe-coded NixOS configurations: it effectively provides each agent its own lane, allowing them to iterate side by side on the same machine, without unforced conflicts.
+
+# Requirements
+
+- Control machine (runs the `nixconvoy` process):
+	- Linux, WSL, or macOS.
+	- Must have Nix with flakes enabled, git 2.35+ and OpenSSH.
+	- Contains a git repository containing your NixOS configuration:
+		- Flake-based.
+		- Must be synced to a git remote such as GitHub.
+- Build machine (runs heavy compilation workload):
+	- Linux or WSL.
+	- Must accept public-key ssh connections from control machine (passwordless).
+- Target machines:
+	- NixOS only.
+	- Must have the same CPU architecture as the builder.
+	- Must accept public-key ssh from control and build machines, with passwordless sudo
+
+> [!NOTE]
+> You only need one physical machine to use nixconvoy!  Control, build and target can be one and the same.  Nixconvoy will simply use ssh over loopback.
+
+# Installation
+
+There are three ways to get started with nixconvoy.  Do any one of the following on your control machine:
+
+<details>
+<summary><b>1. Quick no-config use</b></summary>
+
+```bash
+nix profile install github:bluquark/nixconvoy
+alias nixconvoy='nix run github:bluquark/nixconvoy -- '
+```
+
+</details>
+
+<details>
+<summary><b>2. Pinned flake</b></summary>
+
+1. At the top level of your flake:
+   ```nix
+   nixConfig = {
+     extra-substituters = [ "https://nixconvoy.cachix.org" ];
+     extra-trusted-public-keys = [ "nixconvoy.cachix.org-1:8HCQ3qVkg+lUbouy8s7aWzWoDoGDrm0lkg07VvD8RwQ=" ];
+   };
+   inputs.nixconvoy.url = "github:bluquark/nixconvoy";
+   inputs.nixconvoy.inputs.nixpkgs.follows = "nixpkgs";
+   ```
+2. In outputs:
+   ```nix
+   packages.x86_64-linux.nixconvoy = nixconvoy.packages.x86_64-linux.nixconvoy;
+   ```
+3. Add this small wrapper script called `nixconvoy` somewhere on your PATH:
+   ```sh
+   #!/bin/sh
+   exec nix run "$(git rev-parse --show-toplevel)/nixos#nixconvoy" -- "$@"
+   ```
+
+</details>
+
+<details>
+<summary><b>3. NixOS system package</b></summary>
+
+```nix
+nix.settings = {
+  substituters = [ "https://nixconvoy.cachix.org" ];
+  trusted-public-keys = [ "nixconvoy.cachix.org-1:8HCQ3qVkg+lUbouy8s7aWzWoDoGDrm0lkg07VvD8RwQ=" ];
+};
+{ nixconvoy, pkgs, ... }: {
+  environment.systemPackages = [ nixconvoy.packages.${pkgs.stdenv.hostPlatform.system}.nixconvoy ];
+  environment.pathsToLink = [ "/share/nixconvoy" ];
+}
+```
+
+</details>
+
+Then, after any of the three methods, `cd` into your NixOS checkout (Nixconvoy refuses to run unless it's within a git checkout) and run **`nixconvoy init`**.  Then review the generated `nixconvoy.toml` and commit it to your main branch.  If all the config represents your setup correctly, then you are ready to go.
+
+<details>
+<summary><b>Bash PS1 helper (optional)</b></summary>
+<br>
+Nixconvoy includes `nixconvoy/prompt.bash` defining `__nixconvoy_ps1`, a helper to display nixconvoy worktree status on your prompt.  Depending on install method, it is usually in `/run/current-system/sw/share/nixconvoy/prompt.bash` or .  In your `.bashrc`, write e.g.:
+
+```bash
+source /run/current-system/sw/share/nixconvoy/prompt.bash
+PS1='\h:$(__nixconvoy_ps1)\w\$ '  # simple example; adapt your existing PS1 instead
+```
+
+</details>
+
+<details>
+<summary><b>Claude code plugin (optional)</b></summary>
+<br>
+For the plugin to function, both `nixconvoy` and `jq` must be on the `PATH`.  Then:
+
+```bash
+claude plugin marketplace add bluquark/nixconvoy
+claude plugin install nixconvoy@nixconvoy --scope project
+```
+
+This will cause subagents to spawn inside a nixconvoy-managed child worktree.  It has no effect on normal top-level agents.
+
+With the plugin, you can fire off a sweeping prompt like:
+
+```markdown
+Audit all of my miniPC's systemd units for security hardening opportunities.
+Then divide them into 10 nonconflicting groups and launch one subagent to harden each.
+```
+
+The 10 subagents will go off and work for a while, and as long as they don't touch literally the same lines of config, they should be able to `nixconvoy deploy` their respective changes to verify they didn't break anything on the real machine before terminating.  Then, from the parent worktree, you can examine their config changes as a whole with `nixconvoy review --with-children`, and then land all of it as one single commit on your main branch with `nixconvoy land --with-children`.
+
+> **Warning:** Claude Code doesn't guarantee a stable API for plugins, so this plugin is the most likely part of nixconvoy to break over time.  It may also conflict with other Claude Code hooks or plugins if you have any installed.  So I only recommend it for people who heavily use subagents to write code (not just to research or codereview).
+
+</details>
+
 
 # Tutorial
 
@@ -104,7 +217,7 @@ After an agent reports that it's done, review the diff of all of the code change
 
 ## Command-line reference
 
-```nix
+```xml
 Setting up a repository:
   nixconvoy init [<flake-dir>]
 
@@ -159,7 +272,7 @@ There are three ways to use worktrees, depending on your preference:
 
 ## Deploying and undeploying
 
-```nix
+```xml
   nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict] [--dry-activate]
   nixconvoy undeploy [<worktree> ... | --with-children] [--back-to <rev>]
 ```
@@ -195,7 +308,7 @@ You run `deploy` after staging a change in a workbranch.  `nixconvoy deploy` bot
 
 ## Reviewing and landing
 
-```nix
+```xml
   nixconvoy review [<worktree> | <submodule> | <workbranch> ... | --with-children] [<diff-arg> ...]
   nixconvoy land [<worktree> ... | --with-children] [-m <msg>] [--not-yet-deployed]
 ```
@@ -210,118 +323,6 @@ You run `deploy` after staging a change in a workbranch.  `nixconvoy deploy` bot
 | `--with-children` | land all child worktrees of this parent worktree.  Same effect as listing all child worktrees one by one. |
 | `-m <msg>` | A one-liner commit message.  Will prevent the EDITOR from showing up.  Note that the EDITOR also won't come up if a `COMMIT_MSG.md` is present and the terminal is not interactive (this behavior is intended to allow agents to write up their own commit message while you approve by typing `!land`.) |
 | `--not-yet-deployed` | Override a default safety feature of nixconvoy designed to avoid unpleasant surprises --- namely, that `nixconvoy land` will refuse if not all affected targets are deployed to yet.  If you want to land anyway (e.g. because that machine is powered off at the moment and it is safe to implicitly deploy that change later), then specify this flag. |
-
-# Requirements
-
-- Runner machine (runs the `nixconvoy` process):
-	- Linux, WSL, or macOS.
-	- Must have Nix with flakes enabled, git 2.35+ and OpenSSH.
-	- Contains a git repository containing your NixOS configuration:
-		- Flake-based.
-		- Must be synced to a git remote such as GitHub.
-- Builder machine (runs heavy compilation workload):
-	- Linux or WSL.
-	- Must accept public-key ssh connections from runner (passwordless).
-- Target machines:
-	- NixOS only.
-	- Must have the same CPU architecture as the builder.
-	- Must accept public-key ssh from runner and builder, with passwordless sudo
-
-> [!NOTE]
-> Runner, builder and target can be one and the same physical machine --- it's fully supported to have a NixOS workstation deploying changes to itself.
-
-# Installation
-
-There are three ways to get started with nixconvoy.  Do any one of the following on your runner machine:
-
-<details>
-<summary><b>1. Quick no-config use</b></summary>
-
-```bash
-nix profile install github:bluquark/nixconvoy
-alias nixconvoy='nix run github:bluquark/nixconvoy -- '
-```
-
-</details>
-
-<details>
-<summary><b>2. Pinned flake</b></summary>
-
-1. At the top level of your flake:
-   ```nix
-   nixConfig = {
-     extra-substituters = [ "https://nixconvoy.cachix.org" ];
-     extra-trusted-public-keys = [ "nixconvoy.cachix.org-1:8HCQ3qVkg+lUbouy8s7aWzWoDoGDrm0lkg07VvD8RwQ=" ];
-   };
-   inputs.nixconvoy.url = "github:bluquark/nixconvoy";
-   inputs.nixconvoy.inputs.nixpkgs.follows = "nixpkgs";
-   ```
-2. In outputs:
-   ```nix
-   packages.x86_64-linux.nixconvoy = nixconvoy.packages.x86_64-linux.nixconvoy;
-   ```
-3. Add this small wrapper script called `nixconvoy` somewhere on your PATH:
-   ```sh
-   #!/bin/sh
-   exec nix run "$(git rev-parse --show-toplevel)/nixos#nixconvoy" -- "$@"
-   ```
-
-</details>
-
-<details>
-<summary><b>3. NixOS system package</b></summary>
-
-```nix
-nix.settings = {
-  substituters = [ "https://nixconvoy.cachix.org" ];
-  trusted-public-keys = [ "nixconvoy.cachix.org-1:8HCQ3qVkg+lUbouy8s7aWzWoDoGDrm0lkg07VvD8RwQ=" ];
-};
-{ nixconvoy, pkgs, ... }: {
-  environment.systemPackages = [ nixconvoy.packages.${pkgs.stdenv.hostPlatform.system}.nixconvoy ];
-  environment.pathsToLink = [ "/share/nixconvoy" ];
-}
-```
-
-</details>
-
-Then, after any of the three methods, `cd` into your NixOS checkout (Nixconvoy refuses to run unless it's within a git checkout) and run **`nixconvoy init`**.  Then review the generated `nixconvoy.toml` and commit it to your main branch.  If all the config represents your setup correctly, then you are ready to go.
-
-<details>
-<summary><b>Bash PS1 helper (optional)</b></summary>
-<br>
-Nixconvoy includes `nixconvoy/prompt.bash` defining `__nixconvoy_ps1`, a helper to display nixconvoy worktree status on your prompt.  Depending on install method, it is usually in `/run/current-system/sw/share/nixconvoy/prompt.bash` or .  In your `.bashrc`, write e.g.:
-
-```bash
-source /run/current-system/sw/share/nixconvoy/prompt.bash
-PS1='\h:$(__nixconvoy_ps1)\w\$ '  # simple example; adapt your existing PS1 instead
-```
-
-</details>
-
-<details>
-<summary><b>Claude code plugin (optional)</b></summary>
-<br>
-For the plugin to function, both `nixconvoy` and `jq` must be on the `PATH`.  Then:
-
-```bash
-claude plugin marketplace add bluquark/nixconvoy
-claude plugin install nixconvoy@nixconvoy --scope project
-```
-
-This will cause subagents to spawn inside a nixconvoy-managed child worktree.  It has no effect on normal top-level agents.
-
-With the plugin, you can fire off a sweeping prompt like:
-
-```markdown
-Audit all of my miniPC's systemd units for security hardening opportunities.
-Then divide them into 10 nonconflicting groups and launch one subagent to harden each.
-```
-
-The 10 subagents will go off and work for a while, and as long as they don't touch literally the same lines of config, they should be able to `nixconvoy deploy` their respective changes to verify they didn't break anything on the real machine before terminating.  Then, from the parent worktree, you can examine their config changes as a whole with `nixconvoy review --with-children`, and then land all of it as one single commit on your main branch with `nixconvoy land --with-children`.
-
-> **Warning:** Claude Code doesn't guarantee a stable API for plugins, so this plugin is the most likely part of nixconvoy to break over time.  It may also conflict with other Claude Code hooks or plugins if you have any installed.  So I only recommend it for people who heavily use subagents to write code (not just to research or codereview).
-
-</details>
 
 # Configuration
 
