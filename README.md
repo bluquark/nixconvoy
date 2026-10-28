@@ -155,39 +155,22 @@ Guarantees:
   - The switch+activate phase includes several safety features, including automatic rollback on connectivity loss.
 
 Optional flags:
-- `<target>`
 
-  Restrict the deploy to only this machine.  If none is specified, all affected machines will be deployed to.  Can list more than one, separated by spaces.  (In general, I recommend not going out of your way to specify targets unless it's important for safety reasons not to deploy to certain machines.)
-
-- `@<tag>`
-
-  Similar to `<target>` -- restrict the deploy to only machines with this tag.
-
-- `-m <msg>`
-
-  The commit message on the workbranch for this deploy increment.  (Note that these commit messages get hidden in nixconvoy's internal branches after `nixconvoy land` so it's optional.)
-
-- `--evict`
-
-  Deploy exactly what's on this branch, skipping over nixconvoy's usual union-of-workbranches step and in general aggressively forcing the target to match it even if that would violate nixconvoy's normal guarantees.  Called "evict" because it evicts all other workbranches's ongoing work from the target.  This is a recovery command in case something went wrong and nixconvoy's union mechanism or safety systems are wedged.
-
-- `--dry-activate`
-
-  Run prechecks, evaluation, and build, but don't actually switch the machines to the new NixOS generation.
+| Flag | Description |
+|---|---|
+| `<target>` | Restrict the deploy to only this machine.  If none is specified, all affected machines will be deployed to.  Can list more than one, separated by spaces.  (In general, I recommend not going out of your way to specify targets unless it's important for safety reasons not to deploy to certain machines.) |
+| `@<tag>` | Similar to `<target>` -- restrict the deploy to only machines with this tag. |
+| `-m <msg>` | The commit message on the workbranch for this deploy increment.  (Note that these commit messages get hidden in nixconvoy's internal branches after `nixconvoy land` so it's optional.) |
+| `--evict` | Deploy exactly what's on this branch, skipping over nixconvoy's usual union-of-workbranches step and in general aggressively forcing the target to match it even if that would violate nixconvoy's normal guarantees.  Called "evict" because it evicts all other workbranches's ongoing work from the target.  This is a recovery command in case something went wrong and nixconvoy's union mechanism or safety systems are wedged. |
+| `--dry-activate` | Run prechecks, evaluation, and build, but don't actually switch the machines to the new NixOS generation. |
 
 `nixconvoy undeploy` is the reverse of deploy.  Run without flags, it undoes the latest deploy.  Optional flags:
 
-- `<worktree>`
-
-  the name of a specific child worktree to undeploy.
-
-- `--with-children`
-
-  undeploy all child worktrees of this parent worktree.  Same effect as listing all child worktrees one by one.
-
-- `--back-to <rev>`
-
-  the revision to undeploy back to.  `--back-to HEAD^1` does the same as no flags.  `--back-to origin/main` undeploys all unlanded changes in this workbranch, effectively  turning it back into a freshly opened workbranch.
+| Flag | Description |
+|---|---|
+| `<worktree>` | the name of a specific child worktree to undeploy. |
+| `--with-children` | undeploy all child worktrees of this parent worktree.  Same effect as listing all child worktrees one by one. |
+| `--back-to <rev>` | the revision to undeploy back to.  `--back-to HEAD^1` does the same as no flags.  `--back-to origin/main` undeploys all unlanded changes in this workbranch, effectively  turning it back into a freshly opened workbranch. |
 
 ## Reviewing and landing
 
