@@ -22,7 +22,7 @@ Nixconvoy is built around two fundamental commands, `nixconvoy deploy` and `nixc
 
 If you want, you can start by ignoring all of nixconvoy's more advanced capabilities, and simply use it like `nixos-rebuild`.  With this traditional sequential workflow, here's what it might look like to code and test the two changes in feature branches of `~/homelab`:
 
-```
+```console
 $ cd ~/homelab/nixos/hosts/minipc/
 $ git checkout -b nixconvoy/firewall
 $ vim nftables.nix
@@ -48,7 +48,7 @@ Where things get interesting is when you spin up more than one worktree.  As a r
 
 You can spin up one worktree per task: 
 
-```
+```console
 $ cd ~/homelab/
 $ nixconvoy open ~/homelab-firewall
 $ nixconvoy open ~/homelab-jellyfin
@@ -58,7 +58,7 @@ $ nixconvoy open ~/homelab-jellyfin
 
 With this approach, you can safely work on both features at the same time:
 
-```
+```console
 $ cd ~/homelab-firewall/nixos/hosts/minipc/
 $ vim nftables.nix
 $ git add -A
@@ -210,7 +210,7 @@ There are three ways to get started with nixconvoy.  Do any one of the following
 
 ### 1. Quick no-config use
 
-```
+```bash
 nix profile install github:bluquark/nixconvoy
 alias nixconvoy='nix run github:bluquark/nixconvoy -- '
 ```
@@ -253,7 +253,7 @@ Then, after any of the three methods, `cd` into your NixOS checkout (Nixconvoy r
 
 Nixconvoy includes `nixconvoy/prompt.bash` defining `__nixconvoy_ps1`, a helper to display nixconvoy worktree status on your prompt.  Depending on install method, it is usually in `/run/current-system/sw/share/nixconvoy/prompt.bash` or .  In your `.bashrc`, write e.g.:
 
-```
+```bash
 source /run/current-system/sw/share/nixconvoy/prompt.bash
 PS1='\h:$(__nixconvoy_ps1)\w\$ '  # simple example; adapt your existing PS1 instead
 ```
@@ -262,7 +262,7 @@ PS1='\h:$(__nixconvoy_ps1)\w\$ '  # simple example; adapt your existing PS1 inst
 
 For the plugin to function, both `nixconvoy` and `jq` must be on the `PATH`.  Then:
 
-```
+```bash
 claude plugin marketplace add bluquark/nixconvoy
 claude plugin install nixconvoy@nixconvoy --scope project
 ```
@@ -277,7 +277,7 @@ Claude Code doesn't guarantee a stable API for plugins, so this plugin is the mo
 
 `nixconvoy init` will generate a basic version of this config file at the root of your repo after briefly autodetecting your flake config.  To illustrate the ways you can configure nixconvoy using it, here is a more complex `nixconvoy.toml` configuration example inspired by the one I use for my homelab fleet:
 
-```
+```toml
 config_version = 1
 flake_dir = "nixos"
 targets_dir = "nixos/hosts"
@@ -338,7 +338,7 @@ pin_file = "nixos/submodules/home-widget.json"
 
 Add some text such as the following into the `AGENTS.md` file in your repo root:
 
-```
+```markdown
 In this repo, `nixconvoy` (github.com/bluquark/nixconvoy) is the
 only sanctioned way to invoke nixos-rebuild switch and git commit.  It is possible there are other agents that are deploying their changes in parallel in other worktrees on this machine (you can survey what they're doing with `nixconvoy status`).  Nixconvoy will make sure all not-yet landed changes deployed from each worktree are automatically merged together into a union commit by mergiraf before getting applied to target machines, and also that changes landed to origin/main are automatically rebased on your checkout (can also be done manually using `nixconvoy pull`).
 
