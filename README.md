@@ -206,7 +206,7 @@ This is just an interleaved version of the sequential flow above... but notice t
 This is the property of NixOS that can make it tricky to multitask on without switching to a full GitOps-style pipeline (where even the smallest change is required to be pushed to GitHub before getting deployed to a machine).  But with nixconvoy, the problem "magically" doesn't happen!
 
 > [!NOTE]
-> How?  nixconvoy actually *does* have a full GitOps-style pipeline in its implementation details: it merely presents itself as a simple push-based deploy tool.  It uses that pipeline to apply the merge of every worktree’s work-in-progress, not just what's in the checkout you're deploying from.
+> How?  nixconvoy actually *does* have a full GitOps-style pipeline in its implementation details: it merely presents itself as a simple push-based deploy tool.  It uses that to remember everything you previously deployed in other worktrees, and merge those changes together in /tmp before applying your latest change.  Nixconvoy uses a syntax-aware merge tool called `mergiraf`, so this process is mostly transparent except when two worktrees changed the exact same line of config.
 
 ## Parallel use with coding agents
 
@@ -288,7 +288,7 @@ You run `deploy` after staging a change in a workbranch.  `nixconvoy deploy` bot
 
 **Guarantees:**
 - **Nothing you deploy is ever silently undone.**  What gets applied is not just what is in your current branch, but the union of everything previously deployed from every ongoing workbranch.
-  - Deploy aborts on a true merge conflict between two workbranches. Because nixconvoy merges with mergiraf, adjacent-line edits aren't enough to cause an abort.
+  - Deploy aborts on a true merge conflict between two workbranches. Because nixconvoy merges are syntax-aware, adjacent-line edits aren't enough to cause an abort.
 - **No change will touch a target machine before passing prechecks (lint/static analysis).**
   - To reduce the performance cost of this guarantee, precheck runs in parallel with eval.
 - **Nix configuration changes are simultaneously deployed to all target machines that they affect.**
