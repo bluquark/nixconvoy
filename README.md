@@ -104,7 +104,7 @@ After an agent reports that it's done, review the diff of all of the code change
 
 ## Command-line reference
 
-```
+```nix
 Setting up a repository:
   nixconvoy init [<flake-dir>]
 
@@ -159,7 +159,7 @@ There are three ways to use worktrees, depending on your preference:
 
 ## Deploying and undeploying
 
-```
+```nix
   nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict] [--dry-activate]
   nixconvoy undeploy [<worktree> ... | --with-children] [--back-to <rev>]
 ```
@@ -195,7 +195,7 @@ You run `deploy` after staging a change in a workbranch.  `nixconvoy deploy` bot
 
 ## Reviewing and landing
 
-```
+```nix
   nixconvoy review [<worktree> | <submodule> | <workbranch> ... | --with-children] [<diff-arg> ...]
   nixconvoy land [<worktree> ... | --with-children] [-m <msg>] [--not-yet-deployed]
 ```
@@ -211,29 +211,26 @@ You run `deploy` after staging a change in a workbranch.  `nixconvoy deploy` bot
 | `-m <msg>` | A one-liner commit message.  Will prevent the EDITOR from showing up.  Note that the EDITOR also won't come up if a `COMMIT_MSG.md` is present and the terminal is not interactive (this behavior is intended to allow agents to write up their own commit message while you approve by typing `!land`.) |
 | `--not-yet-deployed` | Override a default safety feature of nixconvoy designed to avoid unpleasant surprises --- namely, that `nixconvoy land` will refuse if not all affected targets are deployed to yet.  If you want to land anyway (e.g. because that machine is powered off at the moment and it is safe to implicitly deploy that change later), then specify this flag. |
 
-# Installation and requirements
+# Requirements
 
-## Requirements
-
-Conceptually, nixconvoy involves a fleet of several machines: a runner, a builder, and at least one target.  However, all 3 can be one and the same physical machine if you simply have a NixOS workstation deploying changes to itself.
-
-**Basic requirements by machine type:**
-
-- Runner (runs the `nixconvoy` process):
+- Runner machine (runs the `nixconvoy` process):
 	- Linux, WSL, or macOS.
 	- Must have Nix with flakes enabled, git 2.35+ and OpenSSH.
 	- Contains a git repository containing your NixOS configuration:
 		- Flake-based.
 		- Must be synced to a git remote such as GitHub.
-- Builder (runs heavy compilation work):
+- Builder machine (runs heavy compilation workload):
 	- Linux or WSL.
 	- Must accept public-key ssh connections from runner (passwordless).
-- Targets:
+- Target machines:
 	- NixOS only.
 	- Must have the same CPU architecture as the builder.
 	- Must accept public-key ssh from runner and builder, with passwordless sudo
 
-## Installation
+> [!NOTE]
+> Runner, builder and target can be one and the same physical machine --- it's fully supported to have a NixOS workstation deploying changes to itself.
+
+# Installation
 
 There are three ways to get started with nixconvoy.  Do any one of the following on your runner machine:
 
