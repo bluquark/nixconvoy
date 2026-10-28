@@ -291,11 +291,15 @@ You run `deploy` after staging a change in a workbranch.  `nixconvoy deploy` bot
   - Deploy aborts on a true merge conflict between two workbranches. Because nixconvoy merges are syntax-aware, adjacent-line edits aren't enough to cause an abort.
 - **No change will touch a target machine before passing prechecks (lint/static analysis).**
   - To reduce the performance cost of this guarantee, precheck runs in parallel with eval.
-- **Nix configuration changes are simultaneously deployed to all target machines that they affect.**
-  - Unless you provide an explicit `<target>`/`@<tag>` parameter, which restrict the set of targets considered.
-  - To reduce the performance cost of this guarantee, eval only reruns for targets whose included config files changed, via a nixconvoy feature called the "eval memo". (You may need to split your Nix config into per-feature files to benefit from the eval memo.)
 - **A deploy running at the same time as another `deploy` (or `land`) will serialize correctly.** In most cases, deploys will queue after one another; in some cases, nixconvoy will abort one side and ask you to retry.  Either way, your git repo and NixOS fleet will remain in a consistent state throughout.
 - **A broken NixOS generation automatically rolls itself back.** If a target loses connectivity or fails its health check after switching, it rolls back automatically.
+- **Nix configuration changes are simultaneously deployed to all target machines that they affect.**
+  - Unless you provide an explicit `<target>`/`@<tag>` parameter, which restricts the set of targets considered.
+
+> [!NOTE]
+> To reduce the performance cost of this final guarantee, nixconvoy includes a feature called the "eval memo".  This reuses previous eval results to decide which targets could possibly be affected by a deploy.  The memo logic may have false positives (unnecessary re-evaluations) but will never have false negatives.
+> 
+> The memo is keyed by a list of filenames and their content hashes.  So if you have a heterogeneous fleet, I recommend organizing your Nix config into per-feature files to fully take advantage of it.
 
 **Optional flags:**
 
