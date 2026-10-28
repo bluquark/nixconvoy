@@ -10,7 +10,9 @@ Nixconvoy is a NixOS deployment tool with a simple command-line interface.  Its 
 
 Overall, nixconvoy is well-suited to NixOS fleets managed primarily by a single person, with a rapid pace of changes.  It especially shines for vibe-coded NixOS configurations: it effectively provides each agent its own lane, allowing them to iterate side by side on the same machine, without unforced conflicts.
 
-# Requirements
+# Getting started
+
+## Requirements
 
 - Control machine (runs the `nixconvoy` process):
 	- Linux, WSL, or macOS.
@@ -29,9 +31,9 @@ Overall, nixconvoy is well-suited to NixOS fleets managed primarily by a single 
 > [!NOTE]
 > You only need one physical machine to use nixconvoy!  Control, build and target can be one and the same.  Nixconvoy will simply use ssh over loopback.
 
-# Installation
+## Installation
 
-There are three ways to get started with nixconvoy.  Do any one of the following on your control machine:
+There are three ways to install nixconvoy.  Do any one of the following on your control machine:
 
 <details>
 <summary><b>1. Quick no-config use</b></summary>
@@ -83,7 +85,7 @@ nix.settings = {
 
 </details>
 
-Then, after any of the three methods, `cd` into your NixOS checkout (Nixconvoy refuses to run unless it's within a git checkout) and run **`nixconvoy init`**.  Then review the generated `nixconvoy.toml` and commit it to your main branch.  If all the config represents your setup correctly, then you are ready to go.
+Then, `cd` into your NixOS checkout (Nixconvoy refuses to run unless it's within a git checkout) and run **`nixconvoy init`**.  Then review the generated `nixconvoy.toml` and commit it to your main branch.  If all the config represents your setup correctly, then you are ready to go.
 
 <details>
 <summary><b>Bash PS1 helper (optional)</b></summary>
@@ -213,7 +215,7 @@ After an agent reports that it's done, review the diff of all of the code change
 > `nixconvoy land` can also be used early and proactively to multitask on not-fully-independent config changes, at the price of a bit of git-main-branch tidiness.  For example, if you notice one agent's deploys are starting to fail because it ended up touching the same line of config as another agent, you can `nixconvoy land` one side early to end the deadlock.  Later on, `nixconvoy land` that same agent a second time when its work is fully complete.
 
 
-# Nixconvoy basic concepts
+# Basic concepts
 
 ## Command-line reference
 
@@ -282,11 +284,11 @@ These are the fundamental actions to apply changes to your running fleet.
 You run `deploy` after staging a change in a workbranch.  `nixconvoy deploy` both commits it to the workbranch and applies it to your machines.
 
 **Guarantees:**
-- What gets applied is not just what is in your current branch, but the union of everything that's been previously deployed from every ongoing workbranch.
-  - Deploy will abort if there's a merge conflict between two workbranches.  Because nixconvoy uses `mergiraf` to merge, this will only happen for true conflicts, not just changes on adjacent lines.
-- Deploys happens in three main phases: lint precheck+Nix evals (in parallel), build+test, switch+activate.
-  - The evaluation phase is optimized to only run on targets touched by config files they actually include, using an "eval memo" feature.  (Configs organized into smaller files where target machines only read the config files for the features they need will especially benefit.)
-  - The switch+activate phase includes several safety features, including automatic rollback on connectivity loss.
+- **Nothing you deploy is ever silently undone.**  What gets applied is not just what is in your current branch, but the union of everything previously deployed from every ongoing workbranch.
+  - Deploy aborts on a true merge conflict between two workbranches. Because nixconvoy merges with mergiraf, adjacent-line edits aren't enough to cause an abort.
+- **No change will touch a machine until it has passed lint, eval and build.**
+  - Eval only reruns for targets whose included config files changed, via nixconvoy's "eval memo" feature. (You may need to split your config into small per-feature files to benefit from this optimization.)
+- **A broken switch undoes itself.** If a target loses connectivity or fails its health check after switching, it rolls back automatically.
 
 **Optional flags:**
 
@@ -315,7 +317,10 @@ You run `deploy` after staging a change in a workbranch.  `nixconvoy deploy` bot
 
 `nixconvoy review` shows the diff all changes that were deployed on this workbranch since it diverged from `main`.  With a simple workbranch, this is mostly a convenience sugar roughly equivalent to `git diff origin/main`.  If you are using submodules or child worktrees, it's more valuable, as it lets you review the changes on all of them in one diff.
 
-`nixconvoy land` squashes all changes on the workbranch into one commit, lands it on `main`, and pushes it to `origin/main`.  It also rebases all other worktrees to include the commit, if possible to do without conflict.  (If there is a conflict, the other worktree will be untouched and flagged in `land`'s stdout, and the next deploy on that worktree will try again to rebase onto `main` before it does anything else.)  Flags:
+`nixconvoy land` squashes all changes on the workbranch into one commit, lands it on `main`, and pushes it to `origin/main`.  It also rebases all other worktrees to include the commit, if possible to do without conflict.
+
+> [!NOTE]
+> If there is a conflict, the other worktree will be untouched and flagged in `land`'s stdout, and the next deploy on that worktree will try to rebase onto `main` again.
 
 | `land` flag | |
 |---|---|
@@ -509,8 +514,7 @@ Also, there are two special cases: a change touching only documentation skips ev
 
 Nixconvoy is written in a mix of Python and Rust.  Python is used for the script-like code, while Rust is used for core logic, particularly the `deploy` state machine (with its multiple error conditions and concurrency).  The Rust core is tested using stateright and property tests.
 
-The code was written via coding agent, mostly Fable.  However, this README was written artisanally by my human hand, as is the `--help` text in nixconvoy.
-
+The code was written via coding agent, mostly Fable.  This README you're reading was written artisanally in a text editor.  Either way, I take responsibility for the quality of the result.
 
 # Advanced features
 
