@@ -261,7 +261,7 @@ There are three ways to use worktrees, depending on your preference:
 
   ```console
   $ cd ~/projects/homelab
-  $ nixconvoy open ../homelab6 --branch 6
+  $ nixconvoy open ../homelab3 --branch 3
   ```
 
   I never `nixconvoy close` them.  `nixconvoy land` brings all 5 checkouts up to date automatically, and then I reuse a numbered worktree at random for the next change.
