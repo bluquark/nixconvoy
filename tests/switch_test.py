@@ -1803,6 +1803,7 @@ def submodule_cases(d: Path) -> None:
 
     wb = "work/tester/9"
     path = "nixos/submodules/dep"
+    staged = f"{submodule.PINS_FILE}\n{path}"  # a pin, as git lists it: the pins file and the gitlink
     v1 = sh(dep_seed, "rev-parse", "HEAD")
     lock = {"nodes": {"dep": {"flake": False, "locked": {"path": "./submodules/dep", "type": "path"},
                               "original": {"path": "./submodules/dep", "type": "path"}, "parent": []},
@@ -1822,7 +1823,8 @@ def submodule_cases(d: Path) -> None:
         return (sh(dep_seed, "ls-remote", str(dep_origin), ref).split() or [""])[0]
 
     files = {".gitmodules": f'[submodule "dep"]\n\tpath = {path}\n\turl = {dep_origin}\n',
-             "nixos/flake.lock": proc.dump_json(lock) + "\n"}
+             "nixos/flake.lock": proc.dump_json(lock) + "\n",
+             submodule.PINS_FILE: json.dumps({"dep": v1}, indent=2) + "\n"}
     with scratch_origin(d, files,
                         seeded=lambda seed: sh(seed, "update-index", "--add", "--cacheinfo", f"160000,{v1},{path}")) \
             as (origin, _seed, co):
@@ -1847,7 +1849,7 @@ def submodule_cases(d: Path) -> None:
         assert v2 != v1 and sh(ax, "log", "-1", "--format=%s") == "dep: v2"
         assert dep_ref(f"refs/heads/{wb}") == v2
         assert len(told) == 2 and "pushed" in told[0] and "pinned" in told[1], told
-        assert sh(co, "diff", "--cached", "--name-only") == path
+        assert sh(co, "diff", "--cached", "--name-only") == staged
         assert pinned() == v2
         # A record an announcement carries (a parent of its commit) pins
         # what its tree names, for as long as the announcement stands.
@@ -2087,7 +2089,7 @@ def submodule_cases(d: Path) -> None:
         assert ax.exists() and sh(ax, "rev-parse", "HEAD") == dep_main
         assert dep_ref(f"refs/heads/{wb}") == dep_main
         assert pinned() == v1  # origin/main's
-        assert sh(co, "diff", "--cached", "--name-only") == path
+        assert sh(co, "diff", "--cached", "--name-only") == staged
         assert submodule.keeps(dep(), co) is None
         sh(co, "reset", "--quiet", "--hard", "HEAD")  # the pin back on the branch's...
         why = submodule.keeps(dep(), co)
@@ -2145,7 +2147,7 @@ def submodule_cases(d: Path) -> None:
             sh(ax8, "log", "-1", "--format=%s", b1r) == sh(ax8, "log", "-1", "--format=%s", b1)
         assert sh(co8, "rev-parse", f"HEAD:{path}") == b1r
         assert sh(co8, "log", "--format=%s", "origin/main..HEAD").split("\n") == ["dep: b"], sh(co8, "log", "--format=%s", "origin/main..HEAD")
-        assert sh(co8, "status", "--porcelain") == f"M  {path}"
+        assert sh(co8, "status", "--porcelain") == f"M  {submodule.PINS_FILE}\nM  {path}"
         sh(co8, "commit", "--quiet", "-m", "dep: c")  # the deploy's commit of the increment
         assert said.count("rebased onto origin/main") == 1, said
         assert dep_ref(f"refs/heads/{wb8}") == b2
@@ -2194,7 +2196,7 @@ def submodule_cases(d: Path) -> None:
         assert dep_ref(f"refs/heads/{wb8}") == b3
         os.chdir(co8)
         assert pinned(co8) == b3
-        assert sh(co8, "diff", "--cached", "--name-only") == path
+        assert sh(co8, "diff", "--cached", "--name-only") == staged
         sh(co8, "commit", "--quiet", "-m", "dep: b on the new main")
         os.chdir(co)
         ax = submodule.create("dep", wb)  # from origin/main: nothing of its own
@@ -2266,19 +2268,18 @@ def submodule_cases(d: Path) -> None:
         assert submodule.sync(wb, None) == []
         assert sh(ax, "rev-parse", "HEAD") == ln  # the default branch as the chained landing left it
         submodule.remove_all(co)
-        # pin_file: every pin also writes the rev and its committer date,
-        # staged; a union merge is dated a second past its parents' newest.
-        config.set_cfg(config.parse(toml(f'[submodules.dep]\nrepo = "{dep_repo}"\npin_file = "nixos/submodules/dep.json"\n',
-                                         flake_dir="nixos", targets_dir="nixos/hosts")))
+        # The pins file: every pin also writes the rev by name, staged; a
+        # union merge is dated a second past its parents' newest, for a
+        # version taken from the pinned commit's date.
         s = submodule.sub_of("dep", submodule.entries(co)["dep"], co)
-        pin_json = co / "nixos/submodules/dep.json"
+        pins = co / submodule.PINS_FILE
 
         def date(rev: str) -> int:
             return int(sh(dep_repo, "show", "-s", "--format=%ct", rev))
 
         submodule.set_pin(s, new_main, co)
-        assert json.loads(pin_json.read_text()) == {"committed": date(new_main), "rev": new_main}
-        assert "nixos/submodules/dep.json" in sh(co, "diff", "--cached", "--name-only").split()
+        assert json.loads(pins.read_text()) == {"dep": new_main}
+        assert submodule.PINS_FILE in sh(co, "diff", "--cached", "--name-only").split()
         sh(dep_seed, "checkout", "--quiet", dep_main)
         put(dep_seed, "side.txt", "s\n", "side")  # diverging from new_main
         side = sh(dep_seed, "rev-parse", "HEAD")
@@ -2289,13 +2290,23 @@ def submodule_cases(d: Path) -> None:
         assert date(merge) == max(date(new_main), date(side)) + 1
         assert submodule.merge_commit("dep", dep_repo, new_main, side, "union") == merge  # deterministic
         submodule.set_pin(s, merge, co)
-        assert json.loads(pin_json.read_text()) == {"committed": date(merge), "rev": merge}
+        assert json.loads(pins.read_text()) == {"dep": merge}
         # A stale file (a hand-moved gitlink) is rewritten by a deploy on a
-        # work branch, only said in a main checkout.
-        pin_json.write_text('{"committed": 1, "rev": "0"}\n')
-        assert warned(lambda: submodule.heal_pin_files(co, None, False)) and json.loads(pin_json.read_text())["rev"] == "0"
-        assert submodule.heal_pin_files(co, wb, False) == [f"submodule dep: nixos/submodules/dep.json rewritten for {merge[:12]}"]
-        assert json.loads(pin_json.read_text())["rev"] == merge
+        # work branch, only said in a main checkout; the index's copy is
+        # what counts.
+        pins.write_text('{"dep": "0"}\n')
+        sh(co, "add", submodule.PINS_FILE)
+        assert warned(lambda: submodule.heal_pins(co, None, False)) and json.loads(pins.read_text()) == {"dep": "0"}
+        assert submodule.heal_pins(co, wb, False) == [f"{submodule.PINS_FILE} rewritten from the tree's gitlinks"]
+        assert json.loads(pins.read_text()) == {"dep": merge} and not sh(co, "diff", "--name-only")
+        assert submodule.heal_pins(co, wb, False) == []
+        # The last gitlink gone, the file goes with it; one back, it is back.
+        sh(co, "rm", "--quiet", "--cached", "--", path)
+        assert submodule.heal_pins(co, wb, False) == [f"{submodule.PINS_FILE} removed: no submodule pinned"]
+        assert not pins.exists() and submodule.PINS_FILE not in sh(co, "ls-files").split()
+        sh(co, "update-index", "--add", "--cacheinfo", f"160000,{merge},{path}")
+        assert submodule.heal_pins(co, wb, False) == [f"{submodule.PINS_FILE} rewritten from the tree's gitlinks"]
+        assert json.loads(pins.read_text()) == {"dep": merge}
     say("submodules: ok")
 
 

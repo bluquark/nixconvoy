@@ -65,10 +65,6 @@ class TargetConfig:
 class SubmoduleConfig:
     # The repository's checkout on this machine, whose origin nix fetches.
     repo: str
-    # A repo-relative file nixconvoy keeps beside the gitlink, staged with
-    # every pin it sets: the pinned rev and its committer date as JSON, for
-    # a flake that wants the commit's identity or age (a version number).
-    pin_file: str = ""
 
 @dataclass(frozen=True)
 class Config:
@@ -356,15 +352,12 @@ def parse(text: str) -> Config:
     for name, a in _table(doc.get("submodules", {}), "submodules").items():
         t = _table(a, f"submodules.{name}")
         for k in t:
-            if k not in ("repo", "pin_file"):
+            if k != "repo":
                 raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"submodules.{name}.{k}"))
         repo = _str(t, "repo", f"submodules.{name}")
         if not repo:
             raise ConfigError(strings.CONFIG_SUBMODULE_REPO(name=name))
-        pin_file = _str(t, "pin_file", f"submodules.{name}")
-        if pin_file.startswith("/") or ".." in pin_file.split("/"):
-            raise ConfigError(strings.CONFIG_SUBMODULE_PIN_FILE(name=name))
-        submodules[name] = SubmoduleConfig(repo=repo, pin_file=pin_file)
+        submodules[name] = SubmoduleConfig(repo=repo)
     return Config(
         flake_dir=flake_dir,
         targets_dir=targets_dir,

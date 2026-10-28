@@ -98,7 +98,7 @@ class UnionQueries(GitQueries):
             case DropFile(file):
                 return ran(git("rm", "--quiet", "-f", file, cwd=wt, check=False))
             case Solve(file):
-                if submodule.owner(Path(wt), file) is not None:
+                if submodule.is_pin_path(Path(wt), file):
                     return Flag(submodule.solve_union(Path(wt), file))
                 return Flag(solve_with_mergiraf(wt, file))
             case Add(file):
