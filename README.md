@@ -396,13 +396,10 @@ tags = ["vps"]
 tags = ["vps"]
 
 # External github projects I maintain that I deploy onto my homelab
-[submodules.nixconvoy]
-repo = "~/projects/nixconvoy"
 [submodules.ebook-reader]
 repo = "~/projects/japanese/ebook-reader"
 [submodules.home-widget]
 repo = "~/projects/android/home-widget"
-pin_file = "nixos/submodules/home-widget.json"
 ```
 ## AGENTS.md
 
