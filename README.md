@@ -125,22 +125,30 @@ Deploying and committing changes:
   nixconvoy land [<worktree> ... | --with-children] [-m <msg>] [--not-yet-deployed]
 ```
 
-## Your main checkout vs your nixconvoy worktrees
+## Checkouts
 
-For each git remote, nixconvoy tracks an arbitrary large number of checkouts of it locally.  But one of these is the root of all of them: your main checkout.  It's the normal git checkout you had on your workstation before you started using nixconvoy --- and after adopting nixconvoy, you can keep landing changes to its `main` branch with regular git commands, then deploying them with nixconvoy after landing.  Most nixconvoy subcommands read from `main` or `origin/main` --- but the only one that writes to the main branch is `nixconvoy land`.
+Nixconvoy distinguishes two kinds of checkout.  Your **main checkout** is the
+normal git checkout you had on your workstation before you adopted nixconvoy.  You can keep landing
+changes to its `main` branch with regular git commands and then deploy them with nixconvoy.  **Nixconvoy
+worktrees** are for work-in-progress changes.  These are created using `nixconvoy open <worktree-path> [--branch <workbranch-name>]`, removed with `nixconvoy close`, and carry their own workbranch.
 
-Secondly, there are nixconvoy worktrees with associated workbranches.  Strictly speaking, worktrees and workbranches are separate concepts mapping to git worktrees and git branches respectively, but personally I prefer to keep worktrees and workbranches 1:1.  These are created using `nixconvoy open <worktree-path> [--branch <workbranch-name>]` and removed with `nixconvoy close`.  On these, you should use only `nixconvoy` commands, not raw `git` commands to write to them, and the expected workflow is deploy-before-land.
+Some rules follow from this:
+
+- Most nixconvoy subcommands read from `main` or `origin/main`, but the only one that writes to `main` is `nixconvoy land`.
+- In a worktree, write only via `nixconvoy` commands, never raw `git`, and generally deploy before you land.
+
+(Strictly speaking, worktrees and workbranches are separate concepts, mapping to git worktrees and git branches respectively, but I prefer to keep them 1:1.)
 
 There are three ways to use worktrees, depending on your preference:
-- **Long-lived worktrees with a generic name.**  This is how I prefer to use nixconvoy most of the time.  For my homelab, my main checkout lives in `~/projects/homelab` while I have 6 nixconvoy worktrees `~/projects/homelab1`, `~/projects/homelab2`, ... `~/projects/homelab6`.  I created them with a command like:
+- **Long-lived worktrees** with a generic name.  This is how I prefer to use nixconvoy most of the time.  For my homelab, my main checkout lives in `~/projects/homelab` while I have 4 nixconvoy worktrees `~/projects/homelab1`, ...,  `~/projects/homelab4`.  I created them with a command like:
 
   ```console
   $ cd ~/projects/homelab
   $ nixconvoy open ../homelab6 --branch 6
   ```
 
-  I never `nixconvoy close` them.  `nixconvoy land` brings all 7 checkouts up to date automatically, and then I reuse a numbered worktree at random for the next change.
-- **Short-lived top-level worktrees with a task-specific name.**  For example:
+  I never `nixconvoy close` them.  `nixconvoy land` brings all 5 checkouts up to date automatically, and then I reuse a numbered worktree at random for the next change.
+- **Short-lived worktrees** with a task-specific name.  For example:
 
   ```console
   $ cd ~/projects/homelab
@@ -316,7 +324,7 @@ flake_dir = "nixos"
 targets_dir = "nixos/hosts"
 targets_arch = "x86_64-linux"
 ssh_address_template = "bluquark@{target}.home.bluquark.net"
-branch_prefix = "nixconvoy/{machine}/"
+branch_prefix = "work/{machine}/"
 child_worktrees = ".claude/worktrees"
 
 [eval]
@@ -367,7 +375,7 @@ repo = "~/projects/japanese/ebook-reader"
 repo = "~/projects/android/home-widget"
 pin_file = "nixos/submodules/home-widget.json"
 ```
-## Configuring agents
+## AGENTS.md
 
 Add some text such as the following into the `AGENTS.md` file in your repo root:
 
@@ -404,7 +412,7 @@ This text is just an initial suggestion based on what I've found nudges agents i
 This section explains some of the key design decisions and implementation details of nixconvoy.  You don't need to understand all of this simply to use nixconvoy --- but it may be useful especially when troubleshooting, optimizing deploy performance, or understanding how to set up a NixOS fleet or a Git setup that works well with it.  Also, if some of the behaviors of nixconvoy strike you as overly "magical", this should help demystify them.
 
 <details>
-<summary><b>The stages of one <code>nixconvoy deploy</code></b></summary>
+<summary><b>Detailed stages of <code>nixconvoy deploy</code></b></summary>
 
 
 1. **Survey the environment**.  Fetch origin/main from GitHub (or whatever you're using as your remote) and ask every target machine what it's running.  If any target is unreachable, the deploy is aborted (if so, you can retry, with a more restricted list of targets).  If another `nixconvoy deploy` is actively running against the same target machines, wait until it exits before moving onto the next step.
@@ -424,10 +432,6 @@ This section explains some of the key design decisions and implementation detail
 Also, there are two special cases: a change touching only documentation skips everything except the precheck and is simply committed immediately.  And if `--dry-activate` was specified, the process stops after step 4 and simply reports what would have gotten switched.
 
 </details>
-
-## Where nixconvoy stores its state
-
-In general, every configuration a machine has ever run is a commit that gets pushed to the git origin, and nixconvoy is intended to be the only writer of every branch or ref mentioned below except `main`.
 
 ### Git-managed state
 
@@ -498,8 +502,8 @@ The code was written via coding agent, mostly Fable.  However, this README was w
 
 <details>
 <summary><b>Submodules</b></summary>
-
-
+<br>
+<br>
 Nixconvoy has support for git submodules.  If you don't write your own software or substantially modify the software packages you use on your NixOS fleet, you can safely ignore this feature.
 
 Submodules are one of git's mechanisms for loading a dependency (whose source of truth is an external git repo) into one of your checkout's subdirectories.  This is particularly useful for developers who maintain a public repository and also run it as part of their private NixOS fleet (in my own environment, I use nixconvoy's submodule support to work on nixconvoy itself).  It can also be used for your private fork of a dependency --- although for that, git subtrees are a simpler alternative that also works.
@@ -512,8 +516,8 @@ Then, when you're ready to make a private change to it, open a nixconvoy worktre
 
 <details>
 <summary><b>Bootable generation assessment</b></summary>
-
-
+<br>
+<br>
 Nixconvoy includes an optional module to have smarter behavior for which NixOS generations are selectable on the boot screen.  Compatible with lanzaboote only, and not enabled by default.
 
 Using nixconvoy as intended can rapidly create a rather large number of NixOS generations, so if your `/boot` partition is on the smaller side, lanzaboote's default "preserve latest N generations" will preserve a bunch of near-identical generations --- not a terribly useful backup plan if the change that broke boot was deployed, say, N+5 generations ago.  So on each nixconvoy deploy, the module performs its own custom generation pruning by age and by proven bootability.
