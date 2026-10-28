@@ -53,6 +53,7 @@ from .checkout import (
     lock_holder,
     lock_live,
     lock_pid_alive,
+    message_on_file,
     note_pushed,
     on_origin,
     origin_tips,
@@ -64,6 +65,7 @@ from .checkout import (
     push_state,
     ran,
     require_work_branch,
+    restage_msg,
     sibling_checkouts,
     sole_writer_problem,
     staged_differs,
@@ -74,6 +76,7 @@ from .checkout import (
     this_prefix,
     trailer_targets,
     tree_less_msg,
+    unstage_msg,
     work_branch_name,
     worktree_lock,
     write_holder,
@@ -128,27 +131,22 @@ def kept_edit() -> Path:
     return state_path(KEPT_EDIT)
 
 
-def committed_message(wb: str, given: str | None) -> str:
-    """checkout.landing_message over HEAD's MSG_FILE and the one on disk."""
-    on_file = out(["git", "show", f"HEAD:{MSG_FILE}"]) if rev(f"HEAD:{MSG_FILE}") else ""
-    try:
-        draft = Path(MSG_FILE).read_text(encoding="utf-8")
-    except OSError:
-        draft = ""
-    return landing_message(given, on_file, draft, wb)
+def file_message(wb: str, given: str | None) -> str:
+    """checkout.landing_message over this checkout's MSG_FILE (message_on_file)."""
+    return landing_message(given, message_on_file(), wb)
 
 
 def refuse_no_message(wb: str, given: str | None) -> None:
     """The refusal main_message ends in, up front when no editor could
     supply the message - before the checks that cost (holds' evaluation,
     the merge of --with-children)."""
-    if not committed_message(wb, given) and not kept_edit().exists() and editor() is None:
+    if not file_message(wb, given) and not kept_edit().exists() and editor() is None:
         die(strings.LAND_NO_MSG_FILE(wb=wb))
 
 
 def main_message(wb: str, given: str | None, main: str, appended: str = "",
                  tips: list[tuple[str, str]] | None = None) -> str:
-    """The main commit's message: committed_message, `appended` (the subs'
+    """The main commit's message: file_message, `appended` (the subs'
     MSG_FILEs, land --with-children) below it, the whole offered in the
     editor on a terminal (checkout.edit_message, `tips` as there) unless -m
     gave it; refused when the checkout's own says nothing and no editor
@@ -158,7 +156,7 @@ def main_message(wb: str, given: str | None, main: str, appended: str = "",
     it off a terminal; the landing removes it.  `main`, origin/main as the
     landing read it, is checked again after the edit, the landing refused
     rather than retried on a main that moved meanwhile."""
-    msg = committed_message(wb, given)
+    msg = file_message(wb, given)
     kept = kept_edit()
     whole = "\n\n".join(x for x in (msg, appended) if x)
     if given is None and kept.exists():
@@ -181,7 +179,7 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
     wb = require_work_branch("land")
     if current_branch() != wb:
         die(strings.LAND_NOT_ON_WORK_BRANCH(wb=wb, cur=current_branch() or strings.LAND_DETACHED_HEAD))
-    if staged_differs():
+    if staged_differs(less_msg=True):
         die(strings.LAND_STAGED)
     lease = ensure_sole_writer(wb)  # origin's copy is reset at the end: it must be ours
     ensure_rebased()
@@ -204,6 +202,7 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
     msg = main_message(wb, message, main)
     if rev(remote_ref(wb)) != lease:  # the edit's fetch brought a tip
         lease = ensure_sole_writer(wb)
+    had_draft = unstage_msg()
     before = rev("HEAD")
     assert before is not None
     landings: list[submodule.Landing] = []
@@ -221,6 +220,8 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
     except Fail:
         submodule.abandon_all(landings)
         git("reset", "--quiet", "--keep", before, check=False)
+        if had_draft:
+            restage_msg()
         raise
     # Refused where main is checked out (the main worktree): catch_up moves it.
     git("branch", "-f", cfg().main_branch, commit, check=False)
@@ -895,7 +896,7 @@ def status() -> None:
                 notes.append(p(strings.STATUS_EMPTY_SESSION_LOCKED, "dim"))
             else:
                 notes.append(p(strings.STATUS_EMPTY(name=d.name), "dim"))
-        msg = g(d, "show", f"HEAD:{MSG_FILE}").partition("\n")[0] if cur not in (None, cfg().main_branch) else ""
+        msg = message_on_file(str(d)).strip().partition("\n")[0] if cur not in (None, cfg().main_branch) else ""
         if msg:
             notes.append(p(strings.STATUS_SUBJECT(subject=msg[:60]), "dim"))
         if op:
@@ -1199,7 +1200,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
     if current_branch() != wb:
         die(strings.LAND_NOT_ON_WORK_BRANCH(wb=wb, cur=current_branch() or strings.LAND_DETACHED_HEAD))
     leases = {wb: ensure_sole_writer(wb)}  # every branch is reset on origin at the end: all must be ours
-    if staged_differs():
+    if staged_differs(less_msg=True):
         die(strings.LAND_STAGED)
     ensure_rebased()
     main = rev(main_ref())
@@ -1216,7 +1217,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
             cur = branch_at(d)
             ident = identity_of(d, cur)
             head = out(["git", "rev-parse", "HEAD"], cwd=str(d))
-            if not ok(["git", "diff", "--cached", "--quiet"], cwd=str(d)):
+            if staged_differs(str(d), less_msg=True):
                 die(strings.LAND_CHILD_STAGED(label=label))
             if is_ancestor(head, main) or tree_less_msg("HEAD", str(d)) == main_tree:
                 continue
@@ -1238,13 +1239,8 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
             if problem is not None:
                 die(strings.LAND_CHILD_PROBLEM(name=d.name, problem=problem))
             leases[b] = rev(remote_ref(b)) or ""
-        # Each sub's MSG_FILE, as its branch carries it, appended in turn.
-        sub_msgs = []
-        for d, _ in parts:
-            if ok(["git", "cat-file", "-e", f"HEAD:{MSG_FILE}"], cwd=str(d)):
-                sub_msg = out(["git", "show", f"HEAD:{MSG_FILE}"], cwd=str(d)).strip()
-                if sub_msg:
-                    sub_msgs.append(sub_msg)
+        # Each sub's MSG_FILE (message_on_file) appended in turn.
+        sub_msgs = [m for d, _ in parts if (m := message_on_file(str(d)).strip())]
         own = {wb, *(b for _, b in parts)}
         for d, b in [(here, wb), *parts]:
             carried = [x for x, tip in listed_tips().items()
@@ -1309,6 +1305,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
                 if problem is not None:
                     die(strings.LAND_CHILD_PROBLEM(name=d.name, problem=problem))
                 leases[b] = rev(remote_ref(b)) or ""
+        had_draft = {d: unstage_msg(str(d)) for d, _ in [(here, wb), *parts]}
         befores = {d: out(["git", "rev-parse", "HEAD"], cwd=str(d)) for d, _ in [(here, wb), *parts]}
         landings: list[submodule.Landing] = []
         # As in land: nothing moves on any origin before main's push is in,
@@ -1332,6 +1329,8 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
             submodule.abandon_all(landings)
             for d, _ in [(here, wb), *parts]:
                 git("reset", "--quiet", "--keep", befores[d], cwd=str(d), check=False)
+                if had_draft[d]:
+                    restage_msg(str(d))
             raise
         git("branch", "-f", cfg().main_branch, commit, check=False)
         submodule.finish_all(landings)

@@ -2504,16 +2504,26 @@ def open_cases(d: Path) -> None:
         put(co, "COMMIT_MSG.md", "the union\n- the sub's piece\n", "parent increment")
         sh(co, "push", "--quiet", "origin", "work/tester/9")
         sh(w, "switch", "--quiet", "-c", "work/tester/9-task")
-        (w / "COMMIT_MSG.md").write_text("the sub: s.txt\n- its detail\n")
+        (w / "COMMIT_MSG.md").write_text("the sub: s.txt\n")
         sh(w, "add", "COMMIT_MSG.md")
         put(w, "s.txt", "sub\n", "sub increment\n\nReaches: a, b\nDeployed: a")
         sh(w, "push", "--quiet", "origin", "work/tester/9-task")
         put(w, "n.txt", "unstaged\n")
         sh(w, "reset", "--quiet", "n.txt")
+        # The sub's COMMIT_MSG.md edited and staged after its deploy: no
+        # undeployed change (the landing reads the file itself); any
+        # other is one.
+        put(w, "COMMIT_MSG.md", "the sub: s.txt\n- its detail\n")
+        put(w, "x.txt", "x\n")
+        assert "has staged but undeployed changes" in dies(commands.land_with_children)
+        sh(w, "rm", "--quiet", "--cached", "x.txt")
+        (w / "x.txt").unlink()
         # The sub holds b back: its increment reached b, deployed to a alone.
         assert checkout.held_targets("origin/main..HEAD", str(w)) == {"b"}
-        # A held target refuses the landing unless --not-yet-deployed.
+        # A held target refuses the landing unless --not-yet-deployed; the
+        # draft stays staged for the deploy a refusal asks for.
         assert "work/tester/9-task holds back b:" in dies(commands.land_with_children)
+        assert sh(w, "status", "--porcelain").splitlines() == ["M  COMMIT_MSG.md", "?? n.txt"]
         told = printed(lambda: commands.land_with_children(not_yet_deployed=True))
         assert "landing with b not yet deployed:" in told
         assert not sh(co, "worktree", "list").count("deploy-wt")
@@ -2559,14 +2569,72 @@ def open_cases(d: Path) -> None:
         main = sh(co, "rev-parse", "origin/main")
         assert sh(co, "log", "-1", "--format=%B", main).strip() == "from -m"
         assert sh(co, "rev-parse", "HEAD") == main and not sh(co, "status", "--porcelain")
+        # A COMMIT_MSG.md staged after the last deploy is not an undeployed
+        # change: the landing commits under it, over the deployed one.
+        put(co, "r3.txt", "r\n")
+        put(co, "COMMIT_MSG.md", "deployed draft\n", "r3 increment")
+        sh(co, "push", "--quiet", "origin", "work/tester/9")
+        put(co, "COMMIT_MSG.md", "staged only\n- never deployed\n")
+        put(co, "r4.txt", "r\n")
+        assert "staged but undeployed changes present" in dies(commands.land)
+        sh(co, "rm", "--quiet", "--cached", "r4.txt")
+        (co / "r4.txt").unlink()
+        # A landing refused past its checks (main moved under its push)
+        # leaves the draft as it was, staged: the landing's own commits
+        # and resets on the branch never carry it.  The re-run lands under it.
+        from nixconvoy import submodule  # noqa: PLC0415 - after scratch_env's config
+        prepare_all = submodule.prepare_all
+
+        def main_moving(wb: str, msg: str) -> list[submodule.Landing]:
+            sh(seed, "fetch", "--quiet")
+            sh(seed, "reset", "--quiet", "--hard", "origin/main")
+            put(seed, "moved.txt", "m\n", "landed elsewhere")
+            sh(seed, "push", "--quiet", "origin", "HEAD:main")
+            return prepare_all(wb, msg)
+
+        tip = sh(co, "rev-parse", "HEAD")
+        # A conflicted draft is no staged change the exclusion passes over.
+        ours = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=co, input="ours\n", capture_output=True,
+                   text=True, check=True).stdout.strip()
+        subprocess.run(["git", "update-index", "--index-info"], cwd=co, text=True, check=True,
+            input=f"100644 {ours} 2\t{config.MSG_FILE}\n100644 {ours} 3\t{config.MSG_FILE}\n")
+        assert "staged but undeployed changes present" in dies(commands.land)
+        sh(co, "reset", "--quiet", "--", config.MSG_FILE)
+        sh(co, "add", config.MSG_FILE)
+        assert sh(co, "rev-parse", "HEAD") == tip and sh(co, "status", "--porcelain") == "M  COMMIT_MSG.md"
+        with mock.patch.object(submodule, "prepare_all", main_moving):
+            assert "pushing main failed" in dies(commands.land)
+        assert sh(co, "rev-parse", "HEAD") == tip and sh(co, "status", "--porcelain") == "M  COMMIT_MSG.md"
+        assert (co / "COMMIT_MSG.md").read_text() == "staged only\n- never deployed\n"
+        commands.land()
+        main = sh(co, "rev-parse", "origin/main")
+        assert sh(co, "log", "-1", "--format=%B", main).strip() == "staged only\n\n- never deployed"
+        assert sh(co, "rev-parse", "HEAD") == main and not sh(co, "status", "--porcelain")
+        assert "moved.txt" in sh(co, "ls-tree", "--name-only", main).split()
+        # The file deleted (staged or not) is no message: land -m takes over.
+        put(co, "r5.txt", "r\n")
+        put(co, "COMMIT_MSG.md", "deleted draft\n", "r5 increment")
+        sh(co, "push", "--quiet", "origin", "work/tester/9")
+        sh(co, "rm", "--quiet", "COMMIT_MSG.md")
+        assert f"has no {config.MSG_FILE}" in dies(commands.land)
+        commands.land(message="over the deleted")
+        main = sh(co, "rev-parse", "origin/main")
+        assert sh(co, "log", "-1", "--format=%B", main).strip() == "over the deleted"
+        assert sh(co, "rev-parse", "HEAD") == main and not sh(co, "status", "--porcelain")
         # Which message a landing commits under.
-        assert checkout.landing_message(None, "s\n- b\n", "", "x") == "s\n\n- b"
-        assert checkout.landing_message(None, "", "draft\n", "x") == ""  # a draft is not HEAD's
-        assert checkout.landing_message("m\n- b", "", "", "x") == "m\n\n- b"
-        assert checkout.landing_message(" m ", "", " \n", "x") == "m"  # a blank file is none
-        assert f"x has a {config.MSG_FILE} and -m was given" in dies(lambda: checkout.landing_message("m", "f\n", "f\n", "x"))
-        assert f"sub y has a {config.MSG_FILE}" in dies(lambda: checkout.landing_message("m", "", "d\n", "sub y"))
-        assert f"x has a {config.MSG_FILE}" in dies(lambda: checkout.landing_message("m", "f\n", "d\n", "x"))
+        assert checkout.landing_message(None, "s\n- b\n", "x") == "s\n\n- b"
+        assert checkout.landing_message("m\n- b", "", "x") == "m\n\n- b"
+        assert checkout.landing_message(" m ", " \n", "x") == "m"  # a blank file is none
+        assert f"x has a {config.MSG_FILE} and -m was given" in dies(lambda: checkout.landing_message("m", "f\n", "x"))
+        assert f"sub y has a {config.MSG_FILE}" in dies(lambda: checkout.landing_message("m", "d\n", "sub y"))
+        # The file a landing reads: the worktree's, tracked or not.
+        assert checkout.message_on_file(str(co)) == ""
+        put(co, "COMMIT_MSG.md", "in HEAD\n", "msg")
+        (co / "COMMIT_MSG.md").write_text("on disk\n")
+        assert checkout.message_on_file(str(co)) == "on disk\n"
+        (co / "COMMIT_MSG.md").unlink()
+        assert checkout.message_on_file(str(co)) == ""  # deleted: HEAD's is not read
+        sh(co, "reset", "--quiet", "--hard", main)
         # The CLI: -m is land's alone, one non-empty message for one branch,
         # never a flag's name.
         argv0 = sys.argv

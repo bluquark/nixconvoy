@@ -337,8 +337,40 @@ def current_branch() -> str | None:
     return p.stdout.strip() or None
 
 
-def staged_differs() -> bool:
-    return not ok(["git", "diff", "--cached", "--quiet"])
+def staged_differs(cwd: str | None = None, *, less_msg: bool = False) -> bool:
+    """Whether the index differs from HEAD (`less_msg`: MSG_FILE aside,
+    which a landing reads from the worktree and never deploys - unless
+    unmerged, which the excluding diff would pass over)."""
+    if less_msg and out(["git", "ls-files", "-u", "--", f":(top){MSG_FILE}"], cwd=cwd):
+        return True
+    return not ok(["git", "diff", "--cached", "--quiet", "--ignore-submodules=none",
+                   *(["--", f":(top,exclude){MSG_FILE}"] if less_msg else [])], cwd=cwd)
+
+
+def message_on_file(cwd: str | None = None) -> str:
+    """MSG_FILE as a landing reads it: the worktree's, tracked or not (a
+    staged one need not have been deployed); "" without one."""
+    try:
+        return (Path(cwd or ".") / MSG_FILE).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def unstage_msg(cwd: str | None = None) -> bool:
+    """MSG_FILE's index entry back to HEAD's, the file itself staying: a
+    landing reads it off the worktree, and the commits it puts on the
+    branch (a submodule's pin) and the resets a failure answers with
+    take the index for clean.  Whether it was staged: a landing refused
+    past this point puts it back (restage_msg), staged for the deploy
+    the refusal asks for."""
+    had = bool(out(["git", "diff", "--cached", "--name-only", "--", f":(top){MSG_FILE}"], cwd=cwd))
+    git("reset", "--quiet", "--", MSG_FILE, cwd=cwd)
+    return had
+
+
+def restage_msg(cwd: str | None = None) -> None:
+    """The draft back on the index as the worktree has it (its deletion too)."""
+    git("add", "--all", "--", f":(top){MSG_FILE}", cwd=cwd, check=False)
 
 
 LOCK_FILE = "deploy.lock"
@@ -698,15 +730,14 @@ def fold_subject(msg: str) -> str:
     return msg
 
 
-def landing_message(given: str | None, on_file: str, draft: str, where: str) -> str:
+def landing_message(given: str | None, on_file: str, where: str) -> str:
     """What a landing of `where` commits under: `given` (land -m) when
-    passed, else `on_file` (its MSG_FILE as the landing reads it) - "" when
-    neither says anything.  -m beside a MSG_FILE, committed (`on_file`) or
-    not (`draft`, the one on disk), is refused: it is for a branch without
-    one."""
+    passed, else `on_file` (its MSG_FILE as the landing reads it,
+    message_on_file) - "" when neither says anything.  -m beside a
+    MSG_FILE is refused: it is for a branch without one."""
     if given is None:
         return fold_subject(on_file.strip())
-    if on_file.strip() or draft.strip():
+    if on_file.strip():
         die(strings.CHECKOUT_LAND_MSG_AND_M(where=where))
     return fold_subject(given.strip())
 
@@ -777,22 +808,18 @@ def edit_message(draft: str, wb: str, tips: list[tuple[str, str]] | None = None)
 
 
 def warn_no_msgfile(wb: str) -> None:
-    if rev(f"HEAD:{MSG_FILE}") is None:
+    if not message_on_file().strip():
         print(strings.CHECKOUT_NO_MSG_FILE_YET(wb=wb), file=sys.stderr)
 
 
-def index_tree(cwd: str | None = None, *, less_msg: bool = False) -> str:
-    """The tree of the index (`less_msg`: without MSG_FILE), through a copy,
-    since write-tree on the real one would rewrite its cache-tree
-    extension."""
+def index_tree(cwd: str | None = None) -> str:
+    """The tree of the index, through a copy, since write-tree on the real
+    one would rewrite its cache-tree extension."""
     fd, tmpidx = tempfile.mkstemp()
     os.close(fd)
     try:
         shutil.copy(out(["git", "rev-parse", "--path-format=absolute", "--git-path", "index"], cwd=cwd), tmpidx)
-        env = {"GIT_INDEX_FILE": tmpidx}
-        if less_msg:
-            git("update-index", "--force-remove", MSG_FILE, env=env, cwd=cwd)
-        p = run(["git", "write-tree"], env=env, cwd=cwd, check=False)
+        p = run(["git", "write-tree"], env={"GIT_INDEX_FILE": tmpidx}, cwd=cwd, check=False)
         if p.returncode != 0:
             die(strings.CHECKOUT_INDEX_UNMERGED(of=strings.CHECKOUT_INDEX_OF(cwd=cwd) if cwd else ""))
         return p.stdout.strip()

@@ -51,12 +51,13 @@ from .checkout import (
     GitQueries,
     common_state_path,
     fold_subject,
-    index_tree,
     landed_prefix,
     landing_message,
+    message_on_file,
     owned,
     rebase_hint,
     rebase_solving,
+    staged_differs,
     tree_less_msg,
 )
 from .config import MSG_FILE, cfg, main_ref, main_short
@@ -181,11 +182,8 @@ def rev_in(d: Path, ref: str) -> str | None:
 
 
 def staged(d: Path, *, less_msg: bool = False) -> bool:
-    """Whether `d`'s index differs from HEAD (`less_msg`: MSG_FILE aside,
-    which a landing reads from the worktree and never deploys)."""
-    if less_msg:
-        return index_tree(str(d), less_msg=True) != tree_less_msg("HEAD", cwd=str(d))
-    return index_tree(str(d)) != out(["git", "rev-parse", "HEAD^{tree}"], cwd=str(d))
+    """checkout.staged_differs in `d`."""
+    return staged_differs(str(d), less_msg=less_msg)
 
 
 def mark(repo: Path) -> None:
@@ -1102,11 +1100,8 @@ def prepare_one(sub: Sub, wb: str, fallback_msg: str, base: str | None = None) -
         if merged is None:
             die(strings.SUBMODULE_LAND_CONFLICT(name=sub.name, wb=wb, default=default, dir=sub.dir))
         tree = tree_less_msg(merged, cwd=str(sub.dir))
-        try:
-            on_file = (sub.dir / MSG_FILE).read_text(encoding="utf-8")
-        except OSError:
-            on_file = ""
-        msg = landing_message(None, on_file, "", strings.SUBMODULE_LABEL(name=sub.name)) or fold_subject(fallback_msg)
+        msg = (landing_message(None, message_on_file(str(sub.dir)), strings.SUBMODULE_LABEL(name=sub.name))
+               or fold_subject(fallback_msg))
         if tree == out(["git", "rev-parse", f"{main}^{{tree}}"], cwd=str(sub.dir)):
             landed = main
         else:
