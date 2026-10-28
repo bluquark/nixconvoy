@@ -4,7 +4,7 @@
 
 Nixconvoy is a NixOS deployment tool with a simple command-line interface.  Its distinguishing features are:
 
-* Nixconvoy tracks the history of every change ever applied to your NixOS fleet --- allowing you to easily reconstruct what happened and revert to an exact previous state.   It does this largely behind the scenes using its own git branches, so your main git branch stays tidy.
+* Nixconvoy tracks the history of every change ever deployed to your NixOS fleet --- allowing you to easily reconstruct what happened and revert to an exact previous state.   It does this largely behind the scenes using its own git branches, so your main git branch stays tidy.
 * Nixconvoy is designed for quick, iterative experiments on live machines.  If your change breaks ssh connectivity (or any other health check of your choice), then nixconvoy automatically rolls back to the previous NixOS generation.
 * Nixconvoy enables multitasking.  It deploys the merge of every worktree’s work-in-progress, so one half-finished change never undoes another.
 
@@ -203,7 +203,10 @@ $ nixconvoy close ~/homelab-jellyfin
 
 This is just an interleaved version of the sequential flow above... but notice the second deploy I highlighted with exclamation marks.  `~/homelab-jellyfin/` doesn't have the changes in `nftables.nix`, so if this were plain `nixos-rebuild`, the first round of firewall changes would accidentally get removed from the running system!
 
-This is the property of NixOS that can make it tricky to multitask on without switching to a full GitOps-style pipeline (where even the smallest change is required to be pushed to GitHub before getting deployed to a machine).  But with nixconvoy, the problem "magically" doesn't happen!  How?  nixconvoy actually *does* have a full GitOps-style pipeline in its implementation details: it merely presents itself as a simple push-based deploy tool.
+This is the property of NixOS that can make it tricky to multitask on without switching to a full GitOps-style pipeline (where even the smallest change is required to be pushed to GitHub before getting deployed to a machine).  But with nixconvoy, the problem "magically" doesn't happen!
+
+> [!NOTE]
+> How?  nixconvoy actually *does* have a full GitOps-style pipeline in its implementation details: it merely presents itself as a simple push-based deploy tool.  It uses that pipeline to apply the merge of every worktree’s work-in-progress, not just what's in the checkout you're deploying from.
 
 ## Parallel use with coding agents
 
@@ -375,7 +378,7 @@ pid=$(systemctl show -p MainPID --value dnsmasq)
 # Switched without checks: WSL networking isn't controlled by NixOS.
 switch = { confirmed = false }
 # 'windows-wsl' does not have its own distinct domain/IP address
-ssh_address = "blu@windows.home.bluquark.net"
+ssh_address = "bluquark@windows.home.bluquark.net"
 tags = ["omnibin"]
 
 [targets.hetzner1]
