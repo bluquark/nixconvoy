@@ -292,7 +292,7 @@ You run `deploy` after staging a change in a workbranch.  `nixconvoy deploy` bot
 - **No change will touch a target machine before passing prechecks (lint/static analysis).**
   - To reduce the performance cost of this guarantee, precheck runs in parallel with eval.
 - **Nix configuration changes are simultaneously deployed to all target machines that they affect.**
-  - Unless you provide an explicit <target>/@<tag> parameter, which restrict the set of targets considered.
+  - Unless you provide an explicit `<target>`/`@<tag>` parameter, which restrict the set of targets considered.
   - To reduce the performance cost of this guarantee, eval only reruns for targets whose included config files changed, via a nixconvoy feature called the "eval memo". (You may need to split your Nix config into per-feature files to benefit from the eval memo.)
 - **A broken NixOS generation automatically rolls itself back.** If a target loses connectivity or fails its health check after switching, it rolls back automatically.
 
