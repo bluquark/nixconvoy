@@ -199,7 +199,7 @@ fn refusal_advice() {
     assert!(a.contains("side1, side6 run another") && a.contains("reaches them too"), "{a}");
     assert!(
         a.contains(
-            "Re-run once that deploy ends, or push its branch from its checkout; or list its branch in nixconvoy.toml's work_branches"
+            "Re-run once that deploy ends, or push its branch from its checkout; or redeploy its work from a branch shaped like nixconvoy.toml's branch_prefix, or --evict"
         ),
         "{a}"
     );

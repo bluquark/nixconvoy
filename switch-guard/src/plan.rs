@@ -56,9 +56,43 @@ impl Names {
     }
 }
 
-/// Whether `name` starts with one of work_branches' prefixes.
-pub fn listed<'a>(prefixes: impl IntoIterator<Item = &'a str>, name: &str) -> bool {
-    prefixes.into_iter().any(|p| name.starts_with(p))
+/// Whether `name` is a work branch: shaped like one of `shapes` (each a
+/// branch_prefix, `{machine}` in it any one path segment), as a prefix.
+pub fn listed<'a>(shapes: impl IntoIterator<Item = &'a str>, name: &str) -> bool {
+    shapes.into_iter().any(|s| shaped(s, name))
+}
+
+fn shaped(shape: &str, name: &str) -> bool {
+    let Some((head, tail)) = shape.split_once("{machine}") else {
+        return name.starts_with(shape);
+    };
+    let Some(rest) = name.strip_prefix(head) else {
+        return false;
+    };
+    (1..=rest.len()).filter(|&i| rest.is_char_boundary(i) && !rest[..i].contains('/')).any(|i| shaped(tail, &rest[i..]))
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::listed;
+
+    #[test]
+    fn shapes() {
+        let one = |shape: &str, name: &str| listed([shape], name);
+        assert!(one("work/{machine}/", "work/haswell-wsl/3"));
+        assert!(one("work/{machine}/", "work/M3-Air/1-agent-x"));
+        assert!(!one("work/{machine}/", "work/haswell-wsl"));
+        assert!(!one("work/{machine}/", "work//3"));
+        assert!(one("work/{machine}/", "work/a/b/3"));
+        assert!(!one("work/{machine}/", "main"));
+        assert!(!one("work/{machine}/", "nixconvoy-history/chikuwa"));
+        assert!(one("nixconvoy/", "nixconvoy/lab5"));
+        assert!(!one("nixconvoy/", "nixconvoy"));
+        assert!(one("{machine}-deploys", "chikuwa-deploys1"));
+        assert!(!one("{machine}-deploys", "a/b-deploys1"));
+        assert!(listed(["x/", "work/{machine}/"], "work/m/1"));
+        assert!(!listed(Vec::<&str>::new(), "work/m/1"));
+    }
 }
 
 #[derive(Serialize)]
@@ -166,9 +200,9 @@ pub enum Query {
         branch: String,
     },
 
-    /// work_branches as the checkout now has it -> Names.
+    /// The work branches' shapes (branch_prefix) as the checkout now has it -> Names.
     Listed,
-    /// origin's work branches (the listed prefixes and this prefix's shape) and their tips, in ref order -> Refs.
+    /// origin's work branches (the refs shaped so) and their tips, in ref order -> Refs.
     Branches,
     /// Whether `sha` changes nothing but MSG_FILE since its merge base with
     /// origin/main -> Flag.

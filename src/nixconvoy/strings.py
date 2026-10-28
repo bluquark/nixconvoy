@@ -45,8 +45,8 @@ one tree silently reverts what another tree already deployed.
 Model (origin and main below are nixconvoy.toml's `remote` and
 `main_branch`, those names unless set):
   - main: mirror of origin/main; only finished (landed) commits.
-  - A work branch, listed by prefix in nixconvoy.toml's work_branches and
-    named with this machine's branch_prefix, is owned by the checkout that
+  - A work branch, one shaped like nixconvoy.toml's branch_prefix ({machine}
+    in it any hostname) and named with this machine's, is owned by the checkout that
     has it checked out; nixconvoy is its only writer: it commits the staged
     state onto it and pushes it after a successful deploy.  A deploy, land
     or undeploy finding origin's copy holding commits this checkout never
@@ -56,7 +56,7 @@ Model (origin and main below are nixconvoy.toml's `remote` and
     main (or any other branch; another machine's work branch too, when
     branch_prefix has {machine}) is a main checkout: it deploys main plus
     the pushed work branches and owns nothing.  Without {machine}, every
-    listed branch is this machine's to own: read another checkout's with
+    work branch is this machine's to own: read another checkout's with
     `nixconvoy review`, never by checking it out.  A subagent worktree - one nested in a checkout,
     <checkout>/<child_worktrees>/<name> by `open` - owns <parent's branch>-<name>
     (<branch_prefix>main-<name> under a main checkout) from its first deploy.
@@ -137,7 +137,7 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      catch-up to main or other branches, not just this increment) - unless
      the provenance shows the target runs another checkout's increment that this
      union cannot contain: a switch whose push has not landed yet, or one
-     of a branch work_branches here does not list.  Such a target is never
+     of a branch not shaped like branch_prefix here.  Such a target is never
      switched as is: when this checkout's own work does not reach it (no
      file its configuration reads changed since the tip of this branch its
      provenance recorded) it is left alone, running that work; when it does,
@@ -148,8 +148,8 @@ Deploy (nixconvoy deploy [<target> | @<tag> ...] [-m <msg>] [--evict]
      A dead deploy's announcement stays up, so its increment stays
      refused: the refusal names the deploy and the clear that ends it
      (git push origin :refs/nixconvoy/deploying/branch/<branch>),
-     or the push of its branch that keeps it.  Work of a branch
-     work_branches does not list stays refused until listed.  When the configuration
+     or the push of its branch that keeps it.  Work of a branch not
+     shaped like branch_prefix stays refused until it is.  When the configuration
      names a precheck (a flake check), it runs on a thread beside the evals
      unless a pass is already proven for the union's tree (nix rebuilds it
      only when a file it reads changed), and a failure stops the deploy the
@@ -440,8 +440,7 @@ the one system literal the hosts' .nix files agree on, else the first
 target's evaluated hostPlatform, else this machine's architecture as a
 guess the file says to verify; ssh_address_template, "<this
 user>@{target}", to edit; branch_prefix nixconvoy/ ({machine} in it, the
-hostname, namespaces one machine's branches) and work_branches, that
-prefix; child_worktrees
+hostname, namespaces one machine's branches); child_worktrees
 .claude/worktrees; remote, origin, else the one remote, and main_branch,
 that remote's HEAD's branch as fetched, else main or master as fetched,
 else main; eval.parallel "auto".  The optional sections follow as
@@ -692,8 +691,8 @@ OPEN_NESTED = M("{path} would be nested in the checkout {up}: `{TOOL} open --chi
                 "worktree there; an agent checkout goes beside the checkouts")
 OPEN_BRANCH_HELD = M("{remote} holds {held}: a removed checkout's, or another machine's (the prefix "
                      "shared).  `--branch {name}` makes it this checkout's, `--branch <leaf>` opens another")
-OPEN_NOT_WORK_BRANCH = M("{branch} is not a work branch of this machine's: one named {prefix}<leaf> that "
-                         "{CONFIG_FILE}'s work_branches lists; `--branch <leaf>` names one")
+OPEN_NOT_WORK_BRANCH = M("{branch} is not a work branch of this machine's: one named {prefix}<leaf>; "
+                         "`--branch <leaf>` names one")
 OPEN_BAD_LEAF = M("{branch}: a checkout's branch is {prefix}<leaf> with a leaf that is not 'main' "
                   "and holds no '-'; name one with --branch <leaf>")
 OPEN_DIVERGED = M("{branch} here and on {remote} have diverged: `git branch -f {branch} "
@@ -742,11 +741,8 @@ STATUS_PENDING_DEAD = M("{entry} - not renewed for {minutes:.0f} min: dead?")
 
 
 # --- checkout.py: work branch
-CHECKOUT_UNLISTED_WB = M("this checkout's work branch {wb} starts with no prefix in {CONFIG_FILE}'s work_branches; "
-                         "add this machine's prefix there (and land it on main so other "
-                         "checkouts union its branches) before deploying")
 CHECKOUT_NEEDS_WB = M("{what} needs a work branch, and this checkout has none: "
-                      "`git checkout -b {prefix}<leaf>` (a branch {CONFIG_FILE}'s work_branches lists) and re-run")
+                      "`git checkout -b {prefix}<leaf>` and re-run")
 
 # --- checkout.py: deploy lock holders
 CHECKOUT_LOCK_UNKNOWN_HOLDER = M("another {TOOL}")
@@ -868,7 +864,7 @@ DEPLOY_KILLED_BY_SIGNAL = M("killed by signal {signum}")
 DEPLOY_RUNNING_PRECHECK = "running the precheck..."
 DEPLOY_REACHES_NONE = M("reaches no target: committed onto {wb} and pushed; nothing built or switched (the probes' results dropped)")
 DEPLOY_FOREIGN_INCREMENTS = M("{remote} holds {wb} with increments this worktree never pushed: another worktree of this name?  `git log {main_ref}..{remote_wb}` shows them; open this worktree under another name, or `git branch {wb} {remote_wb}` to take them over")
-DEPLOY_UNLISTED_BRANCH = M("on branch {branch}, which {CONFIG_FILE}'s work_branches does not list; the main checkout deploys from {main_branch} (a hand commit there is claimed as {main_branch}'s until pushed)")
+DEPLOY_NOT_WORK_BRANCH = M("on branch {branch}, not a work branch of this machine's ({prefix}<leaf>); the main checkout deploys from {main_branch} (a hand commit there is claimed as {main_branch}'s until pushed)")
 DEPLOY_INCREMENT_NAME = M("{checkout}: increment {n}")
 DEPLOY_STAGED_ON_MAIN = "staged changes in the main checkout, which has no work branch: commit them by hand here, or stage them in a checkout on a work branch"
 DEPLOY_REACHES_NO_TARGET = "the increment reaches no target"
@@ -1004,12 +1000,11 @@ INIT_SYSTEM_GUESSED = "guessed"
 
 # --- init.py: render (the comments of the nixconvoy.toml written)
 INIT_TOML_REMOTE = "# The remote the work branches are pushed to and main is landed on, and main's name there."
-INIT_TOML_BRANCH_PREFIX = (
+INIT_TOML_BRANCH_PREFIX = M(
     "# A checkout's work branch is <branch_prefix><leaf>, `open <path>` naming it after the path.\n"
-    "# {machine} in the prefix is this machine's hostname, a namespace per machine when you want one.")
-INIT_TOML_WORK_BRANCHES = M(
-    "# The work branches {TOOL} may union into a deploy (and own, when named with the prefix), by\n"
-    "# the prefixes of their names; a pushed branch starting with none is ignored.")
+    "# {{machine}} in the prefix is this machine's hostname, a namespace per machine when you want one.\n"
+    "# Every branch shaped so ({{machine}} any hostname) is a work branch {TOOL} unions into a deploy;\n"
+    "# a pushed branch shaped otherwise is ignored.")
 INIT_TOML_CHILD_WORKTREES = M(
     "# Child worktrees are an optional feature of {TOOL} that can be used by hand if desired,\n"
     "# but is primarily intended to hook into worktrees that harnesses automatically create to isolate their"
@@ -1237,11 +1232,10 @@ CONFIG_NOT_AUTO_BOOL = M('{where}.{key} must be true, false or "auto"')
 CONFIG_NOT_A_BOOL = M("{CONFIG_FILE}: {where}.{key} must be true or false")
 CONFIG_NOT_A_TEMPLATE = M("{CONFIG_FILE}: {key} is a template over {{{placeholder}}} alone ({error!r})")
 CONFIG_DEADLINE = M("{CONFIG_FILE}: {where}.deadline is a number of seconds, above 0")
-CONFIG_WORK_BRANCHES_REQUIRED = M('{CONFIG_FILE}: work_branches is required: the prefixes of the work branches\' '
-                                  'names, e.g. ["{branch_prefix}"]')
-CONFIG_WORK_BRANCHES_LIST = M("{CONFIG_FILE}: work_branches must be a non-empty list of strings")
-CONFIG_WORK_BRANCHES_CHARS = M("{CONFIG_FILE}: work_branches: a prefix may hold letters, digits, '.', '-', '_' "
-                               "and '/' only: {bad}")
+CONFIG_WORK_BRANCHES_IGNORED = M("note: {CONFIG_FILE}: work_branches is ignored (a work branch is any branch shaped like "
+                                 "branch_prefix, {{machine}} in it any hostname): drop the line")
+CONFIG_BRANCH_PREFIX_CHARS = M("{CONFIG_FILE}: branch_prefix may hold ASCII letters, digits, '.', '-', '_', '/' and "
+                               "{{machine}} only: {branch_prefix!r}")
 CONFIG_CHILD_WORKTREES = M("{CONFIG_FILE}: child_worktrees is a directory inside the checkout")
 CONFIG_REMOTE = M("{CONFIG_FILE}: remote is a git remote's name (letters, digits, '.', '-', '_', "
                   "not starting with '-'), not {remote!r}")

@@ -1,6 +1,6 @@
 """`nixconvoy review`: a pending landing shown as its COMMIT_MSG.md, then
 its diff - `git diff --cached`, from the merge-base with origin's default
-branch when the checkout is on a work branch (one work_branches lists),
+branch when the checkout is on a work branch (one shaped like branch_prefix),
 a subagent worktree or a worktree beside the primary one on a branch of
 its own (a submodule worktree reviewed from its repository), so it shows
 everything pending against main (COMMIT_MSG.md itself left out unless
@@ -90,12 +90,12 @@ def targets(args: list[str], here: Path) -> tuple[list[Path | Sub | str], list[s
 
 
 def listed_in(top: Path, branch: str) -> bool:
-    """Whether `top`'s nixconvoy.toml lists `branch` among its work_branches."""
+    """Whether `branch` is a work branch by `top`'s nixconvoy.toml."""
     try:
-        pats = load(top).work_branches
+        shape = load(top).branch_prefix
     except (OSError, ConfigError):
         return False
-    return listed(branch, set(pats))
+    return listed(branch, shape)
 
 
 def base_of(d: Path, all_wts: dict[Path, str | None]) -> str | None:

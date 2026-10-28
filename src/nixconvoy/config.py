@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,12 +85,11 @@ class Config:
     ssh_template: str
     # A checkout owns "<prefix><leaf>", its subagent worktrees "<prefix><leaf>-<name>"
     # (the main checkout's "<prefix>main-<name>"); {machine}, when the
-    # template has it, is this machine's hostname.
+    # template has it, is this machine's hostname.  Also the shape of every
+    # work branch nixconvoy unions, {machine} standing for any hostname
+    # (checkout.listed, the plan cores' `listed`): a pushed branch not
+    # shaped so is ignored.
     branch_prefix: str
-    # The prefixes of the work branches' names nixconvoy may union or own
-    # (every matcher - here, the plan cores - takes a name starting with
-    # one): a pushed branch none matches is ignored with a warning.
-    work_branches: tuple[str, ...]
     # Where `open --child <name>` puts a child (subagent) worktree, relative
     # to the checkout.  A nested worktree must be ignored (open writes it
     # into .git/info/exclude); any worktree nested in a checkout is one of
@@ -251,6 +251,9 @@ def _bare_url(u: str) -> str:
     return u.split("?")[0].rstrip("/")
 
 
+_noted_work_branches: list[bool] = []
+
+
 def _template(t: dict[str, object], k: str, placeholder: str) -> str:
     """A required template setting, proven here to format with
     `placeholder` alone, so a stale placeholder fails as a ConfigError
@@ -272,8 +275,13 @@ def parse(text: str) -> Config:
     if isinstance(version, bool) or version != 1:
         raise ConfigError(strings.CONFIG_VERSION(version=version))
     known = {"config_version", "flake_dir", "targets_dir", "targets_arch", "ssh_address_template", "branch_prefix",
-             "work_branches", "child_worktrees", "remote", "main_branch",
-             "eval", "build", "switch", "targets", "submodules"}
+             "child_worktrees", "remote", "main_branch", "eval", "build", "switch", "targets", "submodules",
+             "work_branches"}
+    if "work_branches" in doc and not _noted_work_branches:
+        # The allowlist this once had, superseded by branch_prefix's shape:
+        # a file from before still loads, told so once per run.
+        _noted_work_branches.append(True)
+        print(strings.CONFIG_WORK_BRANCHES_IGNORED(), file=sys.stderr)
     for k in doc:
         if k not in known:
             raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=k))
@@ -284,16 +292,10 @@ def parse(text: str) -> Config:
     targets_arch = _str(doc, "targets_arch", CONFIG_FILE, None)
     ssh_template = _template(doc, "ssh_address_template", "target")
     branch_prefix = _template(doc, "branch_prefix", "machine")
-    if "work_branches" not in doc:
-        raise ConfigError(strings.CONFIG_WORK_BRANCHES_REQUIRED(branch_prefix=branch_prefix))
-    pats = doc["work_branches"]
-    if not isinstance(pats, list) or not all(isinstance(s, str) for s in pats) or not pats:
-        raise ConfigError(strings.CONFIG_WORK_BRANCHES_LIST())
-    # A trailing `*` is the glob this once was, read as the prefix before it.
-    pats = [p.removesuffix("*") for p in pats]
-    bad = [p for p in pats if not re.fullmatch(r"[\w./-]+", p)]
-    if bad:
-        raise ConfigError(strings.CONFIG_WORK_BRANCHES_CHARS(bad=", ".join(repr(p) for p in bad)))
+    # ASCII, and braces only as {machine}: the nix side (a deploy-time
+    # regex over it) and the shape matchers read it verbatim.
+    if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch_prefix.replace("{machine}", "")):
+        raise ConfigError(strings.CONFIG_BRANCH_PREFIX_CHARS(branch_prefix=branch_prefix))
     children = _str(doc, "child_worktrees", CONFIG_FILE, None).strip("/")
     if not children or ".." in children.split("/"):
         raise ConfigError(strings.CONFIG_CHILD_WORKTREES())
@@ -369,7 +371,6 @@ def parse(text: str) -> Config:
         targets_arch=targets_arch,
         ssh_template=ssh_template,
         branch_prefix=branch_prefix,
-        work_branches=tuple(pats),
         child_worktrees=children,
         remote=remote,
         main_branch=main_branch,

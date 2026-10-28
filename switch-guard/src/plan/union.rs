@@ -53,16 +53,16 @@ struct Conflict {
 }
 
 /// What the passes over origin's branches carry between them: the
-/// work_branches the last one read, and the unlisted branches already
-/// named.
+/// work branches' shapes the last one read, and the unlisted branches
+/// already named.
 struct Seen {
     listed: Vec<String>,
     warned: BTreeSet<String>,
 }
 
 /// The other listed branches on origin that still declare changes not in
-/// HEAD.  An unlisted one is skipped aloud: the checked-in prefixes, not
-/// the branch name, are the credential.  The list is read on every pass, since
+/// HEAD.  One not shaped so is skipped aloud: the checked-in shape, not
+/// the branch name, is the credential.  The shapes are read on every pass, since
 /// a refresh may bring a new one; the stage's drift verdicts get the same.
 fn select(s: &mut Script, p: &Params, seen: &mut Seen) -> Run<Vec<(String, String)>> {
     seen.listed = s.names(Query::Listed)?;

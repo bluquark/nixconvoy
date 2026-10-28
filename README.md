@@ -14,7 +14,8 @@ what is deployed.
 ## The model in git terms
 
 - **A work branch is where experiments live.**  Each checkout you deploy from
-  owns one, listed by prefix in `nixconvoy.toml`'s `work_branches`.  A
+  owns one, shaped like `nixconvoy.toml`'s `branch_prefix` (`{machine}` in
+  it any hostname).  A
   deploy commits the staged state onto it and pushes it; nothing else
   writes there: a deploy, land or undeploy that finds origin's copy
   holding commits this checkout never pushed is refused before it
@@ -47,7 +48,7 @@ what is deployed.
   there (an increment reset off its branch by hand stays deployed until
   the next deploy by anyone, which says what it reverts).
 
-A checkout on `main` (or any branch `work_branches` does not list) is a
+A checkout on `main` (or any branch not shaped like `branch_prefix`) is a
 plain checkout: it deploys the convoy too, catching the targets up, but owns
 no work.
 
@@ -82,8 +83,8 @@ no work.
   is abandoned and taken over with a warning.  A deploy that died leaves
   its announcement up, so its targets stay refused - the refusal names the
   dead deploy and the clear that ends it - and nothing is ever taken over
-  on a clock.  Work of a branch `work_branches` does not list stays
-  refused until listed.
+  on a clock.  Work of a branch not shaped like `branch_prefix` stays
+  refused until it is.
 - **Held-back targets.**  An increment deployed to named targets alone is
   committed with the targets it reaches (`Reaches:`) and the ones now
   running the branch's tip (`Deployed:`); a target in the first and not the
@@ -245,9 +246,9 @@ main_branch = "main"              # main's name there: what the work branches ar
 branch_prefix = "nixconvoy/"       # a checkout owns "<prefix><leaf>" (`open <path>`: the path's name), a
                                    # subagent worktree "<checkout's branch>-<name>" ("<prefix>main-<name>"
                                    # under a plain checkout); "{machine}" in it is this machine's hostname,
-                                   # a namespace per machine ("nixconvoy/{machine}/")
-work_branches = ["nixconvoy/"]     # the work branches nixconvoy may union or own, by the prefixes of
-                                   # their names; a pushed branch starting with none is ignored
+                                   # a namespace per machine ("nixconvoy/{machine}/").  Every branch shaped
+                                   # so ({machine} any hostname) is a work branch nixconvoy unions; a pushed
+                                   # branch shaped otherwise is ignored
 child_worktrees = ".claude/worktrees"   # where `open --child <worktree>` puts a child (subagent) worktree, under the
                                         # checkout (Claude Code's own place; excluded through .git/info/exclude)
 

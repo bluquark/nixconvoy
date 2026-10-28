@@ -43,7 +43,8 @@ from .checkout import (
     record_commit,
     staged_differs,
     staged_snapshot,
-    work_branch,
+    this_prefix,
+    work_branch_name,
 )
 from .config import cfg, main_ref, remote_ref, repo_names, store_host
 from .guard import binary, decide
@@ -209,7 +210,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     pool.shutdown(wait=False)
 
     pop_tmp_commits()
-    wb = work_branch()
+    wb = work_branch_name()
     cur = current_branch()
     if wb is not None and cur not in (wb, cfg().main_branch, None):
         # A subagent worktree's fresh branch: the provenance must name wb.
@@ -225,7 +226,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
         if not had and (made := rev(f"refs/heads/{wb}")) is not None:
             note_pushed(wb, made)  # the branch as taken from origin's empty copy, or fresh
     elif wb is None and cur not in (cfg().main_branch, None):
-        die(strings.DEPLOY_UNLISTED_BRANCH(branch=cur, main_branch=cfg().main_branch))
+        die(strings.DEPLOY_NOT_WORK_BRANCH(branch=cur, prefix=this_prefix(), main_branch=cfg().main_branch))
 
     def increment_name() -> str:
         n = int(out(["git", "rev-list", "--count", f"{main_ref()}..HEAD"])) + 1
@@ -446,8 +447,8 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
 
     def stage(wt: str, union: str, listed: list[str], branches: list[tuple[str, str]]) -> bool:
         """Eval, precheck, build and copy for `union`, checked out in `wt`,
-        from the branches `listed` in nixconvoy.toml's work_branches, `branches` the ones
-        it merged: whether the deploy ends here."""
+        the work branches shaped like `listed` (nixconvoy.toml's branch_prefix), `branches`
+        the ones it merged: whether the deploy ends here."""
         nonlocal plan, affected, left_alone, tops, committed, records, provenances, ann, last_targets
         if skip:
             if dry:

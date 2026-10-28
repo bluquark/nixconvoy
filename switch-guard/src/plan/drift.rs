@@ -4,16 +4,16 @@
 //!
 //! A target runs another checkout's increment that this union cannot contain
 //! when that checkout's push has not landed (origin's tip of its branch is
-//! still the one it built on) or when it holds work of a branch
-//! work_branches here does not list.  Switching it would revert that work
+//! still the one it built on) or when it holds work of a branch not
+//! shaped like branch_prefix here.  Switching it would revert that work
 //! until its owner redeploys, so it is never switched as is - unless that
 //! deploy is over: the provenance names its increment's announcement
 //! (`pending.announce`, its ref `pending.key`) and that ref is cleared
 //! (Context::in_flight lacks it), which only the deploy's own end does -
 //! its push, or its withdrawal having switched nothing - or the removal
 //! of its branch, or a hand clear; or the deploy is a --evict that names
-//! the target or reaches it.  Work of a branch work_branches here does
-//! not list stays refused until listed.  A deploy that died leaves its announcement up
+//! the target or reaches it.  Work of a branch not shaped like
+//! branch_prefix here stays refused until it is.  A deploy that died leaves its announcement up
 //! (nixconvoy tells one from its stopped renewals: Context::dead), so
 //! its target stays refused, the refusal naming the deploy and the
 //! clear that ends it; nothing is taken over on a clock.  When this
@@ -159,7 +159,7 @@ pub enum Kind {
     CatchUp,
     /// Another checkout's increment whose push has not landed - refused.
     InFlight,
-    /// Work of a branch work_branches does not list here - refused.
+    /// Work of a branch not shaped like branch_prefix here - refused.
     Unlisted,
     /// Held back by another branch whose work the union carries - refused.
     Held,
@@ -199,8 +199,8 @@ pub struct Context {
     pub names: Names,
     /// This checkout: (machine, checkout directory).
     pub me: (String, String),
-    /// The branches its union may contain besides main: work_branches'
-    /// prefixes.
+    /// The branches its union may contain besides main: the work
+    /// branches' shapes (branch_prefix).
     pub listed: BTreeSet<String>,
     /// This run's fetched origin tip of each branch.
     pub tips: BTreeMap<String, String>,

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 const WB: &str = "haswell-wsl-deploys4";
 const LISTED: [&str; 3] = [WB, "chikuwa-deploys1", "M3-Air-deploys2"];
-/// Unlisted at first; a refresh may bring a work_branches listing it.
+/// Unlisted at first; a refresh may bring a branch_prefix shaped to it.
 const NEW: &str = "chikuwa-deploys2";
 const UNLISTED: &str = "M3-Air-deploys9";
 
@@ -25,7 +25,7 @@ struct Origin {
     conflicts: BTreeMap<String, Vec<(String, bool)>>,
     refs: Refs,
     main: String,
-    /// work_branches in the checkout, and after a refresh.
+    /// The work branches' shapes in the checkout, and after a refresh.
     listed: Vec<String>,
     refreshed_listed: Option<Vec<String>>,
     /// What the fetch finds, and each build after it.
@@ -51,7 +51,7 @@ struct Trace {
     checked_out: Option<String>,
     /// Each staged union, the refs and main when it was staged.
     stages: Vec<(String, Vec<String>)>,
-    /// What each select pass saw, and work_branches then.
+    /// What each select pass saw, and the shapes then.
     passes: Vec<(Refs, Vec<String>)>,
     listed_reads: usize,
 }
@@ -75,7 +75,7 @@ fn answer(o: &mut Origin, t: &mut Trace, q: &Query) -> Reply {
             Reply::Names(o.listed.clone())
         }
         Query::Branches => {
-            assert!(t.listed_reads > t.passes.len(), "a pass over the branches without reading work_branches");
+            assert!(t.listed_reads > t.passes.len(), "a pass over the branches without reading the shapes");
             t.passes.push((o.refs.clone(), o.listed.clone()));
             Reply::Refs(o.refs.clone())
         }
@@ -95,7 +95,7 @@ fn answer(o: &mut Origin, t: &mut Trace, q: &Query) -> Reply {
         Query::Summary { sha } => Reply::Text(Some(format!("summary of {sha}"))),
         Query::Merge { name, sha } => {
             assert!(t.pending.is_none(), "merging over an unresolved merge");
-            assert!(o.listed.contains(name), "merging {name}, which work_branches does not list now");
+            assert!(o.listed.contains(name), "merging {name}, not a work branch by the shapes now");
             let files = o.conflicts.get(sha).cloned().unwrap_or_default();
             if files.is_empty() {
                 t.merged.push(name.clone());
@@ -176,7 +176,7 @@ fn answer(o: &mut Origin, t: &mut Trace, q: &Query) -> Reply {
             Reply::Flag(true)
         }
         Query::Stage { union, listed, branches } => {
-            assert_eq!(listed, &o.listed, "drift judged against another work_branches than the checkout's");
+            assert_eq!(listed, &o.listed, "drift judged against other shapes than the checkout's");
             assert_eq!(branches.iter().map(|b| b.0.clone()).collect::<Vec<_>>(), t.merged, "staging other branches than the union merged");
             assert_eq!(t.checked_out.as_ref(), Some(union), "staging what is not checked out");
             assert!(t.fetched && !t.stale, "staged before the fetch was collected and followed");
@@ -268,7 +268,7 @@ proptest! {
         let head_has = &o.head_has;
         let want: BTreeSet<String> = t.passes.iter()
             .flat_map(|(refs, listed)| refs.iter().filter(move |(n, s)| n != WB && !listed.contains(n) && !head_has.contains(s)))
-            .map(|(n, _)| format!("warning: ignoring origin/{n}: not listed in nixconvoy.toml's work_branches"))
+            .map(|(n, _)| format!("warning: ignoring origin/{n}: not shaped like nixconvoy.toml's branch_prefix"))
             .collect();
         let warned: Vec<String> = fx.iter().filter_map(|e| match e { Effect::Warn(w) => Some(w.clone()), _ => None }).collect();
         prop_assert_eq!(warned.len(), want.len());
@@ -328,7 +328,7 @@ fn a_moved_origin_redoes_the_union() {
     };
     let (_, t, asked, fx, out) = run(&o, &params(false));
     let done = out.unwrap();
-    // The refresh brought a work_branches listing NEW: it is unioned too.
+    // The refresh brought a shape fitting NEW: it is unioned too.
     assert_eq!(done.branches, [(LISTED[1].to_string(), "s2".to_string()), (NEW.to_string(), "s3".to_string())]);
     assert_eq!(t.refreshed, 1);
     assert_eq!(t.stages.len(), 1);

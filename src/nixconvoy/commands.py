@@ -24,7 +24,6 @@ from .checkout import (
     GitQueries,
     add_worktree,
     adopt_origin_tip,
-    allowed_branches,
     ancestor_pids,
     await_background_push,
     branch_at,
@@ -192,7 +191,7 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
     refuse_no_message(wb, message)
     # A branch forked from another's tip (a subagent worktree made by hand at
     # its parent's) would land that branch's increments under this message.
-    carried = [b for b, tip in listed_tips(allowed_branches()).items()
+    carried = [b for b, tip in listed_tips().items()
                if b != wb and is_ancestor(tip, "HEAD")
                and not is_ancestor(tip, main_ref())]
     if carried:
@@ -817,7 +816,6 @@ def status() -> None:
     git(*fetch_args("--no-auto-gc"), check=False)
     main = rev(main_ref())
     tips = origin_tips()
-    pats = allowed_branches()
     here = Path.cwd().resolve()
     checkouts = [here, *sibling_checkouts()]
 
@@ -836,16 +834,15 @@ def status() -> None:
         rendered gray as a whole.  A submodule holding anything keeps it lit."""
         cur = g(d, "symbolic-ref", "--short", "-q", "HEAD") or None
         head = g(d, "rev-parse", "HEAD")
-        ident = identity_of(d, cur, pats)
+        ident = identity_of(d, cur)
         # A subagent's commits of its own: beyond main and beyond the parent's
         # (any listed branch's) pushed tip it forked from.
-        beyond = [main_short()] + ([remote_ref(b) for b in tips
-                                     if b != cur and listed(b, pats)]
+        beyond = [main_short()] + ([remote_ref(b) for b in tips if b != cur and listed(b)]
                                     if ident.kind == "sub" else [])
         ahead = int(g(d, "rev-list", "--count", "HEAD", "--not", *beyond) or 0)
         behind = int(g(d, "rev-list", "--count", f"HEAD..{main_short()}") or 0)
         own = ahead  # commits of its own: a review checkout's are on origin
-        if cur is None and ahead and on_origin(str(d), pats):
+        if cur is None and ahead and on_origin(str(d)):
             own = 0
         counts = {label: count(d, *args) for label, args in (
             (strings.STATUS_STAGED, ["diff", "--cached", "--name-only"]),
@@ -912,7 +909,7 @@ def status() -> None:
         return sub_parent(d) or d
 
     def is_main(d: Path) -> bool:
-        return identity_of(d, g(d, "symbolic-ref", "--short", "-q", "HEAD") or None, pats).kind == "main"
+        return identity_of(d, g(d, "symbolic-ref", "--short", "-q", "HEAD") or None).kind == "main"
 
     tops = sorted({parent(d) for d in checkouts}, key=lambda p: (not is_main(p), p.name))
     width = max(len(d.name) + 4 for d in checkouts)
@@ -937,7 +934,7 @@ def status() -> None:
     local |= set(out(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/"]).splitlines())
     elsewhere = []
     for name, tip in sorted(tips.items()):
-        if name == cfg().main_branch or name in local or not listed(name, pats):
+        if name == cfg().main_branch or name in local or not listed(name):
             continue
         if main and is_ancestor(tip, main):
             continue
@@ -1077,7 +1074,6 @@ def open_checkout(path: Path, branch: str | None) -> Path:
             break
         up = up.parent
     git(*fetch_args("--no-auto-gc"), check=False)
-    pats = allowed_branches()
     tips = origin_tips()
     local = set(out(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/"]).split())
     prefix = this_prefix()
@@ -1088,7 +1084,7 @@ def open_checkout(path: Path, branch: str | None) -> Path:
             die(strings.OPEN_BRANCH_HELD(remote=cfg().remote, held=", ".join(held), name=d.name))
     elif not branch.startswith(prefix) and "/" not in branch:
         branch = f"{prefix}{branch}"
-    if not owned(branch, pats):
+    if not owned(branch):
         die(strings.OPEN_NOT_WORK_BRANCH(branch=branch, prefix=prefix))
     if branch.removeprefix(prefix) == "main" or "-" in branch.removeprefix(prefix):
         # "<leaf>-<name>" is a subagent worktree's branch, "main-<name>" the main checkout's.
@@ -1251,7 +1247,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
                     sub_msgs.append(sub_msg)
         own = {wb, *(b for _, b in parts)}
         for d, b in [(here, wb), *parts]:
-            carried = [x for x, tip in listed_tips(allowed_branches()).items()
+            carried = [x for x, tip in listed_tips().items()
                        if x not in own and is_ancestor(tip, "HEAD" if d == here else f"refs/heads/{b}")
                        and not is_ancestor(tip, main)]
             if carried:

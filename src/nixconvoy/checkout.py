@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import functools
 import hashlib
 import os
 import re
@@ -141,29 +142,36 @@ def fetch_args(*flags: str) -> list[str]:
             f"+refs/heads/*:refs/remotes/{cfg().remote}/*", f"+{PENDING_REFS}/*:{PENDING_REFS}/*"]
 
 
-def allowed_branches() -> set[str]:
-    """The prefixes of the work branches nixconvoy may union or own: the
+def work_shape() -> str:
+    """The shape of the work branches nixconvoy may union or own: the
     invoking checkout's working-tree copy of nixconvoy.toml's
-    work_branches (config.root(), wherever the run has moved to), read
-    afresh each time (a rebase may have brought a prefix)."""
+    branch_prefix (config.root(), wherever the run has moved to), read
+    afresh each time (a rebase may have changed it)."""
     try:
-        return set(load(config.root()).work_branches)
+        return load(config.root()).branch_prefix
     except ConfigError as e:
         die(str(e))
 
 
-def listed(name: str, pats: set[str] | None = None) -> bool:
-    return any(name.startswith(p) for p in (allowed_branches() if pats is None else pats))
+@functools.cache
+def shape_re(shape: str) -> re.Pattern[str]:
+    """`shape` as a prefix pattern, {machine} in it any one path segment."""
+    return re.compile("[^/]+".join(re.escape(p) for p in shape.format(machine="\0").split("\0")))
+
+
+def listed(name: str, shape: str | None = None) -> bool:
+    """Whether `name` is a work branch: shaped like `shape` (the work shape)."""
+    return shape_re(work_shape() if shape is None else shape).match(name) is not None
 
 
 def this_prefix() -> str:
     return cfg().branch_prefix.format(machine=proc.this_machine())
 
 
-def owned(name: str, pats: set[str] | None = None) -> bool:
-    """A work branch this machine may write: listed, and named with its
-    prefix (another machine's listed branch is only ever unioned)."""
-    return name.startswith(this_prefix()) and listed(name, pats)
+def owned(name: str) -> bool:
+    """A work branch this machine may write: named with its prefix (another
+    machine's is only ever unioned)."""
+    return name.startswith(this_prefix())
 
 
 class Checkout(NamedTuple):
@@ -291,19 +299,19 @@ def note_prefix(top: Path) -> None:
                 p.write_text(text + "\n")
 
 
-def identity_of(here: Path, cur: str | None, pats: set[str] | None = None) -> Checkout:
+def identity_of(here: Path, cur: str | None) -> Checkout:
     """What the checkout at `here` with `cur` checked out is: on one of
-    this machine's listed work branches it owns that branch (a subagent's
+    this machine's work branches it owns that branch (a subagent's
     when it is nested in another checkout); a subagent worktree on
     any other branch owns <parent's work branch>-<name> (<branch_prefix>main-<name>
     under the main checkout); anything else is the main checkout, with no
     work branch of its own."""
     parent = sub_parent(here)
-    if cur and owned(cur, pats):
+    if cur and owned(cur):
         return Checkout("sub" if parent is not None else "agent", cur)
     if parent is not None:
         pb = branch_of(parent)
-        base = pb if pb and owned(pb, pats) else this_prefix() + "main"
+        base = pb if pb and owned(pb) else this_prefix() + "main"
         return Checkout("sub", f"{base}-{here.name}")
     return Checkout("main", None)
 
@@ -317,15 +325,8 @@ def work_branch_name() -> str | None:
     return checkout_identity().wb
 
 
-def work_branch() -> str | None:
-    wb = work_branch_name()
-    if wb is not None and not listed(wb):
-        die(strings.CHECKOUT_UNLISTED_WB(wb=wb))
-    return wb
-
-
 def require_work_branch(what: str) -> str:
-    wb = work_branch()
+    wb = work_branch_name()
     if wb is None:
         die(strings.CHECKOUT_NEEDS_WB(what=what, prefix=this_prefix()))
     return wb
@@ -523,8 +524,7 @@ class GitQueries:
             case Detach(upstream):
                 return ran(git("switch", "--quiet", "--detach", upstream, check=False))
             case Pushed():
-                return Flag(any(is_ancestor("HEAD", t)
-                                for t in listed_tips(allowed_branches(), names=self.names).values()))
+                return Flag(any(is_ancestor("HEAD", t) for t in listed_tips(names=self.names).values()))
             case OnOrigin():
                 return Flag(on_origin(names=self.names))
             case Switch(branch, start):
@@ -1275,11 +1275,10 @@ def origin_tips(cwd: str | None = None, names: RepoNames | None = None) -> dict[
     return dict(ln.split("\t", 1) for ln in listing.splitlines() if not ln.startswith("HEAD\t"))
 
 
-def listed_tips(pats: set[str], cwd: str | None = None, names: RepoNames | None = None) -> dict[str, str]:
-    """origin_tips narrowed to main and the work branches `pats` list."""
+def listed_tips(cwd: str | None = None, names: RepoNames | None = None) -> dict[str, str]:
+    """origin_tips narrowed to main and the work branches."""
     names = names or cfg().names
-    return {b: t for b, t in origin_tips(cwd, names).items()
-            if b == names.main or listed(b, pats)}
+    return {b: t for b, t in origin_tips(cwd, names).items() if b == names.main or listed(b)}
 
 
 # The Deployed: trailer's value in a git log format; Applied: is the same
@@ -1435,14 +1434,14 @@ def tree_less_msg(ref: str, cwd: str | None = None) -> str:
         Path(tmpidx).unlink()
 
 
-def on_origin(cwd: str | None = None, pats: set[str] | None = None, names: RepoNames | None = None) -> bool:
+def on_origin(cwd: str | None = None, names: RepoNames | None = None) -> bool:
     """Whether HEAD holds nothing of its own beyond origin: it is an
     ancestor of origin/main or of origin's tip of a listed work branch, or
     its tree less MSG_FILE is that of an origin/main commit past their
     merge base (a review checkout of a tip since landed).  `names`: the
     repository's, a submodule's own where the core runs there."""
     names = names or cfg().names
-    tips = set(listed_tips(allowed_branches() if pats is None else pats, cwd, names).values())
+    tips = set(listed_tips(cwd, names).values())
     # Excluded as ^sha lines: --not does not reach revisions read from stdin.
     if not out(["git", "rev-list", "-n", "1", "HEAD", "--stdin"], cwd=cwd,
                input="".join(f"^{c}\n" for c in sorted(tips))):

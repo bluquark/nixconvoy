@@ -18,7 +18,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from . import config, proc, strings
+from . import config, strings
 from .config import CONFIG_FILE
 from .proc import die, out, run
 
@@ -58,7 +58,7 @@ def main(flake_arg: str | None, start: Path) -> None:
     ssh = f"{this_user()}@{{target}}"
     remote, main = detect_names(notes)
     text = render(flake=flake, system=system, ssh=ssh, prefix=prefix,
-                  branches=[prefix.format(machine=proc.this_machine())], checks=check_names, targets=targets,
+                  checks=check_names, targets=targets,
                   remote=remote, main=main, hosts_dir=hosts_dir)
     try:
         config.parse(text)
@@ -245,7 +245,7 @@ def detect_system(root: Path, ref: str, hosts_dir: str | None, targets: list[str
     return f"{arch}-linux", strings.INIT_SYSTEM_GUESSED
 
 
-def render(*, flake: str, system: str, ssh: str, prefix: str, branches: list[str],
+def render(*, flake: str, system: str, ssh: str, prefix: str,
            checks: list[str], targets: list[str], remote: str = "origin", main: str = "main",
            hosts_dir: str | None = None) -> str:
     """The file, the `targets` as [targets.<name>] tables, `hosts_dir`
@@ -260,10 +260,8 @@ def render(*, flake: str, system: str, ssh: str, prefix: str, branches: list[str
         f"remote = {q(remote)}",
         f"main_branch = {q(main)}",
         "",
-        strings.INIT_TOML_BRANCH_PREFIX,
+        strings.INIT_TOML_BRANCH_PREFIX(),
         f"branch_prefix = {q(prefix)}",
-        strings.INIT_TOML_WORK_BRANCHES(),
-        f"work_branches = [{', '.join(q(b) for b in branches)}]",
         strings.INIT_TOML_CHILD_WORKTREES(),
         "child_worktrees = \".claude/worktrees\"",
         "",

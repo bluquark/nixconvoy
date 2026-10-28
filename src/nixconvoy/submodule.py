@@ -54,7 +54,7 @@ from .checkout import (
     index_tree,
     landed_prefix,
     landing_message,
-    listed,
+    owned,
     rebase_hint,
     rebase_solving,
     tree_less_msg,
@@ -1259,7 +1259,7 @@ def remove_one(sub: Sub) -> None:
     shutil.rmtree(sub.dir, ignore_errors=True)
     sub.dir.mkdir(parents=True, exist_ok=True)
     git("worktree", "prune", cwd=str(sub.repo), check=False)
-    if cur is not None and not listed(cur):
+    if cur is not None and not owned(cur):
         print(strings.SUBMODULE_BRANCH_NOT_OURS(name=sub.name, branch=cur))
         cur = None
     if cur is not None:

@@ -7,7 +7,6 @@ from __future__ import annotations
 import subprocess
 from collections.abc import Callable
 from concurrent.futures import Future
-from fnmatch import fnmatchcase
 from pathlib import Path
 
 from . import strings, submodule
@@ -15,11 +14,11 @@ from .checkout import (
     MACHINE_ENV,
     GitQueries,
     add_worktree,
-    allowed_branches,
     drop_worktree,
     listed,
     ran,
     summarize,
+    work_shape,
 )
 from .config import MSG_FILE, cfg, main_ref, main_short
 from .proc import git, ok, out, rev, run, solve_with_mergiraf
@@ -74,17 +73,12 @@ class UnionQueries(GitQueries):
         wt = self.wt
         match ask:
             case Listed():
-                return Names(sorted(allowed_branches()))
+                return Names([work_shape()])
             case Branches():
-                # Every work-branch-shaped ref: the listed ones, and the ones
-                # shaped like this machine's (any machine's), so the core can warn
-                # of a pushed work branch nobody registered.
-                shape = cfg().branch_prefix.replace("{machine}", "*") + "*"
-                pats = allowed_branches()
                 listing = out(["git", "for-each-ref", "--format=%(refname:strip=3)%09%(objectname)",
                                f"refs/remotes/{cfg().remote}/"])
                 refs = [(n, t) for n, t in (ln.split("\t", 1) for ln in listing.splitlines())]
-                return Refs([r for r in refs if listed(r[0], pats) or fnmatchcase(r[0], shape)])
+                return Refs([r for r in refs if listed(r[0])])
             case Unchanged(sha):
                 base = out(["git", "merge-base", main_short(), sha])
                 return Flag(ok(["git", "diff", "--quiet", base, sha, "--", ".", f":(exclude){MSG_FILE}"]))

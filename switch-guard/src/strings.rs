@@ -9,7 +9,7 @@
 #[macro_export]
 macro_rules! text {
     // --- plan.rs
-    (plan_branches_key) => { "nixconvoy.toml's work_branches" };
+    (plan_branches_key) => { "nixconvoy.toml's branch_prefix" };
     (plan_failed) => { "{what} failed" };
     (plan_failed_detail) => { "{what} failed:\n{detail}" };
     (plan_mismatch) => { "nixconvoy-plan asked {q:?} and got {r:?}" };
@@ -18,7 +18,7 @@ macro_rules! text {
     (drift_this_branch) => { "over this checkout's deploy of {when}" };
     (drift_who) => { "{machine}:{checkout} (pid {pid}) at {when}" };
     (drift_who_untimed) => { "{machine}:{checkout} (pid {pid})" };
-    (drift_unlisted) => { "runs work of {branches} deployed by {who}, which {BRANCHES_KEY} here does not list, so no union here contains it" };
+    (drift_unlisted) => { "runs work of {branches} deployed by {who}, not shaped like {BRANCHES_KEY} here, so no union here contains it" };
     (drift_catch_up) => { "runs pushed work deployed by {who}" };
     (drift_pushed_since) => { "runs {branch}'s increment deployed by {who}, pushed since" };
     (drift_branch_gone) => { "runs {branch}'s increment deployed by {who}, the branch gone since" };
@@ -36,7 +36,7 @@ macro_rules! text {
     (drift_refused_held) => { "nothing switched or committed: {held} {are} held back by another branch (see above): the union carries work that checkout deployed to other targets alone, and this checkout's work reaches {them} too.  Deploy it there (nixconvoy deploy {args} from that checkout) or land it with --not-yet-deployed; or deploy with {EVICT_FLAG} {args} to switch {them} to this checkout's view alone, without the held work (and without every other branch's), the hold standing." };
     (drift_fix_in_flight) => { "re-run once that deploy ends, or push its branch from its checkout" };
     (drift_fix_dead) => { "the deploy of {branch} looks dead (its announcement is no longer renewed): clear it to have the next deploy revert its increment - git push {remote} :{PENDING_REFS}/{key} - or push {branch} from its checkout to keep it" };
-    (drift_fix_unlisted) => { "list its branch in {BRANCHES_KEY} (`nixconvoy pull` once that line is on main)" };
+    (drift_fix_unlisted) => { "redeploy its work from a branch shaped like {BRANCHES_KEY}, or --evict" };
     (drift_fix_held) => { "{held} held back by another branch: deploy it there (nixconvoy deploy {args} from that checkout) or land it with --not-yet-deployed" };
     (drift_fix_joiner) => { "; or " };
     (drift_refused) => { "nothing switched or committed: {targets} {run} another checkout's work this union lacks, and this checkout's work reaches {them} too (see above).  {fix}; or deploy with {EVICT_FLAG} {first} to revert it deliberately - along with every other branch's work there, which {EVICT_FLAG} leaves out." };
@@ -98,7 +98,7 @@ macro_rules! text {
     (prune_remove_refused) => { "git refused to remove it:\n{detail}" };
 
     // --- plan/union.rs
-    (union_unlisted) => { "warning: ignoring {remote}/{name}: not listed in {BRANCHES_KEY}" };
+    (union_unlisted) => { "warning: ignoring {remote}/{name}: not shaped like {BRANCHES_KEY}" };
     (union_merging) => { "union: merging {name}: {summary}" };
     (union_merge_what) => { "merging {name} into the union" };
     (union_dropping_msg_file) => { "dropping {MSG_FILE} from the union" };
