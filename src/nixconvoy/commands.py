@@ -62,7 +62,7 @@ from .checkout import (
     pop_tmp_commits,
     proc_stat,
     push_cmd,
-    push_state,
+    push_in_flight,
     ran,
     require_work_branch,
     restage_msg,
@@ -604,7 +604,7 @@ class PruneQueries(GitQueries):
                 reason = f"pid {pid}" + (f" start {start}" if start is not None else "")
                 return Flag(lock_live(reason) if own_ends else lock_pid_alive(reason) is not False)
             case PushInFlight():
-                return Flag(push_state("pid").exists())
+                return Flag(push_in_flight())
             case Nested():
                 inside = [Path(ln[len("worktree "):]).resolve() for ln in out(
                     ["git", "worktree", "list", "--porcelain"]).splitlines() if ln.startswith("worktree ")]
@@ -625,6 +625,7 @@ class PruneQueries(GitQueries):
                     self.fetched.append(super().__call__(ask))
                 return self.fetched[0]
             case RemoveWorktree():
+                await_background_push(wait=False)  # its last push's outcome, told before its files go
                 submodule.remove_all(self.d)  # nested in it: their registrations go first
                 # Under the name lock, which every relock takes too: the lock
                 # judged is the one lifted.

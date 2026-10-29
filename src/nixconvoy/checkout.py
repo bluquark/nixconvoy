@@ -861,38 +861,96 @@ def push_state(kind: str) -> Path:
     return state_path(f"push.{kind}")
 
 
-def await_background_push() -> None:
-    """Collect the previous run's background push (push_deployed) before
-    anything fetches or pushes: wait for it, report a failure (this run's
-    push retries it) and clear its files."""
-    pidf, statusf, logf = (push_state(k) for k in ("pid", "status", "log"))
-    if not pidf.exists():
-        return
+class PushFiles(NamedTuple):
+    pid: Path
+    status: Path
+    tmp: Path  # the status, written whole: echoed here, then moved
+    log: Path
+    lock: Path
+
+
+def push_files() -> PushFiles:
+    """The background push's files (push_deployed), beside each other in the
+    git dir."""
+    pid = push_state("pid")
+    return PushFiles(pid, *(pid.with_name(f"push.{k}") for k in ("status", "status.tmp", "log", "lock")))
+
+
+def push_running(lockf: Path) -> bool:
+    """Whether the background push holding `lockf` (push_deployed's flock,
+    held by its sh alone) still runs: a shared lock, tried and dropped at
+    once, conflicts only with its exclusive one.  No lock file means no
+    push ever started."""
+    if not lockf.exists():
+        return False
     try:
-        pid = int(pidf.read_text().strip())
+        with lockf.open("r") as f:
+            fcntl.flock(f, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    return False
+
+
+def push_in_flight(f: PushFiles | None = None) -> bool:
+    """Whether the previous run's background push still runs: no status
+    written, its lock held."""
+    if f is None:
+        f = push_files()
+    return not f.status.exists() and push_running(f.lock)
+
+
+# How long the deadline's kill of a background push waits for its lock to
+# go, per signal (SIGTERM, then SIGKILL).
+PUSH_KILL_WAIT = 5
+
+
+def await_background_push(*, wait: bool = True) -> bool:
+    """Collect the previous run's background push (push_deployed) before
+    anything fetches or pushes: wait for it (up to a minute, then it is
+    killed), report a failure (this run's push retries it) and clear its
+    files.  Not waited for (a removal, no push of its own to retry with),
+    one still running is left so, True; one over is collected the same,
+    its failure told as final.  The status file is written whole (the
+    script's mv), so one present is a push over."""
+    f = push_files()
+    if not f.pid.exists():
+        return False
+    try:
+        pid = int(f.pid.read_text().strip())
     except ValueError:
         pid = 0
+    alive = push_in_flight(f)
+    if alive and not wait:
+        return True
     deadline = time.monotonic() + 60
-    while pid > 0 and not statusf.exists() and time.monotonic() < deadline:
-        try:
-            os.kill(pid, 0)
-        except OSError:  # gone without a status
-            break
+    while alive and time.monotonic() < deadline:
         time.sleep(0.05)
-    if statusf.exists():
-        status = statusf.read_text().strip()
-    else:
-        status = strings.CHECKOUT_PUSH_TIMED_OUT if pid > 0 else strings.CHECKOUT_PUSH_NO_PID
-        if pid > 0:
+        alive = push_in_flight(f)
+    if f.status.exists():
+        status = f.status.read_text().strip()
+    elif alive:
+        # The lock held is the push's sh alive: its pid, the group's, is its own.
+        status = strings.CHECKOUT_PUSH_TIMED_OUT
+        for sig in (signal.SIGTERM, signal.SIGKILL) if pid > 0 else ():
             with contextlib.suppress(OSError):
-                os.killpg(pid, signal.SIGTERM)
-    log = logf.read_text().strip() if logf.exists() else ""
-    for f in (pidf, statusf, logf):
+                os.killpg(pid, sig)
+            end = time.monotonic() + PUSH_KILL_WAIT
+            while push_running(f.lock) and time.monotonic() < end:
+                time.sleep(0.05)
+            if not push_running(f.lock):
+                break
+    else:
+        status = strings.CHECKOUT_PUSH_GONE if pid > 0 else strings.CHECKOUT_PUSH_NO_PID
+    log = f.log.read_text().strip() if f.log.exists() else ""
+    for path in (f.pid, f.status, f.tmp, f.log):
         with contextlib.suppress(OSError):
-            f.unlink()
+            path.unlink()
     if status != "0":
-        print(strings.CHECKOUT_PUSH_BG_FAILED(status=status, log=strings.CHECKOUT_PUSH_BG_LOG(log=log) if log else ""),
-              file=sys.stderr)
+        detail = strings.CHECKOUT_PUSH_BG_LOG(log=log) if log else ""
+        print(strings.CHECKOUT_PUSH_BG_FAILED(status=status, log=detail) if wait
+              else strings.CHECKOUT_PUSH_BG_FAILED_FINAL(where=Path.cwd(), status=status, remote=cfg().remote,
+                                                         log=detail), file=sys.stderr)
+    return False
 
 
 # The tip this repository last pushed onto a work branch (or took from
@@ -1229,6 +1287,11 @@ def record_commit(target: str, union: str, parents: list[str], subject: str, doc
                env=DATELESS_ENV)
 
 
+# How long a deploy's ending push waits for the lock of the one before
+# (held past the deadline's kill: pathological).
+PUSH_LOCK_WAIT = 10
+
+
 def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str]) -> str | None:
     """The push that ends a deploy, in the background, atomic - all of it
     lands or none, so a deploy waiting on the announcement finds the
@@ -1248,7 +1311,9 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str])
     check before the switches (a later fetch brought its tip) is the
     problem returned: the branch is not pushed and its announcement is
     left to the caller, as for a deploy that ended without its push; the
-    records and the sweep go anyway."""
+    records and the sweep go anyway.  The push before still holding its
+    lock past the deadline's kill (await_background_push) is fatal: the
+    announcement stays, so a re-run finishes this deploy."""
     refspecs: list[str] = []
     what: list[str] = []
     problem: str | None = None
@@ -1275,21 +1340,40 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str])
     sweep = {f"{PENDING_REFS}/{k}": sha for k, sha in announcements()[1].items()}
     if not refspecs and not sweep:
         return problem
-    pidf, statusf, logf = (push_state(k) for k in ("pid", "status", "log"))
+    f = push_files()
     hold = os.environ.get("NIXCONVOY_HOLD_PUSH", "")
     push = ["git", "-c", "core.hooksPath=/dev/null", *proc.PUSH_NET, "push", "--quiet", cfg().remote]
-    script = "export GIT_TERMINAL_PROMPT=0; " + (shlex.join([*push, "--atomic", *refspecs]) if refspecs else "true") + "; rc=$?"
+    body = (shlex.join([*push, "--atomic", *refspecs]) if refspecs else "true") + "; rc=$?"
     if pushed_note:
-        script += f'; [ "$rc" = 0 ] && {shlex.join(pushed_note)}'
+        body += f'; [ "$rc" = 0 ] && {shlex.join(pushed_note)}'
     if sweep:
-        script += f'; [ "$rc" = 0 ] && {shlex.join([*push, *delete_args(sweep)])}'
-    script += '; echo "$rc" >"$0"'
-    if hold:
-        script = f"sleep {shlex.quote(hold)}; {script}"
-    with logf.open("w") as log:
-        child = subprocess.Popen(["sh", "-c", script, str(statusf)], stdin=subprocess.DEVNULL,
-                                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-    pidf.write_text(str(child.pid))
+        body += f'; [ "$rc" = 0 ] && {shlex.join([*push, *delete_args(sweep)])}'
+    body += '; exit "$rc"'
+    # The lock, taken here and passed to the sh, is held while that sh lives
+    # (push_running): closed for its subshell, so no child of git's (a
+    # credential daemon) keeps it.
+    with f.lock.open("a") as lock:
+        deadline = time.monotonic() + PUSH_LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    die(strings.CHECKOUT_PUSH_LOCK_HELD(lock=f.lock, secs=PUSH_LOCK_WAIT))
+                time.sleep(0.05)
+        for path in (f.status, f.tmp):
+            with contextlib.suppress(OSError):
+                path.unlink()
+        script = (f'export GIT_TERMINAL_PROMPT=0; ({body}) {lock.fileno()}>&-; rc=$?'
+                  '; echo "$rc" >"$0.tmp" && mv -f "$0.tmp" "$0"')
+        if hold:
+            script = f"sleep {shlex.quote(hold)}; {script}"
+        with f.log.open("w") as log:
+            child = subprocess.Popen(["sh", "-c", script, str(f.status)], stdin=subprocess.DEVNULL,
+                                     stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+                                     pass_fds=(lock.fileno(),))
+    f.pid.write_text(str(child.pid))
     print(strings.CHECKOUT_PUSHING_BG(what=", ".join(what) or strings.CHECKOUT_PUSHING_CLEARED))
     return problem
 

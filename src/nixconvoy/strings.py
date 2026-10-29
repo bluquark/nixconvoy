@@ -302,8 +302,13 @@ CHECKOUT_RENEW_FAILED = M("note: renewing this deploy's announcement failed; a d
 # --- checkout.py: pushes
 CHECKOUT_PUSH_TIMED_OUT = "timed out"
 CHECKOUT_PUSH_NO_PID = "no pid"
+CHECKOUT_PUSH_GONE = "gone without a status"
+CHECKOUT_PUSH_LOCK_HELD = M("the previous run's background push still runs (holding {lock}) {secs} s after this "
+                            "deploy's end, so nothing of it is pushed: re-run once that push is over")
 CHECKOUT_PUSH_BG_FAILED = M("note: the previous run's background push failed ({status}); this run's "
                             "push retries it{log}")
+CHECKOUT_PUSH_BG_FAILED_FINAL = M("note: the last background push of {where} failed ({status}): the deploy records "
+                                  "it carried are not on {remote}, and nothing retries them{log}")
 CHECKOUT_PUSH_BG_LOG = M(":\n{log}")
 CHECKOUT_SOLE_WRITER = M("{wb} moved on {remote} ({sha}): another checkout deployed on it, but a work branch has one "
                          "writer.  `git log refs/heads/{wb}..{up_ref}` shows what it holds; in that "

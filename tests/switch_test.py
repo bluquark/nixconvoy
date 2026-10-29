@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import fcntl
 import functools
 import getpass
 import hashlib
@@ -28,6 +29,7 @@ import itertools
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1425,7 +1427,63 @@ def git_cases(d: Path) -> None:
         out = printed(lambda: commands.close_worktrees([]))
         assert f"/review: kept, it owns {own}, which carries commits not on origin" in out, out
         sh(co, "branch", "-D", own)
-        out = printed(lambda: commands.close_worktrees([]))
+        # A background push holds it while its sh holds its lock with no
+        # status written; one over is collected (its failure told, its
+        # files cleared) by the removal.
+        pidf, statusf, logf, lockf = (checkout.state_path(f"push.{k}", rv.resolve())
+                                      for k in ("pid", "status", "log", "lock"))
+
+        def pusher(script: str) -> subprocess.Popen[bytes]:
+            """A push's shape (push_deployed): sh holds the lock, its children not."""
+            with lockf.open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                return subprocess.Popen(["sh", "-c", f"({script}) {lock.fileno()}>&-"], start_new_session=True,
+                                        pass_fds=(lock.fileno(),))
+
+        running = pusher("sleep 60")
+        try:
+            pidf.write_text(str(running.pid))
+            out = printed(lambda: commands.close_worktrees([]))
+            assert "/review: kept, a push of its work branch is in flight" in out, out
+            os.chdir(rv)
+            try:
+                assert checkout.await_background_push(wait=False) and pidf.exists()
+            finally:
+                os.chdir(co)
+        finally:
+            with contextlib.suppress(OSError):
+                os.killpg(running.pid, signal.SIGKILL)
+            running.wait()
+        # The sh gone, a child of its still running: not a push in flight.
+        orphaned = pusher("sleep 60 & exit 0")
+        orphaned.wait()
+        os.chdir(rv)
+        try:
+            try:
+                pidf.write_text(str(orphaned.pid))
+                assert not checkout.push_in_flight()
+            finally:
+                with contextlib.suppress(OSError):
+                    os.killpg(orphaned.pid, signal.SIGKILL)
+            # Over with its status written: collected without a word, a
+            # status left half-written with it; gone without one: told as final.
+            statusf.write_text("0\n")
+            statusf.with_name("push.status.tmp").write_text("0")
+            assert warned(lambda: checkout.await_background_push(wait=False)) == ""
+            assert not pidf.exists() and not statusf.with_name("push.status.tmp").exists()
+            pidf.write_text(str(running.pid))
+            err = warned(lambda: checkout.await_background_push(wait=False))
+            assert "/review failed (gone without a status): the deploy records" in err and not pidf.exists(), err
+        finally:
+            os.chdir(co)
+        # The removal tells the outcome of a push that failed.
+        pidf.write_text(str(running.pid))
+        statusf.write_text("1\n")
+        logf.write_text("rejected\n")
+        outs: list[str] = []
+        err = warned(lambda: outs.append(printed(lambda: commands.close_worktrees([]))))
+        assert "/review failed (1): the deploy records" in err and "rejected" in err, err
+        out = outs[0]
         assert out.endswith("/review: empty, removed\n"), out
         assert not rv.exists() and Path.cwd().resolve() == co.resolve()
         out = printed(lambda: commands.close_worktrees([]))
