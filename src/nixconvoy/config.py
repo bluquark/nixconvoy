@@ -125,10 +125,6 @@ class Config:
     # on to its own remote builders (nix.conf's builders), and the closures
     # are copied to the targets from it.  Addressed as a target (ssh_address).
     store: dict[str, str] = field(default_factory=dict)
-    # Substituters a deploy build leaves out of the store host's own
-    # configured list (targets.build_cmd): the caches themselves are each
-    # store host's nix.conf's business.
-    skip_substituters: tuple[str, ...] = ()
     # [switch]: every target's switch policy unless its table overrides.
     switch: SwitchPolicy = field(default_factory=SwitchPolicy)
     targets: dict[str, TargetConfig] = field(default_factory=dict)
@@ -277,12 +273,6 @@ def _strs(t: dict[str, object], k: str, where: str) -> tuple[str, ...]:
     return tuple(v)
 
 
-def _bare_url(u: str) -> str:
-    """A substituter URL as nix.conf's spellings of it compare: without its
-    query (?priority=...) and trailing slashes."""
-    return u.split("?")[0].rstrip("/")
-
-
 _noted_work_branches: list[bool] = []
 _noted_submodules: list[bool] = []
 
@@ -349,7 +339,7 @@ def parse(text: str) -> Config:
             raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"eval.{k}"))
     build = _table(doc.get("build", {}), "build")
     for k in build:
-        if k not in ("store", "builder", "skip_substituters"):
+        if k not in ("store", "builder"):
             raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"build.{k}"))
     # `builder` is the key's older name, still read.
     if "store" in build and "builder" in build:
@@ -366,11 +356,6 @@ def parse(text: str) -> Config:
             if not isinstance(v, str):
                 raise ConfigError(strings.CONFIG_STORE_ENTRY(key=key, name=k))
             store[k] = v
-    skip = []
-    for s in _strs(build, "skip_substituters", "build"):
-        if s.split() != [s]:
-            raise ConfigError(strings.CONFIG_SKIP_SUBSTITUTER(entry=s))
-        skip.append(_bare_url(s))
     switch = _switch(_table(doc.get("switch", {}), "switch"), "switch", None)
     targets: dict[str, TargetConfig] = {}
     for name, h in _table(doc.get("targets", {}), "targets").items():
@@ -402,7 +387,6 @@ def parse(text: str) -> Config:
         precheck=_str(ev, "precheck", "eval"),
         parallel_eval=_auto_bool(ev, "parallel", "eval"),
         store=store,
-        skip_substituters=tuple(skip),
         switch=switch,
         targets=targets,
     )

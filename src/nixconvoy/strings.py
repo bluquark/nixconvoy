@@ -432,8 +432,6 @@ TARGETS_PHANTOM_TAG = M("{CONFIG_FILE} tags {phantom} as {tag}, but the inventor
 TARGETS_UNKNOWN = M("unknown target(s) {unknown}; the inventory has: {inventory}")
 TARGETS_REFRESHING_KIT = M("refreshing the switch kit on {target}...")
 TARGETS_KIT_ROOT_FAILED = M("rooting the switch kit on {target} failed (exit {code}){detail}")
-TARGETS_SUBSTITUTERS_TIMEOUT = M("`nix config show substituters` timed out after {secs} s")
-TARGETS_SUBSTITUTERS_FAILED = M("reading the substituters failed:\n{error}")
 TARGETS_STORE_TIMEOUT = M("`nix store {verb}` timed out after {secs} s")
 TARGETS_STORE_NO_JSON = M("`nix store {verb}` printed no JSON object:\n{output}")
 TARGETS_STORE_FAILED = M("`nix store {verb}` failed:\n{error}")
@@ -526,8 +524,7 @@ INIT_TOML_BUILD = (
     "# runs on (\"*\": any other machine; a machine mapped to itself realises locally); that\n"
     "# machine's nix daemon builds them or hands them to its own remote builders.\n"
     "# [build]\n"
-    "# store = { \"*\" = \"bigbox\" }\n"
-    "# skip_substituters = [\"https://slow.cachix.org\"]")
+    "# store = { \"*\" = \"bigbox\" }")
 INIT_TOML_SWITCH = (
     "# How the targets are switched (every target's defaults; a [targets.<name>.switch] extends them).\n"
     "# With auto_rollback_checks (unset: [{ ssh = true }]) a switch is confirmed: a rollback timer is armed\n"
@@ -765,7 +762,6 @@ CONFIG_STORE_AND_BUILDER = M("{CONFIG_FILE}: build.store and build.builder are t
 CONFIG_STORE_TYPE = M("{CONFIG_FILE}: build.{key} is a machine name, or a table of them keyed by "
                       "the hostname {TOOL} runs on")
 CONFIG_STORE_ENTRY = M("{CONFIG_FILE}: build.{key}.{name} must be a string")
-CONFIG_SKIP_SUBSTITUTER = M("{CONFIG_FILE}: build.skip_substituters entry {entry!r} is not a substituter URL")
 CONFIG_TARGET_DIR = M("{CONFIG_FILE}: targets.{name}.dir is a directory inside the repository, "
                       "relative to its root, not {dir!r}")
 CONFIG_TARGET_DIR_ROOT = M("{CONFIG_FILE}: targets.{name}.dir names the repository root: leave it out instead")

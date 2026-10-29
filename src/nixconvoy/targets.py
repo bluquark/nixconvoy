@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from . import proc, strings
-from .config import _bare_url, cfg, store_host
+from .config import cfg, store_host
 from .proc import die, load_json, run
 
 # Seconds one probe of a target may take, so a stalled ssh session holds
@@ -268,33 +268,6 @@ def sandbox_opts(dry_run: list[str], drvs: list[str]) -> tuple[str, ...]:
     return UNSANDBOXED
 
 
-def kept_substituters(shown: str, skip: tuple[str, ...]) -> str:
-    """`nix config show substituters`' list less `skip` (bare URLs), each
-    cache once: a URL compares without its query and trailing slashes."""
-    seen: set[str] = set()
-    kept = []
-    for url in shown.split():
-        bare = _bare_url(url)
-        if bare not in skip and bare not in seen:
-            seen.add(bare)
-            kept.append(url)
-    return " ".join(kept)
-
-
-@functools.cache
-def store_substituters(via: tuple[str, ...], prefix: tuple[str, ...]) -> tuple[bool, str]:
-    """The substituter list `nix config show` prints through `via` as
-    `prefix` (builder_prefix's) runs nix, or False and the failure text;
-    once per store host for the run (the precheck and the build both ask)."""
-    cmd = [*via, *prefix, "nix", *(ROOT_NIX[2:] if prefix else ()), "config", "show", "substituters"]
-    p = run(cmd, check=False, timeout=BUILDER_TIMEOUT)
-    if p.timed_out:
-        return False, strings.TARGETS_SUBSTITUTERS_TIMEOUT(secs=BUILDER_TIMEOUT)
-    if p.returncode != 0:
-        return False, strings.TARGETS_SUBSTITUTERS_FAILED(error=p.stderr.strip())
-    return True, p.stdout
-
-
 def store_info(prefix: tuple[str, ...], via: tuple[str, ...]) -> dict[str, object] | str:
     """What `nix store info --json` reports through `via` (the ssh prefix
     reaching the store host, empty here) with `prefix` (SUDO or nothing)
@@ -353,22 +326,11 @@ def builder_prefix(via: tuple[str, ...]) -> list[str] | str:
 def build_cmd(opts: tuple[str, ...], via: list[str]) -> list[str] | str:
     """The `nix build` prefix the .drvs follow, run through `via` (the ssh
     prefix reaching the store host, empty here) under builder_prefix, or
-    the failure text.  With
-    skip_substituters set it passes the store host's own substituter list
-    (store_substituters; its failure is the build's) less
-    those: the caches stay the store host's nix.conf's business, this only
-    trims the probes a deploy makes."""
+    the failure text."""
     pre = builder_prefix(tuple(via))
     if isinstance(pre, str):
         return pre
-    nix = [*pre, "nix", *(ROOT_NIX if pre else ()), "build", "--no-link", *BUILD_OPTS, *opts]
-    skip = cfg().skip_substituters
-    if not skip:
-        return nix
-    good, shown = store_substituters(tuple(via), tuple(pre))
-    if not good:
-        return shown
-    return [*nix, "--option", "substituters", kept_substituters(shown, skip)]
+    return [*pre, "nix", *(ROOT_NIX if pre else ()), "build", "--no-link", *BUILD_OPTS, *opts]
 
 
 def build_on(host: str, drvs: list[str], what: str,

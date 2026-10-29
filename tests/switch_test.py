@@ -329,8 +329,6 @@ def builder_cases() -> None:
     def fake(replies: dict[tuple[str, str], Reply]) -> Callable[..., subprocess.CompletedProcess[str]]:
         def run(cmd: list[str], **_: object) -> subprocess.CompletedProcess[str]:
             cmds.append(cmd)
-            if cmd[-1] == "substituters":
-                return proc.Completed(cmd, 0, "https://cache.nixos.org\n", "")
             key = ("sudo" if "sudo" in cmd else "user", cmd[-2])
             assert key in replies, cmd
             rc, out, err = replies[key]
@@ -370,11 +368,6 @@ def builder_cases() -> None:
                     assert targets.builder_prefix(tuple(via)) == want, (replies, targets.builder_prefix(tuple(via)))
                     assert targets.build_cmd((), via) == [*want, "nix", *(targets.ROOT_NIX if want else ()), "build",
                                                           "--no-link", *targets.BUILD_OPTS]
-                    config.set_cfg(config.parse(toml('[build]\nstore = "big"\nskip_substituters = ["https://x"]\n')))
-                    targets.store_substituters.cache_clear()
-                    cmds.clear()
-                    assert targets.build_cmd((), via)[-1] == "https://cache.nixos.org", replies
-                    assert cmds[-1][:len(via) + len(want)] == [*via, *want], cmds[-1]
         # Without a store host nothing is asked before a build comes; the
         # local probe then carries NIX_CONFIG through sudo.
         targets.builder_prefix.cache_clear()
@@ -392,7 +385,6 @@ def builder_cases() -> None:
         if env_cfg is not None:
             os.environ["NIX_CONFIG"] = env_cfg
         targets.builder_prefix.cache_clear()
-        targets.store_substituters.cache_clear()
     say("builder: ok")
 
 
@@ -517,10 +509,6 @@ def target_cases() -> None:
             assert "nixconvoy init" in str(e), e
         else:
             raise AssertionError("loaded without a file")
-    # The store host's substituters less the skipped ones, each cache once.
-    assert targets.kept_substituters(
-        "https://a/ https://slow.cachix.org/?priority=40 https://a?priority=1 https://b\n",
-        ("https://slow.cachix.org",)) == "https://a/ https://b"
     say("targets: ok")
 
 
