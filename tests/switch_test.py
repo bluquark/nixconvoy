@@ -1786,20 +1786,24 @@ def dies(f: Callable[[], object]) -> str:
 
 
 def submodule_cases(d: Path) -> None:
-    """The submodule flow on scratch repos: the planted worktree, a
-    deploy's sync (the branch pushed, the gitlink pinned and staged), the
-    union of two branches, a landing (squashed onto the submodule's main,
-    pinned there), the catch-up onto a moved main and the removal."""
+    """The submodule flow on scratch repos: the planted worktree (the
+    checkouts being clones, each has the repository under its own
+    .git/modules/dep, its working tree the checkout's own), a deploy's
+    sync (the branch pushed, the gitlink pinned and staged), the union of
+    two branches, a landing (squashed onto the submodule's main, pinned
+    there), the catch-up onto a moved main, the main checkout's working
+    tree kept at its pin, and the removal."""
     scratch_env()
+    # The submodule's url is a local path, which git's submodule clone refuses by default.
+    os.environ.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "protocol.file.allow",
+                       "GIT_CONFIG_VALUE_0": "always"})
     from nixconvoy import submodule  # noqa: PLC0415 - after scratch_env's config
     dep_origin, dep_seed = d / "dep.git", d / "dep-seed"
     sh(d, "init", "--quiet", "--bare", "-b", "main", str(dep_origin))
     sh(d, "clone", "--quiet", str(dep_origin), str(dep_seed))
     put(dep_seed, "tool.py", "v1\n", "dep v1")
     sh(dep_seed, "push", "--quiet", "origin", "HEAD:main")
-    dep_repo = d / "dep"  # the repository's checkout here, never deployed from
-    sh(d, "clone", "--quiet", str(dep_origin), str(dep_repo))
-    config.set_cfg(config.parse(toml(f'[submodules.dep]\nrepo = "{dep_repo}"\n', flake_dir="nixos", targets_dir="nixos/hosts")))
+    config.set_cfg(config.parse(toml(flake_dir="nixos", targets_dir="nixos/hosts")))
 
     wb = "work/tester/9"
     path = "nixos/submodules/dep"
@@ -1828,14 +1832,19 @@ def submodule_cases(d: Path) -> None:
              pin_file: json.dumps({"rev": v1}, indent=2) + "\n"}
     with scratch_origin(d, files,
                         seeded=lambda seed: sh(seed, "update-index", "--add", "--cacheinfo", f"160000,{v1},{path}")) \
-            as (origin, _seed, co):
+            as (origin, seed, co):
+        dep_repo = co / ".git/modules/dep"  # the repository, as git keeps a submodule's
         assert (co / path).is_dir() and not any((co / path).iterdir())  # unpopulated, as cloned
         checkout.ensure_on_work_branch(wb)
+        assert submodule.present(co) == []
+        assert "no submodule of this repository (they are: dep)" in dies(lambda: submodule.create("other", wb))
         ax = submodule.create("dep", wb)
         assert ax == co / path and submodule.branch_at(ax) == wb
         assert sh(ax, "rev-parse", "HEAD") == v1
         assert sh(ax, "config", f"branch.{wb}.merge") == "refs/heads/main"
-        assert (dep_repo / ".git" / checkout.STATE_DIR / submodule.MARKER).exists()
+        assert (dep_repo / "HEAD").exists() and (ax / ".git").is_file()
+        assert (dep_repo / checkout.STATE_DIR / submodule.MARKER).exists()
+        assert dep().repo == dep_repo
         assert not sh(co, "status", "--porcelain")  # planted at the pinned rev
         assert submodule.create("dep", wb) == ax  # idempotent
         assert submodule.sync(wb, None) == []  # nothing of its own: no push, the pin as it was
@@ -2004,13 +2013,21 @@ def submodule_cases(d: Path) -> None:
         sh(dep_seed, "reset", "--quiet", "--hard", "HEAD~1")
         sh(dep_seed, "push", "--quiet", "origin", f"{junk}:{submodule.PAST_REFS}/gone/{junk}")
         sh(dep_repo, "push", "--quiet", "origin", f"{b1}:{submodule.PAST_REFS}/keep/{b1}")
-        # The repository's own checkout, idle on main since the clone, follows
-        # in the sweep after the landing (the landing itself leaves it alone:
-        # nothing of its may stop main's commit), like the main checkout
-        # follows main, an untracked file of its riding along; one on
-        # another branch is left where it is.
-        assert sh(dep_repo, "rev-parse", "HEAD") == v1 and submodule.branch_at(dep_repo) == "main"
-        (dep_repo / "scratch.txt").write_text("s\n")
+        # The main checkout (the seed clone, on main) holds the repository's
+        # own working tree once it is cloned there: on the default branch at
+        # the rev the checkout pins, no worktree of nixconvoy's (nothing to
+        # deploy from a main checkout), and kept at the pin by the sweep
+        # after a landing or a pull (the landing itself leaves it alone:
+        # nothing of its may stop main's commit), an untracked file of its
+        # riding along; one on another branch is left where it is.
+        main_wt = seed / path
+        assert submodule.repository(submodule.sub_of("dep", submodule.entries(seed)["dep"], seed), seed) \
+            == seed / ".git/modules/dep"
+        assert sh(main_wt, "rev-parse", "HEAD") == v1 and submodule.branch_at(main_wt) == "main"
+        assert not sh(seed, "status", "--porcelain")
+        assert submodule.present(seed) == [] and [s.name for s in submodule.planted(seed)] == ["dep"]
+        assert submodule.main_checkouts() == [seed]
+        (main_wt / "scratch.txt").write_text("s\n")
         # Prepared, then abandoned (main's push refused): the landing
         # commit waited under a temporary ref, the default branch, the
         # worktree and its message stayed, and the pin comes off again.
@@ -2034,18 +2051,39 @@ def submodule_cases(d: Path) -> None:
         assert not dep_ref(f"{submodule.PAST_REFS}/{wb}/*")
         dep_main = dep_ref("refs/heads/main")
         assert sh(ax, "rev-parse", "HEAD") == dep_main
-        assert sh(dep_repo, "rev-parse", "HEAD") == v1
-        sh(dep_repo, "switch", "--quiet", "-c", "aside")
+        assert sh(main_wt, "rev-parse", "HEAD") == v1
+        sh(main_wt, "switch", "--quiet", "-c", "aside")
         with contextlib.redirect_stdout(io.StringIO()) as noted:
             assert submodule.catch_up_repos()
-        assert sh(dep_repo, "rev-parse", "HEAD") == v1 and not noted.getvalue()
-        sh(dep_repo, "switch", "--quiet", "main")
+        assert sh(main_wt, "rev-parse", "HEAD") == v1 and not noted.getvalue()
+        sh(main_wt, "switch", "--quiet", "main")
+        with contextlib.redirect_stdout(io.StringIO()) as noted:
+            assert submodule.catch_up_repos()  # the pin is still v1: settled, silent
+        assert sh(main_wt, "rev-parse", "HEAD") == v1 and not noted.getvalue()
+        sh(seed, "update-index", "--cacheinfo", f"160000,{dep_main},{path}")  # main's pin, as a landing moves it
+        sh(seed, "commit", "--quiet", "-m", "pinned on the landing")
         with contextlib.redirect_stdout(io.StringIO()) as noted:
             assert submodule.catch_up_repos()
-        assert sh(dep_repo, "rev-parse", "HEAD") == dep_main and submodule.branch_at(dep_repo) == "main"
-        assert f"{dep_repo} (submodule dep): fast-forwarded main" in noted.getvalue(), noted.getvalue()
-        assert sh(dep_repo, "status", "--porcelain") == "?? scratch.txt"
-        (dep_repo / "scratch.txt").unlink()
+        assert sh(main_wt, "rev-parse", "HEAD") == dep_main and submodule.branch_at(main_wt) == "main"
+        assert f"{main_wt} (submodule dep): main at {dep_main[:12]}" in noted.getvalue(), noted.getvalue()
+        assert sh(main_wt, "status", "--porcelain") == "?? scratch.txt"
+        (main_wt / "scratch.txt").unlink()
+        assert not (dirty := sh(seed, "status", "--porcelain")), dirty  # the gitlink clean: the working tree at the pin
+        sh(main_wt, "switch", "--quiet", "--detach")  # a hand `git submodule update` leaves it so
+        with contextlib.redirect_stdout(io.StringIO()) as noted:
+            assert submodule.catch_up_repos()
+        assert submodule.branch_at(main_wt) == "main" and f"main at {dep_main[:12]}" in noted.getvalue()
+        (main_wt / "own.txt").write_text("o\n")
+        sh(main_wt, "add", "own.txt")
+        sh(main_wt, "commit", "--quiet", "-m", "a commit of the main checkout's own")
+        with contextlib.redirect_stderr(io.StringIO()) as said:
+            assert not submodule.catch_up_repos()
+        assert "holds commits not on origin/main, left as it is" in said.getvalue(), said.getvalue()
+        assert submodule.repo_notes() == []  # committed: no edit to note
+        (main_wt / "own.txt").write_text("edited\n")
+        assert submodule.repo_notes() == [(f"{main_wt} (dep): 1 edited file - no deploy picks these up; "
+                                           "`nixconvoy open --submodule dep` is where dep is worked on")]
+        sh(main_wt, "reset", "--quiet", "--hard", dep_main)
         assert sh(ax, "log", "-1", "--format=%B", dep_main) == "dep v2 landed\n\nthe submodule's own message"
         assert not (ax / "COMMIT_MSG.md").exists()
         assert sh(ax, "show", f"{dep_main}:tool.py") == "v2" and sh(ax, "show", f"{dep_main}:other.txt") == "x"
@@ -2170,22 +2208,25 @@ def submodule_cases(d: Path) -> None:
         new_main = sh(dep_seed, "rev-parse", "HEAD")
         submodule.FETCHED.clear()
         os.chdir(co)
-        # The repository's own checkout follows in the sweep's last pass, a
-        # worktree of the submodule present or not; an edit there that the
-        # new tip touches leaves it as it was, named.
-        assert sh(dep_repo, "rev-parse", "HEAD") == dep_main
-        (dep_repo / "more.txt").write_text("mine\n")
+        # The main checkout's working tree follows its pin in the sweep's
+        # last pass, a worktree of the submodule present or not; an
+        # untracked file there that the new tip brings leaves it as it was,
+        # named.
+        assert sh(main_wt, "rev-parse", "HEAD") == dep_main
+        sh(seed, "update-index", "--cacheinfo", f"160000,{new_main},{path}")
+        sh(seed, "commit", "--quiet", "-m", "pinned on the new main")
+        (main_wt / "more.txt").write_text("mine\n")
         with contextlib.redirect_stderr(io.StringIO()) as said:
             assert not submodule.catch_up_repos()
-        assert f"{dep_repo} (submodule dep): rebasing main" in said.getvalue() and "not clean" in said.getvalue(), \
-            said.getvalue()
-        assert sh(dep_repo, "rev-parse", "HEAD") == dep_main and (dep_repo / "more.txt").read_text() == "mine\n"
-        assert not sh(dep_repo, "status", "--porcelain", "-uno")
-        (dep_repo / "more.txt").unlink()
+        assert f"{main_wt} (submodule dep): " in said.getvalue() and "more.txt" in said.getvalue() \
+            and "would be overwritten" in said.getvalue(), said.getvalue()
+        assert sh(main_wt, "rev-parse", "HEAD") == dep_main and (main_wt / "more.txt").read_text() == "mine\n"
+        assert not sh(main_wt, "status", "--porcelain", "-uno")
+        (main_wt / "more.txt").unlink()
         with contextlib.redirect_stdout(io.StringIO()) as noted:
             assert submodule.catch_up_repos()
-        assert sh(dep_repo, "rev-parse", "HEAD") == new_main
-        assert f"{dep_repo} (submodule dep): fast-forwarded main" in noted.getvalue(), noted.getvalue()
+        assert sh(main_wt, "rev-parse", "HEAD") == new_main
+        assert f"{main_wt} (submodule dep): main at {new_main[:12]}" in noted.getvalue(), noted.getvalue()
         with contextlib.redirect_stdout(io.StringIO()) as noted:
             assert submodule.catch_up_repos()  # settled: silent
         assert not noted.getvalue()
@@ -2247,10 +2288,11 @@ def submodule_cases(d: Path) -> None:
         os.chdir(co)
         assert len(chain) == 3 and chain[1].pending is None and chain[1].landed == new_main
         lb, ln = chain[0].landed, chain[2].landed
-        assert sh(dep_repo, "rev-parse", f"{lb}^") == new_main and sh(dep_repo, "rev-parse", f"{ln}^") == lb
-        assert sh(dep_repo, "show", f"{ln}:tool2.py") == "b" and sh(dep_repo, "show", f"{ln}:tool7.py") == "n"
+        dep7 = co7 / ".git/modules/dep"  # co7's repository, which fetched the line's earlier landings
+        assert sh(dep7, "rev-parse", f"{lb}^") == new_main and sh(dep7, "rev-parse", f"{ln}^") == lb
+        assert sh(dep7, "show", f"{ln}:tool2.py") == "b" and sh(dep7, "show", f"{ln}:tool7.py") == "n"
         assert pinned(co8) == lb and pinned() == new_main and pinned(co7) == ln
-        assert submodule.line_end(chain, dep_repo) == ln and submodule.line_end(chain[:2], dep_repo) == lb
+        assert submodule.line_end(chain, "dep") == ln and submodule.line_end(chain[:2], "dep") == lb
         submodule.check_pins(sh(co7, "rev-parse", "HEAD^{tree}"), chain, co7)  # the union's pick: the end
         for top in (co, co8):  # a tree pinning something else
             behind = sh(top, "rev-parse", f"HEAD:{path}")
@@ -2266,6 +2308,7 @@ def submodule_cases(d: Path) -> None:
         # own submodule step brings it along.
         sh(ax, "reset", "--quiet", "--hard", dep_main)
         assert submodule.sync(wb, None, dry=True) == [] and sh(ax, "rev-parse", "HEAD") == dep_main
+        submodule.FETCHED.clear()  # a deploy of its own: co's repository has yet to see the line's end
         assert submodule.sync(wb, None) == []
         assert sh(ax, "rev-parse", "HEAD") == ln  # the default branch as the chained landing left it
         submodule.remove_all(co)
@@ -2309,7 +2352,7 @@ def submodule_cases(d: Path) -> None:
         stray = "nixos/submodules/.nixconvoy_submodule_gone.json"
         put(co, stray, '{"rev": "0"}\n')
         assert warned(lambda: submodule.heal_pins(co, None, False)) and (co / stray).exists()
-        assert submodule.heal_pins(co, wb, False) == [f"{stray} removed: no configured submodule's pin file"]
+        assert submodule.heal_pins(co, wb, False) == [f"{stray} removed: no submodule's pin file"]
         assert not (co / stray).exists() and stray not in sh(co, "ls-files").split()
         assert not pins.exists() and pin_file not in sh(co, "ls-files").split()
         sh(co, "update-index", "--add", "--cacheinfo", f"160000,{merge},{path}")
@@ -2384,8 +2427,8 @@ def open_cases(d: Path) -> None:
         assert not cli.is_path("work/tester/9") and cli.is_path("sub/new")
         assert cli.is_path("../homelab5") and cli.is_path("worktrees/")
         assert not cli.is_path("worktrees") and not cli.is_path("task")
-        # A submodule's name (declared in .gitmodules, configured or not)
-        # never names a worktree, whatever worktree it prefixes.
+        # A submodule's name (declared in .gitmodules) never names a
+        # worktree, whatever worktree it prefixes.
         (co / ".gitmodules").write_text('[submodule "ta"]\n\tpath = deps/ta\n\turl = x\n'
                                         '[submodule "tb"]\n\tpath = deps/tb\n\turl = x\n')
         assert "ta is a submodule" in dies(lambda: names.worktree("ta", co, "land"))
@@ -2398,7 +2441,7 @@ def open_cases(d: Path) -> None:
             os.chdir(co)
             for argv, want in ((["close", "ta", "task"], "usage:"), (["close", "ta", "../x/"], "usage:"),
                                (["close", "task", "../x/"], "usage:"),
-                               (["close", "ta"], "ta is not a configured submodule"),
+                               (["close", "ta"], "no worktree of submodule ta under this checkout"),
                                (["close", "ta", "tb"], "close failed for submodule ta, tb")):
                 sys.argv = ["nixconvoy", *argv]
                 assert want in dies(cli.main), argv
@@ -2859,10 +2902,9 @@ def init_cases(d: Path) -> None:
         assert c.ssh_template == me + "@{target}" and c.branch_prefix == "nixconvoy/", c
         assert c.child_worktrees == ".claude/worktrees" and c.parallel_eval is None and not c.precheck
         assert (c.remote, c.main_branch) == ("origin", "main"), c  # no remote: assumed
-        assert not c.submodules and set(c.targets) == {"a", "b"} and not c.target("a").dir
+        assert set(c.targets) == {"a", "b"} and not c.target("a").dir
         text = (repo / "nixconvoy.toml").read_text()
-        assert "[targets.a]\n" in text and "[targets.b]\n" in text and "# precheck = " in text \
-            and "# [submodules.<input>]" in text, text
+        assert "[targets.a]\n" in text and "[targets.b]\n" in text and "# precheck = " in text, text
         assert "?? nixconvoy.toml" in sh(repo, "status", "--porcelain")  # written, not staged
         assert "already there" in dies(lambda: run_cli(["init"]))
         assert (repo / ".git/nixconvoy/branch-prefix").read_text() == "nixconvoy/\n"  # init notes the prefix (the repo's, not the suite's)

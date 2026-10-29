@@ -276,8 +276,6 @@ def render(*, flake: str, system: str, ssh: str, prefix: str,
         strings.INIT_TOML_SWITCH,
         "",
         *target_tables(targets, hosts_dir if hosts_dir is not None else os.path.normpath(f"{flake}/hosts")),
-        "",
-        strings.INIT_TOML_SUBMODULES,
     ]
     return "\n".join(lines) + "\n"
 

@@ -4,11 +4,16 @@ flake input, which takes it as a relative path (`path:./<dir>`: the
 lock names no rev); the gitlink in the tree is the pin, and nix fetches
 the submodule from its .gitmodules url at that rev (`inputs.self.submodules
 = true` in the flake), so the pinned commit must be on the input's
-origin.  A submodule worked on is a git worktree of the input's
-repository (nixconvoy.toml's [submodules.<input>].repo, which shares
-its objects and holds every branch of the input: `git submodule update`
-would clone a second copy under .git/modules) on a branch named after
-the checkout's work branch.  A deploy commits the worktree's staged
+origin.  The input's repository on this machine is where git keeps a
+submodule's: under the superproject's common git dir, .git/modules/<input>,
+as `git submodule update --init` in the primary worktree clones it
+(repository).  Checkouts that are worktrees of one repository share it,
+the main checkout's working tree of the submodule kept on the default
+branch at the rev main pins (catch_up_repos); a checkout that is a clone
+of its own has its own.  A submodule worked on is a git worktree of that
+repository in a checkout on a work branch, on a branch named after the
+work branch - or, in a clone, the repository's own working tree checked
+out on that branch.  A deploy commits the worktree's staged
 state onto that branch, pushes it and stages the gitlink on the pushed
 rev, so the increment carries the submodule as a tree change, which the
 union, the eval memo and the provenance handle like any other.  `land` lands
@@ -49,18 +54,22 @@ from .checkout import (
     PENDING_REFS,
     TMP_PREFIX,
     GitQueries,
+    branch_of,
     common_state_path,
     fold_subject,
+    git_common,
+    identity_of,
     landed_prefix,
     landing_message,
     message_on_file,
     owned,
     rebase_hint,
     rebase_solving,
+    sibling_checkouts,
     staged_differs,
     tree_less_msg,
 )
-from .config import MSG_FILE, cfg, main_ref, main_short
+from .config import MSG_FILE, main_ref, main_short
 from .guard import decide
 from .proc import Fail, die, git, is_ancestor, ok, out, run, solve_with_mergiraf
 from .wire import Ok, Onto, RebaseParams, RepoNames
@@ -86,7 +95,9 @@ GITLINK = "160000"
 
 class Sub(NamedTuple):
     name: str  # the flake input and the .gitmodules name
-    repo: Path  # the repository's checkout here; its origin is what nix fetches
+    # The repository's git dir (cloned or not: repository): the planted
+    # worktree's, else the superproject's .git/modules/<name>.
+    repo: Path
     path: str  # the submodule's path in the tree (.gitmodules)
     dir: Path  # <checkout>/<path>
     pin_file: str  # the pin file beside the gitlink (pin_file_of)
@@ -97,8 +108,26 @@ class Entry(NamedTuple):
     url: str
 
 
-def configured() -> dict[str, Path]:
-    return {n: Path(c.repo).expanduser() for n, c in cfg().submodules.items()}
+def primary(top: Path) -> Path:
+    """The primary worktree of the repository `top` is a worktree of, whose
+    .git is the common git dir: the main checkout, or `top` itself when
+    it is a clone of its own."""
+    common = git_common(top)
+    if common is None or common.name != ".git":
+        die(strings.SUBMODULE_NO_PRIMARY(top=top))
+    return common.parent
+
+
+def is_main(top: Path) -> bool:
+    """Whether `top` is a main checkout, with no work branch of its own."""
+    return identity_of(top.resolve(), branch_of(top)).kind == "main"
+
+
+def main_checkouts() -> list[Path]:
+    """The main checkouts reached from here: the primary worktree when it
+    is one, and the clones beside with the same origin that are."""
+    here = Path.cwd().resolve()
+    return [d for d in sorted({primary(here), *sibling_checkouts(here)}) if is_main(d)]
 
 
 def pin_file_of(name: str, path: str) -> str:
@@ -111,12 +140,21 @@ def pin_file_of(name: str, path: str) -> str:
 
 
 def sub_of(name: str, entry: Entry, top: Path) -> Sub:
-    return Sub(name, configured()[name], entry.path, top / entry.path, pin_file_of(name, entry.path))
+    d = top / entry.path
+    common = git_common(top)
+    if common is None:
+        die(strings.SUBMODULE_NO_PRIMARY(top=top))
+    repo = (git_common(d) if (d / ".git").exists() else None) or common / "modules" / name
+    return Sub(name, repo, entry.path, d, pin_file_of(name, entry.path))
+
+
+def cloned(sub: Sub) -> bool:
+    return (sub.repo / "HEAD").exists()
 
 
 def entries(top: Path) -> dict[str, Entry]:
-    """The configured submodules' .gitmodules entries under `top` (the
-    checkout, or a worktree of it): name -> (path, url)."""
+    """The .gitmodules entries under `top` (the checkout, or a worktree of
+    it): name -> (path, url)."""
     f = top / ".gitmodules"
     if not f.is_file():
         return {}
@@ -126,17 +164,28 @@ def entries(top: Path) -> dict[str, Entry]:
         m = re.fullmatch(r"submodule\.(.+)\.(path|url)", key)
         if m:
             found.setdefault(m.group(1), {})[m.group(2)] = value
-    return {n: Entry(e["path"], e.get("url", "")) for n, e in found.items() if n in configured() and "path" in e}
+    return {n: Entry(e["path"], e.get("url", "")) for n, e in found.items() if "path" in e}
 
 
-def present(top: Path) -> list[Sub]:
-    """The configured submodules with a worktree planted under `top`."""
+def names_hint(top: Path) -> str:
+    names = sorted(entries(top))
+    return strings.SUBMODULE_NAMES_ARE(names=", ".join(names)) if names else ""
+
+
+def planted(top: Path) -> list[Sub]:
+    """The submodules with a working tree under `top`."""
     return [sub_of(n, e, top) for n, e in entries(top).items() if (top / e.path / ".git").exists()]
 
 
+def present(top: Path) -> list[Sub]:
+    """The submodules with a worktree planted under `top`, a checkout on a
+    work branch: the main checkout's are the repositories themselves."""
+    return [] if is_main(top) else planted(top)
+
+
 def owner(top: Path, path: str) -> Sub | None:
-    """The configured submodule `path` belongs to in the tree under `top`:
-    its gitlink, or its pin file."""
+    """The submodule `path` belongs to in the tree under `top`: its
+    gitlink, or its pin file."""
     for n, e in entries(top).items():
         if path in (e.path, pin_file_of(n, e.path)):
             return sub_of(n, e, top)
@@ -144,7 +193,7 @@ def owner(top: Path, path: str) -> Sub | None:
 
 
 def is_pin_path(top: Path, path: str) -> bool:
-    """Whether `path` is a pin's: a configured submodule's gitlink or pin file."""
+    """Whether `path` is a pin's: a submodule's gitlink or pin file."""
     return owner(top, path) is not None
 
 
@@ -242,10 +291,10 @@ def write_pin(sub: Sub, sha: str | None, top: Path) -> None:
 
 
 def heal_pins(top: Path, wb: str | None, dry: bool) -> list[str]:
-    """Each configured submodule's pin file staged under `top` rewritten
+    """Each submodule's pin file staged under `top` rewritten
     when it does not name the rev the index's gitlink pins (moved by
     hand, or no file yet), removed when the gitlink is gone, as is a pin
-    file no configured submodule claims (one removed, renamed or moved),
+    file no submodule claims (one removed, renamed or moved),
     one line each; only warned about, with no work branch to carry it or
     for a dry activation."""
     told = []
@@ -292,7 +341,7 @@ def off_default(sub: Sub, top: Path) -> bool:
     repository on this machine, or when its origin cannot be fetched
     (said): then False."""
     rev = pin(sub, top)
-    if rev is None or not (sub.repo / ".git").exists():
+    if rev is None or not cloned(sub):
         return False
     default = default_branch_of(sub.repo)
     if default is None:
@@ -321,8 +370,8 @@ class Pending(NamedTuple):
     onto: str
 
 
-# Per run: the submodule repositories fetched, the fetches under way beside
-# the deploy's own (prefetch), and the rebased submodules.
+# Per run, by git dir: the submodule repositories fetched, the fetches
+# under way beside the deploy's own (prefetch), and the rebased submodules.
 FETCHED: set[Path] = set()
 PREFETCH: dict[Path, Future[bool]] = {}
 PENDING: dict[tuple[str, str], Pending] = {}
@@ -340,19 +389,25 @@ def fetch_refs(name: str, repo: Path) -> bool:
 
 
 def fetch_once(name: str, repo: Path) -> bool:
-    """fetch_refs once per run, a prefetch under way waited for."""
-    if repo in FETCHED:
-        return True
+    """fetch_refs once per run, a prefetch under way waited for (taken
+    first: one done already is in FETCHED, and must not stand for a
+    fetch asked for after FETCHED is cleared)."""
     under_way = PREFETCH.pop(repo, None)
-    return under_way.result() if under_way is not None else fetch_refs(name, repo)
+    if under_way is not None:
+        return under_way.result()
+    return repo in FETCHED or fetch_refs(name, repo)
+
+
+def prefetch_all(subs: list[Sub], pool: ThreadPoolExecutor) -> None:
+    for sub in subs:
+        if sub.repo not in FETCHED and sub.repo not in PREFETCH:
+            PREFETCH[sub.repo] = pool.submit(fetch_refs, sub.name, sub.repo)
 
 
 def prefetch(top: Path, pool: ThreadPoolExecutor) -> None:
     """The present submodules' origins fetched on `pool`, beside the
     deploy's own fetch, for the catch-up of the submodule step to find done."""
-    for sub in present(top):
-        if sub.repo not in FETCHED and sub.repo not in PREFETCH:
-            PREFETCH[sub.repo] = pool.submit(fetch_refs, sub.name, sub.repo)
+    prefetch_all(present(top), pool)
 
 
 def pinned_revs(sub: Sub) -> set[str]:
@@ -429,33 +484,34 @@ def merge_commit(name: str, repo: Path, ours: str, theirs: str, subject: str) ->
         shutil.rmtree(wt, ignore_errors=True)
 
 
-def mirror_dir(name: str) -> Path:
-    return proc.cache_dir() / "submodules" / f"{name}.git"
+def repository(sub: Sub, top: Path) -> Path:
+    """The submodule's repository, to merge its branches or plant a
+    worktree of it: `sub.repo`, cloned first when it is not yet, as is
+    the primary worktree's working tree of the submodule when that is
+    unpopulated (`git submodule update --init` there: the pinned rev
+    checked out, where a main checkout then checks out the default
+    branch at that rev; origin's refs beyond its branches come with the
+    first fetch)."""
+    main = primary(top)
+    wt = main / sub.path
+    if cloned(sub) and (wt / ".git").exists():
+        return sub.repo
+    p = git("submodule", "update", "--quiet", "--init", "--", sub.path, cwd=str(main), check=False)
+    if p.returncode != 0 or not cloned(sub):
+        die(strings.SUBMODULE_INIT_FAILED(name=sub.name, primary=main, stderr=(p.stderr or "").strip()))
+    if is_main(main):
+        git("checkout", "--quiet", "-B", default_branch(sub.repo), "HEAD", cwd=str(wt))
+    print(strings.SUBMODULE_CLONED(name=sub.name, dir=wt))
+    return sub.repo
 
 
-def store(name: str, url: str) -> Path:
-    """The repository the submodule `name`'s branches are merged in: its
-    configured checkout when it is here, else a bare mirror of `url`
-    under the cache dir (a machine deploying without the repository)."""
-    repo = configured().get(name)
-    if repo is not None and (repo / ".git").exists():
-        return repo
-    cache = mirror_dir(name)
-    if not cache.is_dir():
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        p = git("clone", "--quiet", "--bare", url, str(cache), check=False)
-        if p.returncode != 0:
-            die(strings.SUBMODULE_MIRROR_CLONE_FAILED(name=name, url=url, stderr=(p.stderr or "").strip()))
-    return cache
-
-
-def union_rev(sub: Sub, url: str, ours: str, theirs: str) -> str | None:
+def union_rev(sub: Sub, top: Path, ours: str, theirs: str) -> str | None:
     """The rev carrying both `ours` and `theirs`, two pins of the
     submodule: the one containing the other, else their merge (mergiraf on
     the conflicts) as a deterministic commit pushed to UNION_REFS/<name>/<sha>
     on the origin, to be pinned there; None when they conflict (said on
     stderr)."""
-    repo = store(sub.name, url)
+    repo = repository(sub, top)
     with repo_lock(repo):
         if not fetch_once(sub.name, repo):
             return None
@@ -497,7 +553,7 @@ def solve_union(wt: Path, path: str) -> bool:
         return True
     if 2 not in stages or 3 not in stages:
         return False
-    sha = union_rev(sub, entries(wt)[sub.name].url, stages[2], stages[3])
+    sha = union_rev(sub, wt, stages[2], stages[3])
     if sha is None:
         return False
     set_pin(sub, sha, wt)
@@ -674,16 +730,10 @@ def create(name: str, wb: str) -> Path:
     this checkout, on `wb` - origin's copy of the branch when it has one
     (a worktree re-created), else a new branch off the repository's
     default."""
-    repo = configured_repo(name)
-    if not (repo.is_dir() and ok(["git", "rev-parse", "--git-dir"], cwd=str(repo))):
-        die(strings.SUBMODULE_NOT_A_REPO(name=name, repo=repo))
     top = Path.cwd()
     entry = entries(top).get(name)
     if entry is None:
-        die(strings.SUBMODULE_NOT_A_SUBMODULE(name=name))
-    origin = run(["git", "remote", "get-url", "origin"], cwd=str(repo), check=False).stdout.strip()
-    if not same_repo(origin, entry.url):
-        die(strings.SUBMODULE_ORIGIN_MISMATCH(name=name, repo=repo, origin=origin, url=entry.url))
+        die(strings.SUBMODULE_NOT_A_SUBMODULE(name=name, hint=names_hint(top)))
     d = top / entry.path
     if (d / ".git").exists():
         cur = branch_at(d)
@@ -693,6 +743,11 @@ def create(name: str, wb: str) -> Path:
         return d
     if d.exists() and any(d.iterdir()):
         die(strings.SUBMODULE_DIR_NOT_EMPTY(dir=d))
+    repo = repository(sub_of(name, entry, top), top)
+    origin = run(["git", "remote", "get-url", "origin"], cwd=str(repo), check=False).stdout.strip()
+    if not same_repo(origin, entry.url):
+        die(strings.SUBMODULE_ORIGIN_MISMATCH(name=name, repo=repo, origin=origin, url=entry.url,
+                                              primary=primary(top), path=entry.path))
     git("worktree", "prune", cwd=str(repo), check=False)
     p = git("fetch", "--quiet", "origin", cwd=str(repo), check=False)
     if p.returncode != 0:
@@ -705,16 +760,28 @@ def create(name: str, wb: str) -> Path:
             die(strings.SUBMODULE_BRANCH_DIVERGED(name=name, wb=wb, local=local[:12], remote=remote[:12],
                                                   repo=repo))
         remote = None  # the local branch is ahead (a push that failed): kept
+    # In a clone, the repository's own working tree (populated by
+    # repository) is this checkout's: the branch is checked out in it.
+    own = (d / ".git").exists()
     if remote is not None:
-        git("branch", "--quiet", "-f", wb, remote, cwd=str(repo), check=False)
-        git("worktree", "add", "--quiet", str(d), wb, cwd=str(repo))
+        if own:
+            git("checkout", "--quiet", "-B", wb, remote, cwd=str(d))
+        else:
+            git("branch", "--quiet", "-f", wb, remote, cwd=str(repo), check=False)
+            git("worktree", "add", "--quiet", str(d), wb, cwd=str(repo))
         where = f"origin/{wb}"
     elif local is not None:
-        git("worktree", "add", "--quiet", str(d), wb, cwd=str(repo))
+        if own:
+            git("checkout", "--quiet", wb, cwd=str(d))
+        else:
+            git("worktree", "add", "--quiet", str(d), wb, cwd=str(repo))
         where = strings.SUBMODULE_FROM_LOCAL(wb=wb)
     else:
-        git("worktree", "add", "--quiet", "-b", wb, str(d), f"refs/remotes/origin/{default}",
-            cwd=str(repo))
+        if own:
+            git("checkout", "--quiet", "-B", wb, f"refs/remotes/origin/{default}", cwd=str(d))
+        else:
+            git("worktree", "add", "--quiet", "-b", wb, str(d), f"refs/remotes/origin/{default}",
+                cwd=str(repo))
         where = f"origin/{default}"
     # `git status` there counts against the branch it will land on.
     git("branch", "--quiet", f"--set-upstream-to=origin/{default}", wb, cwd=str(d), check=False)
@@ -723,21 +790,13 @@ def create(name: str, wb: str) -> Path:
     return d
 
 
-def configured_repo(name: str) -> Path:
-    repos = configured()
-    if name not in repos:
-        die(strings.SUBMODULE_NOT_CONFIGURED(name=name, hint=strings.SUBMODULE_CONFIGURED_ARE(
-            names=", ".join(sorted(repos))) if repos else strings.SUBMODULE_NONE_CONFIGURED()))
-    return repos[name]
-
-
 def present_one(top: Path, name: str) -> Sub:
     found = [s for s in present(top) if s.name == name]
     if not found:
-        configured_repo(name)
         entry = entries(top).get(name)
-        die(strings.SUBMODULE_NO_WORKTREE(name=name, where=strings.SUBMODULE_NO_WORKTREE_AT(
-            path=top / entry.path) if entry else strings.SUBMODULE_NO_GITMODULES_ENTRY))
+        if entry is None:
+            die(strings.SUBMODULE_NOT_A_SUBMODULE(name=name, hint=names_hint(top)))
+        die(strings.SUBMODULE_NO_WORKTREE(name=name, path=top / entry.path))
     return found[0]
 
 
@@ -873,45 +932,55 @@ def catch_up_one(sub: Sub, wb: str, top: Path) -> str | None:
 
 
 def catch_up_repos() -> bool:
-    """After a landing's or a pull's sweep of the checkouts: every
-    configured submodule repository with a checkout here sitting on its
-    default branch brought onto that branch as fetched (catch_up_repo,
-    the origins fetched in parallel), as the main checkout is brought
-    onto main; whether each could be, the problems said."""
-    on_default = {name: repo for name, repo in configured().items()
-                  if (repo / ".git").exists() and branch_at(repo) == default_branch_of(repo)}
+    """After a landing's or a pull's sweep of the checkouts: every main
+    checkout's working tree of a submodule (its repository's own) brought
+    onto the default branch at the rev that checkout pins (catch_up_repo,
+    the origins fetched in parallel); whether each could be, the
+    problems said."""
+    held = [(sub, main) for main in main_checkouts() for sub in planted(main)]
     with ThreadPoolExecutor() as pool:
-        for name, repo in on_default.items():
-            if repo not in FETCHED and repo not in PREFETCH:
-                PREFETCH[repo] = pool.submit(fetch_refs, name, repo)
+        prefetch_all([sub for sub, _main in held], pool)
     good = True
-    for name, repo in on_default.items():
+    for sub, main in held:
         try:
-            problem = catch_up_repo(name, repo)
+            problem = catch_up_repo(sub, main)
         except Fail:
-            problem = strings.SUBMODULE_REPO_FAILED_ABOVE(repo=repo, name=name)
+            problem = strings.SUBMODULE_REPO_FAILED_ABOVE(repo=sub.dir, name=sub.name)
         if problem is not None:
             print(problem, file=sys.stderr)
             good = False
     return good
 
 
-def catch_up_repo(name: str, repo: Path) -> str | None:
-    """The submodule repository's own checkout (`repo`, worked in by
-    nobody) brought onto its default branch as fetched the way a main
-    checkout is brought onto origin/main: fast-forwarded when it holds
-    nothing of its own, its edits riding along.  One whose origin cannot
-    be fetched is left alone (said).  The problem, or None."""
-    if not fetch_once(name, repo):
+def catch_up_repo(sub: Sub, main: Path) -> str | None:
+    """The main checkout's working tree of the submodule (worked in by
+    nobody) brought onto the default branch at the rev the checkout pins
+    - so the gitlink there stays clean, and an evaluation of that tree
+    reads the pinned rev - or at the branch's tip as fetched when the pin
+    is not on it; its edits ride along (`checkout -B`, refused where they
+    would be overwritten).  One on another branch, holding commits of its
+    own or whose origin cannot be fetched is left alone (the commits
+    said).  The problem, or None."""
+    if not fetch_once(sub.name, sub.repo):
         return None
-    default = default_branch(repo)
-    with repo_lock(repo):  # another checkout's sweep, reaching the same repository
-        was = rev_in(repo, "HEAD")
-        good, status = onto(repo, default)
-    if not good:
-        return strings.SUBMODULE_REPO_STATUS(repo=repo, name=name, status=status)
-    if rev_in(repo, "HEAD") != was:
-        print(strings.SUBMODULE_REPO_STATUS(repo=repo, name=name, status=status))
+    default = default_branch(sub.repo)
+    upstream = f"refs/remotes/origin/{default}"
+    d = str(sub.dir)
+    pinned = pin_at("HEAD", sub.path, main)
+    want = (pinned if pinned and rev_in(sub.dir, f"{pinned}^{{commit}}") and is_ancestor(pinned, upstream, cwd=d)
+            else rev_in(sub.dir, upstream))
+    assert want is not None
+    with repo_lock(sub.repo):  # another checkout's sweep, reaching the same repository
+        cur = branch_at(sub.dir)
+        if (cur is not None and cur != default) or (cur == default and rev_in(sub.dir, "HEAD") == want):
+            return None
+        if not is_ancestor("HEAD", upstream, cwd=d):
+            return strings.SUBMODULE_REPO_OWN_COMMITS(repo=sub.dir, name=sub.name, default=default)
+        p = git("checkout", "--quiet", "-B", default, want, cwd=d, check=False)
+    if p.returncode != 0:
+        return strings.SUBMODULE_REPO_STATUS(repo=sub.dir, name=sub.name, status=(p.stderr or "").strip())
+    print(strings.SUBMODULE_REPO_STATUS(repo=sub.dir, name=sub.name,
+                                        status=strings.SUBMODULE_REPO_AT(default=default, rev=want[:12])))
     return None
 
 
@@ -995,19 +1064,19 @@ def prepare_all(wb: str, fallback_msg: str, earlier: list[Landing] | None = None
     landings: list[Landing] = []
     try:
         for sub in present(Path.cwd()):
-            landings.append(prepare_one(sub, wb, fallback_msg, line_end(earlier or [], sub.repo)))
+            landings.append(prepare_one(sub, wb, fallback_msg, line_end(earlier or [], sub.name)))
     except Fail:
         abandon_all(landings)
         raise
     return landings
 
 
-def line_end(landings: list[Landing], repo: Path) -> str | None:
-    """The rev the landings of the repository `repo` so far put its
-    default branch on: the latest that carried work there (one with
-    nothing of its own just follows a pin, behind that line or on it).
-    None before any did."""
-    return next((e.landed for e in reversed(landings) if e.sub.repo == repo and e.settle), None)
+def line_end(landings: list[Landing], name: str) -> str | None:
+    """The rev the landings of the submodule `name` so far put its default
+    branch on: the latest that carried work there (one with nothing of
+    its own just follows a pin, behind that line or on it).  None before
+    any did."""
+    return next((e.landed for e in reversed(landings) if e.sub.name == name and e.settle), None)
 
 
 def check_pins(tree: str, landings: list[Landing], top: Path) -> None:
@@ -1015,8 +1084,8 @@ def check_pins(tree: str, landings: list[Landing], top: Path) -> None:
     repository on the end of its line (line_end), the rev finish_all
     leaves its default branch on; a union merge, or a pin from outside
     the landings, would leave that branch short of main's pin."""
-    for landing in {e.sub.repo: e for e in landings}.values():
-        end = line_end(landings, landing.sub.repo)
+    for landing in {e.sub.name: e for e in landings}.values():
+        end = line_end(landings, landing.sub.name)
         want = pin_at(tree, landing.sub.path, top)
         if end is not None and want != end:
             die(strings.SUBMODULE_LANDED_TREE_PIN(name=landing.sub.name,
@@ -1249,22 +1318,33 @@ def keeps(sub: Sub, top: Path) -> str | None:
 def remove_one(sub: Sub) -> None:
     """The submodule worktree removed with its branch, here and on origin;
     the directory stays, empty, as git leaves an unpopulated submodule
-    (gone, the gitlink would show as deleted)."""
+    (gone, the gitlink would show as deleted).  The repository's own
+    working tree (a clone's) is unpopulated instead (`git submodule
+    deinit`), its HEAD detached for the branch to go."""
+    repo = sub.repo
     cur = branch_at(sub.dir)
-    git("worktree", "remove", "--force", str(sub.dir), cwd=str(sub.repo), check=False)
+    gitdir = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-dir"], cwd=str(sub.dir))).resolve()
+    if gitdir == repo:
+        top = out(["git", "rev-parse", "--show-toplevel"], cwd=str(sub.dir.parent))
+        git("submodule", "deinit", "--quiet", "--force", "--", sub.path, cwd=top, check=False)
+        head = rev_in(repo, "HEAD")
+        if head is not None:
+            git("update-ref", "--no-deref", "HEAD", head, cwd=str(repo), check=False)
+    else:
+        git("worktree", "remove", "--force", str(sub.dir), cwd=str(repo), check=False)
     shutil.rmtree(sub.dir, ignore_errors=True)
     sub.dir.mkdir(parents=True, exist_ok=True)
-    git("worktree", "prune", cwd=str(sub.repo), check=False)
+    git("worktree", "prune", cwd=str(repo), check=False)
     if cur is not None and not owned(cur):
         print(strings.SUBMODULE_BRANCH_NOT_OURS(name=sub.name, branch=cur))
         cur = None
     if cur is not None:
-        git("branch", "--quiet", "-D", cur, cwd=str(sub.repo), check=False)
-        old = rev_in(sub.repo, f"refs/remotes/origin/{cur}")
+        git("branch", "--quiet", "-D", cur, cwd=str(repo), check=False)
+        old = rev_in(repo, f"refs/remotes/origin/{cur}")
         if old:
             # The tip stays under PAST_REFS: the work branch as pushed pins it.
             p = git("push", "--quiet", "--atomic", "origin", f"+{old}:{PAST_REFS}/{cur}/{old}", f":refs/heads/{cur}",
-                    f"--force-with-lease=refs/heads/{cur}:{old}", cwd=str(sub.repo), check=False)
+                    f"--force-with-lease=refs/heads/{cur}:{old}", cwd=str(repo), check=False)
             if p.returncode != 0:
                 print(strings.SUBMODULE_BRANCH_DELETE_FAILED(name=sub.name, branch=cur,
                                                              stderr=(p.stderr or "").strip()), file=sys.stderr)
@@ -1290,7 +1370,7 @@ def restore(sub: Sub, top: Path) -> bool:
 
 
 def orphaned(top: Path) -> list[str]:
-    """The configured submodules whose pin in `top` names a rev off the
+    """The submodules whose pin in `top` names a rev off the
     default branch (a work branch's) while no worktree of theirs is under
     `top`: a landing must not take that to main."""
     here = {s.name for s in present(top)}
@@ -1338,14 +1418,13 @@ def notes(d: Path) -> list[str]:
 
 
 def repo_notes() -> list[str]:
-    """The configured submodule repositories' own checkouts holding edits,
-    which no deploy picks up."""
+    """The main checkouts' working trees of the submodules (the
+    repositories' own) holding edits, which no deploy picks up."""
     found = []
-    for name, repo in configured().items():
-        if not repo.is_dir():
-            continue
-        dirty = run(["git", "status", "--porcelain", "-uno"], cwd=str(repo), check=False).stdout
-        if dirty.strip():
-            n = len(dirty.strip().splitlines())
-            found.append(strings.SUBMODULE_REPO_EDITED(repo=repo, name=name, n=n, s="s" if n > 1 else ""))
+    for main in main_checkouts():
+        for sub in planted(main):
+            dirty = run(["git", "status", "--porcelain", "-uno"], cwd=str(sub.dir), check=False).stdout
+            if dirty.strip():
+                n = len(dirty.strip().splitlines())
+                found.append(strings.SUBMODULE_REPO_EDITED(repo=sub.dir, name=sub.name, n=n, s="s" if n > 1 else ""))
     return found

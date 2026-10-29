@@ -60,12 +60,6 @@ class TargetConfig:
     switch: SwitchPolicy | None = None
 
 
-
-@dataclass(frozen=True)
-class SubmoduleConfig:
-    # The repository's checkout on this machine, whose origin nix fetches.
-    repo: str
-
 @dataclass(frozen=True)
 class Config:
     # The directory holding flake.nix, relative to the repo root.
@@ -114,8 +108,6 @@ class Config:
     # [switch]: every target's switch policy unless its table overrides.
     switch: SwitchPolicy = field(default_factory=SwitchPolicy)
     targets: dict[str, TargetConfig] = field(default_factory=dict)
-    # The flake inputs developed in place (submodule.py), by input name.
-    submodules: dict[str, SubmoduleConfig] = field(default_factory=dict)
 
     def target(self, name: str) -> TargetConfig:
         return self.targets.get(name, TargetConfig())
@@ -248,6 +240,7 @@ def _bare_url(u: str) -> str:
 
 
 _noted_work_branches: list[bool] = []
+_noted_submodules: list[bool] = []
 
 
 def _template(t: dict[str, object], k: str, placeholder: str) -> str:
@@ -278,6 +271,11 @@ def parse(text: str) -> Config:
         # a file from before still loads, told so once per run.
         _noted_work_branches.append(True)
         print(strings.CONFIG_WORK_BRANCHES_IGNORED(), file=sys.stderr)
+    if "submodules" in doc and not _noted_submodules:
+        # The repositories this once named by path: now the main
+        # checkout's submodules, every .gitmodules entry one (submodule.py).
+        _noted_submodules.append(True)
+        print(strings.CONFIG_SUBMODULES_IGNORED(), file=sys.stderr)
     for k in doc:
         if k not in known:
             raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=k))
@@ -348,16 +346,6 @@ def parse(text: str) -> Config:
                                      tags=_strs(t, "tags", f"targets.{name}"), dir=d, switch=own)
     if not targets_dir and not targets:
         raise ConfigError(strings.CONFIG_NO_TARGETS())
-    submodules: dict[str, SubmoduleConfig] = {}
-    for name, a in _table(doc.get("submodules", {}), "submodules").items():
-        t = _table(a, f"submodules.{name}")
-        for k in t:
-            if k != "repo":
-                raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"submodules.{name}.{k}"))
-        repo = _str(t, "repo", f"submodules.{name}")
-        if not repo:
-            raise ConfigError(strings.CONFIG_SUBMODULE_REPO(name=name))
-        submodules[name] = SubmoduleConfig(repo=repo)
     return Config(
         flake_dir=flake_dir,
         targets_dir=targets_dir,
@@ -373,7 +361,6 @@ def parse(text: str) -> Config:
         skip_substituters=tuple(skip),
         switch=switch,
         targets=targets,
-        submodules=submodules,
     )
 
 

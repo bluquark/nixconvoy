@@ -945,9 +945,9 @@ def status() -> None:
         print(paint(strings.STATUS_ELSEWHERE_HEADER(remote=cfg().remote), "dim"))
         for e in elsewhere:
             print(f"  {paint(e, 'yellow')}")
-    repos = submodule.configured()
-    if repos:
-        print(paint(strings.STATUS_SUBMODULES(names=", ".join(sorted(repos))), "dim"))
+    names = sorted(submodule.entries(Path.cwd()))
+    if names:
+        print(paint(strings.STATUS_SUBMODULES(names=", ".join(names)), "dim"))
     stray = submodule.repo_notes()
     if stray:
         print(paint(strings.STATUS_STRAY_HEADER, "dim"))

@@ -539,11 +539,6 @@ INIT_TOML_SWITCH = (
     "# checks = \"\"\"\n"
     "# systemctl is-active -q nginx.service\n"
     "# \"\"\"")
-INIT_TOML_SUBMODULES = (
-    "# Optional support for git submodules. Feel free to ignore this if you don't have any submodules in your"
-    " git repo.\n"
-    "# [submodules.<input>]\n"
-    "# repo = \"~/src/<input>\"")
 INIT_TOML_TARGETS = (
     "# The targets: one table per nixosConfiguration (the inventory, as there is no targets_dir);\n"
     "# a nixosConfiguration added later needs its table here.\n"
@@ -585,9 +580,9 @@ SUBMODULE_PIN_FILE_STALE = M("warning: {file} does not name the rev the tree pin
                              "a deploy from a checkout on a work branch rewrites it")
 SUBMODULE_PIN_FILE_REWRITTEN = M("submodule {name}: {file} rewritten for {rev}")
 SUBMODULE_PIN_FILE_REMOVED = M("submodule {name}: {file} removed, its gitlink gone")
-SUBMODULE_PIN_FILE_UNCLAIMED = M("warning: {file} is no configured submodule's pin file: "
+SUBMODULE_PIN_FILE_UNCLAIMED = M("warning: {file} is no submodule's pin file: "
                                  "a deploy from a checkout on a work branch removes it")
-SUBMODULE_PIN_FILE_UNCLAIMED_REMOVED = M("{file} removed: no configured submodule's pin file")
+SUBMODULE_PIN_FILE_UNCLAIMED_REMOVED = M("{file} removed: no submodule's pin file")
 SUBMODULE_FETCH_FAILED = M("note: submodule {name}: fetching its origin failed:\n{stderr}")
 SUBMODULE_PAST_REFS_DELETE_FAILED = M("warning: submodule {name}: deleting its past refs on its origin failed:\n"
                                       "{stderr}")
@@ -602,7 +597,6 @@ SUBMODULE_OFF_BRANCH_SWITCH = M("submodule {name} ({dir}) is on {cur}, not {wb}:
 
 # --- submodule.py: union
 SUBMODULE_MERGE_CONFLICT = M("note: submodule {name}: {ours} and {theirs} conflict in {path}")
-SUBMODULE_MIRROR_CLONE_FAILED = M("submodule {name}: cloning {url} to union its branches failed:\n{stderr}")
 SUBMODULE_NOT_ON_ORIGIN = M("note: submodule {name}: {sha} is not on its origin")
 SUBMODULE_UNION_SUBJECT = M("union of {name}")
 SUBMODULE_UNION_PUSH_FAILED = M("submodule {name}: pushing its union to {ref} failed:\n{stderr}")
@@ -627,12 +621,22 @@ SUBMODULE_REBASED = M("submodule {name}: {wb} rebased onto origin/{default} ({he
 SUBMODULE_PUSHED = M("submodule {name}: pushed {wb}")
 SUBMODULE_PUT_BACK = M("submodule {name}: {wb} put back to {rev}")
 
+# --- submodule.py: the repository
+SUBMODULE_NO_PRIMARY = M("{top} is no worktree of a repository with a .git directory to hold the submodules' "
+                         "repositories")
+SUBMODULE_INIT_FAILED = M("submodule {name}: cloning it (`git submodule update --init` in {primary}) failed:"
+                          "\n{stderr}")
+SUBMODULE_CLONED = M("submodule {name}: cloned, {dir}")
+SUBMODULE_REPO_OWN_COMMITS = M("{repo} (submodule {name}): holds commits not on origin/{default}, left as it is; "
+                               "`{TOOL} open --submodule {name}` is where {name} is worked on")
+SUBMODULE_REPO_AT = M("{default} at {rev}")
+
 # --- submodule.py: open --submodule
-SUBMODULE_NOT_A_REPO = M("submodule {name}: {repo} is not a git repository")
-SUBMODULE_NOT_A_SUBMODULE = M("{name} is no submodule of this repository: `git submodule add --name {name} <url> "
-                              "<path>` first, with flake.nix taking it as a relative path input")
+SUBMODULE_NOT_A_SUBMODULE = M("{name} is no submodule of this repository{hint}: `git submodule add --name {name} "
+                              "<url> <path>` first, with flake.nix taking it as a relative path input")
+SUBMODULE_NAMES_ARE = M(" (they are: {names})")
 SUBMODULE_ORIGIN_MISMATCH = M("submodule {name}: {repo}'s origin is {origin}, not .gitmodules' {url}, "
-                              "which the build fetches the pushed branch from")
+                              "which the build fetches the pushed branch from: `git -C {primary} submodule sync -- {path}`")
 SUBMODULE_AT_OFF_BRANCH = M("submodule {name} at {dir} is on {cur}, not {wb}: `git -C {dir} switch {wb}`")
 SUBMODULE_ALREADY_OPEN = M("submodule {name}: {dir} (on {wb})")
 SUBMODULE_DIR_NOT_EMPTY = M("{dir} is not empty and no worktree: move it away")
@@ -641,12 +645,7 @@ SUBMODULE_BRANCH_DIVERGED = M("submodule {name}: the local branch {wb} ({local})
                               "reconcile them in {repo} first")
 SUBMODULE_FROM_LOCAL = M("the local branch {wb}")
 SUBMODULE_OPENED = M("submodule {name}: {dir} on {wb} (from {where})")
-SUBMODULE_NOT_CONFIGURED = M("{name} is not a configured submodule{hint}")
-SUBMODULE_CONFIGURED_ARE = M(" (they are: {names})")
-SUBMODULE_NONE_CONFIGURED = M(' ({CONFIG_FILE}: [submodules.<input>] repo = "...")')
-SUBMODULE_NO_WORKTREE = M("no worktree of submodule {name} under this checkout{where}")
-SUBMODULE_NO_WORKTREE_AT = M(" ({path})")
-SUBMODULE_NO_GITMODULES_ENTRY = " (nor a .gitmodules entry)"
+SUBMODULE_NO_WORKTREE = M("no worktree of submodule {name} under this checkout ({path})")
 
 # --- submodule.py: deploy (sync, catch_up)
 SUBMODULE_DROPPED = M("submodule {name}'s worktree ({dir}) was reset below the work the tree deploys on {wb}; "
@@ -761,7 +760,9 @@ CONFIG_TARGET_DIR = M("{CONFIG_FILE}: targets.{name}.dir is a directory inside t
                       "relative to its root, not {dir!r}")
 CONFIG_TARGET_DIR_ROOT = M("{CONFIG_FILE}: targets.{name}.dir names the repository root: leave it out instead")
 CONFIG_NO_TARGETS = M("{CONFIG_FILE}: targets_dir, or a [targets.<name>] table per target, is required")
-CONFIG_SUBMODULE_REPO = M("{CONFIG_FILE}: submodules.{name}.repo is required")
+CONFIG_SUBMODULES_IGNORED = M("note: {CONFIG_FILE}: [submodules] is ignored (every .gitmodules entry is a "
+                              "submodule {TOOL} manages, its repository the superproject's .git/modules/<input>): "
+                              "drop the table")
 
 # --- memo.py: the eval memo
 MEMO_LOCK_WAIT = "waiting for another deploy's turn at the eval memo..."

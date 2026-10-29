@@ -70,9 +70,8 @@ def worktree(name: str, here: Path, verb: str, *, subagent: bool = True) -> Path
 
 
 def gitmodule_names(top: Path) -> set[str]:
-    """The submodule names .gitmodules declares under `top`, configured
-    here or not (read without nixconvoy.toml, which belongs to the
-    checkout acted in)."""
+    """The submodule names .gitmodules declares under `top` (read without
+    nixconvoy.toml, which belongs to the checkout acted in)."""
     p = run(["git", "config", "-f", str(top / ".gitmodules"), "--name-only", "--get-regexp", r"^submodule\..*\.path$"],
             check=False)
     return {ln[len("submodule."):-len(".path")] for ln in p.stdout.splitlines() if ln.startswith("submodule.")}
