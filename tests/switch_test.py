@@ -478,7 +478,8 @@ def target_cases() -> None:
                           (toml('[switch]\nauto_rollback_checks = [{ internet = true }]\n'), "has checks but no { ssh_deadline_secs"),
                           (toml('[switch]\nauto_rollback_checks = []\n[targets.a.switch]\n'
                                 'auto_rollback_checks = [{ bash = "x" }]\n'), "targets.a.switch.auto_rollback_checks has checks but no"),
-                          (toml('[switch]\nauto_rollback_checks = false\n'), "switch.auto_rollback_checks is a list"),
+                          (toml('[switch]\nauto_rollback_checks = true\n'), "switch.auto_rollback_checks is a list"),
+                          (toml('[targets.a.switch]\nauto_rollback_checks = 0\n'), "targets.a.switch.auto_rollback_checks is a list"),
                           (toml('[switch]\nauto_rollback_checks = [{ ssh_deadline_secs = 5 }, { ssh_deadline_secs = 6 }]\n'),
                            "checks[1] is a second ssh_deadline_secs"),
                           (toml('[switch]\nauto_rollback_checks = 1\n'), "switch.auto_rollback_checks is a list"),
@@ -519,15 +520,17 @@ def target_cases() -> None:
     # A target's checks are appended to the fleet's ([switch]'s), a false
     # item striking the fleet's of its kind (never the target's own), its
     # ssh_deadline_secs item replacing the fleet's; the deadline alone
-    # confirms, an empty list (at either level) is a plain switch.
+    # confirms, false (at either level) is a plain switch, a target's []
+    # adds nothing.
     Check, Policy = config.Check, config.SwitchPolicy
     c = config.parse(toml('[switch]\nauto_rollback_checks = [{ ssh_deadline_secs = 45 }, { internet = true }, '
                           '{ bash = "fleet" }]\n'
                           '[targets.a.switch]\nauto_rollback_checks = [{ routing = true }, '
                           '{ bash = "one" }, { bash = false }, { bash = "two" }, { ssh_deadline_secs = 20 }]\n'
-                          '[targets.b]\nswitch = { auto_rollback_checks = [] }\n'
-                          '[targets.e]\nswitch = { auto_rollback_checks = [{ internet = false }, { bash = false }] }\n'))
-    a, b, d, e = (c.switch_policy(n) for n in "abde")
+                          '[targets.b]\nswitch = { auto_rollback_checks = false }\n'
+                          '[targets.e]\nswitch = { auto_rollback_checks = [{ internet = false }, { bash = false }] }\n'
+                          '[targets.f]\nswitch = { auto_rollback_checks = [] }\n'))
+    a, b, d, e, f = (c.switch_policy(n) for n in "abdef")
     assert a.checks == (Check("internet"), Check("routing"), Check("bash", "one"), Check("bash", "two")), a
     assert a.confirmed and a.deadline == 20 and a.script == "(\n:\none\n)\n(\n:\ntwo\n)", a
     assert b == Policy(None, ()) and not b.confirmed and b.script == "", b
@@ -535,8 +538,9 @@ def target_cases() -> None:
     assert config.parse(toml('[switch]\nauto_rollback_checks = []\n[targets.a.switch]\n'
                              'auto_rollback_checks = [{ ssh_deadline_secs = 5 }, { bash = "x" }]\n')
                         ).switch_policy("a") == Policy(5, (Check("bash", "x"),))
-    assert d == c.switch and d == Policy(45, (Check("internet"), Check("bash", "fleet"))), d
+    assert d == f == c.switch and d == Policy(45, (Check("internet"), Check("bash", "fleet"))), d
     assert config.parse(toml()).switch == Policy(10, ())
+    assert config.parse(toml('[switch]\nauto_rollback_checks = false\n')).switch == Policy(None, ())
     assert config.parse(toml('[switch]\nauto_rollback_checks = []\n')).switch == Policy(None, ())
     with tempfile.TemporaryDirectory() as empty:
         try:
