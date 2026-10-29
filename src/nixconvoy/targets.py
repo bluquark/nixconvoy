@@ -466,20 +466,19 @@ def copy_closure(target: str, paths: list[str], quiet: bool = False, fatal: bool
 
 def builder_problem(host: str) -> str | None:
     """Why `host` ("" for this machine) cannot realise the closures, or
-    None: unreachable or its daemon neither trusting the user nor running
-    nix as root (builder_prefix), or its nix not building targets_arch
-    (platforms)."""
+    None: unreachable, its nix not building targets_arch (platforms, asked
+    first: the reason a Darwin controller never builds, before any sudo),
+    or its daemon neither trusting the user nor running nix as root
+    (builder_prefix)."""
     via = ("ssh", *ssh_opts(), ssh_address(host)) if host else ()
-    pre = builder_prefix(via)
-    if isinstance(pre, str):
-        return pre
     systems = platforms(via)
     if isinstance(systems, str):
         return systems
     arch = cfg().targets_arch
     if arch not in systems:
         return strings.TARGETS_BUILDER_ARCH(arch=arch, systems=", ".join(sorted(systems)) or "nothing")
-    return None
+    pre = builder_prefix(via)
+    return pre if isinstance(pre, str) else None
 
 
 @functools.cache
@@ -490,15 +489,13 @@ def builder_host() -> str:
     when none is usable, rather than on ssh's own timeout or nix's
     ignored-setting warning deep in a build."""
     me = proc.this_machine()
-    problems: list[str] = []
-    for b in cfg().builders:
-        name = b.format(local_hostname=me)
+    names = list(dict.fromkeys(b.format(local_hostname=me) for b in cfg().builders))
+    for name in names:
         problem = builder_problem("" if name == me else name)
         if problem is None:
             return "" if name == me else name
-        problems.append(strings.TARGETS_BUILDER_SKIPPED(host=name, problem=problem))
-        print(problems[-1], file=sys.stderr)
-    return die(strings.TARGETS_NO_BUILDER(problems="\n".join(problems)))
+        print(strings.TARGETS_BUILDER_SKIPPED(host=name, problem=problem), file=sys.stderr)
+    return die(strings.TARGETS_NO_BUILDER(names=", ".join(names)))
 
 
 def check_builder() -> None:

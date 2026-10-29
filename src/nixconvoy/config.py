@@ -226,7 +226,7 @@ def _auto_bool(t: dict[str, object], k: str, where: str) -> bool | None:
     if v == "auto":
         return None
     if not isinstance(v, bool):
-        raise ConfigError(strings.CONFIG_NOT_AUTO_BOOL(where=where, key=k))
+        raise ConfigError(strings.CONFIG_NOT_AUTO_BOOL(key=k if where == CONFIG_FILE else f"{where}.{k}"))
     return v
 
 

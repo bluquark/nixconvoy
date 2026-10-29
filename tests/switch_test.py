@@ -392,8 +392,8 @@ def builder_cases() -> None:
             cmds.clear()
             os.environ["NIX_CONFIG"] = "builders ="
             targets.check_builder()
-            assert targets.builder_host() == "" and cmds[1][:4] == [*targets.SUDO, "--preserve-env=NIX_CONFIG"], cmds
-            assert cmds[-1][-3:] == ["config", "show", "--json"] and "sudo" not in cmds[-1], cmds[-1]
+            assert targets.builder_host() == "" and cmds[2][:4] == [*targets.SUDO, "--preserve-env=NIX_CONFIG"], cmds
+            assert cmds[0][-3:] == ["config", "show", "--json"] and "sudo" not in cmds[0], cmds[0]
             assert targets.build_cmd((), [])[:4] == [*targets.SUDO, "--preserve-env=NIX_CONFIG"]
     finally:
         os.environ.pop("NIX_CONFIG", None)
@@ -436,6 +436,7 @@ def target_cases() -> None:
                                       ('["{local_hostname}", "big"]', set(), {"tester"}, "big"),
                                       ('["fast", "big"]', {"fast"}, set(), "big"),
                                       ('["fast", "{local_hostname}"]', {"fast"}, set(), ""),
+                                      ('["{local_hostname}", "tester", "big"]', set(), {"tester"}, "big"),
                                       ('["fast", "big"]', {"fast"}, {"big"}, None)):
         targets.builder_prefix.cache_clear()
         targets.builder_host.cache_clear()
@@ -443,7 +444,8 @@ def target_cases() -> None:
         with mock.patch.object(targets, "run", fake(down, darwin)):
             if want is None:
                 err = dies(targets.check_builder)
-                assert "no usable builder" in err and "builder fast is unusable: `nix store info` failed" in err \
+                assert "no usable builder among fast, big" in err \
+                    and "builder fast is unusable: `nix config show` failed" in err \
                     and "builder big is unusable: its nix builds aarch64-darwin, not x86_64-linux" in err, err
             else:
                 told = warned(targets.check_builder)
