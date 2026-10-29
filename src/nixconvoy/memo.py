@@ -23,7 +23,18 @@ from urllib.parse import quote
 
 from . import strings
 from .checkout import lock_pid_alive, pid_started
-from .config import CONFIG_FILE, Config, ConfigError, SwitchPolicy, cfg, main_ref, parallel_eval, parse, root
+from .config import (
+    CONFIG_FILE,
+    SHELL_PRELUDE,
+    Config,
+    ConfigError,
+    SwitchPolicy,
+    cfg,
+    main_ref,
+    parallel_eval,
+    parse,
+    root,
+)
 from .proc import cache_dir, die, dump_json, is_ancestor, load_json, out, run
 
 # A target entry lives while its .drv does: unrooted once no checkout's
@@ -539,9 +550,9 @@ def union_config(wt: str) -> Config:
 
 
 def kit_inputs(pol: SwitchPolicy) -> tuple[object, ...]:
-    """What of a policy the kit is made from (the routing check is this
-    machine's): nothing for a target switched plainly."""
-    return (pol.deadline, pol.has("internet"), pol.script) if pol.confirmed else ()
+    """What of a policy the kit is made from (the controller_shell checks
+    are this machine's, no part of it): nothing for a plain switch."""
+    return (pol.deadline, pol.has("internet"), pol.statements("target_shell")) if pol.confirmed else ()
 
 
 def kit_part(wt: str, target: str) -> str:
@@ -551,7 +562,7 @@ def kit_part(wt: str, target: str) -> str:
     pol = union_config(wt).switch_policy(target)
     if not pol.confirmed:
         return "kit none"
-    checks = hashlib.sha256(pol.script.encode()).hexdigest()
+    checks = hashlib.sha256("\0".join((SHELL_PRELUDE, *pol.statements("target_shell"))).encode()).hexdigest()
     return f"kit {kit_src()} {pol.deadline} {pol.has('internet')} {checks}"
 
 
@@ -717,7 +728,8 @@ def kit_expr(pol: SwitchPolicy) -> str:
     tree = (f'builtins.fetchTree {{ type = "path"; path = {nix_string(kit_src())}; '
             f'narHash = {nix_string(kit_nar_hash())}; }}')
     return (f'import "${{{tree}}}/nix/kit.nix" {{ inherit (c) pkgs config; deadline = {pol.deadline}; '
-            f'internetCheck = {"true" if pol.has("internet") else "false"}; checks = {nix_string(pol.script)}; }}')
+            f'internetCheck = {"true" if pol.has("internet") else "false"}; prelude = {nix_string(SHELL_PRELUDE)}; '
+            f'checks = [ {" ".join(nix_string(st) for st in pol.statements("target_shell"))} ]; }}')
 
 
 def eval_expr(target: str, parallel: bool, pol: SwitchPolicy) -> str:

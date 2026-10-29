@@ -426,6 +426,10 @@ SWITCH_PROVENANCE_REWRITTEN = ", its provenance rewritten by another deploy"
 SWITCH_UNCLAIMED = M("note: could not claim {target}'s provenance in {file}; until its next switch, other deploys treat its system as untracked")
 SWITCH_STALE_KIT_DROP_FAILED = M("warning: dropping {target}'s stale switch kit link failed (exit {code})")
 SWITCH_KIT_ROOT_FAILED = M("rooting the switch kit {kit} on {target} failed (exit {code}){detail}")
+SWITCH_CHECK_EXITED = M('"{statement}" exited {code}')
+SWITCH_CHECK_TIMED_OUT = M('"{statement}" timed out')
+SWITCH_CHECK_UNPARSED = M('{shell} cannot parse "{statement}": {detail}')
+DEPLOY_CONTROLLER_CHECK_UNPARSED = M("nothing switched: {target}'s controller_shell check: {fault}")
 SWITCH_CHECK_INTERRUPTED = M("check interrupted: {error}")
 SWITCH_DURING = M(" while switching {target}")
 
@@ -533,6 +537,8 @@ INIT_TOML_BUILD = (
 INIT_TOML_PARALLEL_EVAL = (
     "# Optional: Determinate Nix's parallel evaluation: true, false or \"auto\" (when nix has it).\n"
     "# parallel_eval = \"auto\"")
+# A statement proving the internet reachable from where it runs: exactly the 204 Google answers.
+PROBE = '[ "$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" https://www.google.com/generate_204)" = 204 ]'
 INIT_TOML_SWITCH = M(
     "# How the targets are switched (every target's defaults; a [targets.<name>.switch] extends them).\n"
     "# A switch is confirmed: a rollback timer is armed on the target, the new system activated and,\n"
@@ -540,15 +546,17 @@ INIT_TOML_SWITCH = M(
     "# verified by each further check and only then set as the profile and boot entry; otherwise the\n"
     "# target rolls back on its own.  A target's list is appended to this one (its ssh_deadline_secs\n"
     "# replacing), a `false` item striking the fleet's of its kind; auto_rollback_checks = false\n"
-    "# switches it plainly, as nixos-rebuild switch.\n"
+    "# switches it plainly, as nixos-rebuild switch.  The shell statements run at once, each in a\n"
+    "# shell of its own under `set -eu -o pipefail`, any one's non-zero exit failing the switch.\n"
     "[switch]\n"
     "auto_rollback_checks = [\n"
     "  {{ ssh_deadline_secs = {deadline} }},\n"
     "#   {{ internet = true }},  # the target reaches the internet\n"
-    "#   {{ bash = \"systemctl is-active -q nginx.service\" }},  # run as root on the target\n"
+    "#   {{ target_shell = [\"systemctl is-active -q nginx.service\"] }},  # run as root on the target\n"
     "]\n"
     "# [targets.router.switch]\n"
-    "# auto_rollback_checks = [{{ routing = true }}]  # this machine still reaches the internet, through it")
+    "# # this machine still reaches the internet, through it\n"
+    "# auto_rollback_checks = [{{ controller_shell = ['" + PROBE.replace("{", "{{").replace("}", "}}") + "'] }}]")
 INIT_TOML_TARGETS = (
     "# The targets: one table per nixosConfiguration (the inventory, as there is no targets_dir);\n"
     "# a nixosConfiguration added later needs its table here.\n"
@@ -767,8 +775,12 @@ CONFIG_CHECKS = M("{CONFIG_FILE}: {where} is a list of checks, tables like {{ ss
                   "(switched plainly)")
 CONFIG_CHECK_STRIKE = M("{CONFIG_FILE}: {where} strikes nothing: [switch] has no fleet checks over it (leave "
                         "the kind out instead)")
-CONFIG_CHECK_ITEM = M("{CONFIG_FILE}: {where} is a table with one key: ssh_deadline_secs = <seconds>, internet or "
-                      "routing = true, or bash = \"...\" (a script); = false strikes the fleet's checks of that kind")
+CONFIG_CHECK_ITEM = M("{CONFIG_FILE}: {where} is a table with one key: ssh_deadline_secs = <seconds>, internet = "
+                      "true, or target_shell / controller_shell = [\"...\"] (statements, each run in a shell of its "
+                      "own); = false strikes the fleet's checks of that kind")
+CONFIG_CHECK_SHELL = M("{CONFIG_FILE}: {where}.{kind} is a list of statements (strings), each run in a shell of its own, "
+                       "or false (striking the fleet's)")
+CONFIG_CHECK_KIND_GONE = M("{CONFIG_FILE}: {where}: `{kind}` is gone: use {instead}")
 CONFIG_WORK_BRANCHES_IGNORED = M("note: {CONFIG_FILE}: work_branches is ignored (a work branch is any branch shaped like "
                                  "branch_prefix, {{local_hostname}} in it any hostname): drop the line")
 CONFIG_BRANCH_PREFIX_CHARS = M("{CONFIG_FILE}: branch_prefix may hold ASCII letters, digits, '.', '-', '_', '/' and "

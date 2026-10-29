@@ -179,7 +179,7 @@ class Clock:
 def scenario(name: str, *, helper: bool = True, check_ok: bool = True, activate_rc: int = 0,
              running: str = OLD, rollback_to: str = OLD, check_killed: bool = False,
              confirm_rc: int = 0, rollback_rc: int = 0,
-             nixconvoy_switch: str = "") -> tuple[str | None, dict[str, object]]:
+             nixconvoy_switch: str = "", controller: tuple[str, ...] = ()) -> tuple[str | None, dict[str, object]]:
     """Run one switch; (the die message or None, the target's final state)."""
     state_file = Path(os.environ["FAKE_TARGET_STATE"])
     state_file.write_text(proc.dump_json({
@@ -191,7 +191,7 @@ def scenario(name: str, *, helper: bool = True, check_ok: bool = True, activate_
     died: str | None = None
     try:
         switch.switch("testhost", OLD, NEW, KIT if helper else "", nixconvoy_switch or guard.binary("nixconvoy-switch"),
-                      provenance=PROVENANCE)
+                      provenance=PROVENANCE, controller_checks=controller)
     except (proc.Fail, switch.SwitchedMeanwhile) as e:
         died = str(e).splitlines()[0]
     say(f"{name}: {died or 'switched'}")
@@ -214,7 +214,6 @@ def switch_cases(d: Path) -> None:
 
     with contextlib.ExitStack() as patched:
         for obj, name, value in ((targets, "target_cmd", target_cmd), (switch, "switch_guard_cmd", switch_guard_cmd),
-                                 (targets, "internet_reachable", lambda timeout=8.0: timeout > 0),
                                  (proc, "monotonic_ms", Clock()), (time, "sleep", lambda _secs: None)):
             patched.enter_context(mock.patch.object(obj, name, value))
         patched.enter_context(mock.patch.dict(os.environ, FAKE_TARGET_STATE=str(d / "target.json")))
@@ -253,7 +252,7 @@ def switch_scenarios(d: Path) -> None:
         proc.EXITING = "a sibling's switch failed"
         return running_system_read(*args, **kwargs)
     with mock.patch.object(targets, "running_system_read", sibling_died), mock.patch.object(proc, "EXITING", None):
-        died, s = scenario("sibling died while armed")
+        died, s = scenario("sibling died while armed", controller=("true",))
     assert died is None and s["running"] == NEW, (died, s)
     with mock.patch.object(proc, "EXITING", "a sibling's switch failed"):
         died, s = scenario("sibling died before arming")
@@ -264,6 +263,29 @@ def switch_scenarios(d: Path) -> None:
     assert died is not None and "did not verify (testhost: dnsmasq is not active" in died, died
     assert f"rolled back to {OLD}" in died, died
     assert s["running"] == OLD and s["profile"] == OLD, s
+
+    # The controller_shell statements run at once in this machine's shell
+    # under the prelude (a failing pipe stage fails one): every failing
+    # one's last stderr line, or its exit, in the report.
+    died, s = scenario("controller checks fail", controller=("true", "echo the way out is gone >&2; exit 3", "false | true"))
+    assert died is not None and ('did not verify (this machine\'s check for testhost: the way out is gone; '
+                                 '"false | true" exited 1') in died, died
+    assert s["running"] == OLD and s["profile"] == OLD, s
+    died, s = scenario("controller checks pass", controller=("true", "echo fine | grep -q fine"))
+    assert died is None and s["running"] == NEW and s["profile"] == NEW, (died, s)
+    # One that outlives the budget is ended with its whole process group
+    # (the pipe's reader would otherwise hold the run past the budget),
+    # named as timed out beside the other's failure; the switch rolls back.
+    t0 = time.monotonic()
+    assert switch.run_checks(("sleep 60 | cat", "echo gone >&2; exit 1"), 1) == (1, '"sleep 60 | cat" timed out; gone')
+    assert switch.run_checks(("sleep 60 | cat", "true"), 1) == (-1, '"sleep 60 | cat" timed out')
+    assert time.monotonic() - t0 < 3
+    # A statement that reads stdin finds it empty; one its shell cannot
+    # parse is found before any target is touched (deploy).
+    assert switch.run_checks(("x=; read -r x || true; [ -z \"$x\" ]",), 5) == (0, None)
+    assert switch.parse_checks(("true", "echo 'ok")) is not None and switch.parse_checks(("true",)) is None
+    died, s = scenario("controller check hangs", controller=("sleep 60 | cat",))
+    assert died is not None and "did not verify" in died and s["running"] == OLD and s["profile"] == OLD, (died, s)
 
     died, s = scenario("reboot needed", activate_rc=100)
     assert died is not None and "reboot testhost" in died, died
@@ -504,14 +526,18 @@ def target_cases() -> None:
                           (toml('[switch]\nauto_rollback_checks = [{ ssh = true }]\n'), "checks[0] is a table"),
                           (toml('[switch]\nauto_rollback_checks = [{ internet = true }]\n'), "has checks but no { ssh_deadline_secs"),
                           (toml('[switch]\nauto_rollback_checks = []\n[targets.a.switch]\n'
-                                'auto_rollback_checks = [{ bash = "x" }]\n'), "targets.a.switch.auto_rollback_checks has checks but no"),
+                                'auto_rollback_checks = [{ target_shell = ["x"] }]\n'), "targets.a.switch.auto_rollback_checks has checks but no"),
                           (toml('[switch]\nauto_rollback_checks = true\n'), "switch.auto_rollback_checks is a list"),
                           (toml('[targets.a.switch]\nauto_rollback_checks = 0\n'), "targets.a.switch.auto_rollback_checks is a list"),
                           (toml('[switch]\nauto_rollback_checks = [{ ssh_deadline_secs = 5 }, { ssh_deadline_secs = 6 }]\n'),
                            "checks[1] is a second ssh_deadline_secs"),
                           (toml('[switch]\nauto_rollback_checks = 1\n'), "switch.auto_rollback_checks is a list"),
                           (toml('[switch]\nauto_rollback_checks = [{ ssh = 1 }]\n'), "switch.auto_rollback_checks[0] is a table"),
-                          (toml('[switch]\nauto_rollback_checks = [{ bash = true }]\n'), "auto_rollback_checks[0] is a table"),
+                          (toml('[switch]\nauto_rollback_checks = [{ target_shell = true }]\n'), "auto_rollback_checks[0].target_shell is a list of statements"),
+                          (toml('[switch]\nauto_rollback_checks = [{ controller_shell = "x" }]\n'), "checks[0].controller_shell is a list of statements"),
+                          (toml('[switch]\nauto_rollback_checks = [{ target_shell = ["x", 1] }]\n'), "checks[0].target_shell is a list of statements"),
+                          (toml('[switch]\nauto_rollback_checks = [{ bash = "x" }]\n'), "checks[0]: `bash` is gone: use target_shell"),
+                          (toml('[switch]\nauto_rollback_checks = [{ routing = true }]\n'), "checks[0]: `routing` is gone: use a controller_shell statement"),
                           (toml('[switch]\nauto_rollback_checks = [{ ssh_deadline_secs = 5 }, { dns = true }]\n'), "checks[1] is a table"),
                           (toml('[switch]\nauto_rollback_checks = [{ ssh_deadline_secs = 5, internet = true }]\n'), "checks[0] is a table"),
                           (toml('[switch]\nauto_rollback_checks = [{ internet = false }]\n'), "checks[0] strikes nothing"),
@@ -544,28 +570,35 @@ def target_cases() -> None:
             assert hint in str(e), (bad_cfg, e)
         else:
             raise AssertionError(f"accepted: {bad_cfg!r}")
-    # A target's checks are appended to the fleet's ([switch]'s), a false
-    # item striking the fleet's of its kind (never the target's own), its
-    # ssh_deadline_secs item replacing the fleet's; the deadline alone
-    # confirms, false (at either level) is a plain switch, a target's []
-    # adds nothing.
+    # A target's checks are appended to the fleet's ([switch]'s), a shell
+    # kind's list one check per statement, a false item striking the
+    # fleet's of its kind (never the target's own), its ssh_deadline_secs
+    # item replacing the fleet's; the deadline alone confirms, false (at
+    # either level) is a plain switch, a target's [] adds nothing.
     Check, Policy = config.Check, config.SwitchPolicy
     c = config.parse(toml('[switch]\nauto_rollback_checks = [{ ssh_deadline_secs = 45 }, { internet = true }, '
-                          '{ bash = "fleet" }]\n'
-                          '[targets.a.switch]\nauto_rollback_checks = [{ routing = true }, '
-                          '{ bash = "one" }, { bash = false }, { bash = "two" }, { ssh_deadline_secs = 20 }]\n'
+                          '{ target_shell = ["fleet"] }, { controller_shell = ["out"] }]\n'
+                          '[targets.a.switch]\nauto_rollback_checks = [{ controller_shell = ["mine", "too"] }, '
+                          '{ target_shell = ["one"] }, { target_shell = false }, { target_shell = ["two", "three"] }, '
+                          '{ ssh_deadline_secs = 20 }]\n'
                           '[targets.b]\nswitch = { auto_rollback_checks = false }\n'
-                          '[targets.e]\nswitch = { auto_rollback_checks = [{ internet = false }, { bash = false }] }\n'
+                          '[targets.e]\nswitch = { auto_rollback_checks = [{ internet = false }, { target_shell = false }, '
+                          '{ controller_shell = false }] }\n'
                           '[targets.f]\nswitch = { auto_rollback_checks = [] }\n'))
     a, b, d, e, f = (c.switch_policy(n) for n in "abdef")
-    assert a.checks == (Check("internet"), Check("routing"), Check("bash", "one"), Check("bash", "two")), a
-    assert a.confirmed and a.deadline == 20 and a.script == "(\n:\none\n)\n(\n:\ntwo\n)", a
-    assert b == Policy(None, ()) and not b.confirmed and b.script == "", b
+    assert a.checks == (Check("internet"), Check("controller_shell", "out"), Check("controller_shell", "mine"),
+                        Check("controller_shell", "too"), Check("target_shell", "one"), Check("target_shell", "two"),
+                        Check("target_shell", "three")), a
+    assert a.confirmed and a.deadline == 20 and a.statements("target_shell") == ("one", "two", "three"), a
+    assert a.statements("controller_shell") == ("out", "mine", "too"), a
+    assert config.shell_script("x | y") == "set -eu -o pipefail\nx | y\n"
+    assert b == Policy(None, ()) and not b.confirmed and b.statements("target_shell") == (), b
     assert e == Policy(45, ()) and e.confirmed, e
     assert config.parse(toml('[switch]\nauto_rollback_checks = []\n[targets.a.switch]\n'
-                             'auto_rollback_checks = [{ ssh_deadline_secs = 5 }, { bash = "x" }]\n')
-                        ).switch_policy("a") == Policy(5, (Check("bash", "x"),))
-    assert d == f == c.switch and d == Policy(45, (Check("internet"), Check("bash", "fleet"))), d
+                             'auto_rollback_checks = [{ ssh_deadline_secs = 5 }, { target_shell = ["x"] }]\n')
+                        ).switch_policy("a") == Policy(5, (Check("target_shell", "x"),))
+    assert d == f == c.switch and d == Policy(45, (Check("internet"), Check("target_shell", "fleet"),
+                                                   Check("controller_shell", "out"))), d
     assert config.parse(toml()).switch == Policy(10, ())
     assert config.parse(toml('[switch]\nauto_rollback_checks = false\n')).switch == Policy(None, ())
     assert config.parse(toml('[switch]\nauto_rollback_checks = []\n')).switch == Policy(None, ())

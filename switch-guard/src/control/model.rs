@@ -284,7 +284,7 @@ fn due(w: &World) -> bool {
     }
     w.deploys.iter().any(|s| match s {
         Status::Active { wait: Wait::Local(q, at), .. } => match q {
-            CQuery::Running { timeout_ms: Some(t) } | CQuery::Check { timeout_ms: t } | CQuery::Internet { timeout_ms: t } => {
+            CQuery::Running { timeout_ms: Some(t) } | CQuery::Check { timeout_ms: t } | CQuery::Controller { timeout_ms: t } => {
                 w.clock >= at + t / 1000
             }
             CQuery::Sleep { ms } => w.clock >= at + ms / 1000,
@@ -385,7 +385,7 @@ impl Model for Composed {
                     expected: SYS[w.target.running].into(),
                     place: "blu@choko".into(),
                     quiet: false,
-                    routing_check: true,
+                    controller_check: true,
                     fail_verify: false,
                 };
                 w.deploys[d] = Status::Active { m: Control::new(p), wait: Wait::Local(CQuery::Clock, 0) };
@@ -398,7 +398,8 @@ impl Model for Composed {
                 let timed_out = |t: u64| clock >= at + t / 1000;
                 // A probe answers at once or takes its whole timeout: the
                 // durations in between start the next probe in between.
-                if let CQuery::Running { timeout_ms: Some(t) } | CQuery::Check { timeout_ms: t } | CQuery::Internet { timeout_ms: t } = q {
+                if let CQuery::Running { timeout_ms: Some(t) } | CQuery::Check { timeout_ms: t } | CQuery::Controller { timeout_ms: t } = q
+                {
                     if clock != at && !timed_out(t) {
                         return None;
                     }
@@ -428,8 +429,10 @@ impl Model for Composed {
                     // The target's own checks pass or not, at any moment.
                     (CQuery::Check { .. }, false) => CReply::Checked { code: 0, last: None },
                     (CQuery::Check { .. }, true) => CReply::Checked { code: 1, last: Some("x".into()) },
-                    (CQuery::Internet { .. }, false) => CReply::Reached { ok: true, timed_out: false },
-                    (CQuery::Internet { timeout_ms }, true) if timed_out(timeout_ms) => CReply::Reached { ok: false, timed_out: true },
+                    // This machine's checks pass, or time out (a failure
+                    // at once shapes the report alone, as the target's).
+                    (CQuery::Controller { .. }, false) => CReply::Checked { code: 0, last: None },
+                    (CQuery::Controller { timeout_ms }, true) if timed_out(timeout_ms) => CReply::Checked { code: -1, last: None },
                     (CQuery::Sleep { ms }, false) if timed_out(ms) => CReply::Done,
                     _ => return None,
                 };

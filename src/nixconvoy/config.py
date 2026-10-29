@@ -22,20 +22,42 @@ from .wire import RepoNames
 CLAUDE_WORKTREES = ".claude/worktrees"
 
 
-CHECK_KINDS = ("internet", "routing", "bash")
+CHECK_KINDS = ("internet", "target_shell", "controller_shell")
+SHELL_KINDS = ("target_shell", "controller_shell")
 DEADLINE_KEY = "ssh_deadline_secs"
 # The deadline of a nixconvoy.toml without [switch]; nixconvoy init writes it out.
 DEFAULT_DEADLINE = 10
+# What every shell statement runs under: a failing command, an unset
+# variable or a failing pipe stage fails the check.
+SHELL_PRELUDE = "set -eu -o pipefail"
+# Former kinds, each with what replaces it.
+GONE_KINDS = {
+    "routing": "a controller_shell statement reaching the internet from this machine, such as "
+               f"{{ controller_shell = ['{strings.PROBE}'] }}",
+    "bash": 'target_shell = ["..."] (a list of statements)',
+}
+
+
+def shell_script(statement: str) -> str:
+    """`statement` as the script its shell runs: SHELL_PRELUDE first."""
+    return f"{SHELL_PRELUDE}\n{statement}\n"
+
+
+def controller_shell() -> str:
+    """The shell this machine's checks run in: the user's own."""
+    return os.environ.get("SHELL") or "/bin/sh"
 
 
 @dataclass(frozen=True)
 class Check:
     """One auto_rollback_checks item besides the deadline's: `internet` (an
-    HTTPS probe from the target), `routing` (one from this machine: the
-    target is the deploy's own way out, the router) or `bash` (`script`,
-    run as root on the target with errexit by the helper's `check` verb
-    after its probe, its last stderr line what a failed verification
-    reports)."""
+    HTTPS probe from the target), `target_shell` (`script`: one statement,
+    run as root on the target in root's shell by the helper's `check` verb
+    after its probe) or `controller_shell` (one statement, run on this
+    machine in its shell).  A policy's statements of a kind run at once,
+    each in a shell of its own, any one's non-zero exit failing the
+    verification; the last stderr line of each failing one is what the
+    report says."""
 
     kind: str
     script: str = ""
@@ -67,12 +89,10 @@ class SwitchPolicy:
     def has(self, kind: str) -> bool:
         return any(c.kind == kind for c in self.checks)
 
-    @property
-    def script(self) -> str:
-        """The bash checks, in order, as the one errexit script the kit
-        carries: each in a subshell of its own, so one's early `exit 0` or
-        `set +e` reaches no other (the `:` keeps a blank one a subshell)."""
-        return "\n".join(f"(\n:\n{c.script}\n)" for c in self.checks if c.kind == "bash")
+    def statements(self, kind: str) -> tuple[str, ...]:
+        """The shell checks of `kind`, in order: the kit carries the
+        target's, this machine runs the controller's (shell_script each)."""
+        return tuple(c.script for c in self.checks if c.kind == kind)
 
 
 @dataclass(frozen=True)
@@ -234,9 +254,10 @@ def _checks(v: object, where: str, base: SwitchPolicy | None) -> SwitchPolicy:
     """An auto_rollback_checks value over `base` (the fleet's policy; None
     for `[switch]` itself): false, a plain switch; else a list of at most
     one { ssh_deadline_secs = N } item, the deadline (over the fleet's),
-    the rest each a table with one key of CHECK_KINDS - true (bash: the
-    script) appends the check, false strikes `base`'s of that kind.
-    Checks need a deadline from one or the other."""
+    the rest each a table with one key of CHECK_KINDS - internet = true
+    appends the check, a shell kind's list of statements appends one check
+    per statement, false strikes `base`'s of that kind.  Checks need a
+    deadline from one or the other."""
     if v is False:
         return SwitchPolicy(deadline=None)
     if not isinstance(v, list):
@@ -256,15 +277,19 @@ def _checks(v: object, where: str, base: SwitchPolicy | None) -> SwitchPolicy:
             if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
                 raise ConfigError(strings.CONFIG_DEADLINE(where=at))
             own_deadline, deadline = True, val
+        elif kind in GONE_KINDS:
+            raise ConfigError(strings.CONFIG_CHECK_KIND_GONE(where=at, kind=kind, instead=GONE_KINDS[kind]))
         elif kind not in CHECK_KINDS:
             raise ConfigError(strings.CONFIG_CHECK_ITEM(where=at))
         elif val is False:
             if base is None:
                 raise ConfigError(strings.CONFIG_CHECK_STRIKE(where=at))
             kept = [c for c in kept if c.kind != kind]
-        elif kind == "bash" and isinstance(val, str):
-            own.append(Check(kind, val))
-        elif kind != "bash" and val is True:
+        elif kind in SHELL_KINDS:
+            if not isinstance(val, list) or not all(isinstance(st, str) for st in val):
+                raise ConfigError(strings.CONFIG_CHECK_SHELL(where=at, kind=kind))
+            own.extend(Check(kind, st) for st in val)
+        elif val is True:
             own.append(Check(kind))
         else:
             raise ConfigError(strings.CONFIG_CHECK_ITEM(where=at))

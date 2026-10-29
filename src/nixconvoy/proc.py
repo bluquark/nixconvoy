@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -153,6 +154,11 @@ def finishing() -> Iterator[None]:
         set_finishing(was)
 
 
+def is_finishing() -> bool:
+    """Whether this thread finishes (set_finishing)."""
+    return bool(getattr(_LOCAL, "finishing", False))
+
+
 def gate() -> None:
     if EXITING is not None and not getattr(_LOCAL, "finishing", False):
         raise Fail(EXITING)
@@ -164,13 +170,17 @@ SUDO_GRACE = 5
 
 
 def stop(c: subprocess.Popen[str]) -> None:
-    """End `c`: SIGKILL, or SIGTERM for a sudo, which relays it to root's
-    command (a grandchild no signal of our own reaches), killed itself after
-    SUDO_GRACE should that not end it."""
+    """End `c`: SIGKILL - its whole process group when it leads one (run's
+    `session`), so no grandchild holds its pipes open past it - or SIGTERM
+    for a sudo, which relays it to root's command (a grandchild no signal
+    of our own reaches), killed itself after SUDO_GRACE should that not
+    end it."""
     with contextlib.suppress(OSError):
         if isinstance(c.args, list) and c.args[:1] == ["sudo"]:
             c.terminate()
             threading.Timer(SUDO_GRACE, lambda: c.poll() is None and c.kill()).start()
+        elif os.getpgid(c.pid) == c.pid:
+            os.killpg(c.pid, signal.SIGKILL)
         else:
             c.kill()
 
@@ -220,10 +230,12 @@ def run(
     timeout: float | None = None,
     input: str | None = None,
     pass_fds: tuple[int, ...] = (),
+    session: bool = False,
 ) -> Completed:
     """`merged` captures stderr into stdout, in order (p.stderr is None).
     `timeout` ends the command after that many seconds (stop; p.timed_out).
-    `input` is fed to the command's stdin; the command inherits `pass_fds`."""
+    `input` is fed to the command's stdin; the command inherits `pass_fds`.
+    `session` starts it in a session of its own, ended as a whole."""
     full_env = dict(os.environ)
     if env:
         full_env.update(env)
@@ -236,7 +248,7 @@ def run(
             stdin=subprocess.PIPE if input is not None else None,
             stdout=subprocess.PIPE if capture else None,
             stderr=(subprocess.STDOUT if merged else subprocess.PIPE) if capture else None,
-            pass_fds=pass_fds,
+            pass_fds=pass_fds, start_new_session=session,
         )
         CHILDREN.add(child)
     try:

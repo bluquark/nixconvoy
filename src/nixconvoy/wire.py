@@ -725,7 +725,7 @@ class SwitchParams:
     expected: str
     place: str
     quiet: bool
-    routing_check: bool
+    controller_check: bool
     fail_verify: bool
 
 
@@ -780,7 +780,9 @@ class Check(Variant):
 
 
 @dataclass(frozen=True)
-class Internet(Variant):
+class Controller(Variant):
+    """This machine's controller_shell checks -> Checked."""
+
     timeout_ms: int
 
 
@@ -791,7 +793,7 @@ class Sleep(Variant):
 
 SwitchQuery = (
     TakeGuard | ProbeHelper | SetProfile | Activate | Deadline | Arm | Helper | Clock | Running | Check
-    | Internet | Sleep
+    | Controller | Sleep
 )
 
 
@@ -857,13 +859,4 @@ class Done(Variant):
     pass
 
 
-@dataclass(frozen=True)
-class Reached(Variant):
-    """Whether this machine reached the internet, and if not whether the
-    probe timed out."""
-
-    ok: bool
-    timed_out: bool
-
-
-SwitchReply = Guard | Code | Said | Text | Now | System | Checked | Reached | Done
+SwitchReply = Guard | Code | Said | Text | Now | System | Checked | Done

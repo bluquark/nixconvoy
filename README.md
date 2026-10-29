@@ -399,12 +399,12 @@ tags = ["lan"]
 # C) Routing still works (verified by the nixconvoy controller trying to reach the internet)
 # D) DNS still works (verified by custom bash script running as a one-shot after activation)
 auto_rollback_checks = [
-  { routing = true },
-  { bash = '''
+  { controller_shell = ['[ "$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" https://www.google.com/generate_204)" = 204 ]'] },
+  { target_shell = ['''
 systemctl is-active --quiet dnsmasq || { echo "dnsmasq is not active" >&2; exit 1; }
 pid=$(systemctl show -p MainPID --value dnsmasq)
 [ "$pid" != 0 ] || { echo "dnsmasq is not running" >&2; exit 1; }
-''' },
+'''] },
 ]
 
 [targets.windows-wsl]

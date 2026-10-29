@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import functools
-import http.client
 import ipaddress
 import os
 import re
 import shlex
 import socket
 import sys
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import NamedTuple
 
@@ -489,21 +486,6 @@ def rejected_generation(target: str, toplevel: str) -> str | None:
     if p.returncode != 0:
         die(strings.TARGETS_ESP_SCAN_FAILED(target=target, code=p.returncode))
     return p.stdout.strip() or None
-
-
-def internet_reachable(timeout: float = 8) -> tuple[bool, bool]:
-    """Whether this machine reaches the internet, and if not whether the
-    probe timed out rather than failed."""
-    try:
-        with urllib.request.urlopen("https://www.google.com/generate_204",
-                                    timeout=timeout) as r:
-            return r.status == 204, False
-    except TimeoutError:
-        return False, True
-    except urllib.error.URLError as e:
-        return False, isinstance(e.reason, TimeoutError)
-    except (OSError, ValueError, http.client.HTTPException):
-        return False, False
 
 
 def unit_changes(dry_activate: str) -> dict[str, list[str]]:

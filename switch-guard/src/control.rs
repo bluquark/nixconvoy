@@ -30,10 +30,9 @@ pub const PROBE_TIMEOUT_MS: u64 = 20_000;
 /// warm, 600 ms cold, measured) fit in it, as does the activate call's
 /// return trip, by which the target's restarted timer leads the window
 /// (Pc::Clocking).  Each probe's timeout is cut to that hard stop, so the
-/// probes of the last round (running system, check, this machine's
-/// internet) cannot add up past the timer.
+/// probes of the last round (running system, the target's check, this
+/// machine's) cannot add up past the timer.
 pub const CONFIRM_RESERVE_MS: u64 = 2_000;
-pub const INTERNET_TIMEOUT_MS: u64 = 8_000;
 pub const VERIFY_PAUSE_MS: u64 = 1_000;
 /// The rollback exit code that means the confirm landed after all.
 pub const ALREADY_CONFIRMED: i32 = crate::switch::core::ALREADY_CONFIRMED;
@@ -50,9 +49,10 @@ pub struct Params {
     /// The ssh address.
     pub place: String,
     pub quiet: bool,
-    /// Verification also needs this machine on the internet (the policy's
-    /// key of that name: the router, the deploy's own way out).
-    pub routing_check: bool,
+    /// Verification also runs the policy's controller_shell checks on
+    /// this machine (Query::Controller): the router, the deploy's own way
+    /// out, is proven by one reaching the internet through it.
+    pub controller_check: bool,
     /// NIXCONVOY_FAIL_VERIFY=1: fail verification at once.
     pub fail_verify: bool,
 }
@@ -103,8 +103,8 @@ pub enum Query {
     Check {
         timeout_ms: u64,
     },
-    /// Whether this machine reaches the internet -> Reached.
-    Internet {
+    /// This machine's controller_shell checks -> Checked.
+    Controller {
         timeout_ms: u64,
     },
     Sleep {
@@ -135,16 +135,11 @@ pub enum Reply {
         system: Option<String>,
         timed_out: bool,
     },
-    /// `code` < 0: timed out.  `last`: its last stderr line.
+    /// `code` < 0: timed out.  `last`: its last stderr line (the target's
+    /// check), or the report of every failing statement (this machine's).
     Checked {
         code: i32,
         last: Option<String>,
-    },
-    /// Whether this machine reached the internet, and if not whether the
-    /// probe timed out.
-    Reached {
-        ok: bool,
-        timed_out: bool,
     },
     Done,
 }
@@ -198,8 +193,8 @@ enum Pc {
     VerifyRunning { w: Window, rc: i32, tmo: u64 },
     CheckNow { w: Window, rc: i32 },
     VerifyCheck { w: Window, rc: i32, tmo: u64 },
-    InternetNow { w: Window, rc: i32, problems: Vec<String> },
-    VerifyInternet { w: Window, rc: i32, problems: Vec<String>, tmo: u64 },
+    ControllerNow { w: Window, rc: i32, problems: Vec<String> },
+    VerifyController { w: Window, rc: i32, problems: Vec<String>, tmo: u64 },
     VerifyEnd { w: Window, rc: i32, problems: Vec<String> },
     VerifyPause { w: Window, rc: i32 },
     RollingBack { problem: String },
@@ -370,10 +365,9 @@ impl Machine {
 
             // One round of verification: a read of the running system (over
             // a new ssh connection) finds the new one, the
-            // target's check passes (the internet
-            // probe when configured, then the policy's checks),
-            // and, with routing_check, this machine reaches the
-            // internet too.
+            // target's check passes (the internet probe when configured,
+            // then the policy's target_shell checks) and, with
+            // controller_check, this machine's controller_shell checks too.
             (Pc::VerifyNow { w, rc }, Reply::Now(now)) => self.round(w, rc, now),
             (Pc::VerifyRunning { w, rc, tmo }, Reply::System { system: cur, timed_out }) => {
                 if cur.is_none() && timed_out && tmo < PROBE_TIMEOUT_MS {
@@ -385,7 +379,7 @@ impl Machine {
                         target = target,
                         cur = cur.as_deref().unwrap_or(text!(control_nothing_reachable))
                     );
-                    return self.verify_internet(w, rc, vec![problem]);
+                    return self.verify_controller(w, rc, vec![problem]);
                 }
                 self.ask(Pc::CheckNow { w, rc }, Query::Clock)
             }
@@ -405,19 +399,26 @@ impl Machine {
                         last = last.as_deref().unwrap_or(text!(control_check_failed))
                     ));
                 }
-                self.verify_internet(w, rc, problems)
+                self.verify_controller(w, rc, problems)
             }
-            (Pc::InternetNow { w, rc, problems }, Reply::Now(now)) => match self.budget(w, now) {
+            (Pc::ControllerNow { w, rc, problems }, Reply::Now(now)) => match self.budget(w, now) {
                 None => self.out_of_time_end(w, rc, problems),
-                Some(tmo) => {
-                    let tmo = INTERNET_TIMEOUT_MS.min(tmo);
-                    self.ask(Pc::VerifyInternet { w, rc, problems, tmo }, Query::Internet { timeout_ms: tmo })
-                }
+                Some(tmo) => self.ask(Pc::VerifyController { w, rc, problems, tmo }, Query::Controller { timeout_ms: tmo }),
             },
-            (Pc::VerifyInternet { w, rc, mut problems, tmo }, Reply::Reached { ok, timed_out }) => {
-                if !ok {
-                    self.cut |= timed_out && tmo < INTERNET_TIMEOUT_MS;
-                    problems.push(text!(control_no_internet).to_string());
+            // A timed-out statement is named in `last` with the others
+            // failing; a run that itself timed out leaves none.
+            (Pc::VerifyController { w, rc, mut problems, tmo }, Reply::Checked { code, last }) => {
+                if code < 0 {
+                    self.cut |= tmo < PROBE_TIMEOUT_MS;
+                }
+                if code < 0 && last.is_none() {
+                    problems.push(format!(text!(control_controller_timed_out), target = target, secs = tmo as f64 / 1000.0));
+                } else if code != 0 {
+                    problems.push(format!(
+                        text!(control_controller_problem),
+                        target = target,
+                        last = last.as_deref().unwrap_or(text!(control_check_failed))
+                    ));
                 }
                 self.verify_end(w, rc, problems)
             }
@@ -495,9 +496,9 @@ impl Machine {
         format!(text!(control_out_of_time), target = self.p.target)
     }
 
-    fn verify_internet(&mut self, w: Window, rc: i32, problems: Vec<String>) -> Next {
-        if self.p.routing_check {
-            return self.ask(Pc::InternetNow { w, rc, problems }, Query::Clock);
+    fn verify_controller(&mut self, w: Window, rc: i32, problems: Vec<String>) -> Next {
+        if self.p.controller_check {
+            return self.ask(Pc::ControllerNow { w, rc, problems }, Query::Clock);
         }
         self.verify_end(w, rc, problems)
     }

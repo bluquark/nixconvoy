@@ -138,7 +138,8 @@ macro_rules! text {
     (control_check_timed_out) => { "{target}: check timed out after {secs:.0}s" };
     (control_check_problem) => { "{target}: {last}" };
     (control_check_failed) => { "check failed" };
-    (control_no_internet) => { "this machine cannot reach the internet" };
+    (control_controller_timed_out) => { "this machine's check for {target} timed out after {secs:.0}s" };
+    (control_controller_problem) => { "this machine's check for {target}: {last}" };
     (control_did_not_verify) => { "the switch of {target} did not verify ({problem}); rolled back to {previous}.  Nothing was committed or pushed - the changes are still staged." };
     (control_unconfirmed) => { "{target} could not be confirmed; rolling back" };
     (control_confirm_rolled_back) => { "{target} verified but could not be confirmed (see above: its deadline passed first, or persisting the new system failed); rolled back to {previous}.  Nothing was committed or pushed." };

@@ -50,7 +50,7 @@ from .config import SwitchPolicy, cfg, main_ref, remote_ref, repo_names
 from .guard import binary, decide
 from .memo import Top
 from .proc import PERF, Fail, die, dump_json, is_ancestor, load_json, out, rev
-from .switch import SwitchedMeanwhile, provenance_record, switch
+from .switch import SwitchedMeanwhile, parse_checks, provenance_record, switch
 from .targets import Probe, expand_targets, flake_target_names
 from .union import UnionQueries
 from .wire import Context, DriftParams, UnionParams
@@ -649,13 +649,16 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             assert r is not None  # unreachable targets never enter the plan
             expected[name] = r
         PERF.mark("switch:" + "+".join(plan))
+        for name in plan:
+            if (fault := parse_checks(policies[name].statements("controller_shell"))) is not None:
+                die(strings.DEPLOY_CONTROLLER_CHECK_UNPARSED(target=name, fault=fault))
         # Claimed before the switch starts: a switch cut short (a signal,
         # a sibling's die) may still leave the target running it.
         if ann is not None:
             ann.claimed += [n for n in plan if n not in ann.claimed]
         with ThreadPoolExecutor(len(plan)) as pool:
             switches = [pool.submit(switch, n, expected[n], tops[n].out, tops[n].kit, nixconvoy_switch,
-                                    len(plan) > 1, provenances[n], probed[n].digest, policies[n].has("routing"))
+                                    len(plan) > 1, provenances[n], probed[n].digest, policies[n].statements("controller_shell"))
                         for n in plan]
         moved: list[SwitchedMeanwhile] = []
         failed: Fail | None = None

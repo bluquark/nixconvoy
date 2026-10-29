@@ -10,11 +10,12 @@ import shlex
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import proc, strings, targets
 from .checkout import current_branch
-from .config import cfg, main_ref, remote_ref
+from .config import cfg, controller_shell, main_ref, remote_ref, shell_script
 from .guard import drive
 from .proc import Fail, out, rev, run, stream
 from .targets import PROBE_TIMEOUT, provenance_digest, ssh_opts
@@ -26,6 +27,7 @@ from .wire import (
     Checked,
     Clock,
     Code,
+    Controller,
     Deadline,
     Disarmed,
     Done,
@@ -33,11 +35,9 @@ from .wire import (
     Failed,
     Guard,
     Helper,
-    Internet,
     Locked,
     Now,
     ProbeHelper,
-    Reached,
     Running,
     Said,
     SetProfile,
@@ -141,9 +141,61 @@ def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> 
     return ["ssh", *ssh_opts(), targets.ssh_address(target), switch_guard_script(expected, toplevel, digest)]
 
 
+def parse_checks(statements: tuple[str, ...]) -> str | None:
+    """What controller_shell makes of each of `statements` without running
+    it (`-n`): the first fault, or None - asked before any target is
+    touched, as the kit asks root's shell of the target's at build."""
+    for statement in statements:
+        try:
+            p = run([controller_shell(), "-n", "-c", shell_script(statement)], check=False, timeout=10)
+        except OSError as e:
+            return strings.SWITCH_CHECK_INTERRUPTED(error=e)
+        if p.returncode != 0 or p.timed_out:
+            first = statement.strip().splitlines()
+            return strings.SWITCH_CHECK_UNPARSED(statement=first[0] if first else "", shell=controller_shell(),
+                                                 detail=(p.stderr or "").strip())
+    return None
+
+
+def run_checks(statements: tuple[str, ...], timeout: float) -> tuple[int, str | None]:
+    """`statements` at once on this machine, each in its own
+    controller_shell (shell_script), within `timeout` seconds: the exit
+    code (0, 1, or -1 when one timed out and none failed outright) and
+    the report, one entry per
+    failing statement - its last stderr line, or that it exited so or
+    timed out - joined by "; ", as nix/kit.nix's runner reports the
+    target's.  The workers finish as this thread does (proc.set_finishing:
+    armed, a sibling's die() must not cut the verification short)."""
+    finishing = proc.is_finishing()
+
+    def one(statement: str) -> tuple[str, proc.Completed]:
+        proc.set_finishing(finishing)
+        return statement, run([controller_shell(), "-c", shell_script(statement)], check=False, timeout=timeout,
+                              session=True, input="")
+
+    with ThreadPoolExecutor(max(len(statements), 1)) as pool:
+        done = list(pool.map(one, statements))
+    # A definite failure outranks a timeout: the round's report then
+    # stands (the control core records no cut round's).
+    code = 0
+    report: list[str] = []
+    for statement, p in done:
+        if p.returncode == 0 and not p.timed_out:
+            continue
+        code = 1 if not p.timed_out or code == 1 else -1
+        lines = (p.stderr or "").strip().splitlines()
+        first = statement.strip().splitlines()
+        head = first[0] if first else ""
+        if p.timed_out:
+            report.append(strings.SWITCH_CHECK_TIMED_OUT(statement=head))
+        else:
+            report.append(lines[-1] if lines else strings.SWITCH_CHECK_EXITED(statement=head, code=p.returncode))
+    return code, "; ".join(report) if report else None
+
+
 def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch: str,
            quiet: bool = False, provenance: str = "", digest: str = "",
-           routing_check: bool = False) -> None:
+           controller_checks: tuple[str, ...] = ()) -> None:
     """Switch `target` to `toplevel` as nixconvoy-switch decides, confirmed
     through `kit`'s helper (nix/kit.nix, already copied) or plainly when
     `kit` is "".  `quiet`
@@ -155,9 +207,9 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
     read (switch_guard_cmd).  Each verification round reads the running
     system over a new ssh connection rather than the deploy's master
     connection, so a switch that stopped sshd admitting logins fails it;
-    `routing_check` (the policy's check of this machine's, config.Check)
-    requires this machine to reach the internet too (the router, the
-    deploy's own way out)."""
+    `controller_checks` (the policy's controller_shell statements,
+    config.SwitchPolicy.statements) must pass on this machine too, run at
+    once (run_checks) within the round's budget."""
     held = f"[{target}] " if quiet else None
     helper = f"{kit}/confirmed-switch"
     guard: subprocess.Popen[str] | None = None
@@ -259,8 +311,12 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
                     return Checked(1, strings.SWITCH_CHECK_INTERRUPTED(error=e))
                 lines = (p.stderr or "").strip().splitlines()
                 return Checked(p.returncode, lines[-1] if lines else None)
-            case Internet(timeout_ms):
-                return Reached(*targets.internet_reachable(secs(timeout_ms)))
+            case Controller(timeout_ms):
+                # OSError: no such shell (controller_shell).
+                try:
+                    return Checked(*run_checks(controller_checks, secs(timeout_ms)))
+                except (Fail, OSError) as e:
+                    return Checked(1, strings.SWITCH_CHECK_INTERRUPTED(error=e))
             case Sleep(ms):
                 time.sleep(secs(ms))
                 return Done()
@@ -282,7 +338,7 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
     was_finishing = proc.set_finishing(False)
     try:
         params = SwitchParams(target, toplevel, expected, targets.ssh_address(target), quiet,
-                              routing_check, os.environ.get("NIXCONVOY_FAIL_VERIFY") == "1")
+                              bool(controller_checks), os.environ.get("NIXCONVOY_FAIL_VERIFY") == "1")
         drive(nixconvoy_switch, encode(params), perform, SwitchQuery, type(None),
               "nixconvoy-switch", strings.SWITCH_DURING(target=target), effect)
     finally:
