@@ -231,7 +231,6 @@ fn params(targets: &[&str], candidates: &[&str], evict: (bool, bool), drifting: 
     Params {
         cx: cx(&[(BRANCH, &b)]),
         union: "u".repeat(40),
-        router: "choko".into(),
         targets: s(targets),
         candidates: s(candidates),
         evict: evict.0,
@@ -261,9 +260,9 @@ fn held_targets() {
         msg,
         "nothing switched or committed: choko is held back by another branch (see above): the union carries work that checkout deployed to other targets alone, and this checkout's work reaches it too.  Deploy it there (nixconvoy deploy choko from that checkout) or land it with --not-yet-deployed; or deploy with --evict choko to switch it to this checkout's view alone, without the held work (and without every other branch's), the hold standing."
     );
-    assert_eq!(fx[1], Effect::Print("  side1: will switch".into()));
+    assert_eq!(fx[2], Effect::Print("  side1: will switch".into()));
     assert_eq!(
-        fx[2],
+        fx[1],
         Effect::Print(
             "  choko: refused: held back by work/chikuwa/1: the union carries its work, deployed from that checkout to other targets alone"
                 .into()
@@ -283,7 +282,7 @@ fn held_targets() {
     let msg = out.unwrap_err();
     assert!(msg.contains(&format!("the deploy of {BRANCH} looks dead")), "{msg}");
     assert!(
-        matches!(&fx[2], Effect::Print(l) if l.starts_with("  choko: refused: runs an increment") && l.ends_with("no longer renewed")),
+        matches!(&fx[1], Effect::Print(l) if l.starts_with("  choko: refused: runs an increment") && l.ends_with("no longer renewed")),
         "{fx:?}"
     );
 
@@ -293,7 +292,7 @@ fn held_targets() {
     assert_eq!(out.plan, ["side1"]);
     assert_eq!(out.drift["choko"].0, Kind::LeftAlone);
     assert_eq!(
-        fx[2],
+        fx[1],
         Effect::Print("  choko: left alone: held back by work/chikuwa/1: the union carries its work, deployed from that checkout to other targets alone; this checkout's work does not reach it".into())
     );
     // A main checkout reaching it (main's advance) is left behind on it.
@@ -301,11 +300,11 @@ fn held_targets() {
     p.work_branch = false;
     let (fx, out) = run(p.clone());
     assert_eq!(out.unwrap().drift["choko"].0, Kind::LeftAlone);
-    assert!(matches!(&fx[2], Effect::Print(l) if l.ends_with("left behind on main's advance")), "{fx:?}");
+    assert!(matches!(&fx[1], Effect::Print(l) if l.ends_with("left behind on main's advance")), "{fx:?}");
     // An empty holder list is no hold.
     p.work_branch = true;
     p.held.insert("choko".into(), vec![]);
-    assert_eq!(run(p).1.unwrap().plan, ["side1", "choko"]);
+    assert_eq!(run(p).1.unwrap().plan, ["choko", "side1"]);
 }
 
 /// The core run with every increment that left origin's tips `fate`
@@ -417,8 +416,8 @@ fn reports_the_plan() {
     let (fx, out) = run(p.clone());
     let msg = out.unwrap_err();
     assert!(msg.starts_with("nothing switched or committed: side1 runs another"), "{msg}");
-    assert_eq!(fx[0], Effect::Print("  side1: refused: runs an increment of work/haswell-wsl/2 deployed by haswell-wsl:/home/blu/projects/homelab2 (pid 4242) at 13:46 whose push has not landed (origin/work/haswell-wsl/2 is still at aaaaaaaaaaaa)".into()));
-    assert_eq!(fx[1], Effect::Print("  choko: will switch".into()));
+    assert_eq!(fx[1], Effect::Print("  side1: refused: runs an increment of work/haswell-wsl/2 deployed by haswell-wsl:/home/blu/projects/homelab2 (pid 4242) at 13:46 whose push has not landed (origin/work/haswell-wsl/2 is still at aaaaaaaaaaaa)".into()));
+    assert_eq!(fx[0], Effect::Print("  choko: will switch".into()));
     assert_eq!(fx[2], Effect::Print("  chikuwa: differs but excluded by the target filter".into()));
     assert_eq!(fx.len(), 3);
     // The announced increment of a deploy found dead: refused still, the
@@ -431,7 +430,7 @@ fn reports_the_plan() {
     let msg = out.unwrap_err();
     assert!(msg.contains(&format!("The deploy of {BRANCH} looks dead")) && !msg.contains("Re-run once"), "{msg}");
     assert!(
-        matches!(&fx[0], Effect::Print(l) if l.starts_with("  side1: refused: ") && l.ends_with("that deploy looks dead, its announcement no longer renewed")),
+        matches!(&fx[1], Effect::Print(l) if l.starts_with("  side1: refused: ") && l.ends_with("that deploy looks dead, its announcement no longer renewed")),
         "{fx:?}"
     );
 
@@ -443,10 +442,10 @@ fn reports_the_plan() {
     );
     let (fx, out) = run(p);
     let out = out.unwrap();
-    assert_eq!(out.plan, ["side1", "choko"]);
-    assert_eq!(out.affected, ["side1", "choko"]);
+    assert_eq!(out.plan, ["choko", "side1"]);
+    assert_eq!(out.affected, ["choko", "side1"]);
     assert_eq!(fx[0], Effect::Print("  chikuwa: up to date".into()));
-    assert!(matches!(&fx[1], Effect::Print(l) if l.starts_with("  side1: will switch, reverting it: runs an increment")), "{fx:?}");
+    assert!(matches!(&fx[2], Effect::Print(l) if l.starts_with("  side1: will switch, reverting it: runs an increment")), "{fx:?}");
     assert_eq!(fx.len(), 3);
 
     // The in-flight target is outside this checkout's work: left alone, the
@@ -461,13 +460,13 @@ fn reports_the_plan() {
     let (fx, out) = run(p.clone());
     let out = out.unwrap();
     assert_eq!(out.plan, ["choko"]);
-    assert_eq!(out.affected, ["side1", "choko"]);
+    assert_eq!(out.affected, ["choko", "side1"]);
     assert_eq!(out.drift["side1"].0, Kind::LeftAlone);
     assert!(
-        matches!(&fx[1], Effect::Print(l) if l.starts_with("  side1: left alone: runs an increment") && l.ends_with("this checkout's work does not reach it")),
+        matches!(&fx[2], Effect::Print(l) if l.starts_with("  side1: left alone: runs an increment") && l.ends_with("this checkout's work does not reach it")),
         "{fx:?}"
     );
-    assert_eq!(fx[2], Effect::Print("  choko: will switch".into()));
+    assert_eq!(fx[1], Effect::Print("  choko: will switch".into()));
 
     // An unnamed --evict leaves it alone too; one naming the targets takes it over.
     p.evict = true;
@@ -477,7 +476,7 @@ fn reports_the_plan() {
     let (_, out) = run(p.clone());
     let out = out.unwrap();
     assert_eq!(out.drift["side1"].0, Kind::Overridden);
-    assert_eq!(out.plan, ["side1", "choko"]);
+    assert_eq!(out.plan, ["choko", "side1"]);
 
     // Named or not, a --evict never takes over a target outside the filter.
     p.candidates = vec!["choko".into()];
@@ -541,7 +540,6 @@ fn arb_params() -> impl Strategy<Value = Params> {
             let mut p = Params {
                 cx: Context { tips, in_flight, dead, ..cx(&[]) },
                 union: "u".repeat(40),
-                router: "choko".into(),
                 candidates: cands.into_iter().filter(|c| targets.contains(c)).collect(),
                 targets: targets.clone(),
                 evict,
@@ -621,11 +619,11 @@ proptest! {
 
     /// A --evict never refuses: a refusal needs a reached target, which it
     /// takes over.  The plan is the drifting candidates not left alone, in
-    /// switch order, the router last.
+    /// switch order.
     #[test]
     fn plans(p in arb_params(), fate in prop::sample::select(vec!["kept", "abandoned"])) {
         let (_, fx, out) = run_with(p.clone(), fate);
-        let affected: Vec<String> = switch_order(&p.targets, &p.router).into_iter()
+        let affected: Vec<String> = by_name(&p.targets).into_iter()
             .filter(|h| matches!((p.running.get(h), p.built.get(h)), (Some(Some(r)), Some(b)) if r != b))
             .collect();
         if p.evict { prop_assert!(out.is_ok(), "{:?}", out); }
@@ -634,7 +632,6 @@ proptest! {
             prop_assert!(o.drift.values().all(|(k, _)| !k.refused()));
             let plan: Vec<&String> = affected.iter().filter(|h| o.drift.get(*h).is_some_and(|(k, _)| *k != Kind::LeftAlone)).collect();
             prop_assert_eq!(o.plan.iter().collect::<Vec<_>>(), plan);
-            if let Some(i) = o.plan.iter().position(|h| *h == p.router) { prop_assert_eq!(i, o.plan.len() - 1); }
         }
         // One report line per candidate and per excluded drifting target.
         let printed = fx.iter().filter(|e| matches!(e, Effect::Print(_))).count();

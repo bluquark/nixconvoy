@@ -22,28 +22,52 @@ from .wire import RepoNames
 CLAUDE_WORKTREES = ".claude/worktrees"
 
 
+CHECK_KINDS = ("ssh", "internet", "routing", "bash")
+
+
+@dataclass(frozen=True)
+class Check:
+    """One auto_rollback_checks item: `ssh` (each verification round's
+    read of the running system opens a new ssh connection, so sshd must
+    admit a login; without it the deploy's master connection serves),
+    `internet` (an HTTPS
+    probe from the target), `routing` (one from this machine: the target
+    is the deploy's own way out, the router) or `bash` (`script`, run as
+    root on the target with errexit by the helper's `check` verb after its
+    probe, its last stderr line what a failed verification reports)."""
+
+    kind: str
+    script: str = ""
+
+
 @dataclass(frozen=True)
 class SwitchPolicy:
     """How a target is switched: nixconvoy.toml's `[switch]` table, the
     fleet's defaults, under a target's `[targets.<name>.switch]`."""
 
-    # Confirmed (nix/kit.nix's helper arms a rollback timer, the toplevel
-    # is activated with `test`, verified from here, then the profile set),
-    # or plainly, as nixos-rebuild switch would.
-    confirmed: bool = True
     # Seconds after arming before an unconfirmed switch rolls back: the
     # activation plus the verification must fit.
     deadline: int = 30
-    # The verification begins with an HTTPS probe of the internet from the
-    # target.
-    internet_check: bool = False
-    # Bash the helper's `check` verb runs as root (errexit) after that
-    # probe: the target's own assertions on the new system, whose last
-    # stderr line is what a failed verification reports.
-    checks: str = ""
-    # Switched alone after every other target, verified only while this
-    # machine still reaches the internet (the router).  Per target only.
-    last: bool = False
+    # auto_rollback_checks: the fleet's, then the target's own appended (a
+    # `false` item of a kind strikes the fleet's of it).  Any: the switch
+    # is confirmed (nix/kit.nix's helper arms a rollback timer, the
+    # toplevel is activated with `test`, verified from here by each check,
+    # then the profile set); none: plain, as nixos-rebuild switch would.
+    checks: tuple[Check, ...] = (Check("ssh"),)
+
+    @property
+    def confirmed(self) -> bool:
+        return bool(self.checks)
+
+    def has(self, kind: str) -> bool:
+        return any(c.kind == kind for c in self.checks)
+
+    @property
+    def script(self) -> str:
+        """The bash checks, in order, as the one errexit script the kit
+        carries: each in a subshell of its own, so one's early `exit 0` or
+        `set +e` reaches no other."""
+        return "\n".join(f"(\n{c.script}\n)" for c in self.checks if c.kind == "bash")
 
 
 @dataclass(frozen=True)
@@ -202,28 +226,48 @@ def _auto_bool(t: dict[str, object], k: str, where: str) -> bool | None:
     return v
 
 
-def _bool(t: dict[str, object], k: str, where: str, default: bool) -> bool:
-    v = t.get(k, default)
-    if not isinstance(v, bool):
-        raise ConfigError(strings.CONFIG_NOT_A_BOOL(where=where, key=k))
-    return v
+def _checks(v: object, where: str, base: tuple[Check, ...]) -> tuple[Check, ...]:
+    """An auto_rollback_checks list appended to `base` (the fleet's; the
+    built-in default for `[switch]` itself, which it replaces): each item
+    a table with one key of CHECK_KINDS - true (bash: the script) adds the
+    check, false strikes `base`'s of that kind."""
+    if not isinstance(v, list):
+        raise ConfigError(strings.CONFIG_CHECKS(where=where))
+    kept = list(base)
+    own: list[Check] = []
+    for i, item in enumerate(v):
+        at = f"{where}[{i}]"
+        if not isinstance(item, dict) or len(item) != 1:
+            raise ConfigError(strings.CONFIG_CHECK_ITEM(where=at))
+        ((kind, val),) = item.items()
+        if kind not in CHECK_KINDS:
+            raise ConfigError(strings.CONFIG_CHECK_ITEM(where=at))
+        if val is False:
+            kept = [c for c in kept if c.kind != kind]
+        elif kind == "bash" and isinstance(val, str):
+            own.append(Check(kind, val))
+        elif kind != "bash" and val is True:
+            own.append(Check(kind))
+        else:
+            raise ConfigError(strings.CONFIG_CHECK_ITEM(where=at))
+    return (*kept, *own)
 
 
-def _switch(t: dict[str, object], where: str, base: SwitchPolicy, per_target: bool) -> SwitchPolicy:
-    """A `switch` table over `base`: `[switch]` (the defaults; `last` is a
-    target's alone) or a `[targets.<name>.switch]`."""
-    keys = ("confirmed", "deadline", "internet_check", "checks", *(("last",) if per_target else ()))
+def _switch(t: dict[str, object], where: str, base: SwitchPolicy | None) -> SwitchPolicy:
+    """A `switch` table: `[switch]` (`base` None: the fleet's defaults
+    over the built-in ones) or a `[targets.<name>.switch]` over the
+    fleet's."""
     for k in t:
-        if k not in keys:
-            unknown = strings.CONFIG_UNKNOWN_KEY_LAST if k == "last" else strings.CONFIG_UNKNOWN_KEY
-            raise ConfigError(unknown(key=f"{where}.{k}"))
-    d = t.get("deadline", base.deadline)
+        if k not in ("deadline_secs", "auto_rollback_checks"):
+            raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"{where}.{k}"))
+    fleet = base or SwitchPolicy()
+    d = t.get("deadline_secs", fleet.deadline)
     if isinstance(d, bool) or not isinstance(d, int) or d <= 0:
         raise ConfigError(strings.CONFIG_DEADLINE(where=where))
-    return SwitchPolicy(confirmed=_bool(t, "confirmed", where, base.confirmed), deadline=d,
-                        internet_check=_bool(t, "internet_check", where, base.internet_check),
-                        checks=_str(t, "checks", where, base.checks),
-                        last=_bool(t, "last", where, base.last))
+    checks = fleet.checks
+    if "auto_rollback_checks" in t:
+        checks = _checks(t["auto_rollback_checks"], f"{where}.auto_rollback_checks", fleet.checks if base else ())
+    return SwitchPolicy(deadline=d, checks=checks)
 
 
 def _strs(t: dict[str, object], k: str, where: str) -> tuple[str, ...]:
@@ -327,14 +371,14 @@ def parse(text: str) -> Config:
         if s.split() != [s]:
             raise ConfigError(strings.CONFIG_SKIP_SUBSTITUTER(entry=s))
         skip.append(_bare_url(s))
-    switch = _switch(_table(doc.get("switch", {}), "switch"), "switch", SwitchPolicy(), per_target=False)
+    switch = _switch(_table(doc.get("switch", {}), "switch"), "switch", None)
     targets: dict[str, TargetConfig] = {}
     for name, h in _table(doc.get("targets", {}), "targets").items():
         t = _table(h, f"targets.{name}")
         for k in t:
             if k not in ("ssh_address", "tags", "dir", "switch"):
                 raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"targets.{name}.{k}"))
-        own = (_switch(_table(t["switch"], f"targets.{name}.switch"), f"targets.{name}.switch", switch, per_target=True)
+        own = (_switch(_table(t["switch"], f"targets.{name}.switch"), f"targets.{name}.switch", switch)
                if "switch" in t else None)
         d = _str(t, "dir", f"targets.{name}")
         if d.startswith("/") or ".." in d.split("/"):

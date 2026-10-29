@@ -383,7 +383,7 @@ impl Model for Composed {
                     expected: SYS[w.target.running].into(),
                     place: "local".into(),
                     quiet: false,
-                    router: true,
+                    routing_check: true,
                     fail_verify: false,
                 };
                 w.deploys[d] = Status::Active { m: Control::new(p), wait: Wait::Local(CQuery::Clock, 0) };

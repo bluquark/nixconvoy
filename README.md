@@ -362,30 +362,30 @@ precheck = "repo-lint"
 
 [build]
 store = { macbook = "chikuwa" }
-# This particular substituter is too slow, skip it
-skip_substituters = ["https://claude-code.cachix.org"]
 
 # Automatically roll back if the target can no longer connect to the internet.
 [switch]
-internet_check = true
+auto_rollback_checks = [{ ssh = true }, { internet = true }]
 
 [targets.minipc]
 tags = ["omnibin"]
-switch = { deadline = 120 }
+switch = { deadline_secs = 120 }
 
 [targets.router]
 [targets.router.switch]
-deadline = 20
-last = true
-checks = '''
+deadline_secs = 20
+auto_rollback_checks = [
+  { routing = true },
+  { bash = '''
 systemctl is-active --quiet dnsmasq || { echo "dnsmasq is not active" >&2; exit 1; }
 pid=$(systemctl show -p MainPID --value dnsmasq)
 [ "$pid" != 0 ] || { echo "dnsmasq is not running" >&2; exit 1; }
-'''
+''' },
+]
 
 [targets.windows-wsl]
 # Switched without checks: WSL networking isn't controlled by NixOS.
-switch = { confirmed = false }
+switch = { auto_rollback_checks = [{ ssh = false }, { internet = false }] }
 # 'windows-wsl' does not have its own distinct domain/IP address
 ssh_address = "bluquark@windows.home.bluquark.net"
 tags = ["omnibin"]

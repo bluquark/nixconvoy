@@ -91,7 +91,7 @@ mod tests {
         assert!(reply(r#"{"flag":"yes"}"#).is_err());
         assert_eq!(enc(&Query::Switch { branch: "b".into(), start: None }), r#"{"switch":{"branch":"b","start":null}}"#);
         let mut d = start(
-            r#"{"drift":{"cx":{"names":{"remote":"origin","main":"main"},"me":["h","/c"],"listed":["main"],"tips":{},"in_flight":{},"dead":[],"tz_offset":0},"union":"u","router":"choko","targets":["a"],"candidates":["a"],"evict":false,"named":false,"work_branch":true,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"provenances":{"a":""},"held":{}}}"#,
+            r#"{"drift":{"cx":{"names":{"remote":"origin","main":"main"},"me":["h","/c"],"listed":["main"],"tips":{},"in_flight":{},"dead":[],"tz_offset":0},"union":"u","targets":["a"],"candidates":["a"],"evict":false,"named":false,"work_branch":true,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"provenances":{"a":""},"held":{}}}"#,
         )
         .unwrap();
         let (line, _) = d.decide(None);

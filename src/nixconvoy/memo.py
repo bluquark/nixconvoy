@@ -539,9 +539,9 @@ def union_config(wt: str) -> Config:
 
 
 def kit_inputs(pol: SwitchPolicy) -> tuple[object, ...]:
-    """What of a policy the kit is made from: nothing for a target
-    switched plainly (`last` only orders the switches)."""
-    return (pol.deadline, pol.internet_check, pol.checks) if pol.confirmed else ()
+    """What of a policy the kit is made from (the ssh and routing checks
+    are this machine's): nothing for a target switched plainly."""
+    return (pol.deadline, pol.has("internet"), pol.script) if pol.confirmed else ()
 
 
 def kit_part(wt: str, target: str) -> str:
@@ -551,8 +551,8 @@ def kit_part(wt: str, target: str) -> str:
     pol = union_config(wt).switch_policy(target)
     if not pol.confirmed:
         return "kit none"
-    checks = hashlib.sha256(pol.checks.encode()).hexdigest()
-    return f"kit {kit_src()} {pol.deadline} {pol.internet_check} {checks}"
+    checks = hashlib.sha256(pol.script.encode()).hexdigest()
+    return f"kit {kit_src()} {pol.deadline} {pol.has('internet')} {checks}"
 
 
 def target_eval_key(wt: str, union: str, target: str) -> str:
@@ -717,7 +717,7 @@ def kit_expr(pol: SwitchPolicy) -> str:
     tree = (f'builtins.fetchTree {{ type = "path"; path = {nix_string(kit_src())}; '
             f'narHash = {nix_string(kit_nar_hash())}; }}')
     return (f'import "${{{tree}}}/nix/kit.nix" {{ inherit (c) pkgs config; deadline = {pol.deadline}; '
-            f'internetCheck = {"true" if pol.internet_check else "false"}; checks = {nix_string(pol.checks)}; }}')
+            f'internetCheck = {"true" if pol.has("internet") else "false"}; checks = {nix_string(pol.script)}; }}')
 
 
 def eval_expr(target: str, parallel: bool, pol: SwitchPolicy) -> str:

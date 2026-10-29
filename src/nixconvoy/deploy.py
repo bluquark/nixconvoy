@@ -46,7 +46,7 @@ from .checkout import (
     this_prefix,
     work_branch_name,
 )
-from .config import cfg, main_ref, remote_ref, repo_names, store_host
+from .config import SwitchPolicy, cfg, main_ref, remote_ref, repo_names, store_host
 from .guard import binary, decide
 from .memo import Top
 from .proc import PERF, Fail, die, dump_json, is_ancestor, load_json, out, rev
@@ -344,8 +344,8 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         targets.check_store()
 
     plan: list[str] = []
-    # The plan's switch-last targets (the union's policy).
-    last_targets: set[str] = set()
+    # Each built target's switch policy (the union's).
+    policies: dict[str, SwitchPolicy] = {}
     affected: list[str] = []
     left_alone: list[str] = []
     tops: dict[str, Top] = {}
@@ -449,7 +449,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         """Eval, precheck, build and copy for `union`, checked out in `wt`,
         the work branches shaped like `listed` (nixconvoy.toml's branch_prefix), `branches`
         the ones it merged: whether the deploy ends here."""
-        nonlocal plan, affected, left_alone, tops, committed, records, provenances, ann, last_targets
+        nonlocal plan, affected, left_alone, tops, committed, records, provenances, ann, policies
         if skip:
             if dry:
                 print(strings.DEPLOY_SKIP_DRY(union=union))
@@ -493,8 +493,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                     continue
                 held.setdefault(h, []).append(name)
         policy = memo.union_config(wt).switch_policy
-        last = [h for h in sorted(tops) if policy(h).last]
-        last_targets = set(last)
+        policies = {h: policy(h) for h in tops}
         for h in sorted(tops):
             if tops[h].assessed and not tops[h].kit:
                 print(strings.DEPLOY_ASSESSED_PLAIN(target=h), file=sys.stderr)
@@ -502,7 +501,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                      in_flight=announced(ann.key if ann is not None else None), dead=sorted(dead),
                      tz_offset=time.localtime().tm_gmtoff)
         verdict = decide(DriftParams(
-            cx=cx, union=union, router=last[0] if last else "", targets=all_targets, candidates=candidates,
+            cx=cx, union=union, targets=all_targets, candidates=candidates,
             evict=evict, named=bool(filter_targets), work_branch=wb is not None, reached=sorted(reached),
             running=running, built={h: t.out for h, t in tops.items()},
             held={h: sorted(bs) for h, bs in held.items()},
@@ -638,45 +637,42 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         return False
 
     def switch_all(nixconvoy_switch: str) -> None:
-        """The plan's switches: the switch-last targets alone, one by one,
-        once everything else has finished talking to them.  A failed switch
-        dies once the others in its batch finish; one refused because the
-        target moved meanwhile (SwitchedMeanwhile) is raised once no sibling
-        failed, the moved targets' claims taken back."""
-        first = [h for h in plan if h not in last_targets]
-        batches = [first, *([h] for h in plan if h in last_targets)]
-        for batch in batches:
-            if not batch:
-                continue
-            expected: dict[str, str] = {}
-            for name in batch:
-                r = running.get(name)
-                assert r is not None  # unreachable targets never enter the plan
-                expected[name] = r
-            PERF.mark("switch:" + "+".join(batch))
-            # Claimed before the switch starts: a switch cut short (a signal,
-            # a batch sibling's die) may still leave the target running it.
-            if ann is not None:
-                ann.claimed += [n for n in batch if n not in ann.claimed]
-            with ThreadPoolExecutor(len(batch)) as pool:
-                switches = [pool.submit(switch, n, expected[n], tops[n].out, tops[n].kit, nixconvoy_switch,
-                                        len(batch) > 1, provenances[n], probed[n].digest, n in last_targets)
-                            for n in batch]
-            moved: list[SwitchedMeanwhile] = []
-            failed: Fail | None = None
-            for f in switches:
-                try:
-                    f.result()
-                except SwitchedMeanwhile as e:
-                    moved.append(e)
-                except Fail as e:
-                    failed = failed or e
-            if moved and ann is not None:
-                ann.claimed = [h for h in ann.claimed if h not in {e.target for e in moved}]
-            if failed is not None:
-                raise failed
-            if moved:
-                raise moved[0]
+        """The plan's switches, all at once.  A failed switch dies once the
+        others finish; one refused because the target moved meanwhile
+        (SwitchedMeanwhile) is raised once none failed, the moved targets'
+        claims taken back."""
+        if not plan:
+            return
+        expected: dict[str, str] = {}
+        for name in plan:
+            r = running.get(name)
+            assert r is not None  # unreachable targets never enter the plan
+            expected[name] = r
+        PERF.mark("switch:" + "+".join(plan))
+        # Claimed before the switch starts: a switch cut short (a signal,
+        # a sibling's die) may still leave the target running it.
+        if ann is not None:
+            ann.claimed += [n for n in plan if n not in ann.claimed]
+        with ThreadPoolExecutor(len(plan)) as pool:
+            switches = [pool.submit(switch, n, expected[n], tops[n].out, tops[n].kit, nixconvoy_switch,
+                                    len(plan) > 1, provenances[n], probed[n].digest,
+                                    policies[n].has("ssh"), policies[n].has("routing"))
+                        for n in plan]
+        moved: list[SwitchedMeanwhile] = []
+        failed: Fail | None = None
+        for f in switches:
+            try:
+                f.result()
+            except SwitchedMeanwhile as e:
+                moved.append(e)
+            except Fail as e:
+                failed = failed or e
+        if moved and ann is not None:
+            ann.claimed = [h for h in ann.claimed if h not in {e.target for e in moved}]
+        if failed is not None:
+            raise failed
+        if moved:
+            raise moved[0]
 
     for redo in range(SWITCH_REDOS + 1):
         queries = UnionQueries(lambda: snap or "HEAD", fetch, refresh, stage, await_pending)

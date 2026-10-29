@@ -141,19 +141,21 @@ def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> 
 
 def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch: str,
            quiet: bool = False, provenance: str = "", digest: str = "",
-           needs_internet: bool = False) -> None:
+           ssh_check: bool = True, routing_check: bool = False) -> None:
     """Switch `target` to `toplevel` as nixconvoy-switch decides, confirmed
     through `kit`'s helper (nix/kit.nix, already copied) or plainly when
     `kit` is "".  `quiet`
     (several switches at once) prints the activation output afterwards,
     prefixed with the target.  Activation, confirm and rollback run in a
     transient unit on the target (as nixos-rebuild does), so they complete
-    even if this ssh session dies.  Each verification round reads the running
-    system over a new ssh connection, not the deploy's master connection: a
-    switch that stopped sshd admitting logins fails it.  `provenance` (one JSON line) is claimed on
+    even if this ssh session dies.  `provenance` (one JSON line) is claimed on
     the target under the switch lock, `digest` the provenance_digest the probe
-    read (switch_guard_cmd).  `needs_internet`: verification also requires
-    this machine to reach the internet (the router)."""
+    read (switch_guard_cmd).  `ssh_check` and `routing_check`: the policy's
+    checks of this machine's (config.Check) - each verification round
+    reads the running system over a new ssh connection rather than the
+    deploy's master connection, so a switch that stopped sshd admitting
+    logins fails it; and the verification requires this machine to reach
+    the internet (the router, the deploy's own way out)."""
     local = target == proc.this_machine()
     held = f"[{target}] " if quiet else None
     helper = f"{kit}/confirmed-switch"
@@ -241,7 +243,7 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
             # round, retried until the deadline.
             case Running(timeout_ms):
                 try:
-                    return System(targets.running_system(target, timeout=secs(timeout_ms), fresh=True))
+                    return System(targets.running_system(target, timeout=secs(timeout_ms), fresh=ssh_check))
                 except Fail:
                     return System(None)
             case Check(timeout_ms):
@@ -275,7 +277,7 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
     was_finishing = proc.set_finishing(False)
     try:
         params = SwitchParams(target, toplevel, expected, "local" if local else targets.ssh_address(target), quiet,
-                              needs_internet, os.environ.get("NIXCONVOY_FAIL_VERIFY") == "1")
+                              routing_check, os.environ.get("NIXCONVOY_FAIL_VERIFY") == "1")
         drive(nixconvoy_switch, encode(params), perform, SwitchQuery, type(None),
               "nixconvoy-switch", strings.SWITCH_DURING(target=target), effect)
     finally:

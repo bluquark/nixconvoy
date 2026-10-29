@@ -389,7 +389,7 @@ DEPLOY_SKIP = M("NIXCONVOY_SKIP_SWITCH=1: skipping probe+eval+switch (union {uni
 DEPLOY_ANNOUNCE_FAILED = M("announcing this deploy on {remote} failed; {NOTHING_DONE}:\n{detail}")
 DEPLOY_EVALUATING = "evaluating targets..."
 DEPLOY_EVALUATING_PRECHECK = "evaluating targets, running the precheck..."
-DEPLOY_ASSESSED_PLAIN = M("warning: {target} is switched plainly (confirmed = false) but carries the boot-assessment module: a counted boot there runs no switch checks")
+DEPLOY_ASSESSED_PLAIN = M("warning: {target} is switched plainly (no auto_rollback_checks) but carries the boot-assessment module: a counted boot there runs no switch checks")
 DEPLOY_REJECTED_GENERATION = M("{target}'s bootloader rejected the very generation this deploy would switch it to ({stub}): it failed its boot assessment and the target fell back.  Nothing was built, switched or committed.  See `journalctl -u boot-assessment-watch -u boot-assessment` on {target}; then change the configuration, or re-arm the stub to retry it as is (sudo mv of the +0-N stub to +2 under /boot/EFI/Linux).")
 # A deploy record's subject: the main branch, then each unioned branch.
 DEPLOY_SUBJECT_BRANCH = M(" + {branch}")
@@ -529,16 +529,20 @@ INIT_TOML_BUILD = (
     "# store = { \"*\" = \"bigbox\" }\n"
     "# skip_substituters = [\"https://slow.cachix.org\"]")
 INIT_TOML_SWITCH = (
-    "# How the targets are switched (every target's defaults; [targets.<name>.switch] overrides one's).\n"
-    "# Confirmed, unless `confirmed = false`: a rollback timer is armed on the target, the new system\n"
-    "# activated, verified over a new ssh connection (and its `checks`, bash run as root), and only then\n"
-    "# set as the profile and boot entry; otherwise it rolls back within `deadline` seconds.\n"
+    "# How the targets are switched (every target's defaults; a [targets.<name>.switch] extends them).\n"
+    "# With auto_rollback_checks (unset: [{ ssh = true }]) a switch is confirmed: a rollback timer is armed\n"
+    "# on the target, the new system activated and verified by each check, and only then set as the\n"
+    "# profile and boot entry; otherwise it rolls back within `deadline_secs`.  A target's list is\n"
+    "# appended to this one, a `false` item striking the fleet's of its kind; with none left, its switch\n"
+    "# is plain, as nixos-rebuild switch.\n"
     "# [switch]\n"
-    "# deadline = 30\n"
-    "# internet_check = false   # the verification also wants the internet reachable from the target\n"
-    "# checks = \"\"\"\n"
-    "# systemctl is-active -q nginx.service\n"
-    "# \"\"\"")
+    "# deadline_secs = 30\n"
+    "# auto_rollback_checks = [\n"
+    "#   { ssh = true },       # a new ssh connection finds the new system running\n"
+    "#   { internet = true },  # the target reaches the internet\n"
+    "#   { routing = true },   # this machine still does, through the target (the router)\n"
+    "#   { bash = \"systemctl is-active -q nginx.service\" },  # run as root on the target\n"
+    "# ]")
 INIT_TOML_TARGETS = (
     "# The targets: one table per nixosConfiguration (the inventory, as there is no targets_dir);\n"
     "# a nixosConfiguration added later needs its table here.\n"
@@ -739,14 +743,15 @@ CONFIG_TOML = M("{CONFIG_FILE}: {error}")
 CONFIG_VERSION = M("{CONFIG_FILE}: config_version {version} is not supported (1 is)")
 CONFIG_REQUIRED = M("{CONFIG_FILE}: {key} is required (`{TOOL} init` writes a complete file)")
 CONFIG_UNKNOWN_KEY = M("{CONFIG_FILE}: unknown key {key}")
-CONFIG_UNKNOWN_KEY_LAST = M("{CONFIG_FILE}: unknown key {key} (last is a target's setting: [targets.<name>.switch])")
 CONFIG_NOT_A_TABLE = M("{where} must be a table")
 CONFIG_NOT_A_STRING = M("{where}.{key} must be a string")
 CONFIG_NOT_STRINGS = M("{where}.{key} must be a list of strings")
 CONFIG_NOT_AUTO_BOOL = M('{where}.{key} must be true, false or "auto"')
-CONFIG_NOT_A_BOOL = M("{CONFIG_FILE}: {where}.{key} must be true or false")
 CONFIG_NOT_A_TEMPLATE = M("{CONFIG_FILE}: {key} is a template over {{{placeholder}}} alone ({error!r})")
-CONFIG_DEADLINE = M("{CONFIG_FILE}: {where}.deadline is a number of seconds, above 0")
+CONFIG_DEADLINE = M("{CONFIG_FILE}: {where}.deadline_secs is a number of seconds, above 0")
+CONFIG_CHECKS = M("{CONFIG_FILE}: {where} is a list of checks, tables like {{ ssh = true }}")
+CONFIG_CHECK_ITEM = M("{CONFIG_FILE}: {where} is a table with one key: ssh, internet or routing = true, or "
+                      "bash = \"...\" (a script); = false strikes the fleet's checks of that kind")
 CONFIG_WORK_BRANCHES_IGNORED = M("note: {CONFIG_FILE}: work_branches is ignored (a work branch is any branch shaped like "
                                  "branch_prefix, {{machine}} in it any hostname): drop the line")
 CONFIG_BRANCH_PREFIX_CHARS = M("{CONFIG_FILE}: branch_prefix may hold ASCII letters, digits, '.', '-', '_', '/' and "

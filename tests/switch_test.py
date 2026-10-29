@@ -308,7 +308,7 @@ def report(text: str, *, tips: dict[str, str] | None = None,
             cx = Context(names=NAMES, me=ME, listed=sorted(LISTED), tips={BRANCH: BASE} if tips is None else tips,
                          in_flight=in_flight or {}, dead=dead or [], tz_offset=0)
             guard.decide(DriftParams(
-                cx=cx, union="u" * 40, router="choko", targets=["side1"], candidates=["side1"],
+                cx=cx, union="u" * 40, targets=["side1"], candidates=["side1"],
                 evict=evict, named=named, work_branch=True, reached=["side1"] if reached else [],
                 running={"side1": running}, built={"side1": "/nix/store/union-system"}, held=held or {},
                 provenances={"side1": text}))
@@ -454,6 +454,15 @@ def target_cases() -> None:
                           (toml().replace("config_version = 1", "config_version = true"), "not supported"),
                           (toml('[build]\nunreachable_hint = "zzz"\n'), "unknown key build.unreachable_hint"),
                           (toml('[targets.a]\nlocal_only = true\n'), "unknown key targets.a.local_only"),
+                          (toml('[switch]\nconfirmed = false\n'), "unknown key switch.confirmed"),
+                          (toml('[switch]\ndeadline = 20\n'), "unknown key switch.deadline"),
+                          (toml('[targets.a.switch]\nlast = true\n'), "unknown key targets.a.switch.last"),
+                          (toml('[targets.a.switch]\ndeadline_secs = 0\n'), "targets.a.switch.deadline_secs is a number"),
+                          (toml('[switch]\nauto_rollback_checks = 1\n'), "switch.auto_rollback_checks is a list"),
+                          (toml('[switch]\nauto_rollback_checks = [{ ssh = 1 }]\n'), "switch.auto_rollback_checks[0] is a table"),
+                          (toml('[switch]\nauto_rollback_checks = [{ bash = true }]\n'), "auto_rollback_checks[0] is a table"),
+                          (toml('[switch]\nauto_rollback_checks = [{ ssh = true }, { dns = true }]\n'), "checks[1] is a table"),
+                          (toml('[switch]\nauto_rollback_checks = [{ ssh = true, internet = true }]\n'), "checks[0] is a table"),
                           (toml(ssh_address_template="x@{host}"), "over {target} alone"),
                           (toml(branch_prefix="{host}-d"), "over {machine} alone"),
                           # No defaults: every scalar key is required.
@@ -484,6 +493,23 @@ def target_cases() -> None:
             assert hint in str(e), (bad_cfg, e)
         else:
             raise AssertionError(f"accepted: {bad_cfg!r}")
+    # A target's checks are appended to the fleet's ([switch]'s, which
+    # replace the built-in ssh one), a false item striking the fleet's of
+    # its kind (never the target's own); none left is a plain switch.
+    Check = config.Check
+    c = config.parse(toml('[switch]\ndeadline_secs = 45\nauto_rollback_checks = [{ ssh = true }, { internet = true }, '
+                          '{ bash = "fleet" }]\n'
+                          '[targets.a.switch]\nauto_rollback_checks = [{ ssh = false }, { routing = true }, '
+                          '{ bash = "one" }, { bash = false }, { bash = "two" }]\n'
+                          '[targets.b]\nswitch = { auto_rollback_checks = [{ ssh = false }, { internet = false }, '
+                          '{ bash = false }] }\n'))
+    a, b, d = c.switch_policy("a"), c.switch_policy("b"), c.switch_policy("d")
+    assert a.checks == (Check("internet"), Check("routing"), Check("bash", "one"), Check("bash", "two")), a
+    assert a.confirmed and a.deadline == 45 and not a.has("ssh") and a.script == "(\none\n)\n(\ntwo\n)", a
+    assert b.checks == () and not b.confirmed and b.deadline == 45 and b.script == "", b
+    assert d == c.switch and d.checks == (Check("ssh"), Check("internet"), Check("bash", "fleet")), d
+    assert config.parse(toml()).switch.checks == (Check("ssh"),)
+    assert config.parse(toml('[switch]\nauto_rollback_checks = []\n')).switch.checks == ()
     with tempfile.TemporaryDirectory() as empty:
         try:
             config.load(Path(empty))

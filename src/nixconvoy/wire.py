@@ -253,7 +253,6 @@ class Context:
 class DriftParams:
     cx: Context
     union: str
-    router: str
     targets: list[str]
     candidates: list[str]
     evict: bool
@@ -726,7 +725,7 @@ class SwitchParams:
     expected: str
     place: str
     quiet: bool
-    router: bool
+    routing_check: bool
     fail_verify: bool
 
 

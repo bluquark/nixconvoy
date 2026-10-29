@@ -28,7 +28,7 @@ pub const PROBE_TIMEOUT_MS: u64 = 20_000;
 /// Every probe ends this long before the target's deadline, whenever its
 /// round began: the confirm's ssh round trip and systemd-run start fit in
 /// it.  Each probe's timeout is cut to that hard stop, so the probes of the
-/// last round (running system, check, the router's internet) cannot add up
+/// last round (running system, check, this machine's internet) cannot add up
 /// past the timer.
 pub const CONFIRM_RESERVE_MS: u64 = 2_000;
 pub const INTERNET_TIMEOUT_MS: u64 = 8_000;
@@ -48,8 +48,9 @@ pub struct Params {
     /// "local", or the ssh address.
     pub place: String,
     pub quiet: bool,
-    /// The router: verification also needs this machine on the internet.
-    pub router: bool,
+    /// Verification also needs this machine on the internet (the policy's
+    /// key of that name: the router, the deploy's own way out).
+    pub routing_check: bool,
     /// NIXCONVOY_FAIL_VERIFY=1: fail verification at once.
     pub fail_verify: bool,
 }
@@ -355,7 +356,8 @@ impl Machine {
             // One round of verification: a new ssh connection finds the
             // target running the new system, its check passes (the internet
             // probe when configured, then the policy's checks),
-            // and for the router this machine reaches the internet too.
+            // and, with routing_check, this machine reaches the
+            // internet too.
             (Pc::VerifyNow { w, rc }, Reply::Now(now)) => {
                 self.cut = false;
                 match self.budget(w, now) {
@@ -475,7 +477,7 @@ impl Machine {
     }
 
     fn verify_internet(&mut self, w: Window, rc: i32, problems: Vec<String>) -> Next {
-        if self.p.router {
+        if self.p.routing_check {
             return self.ask(Pc::InternetNow { w, rc, problems }, Query::Clock);
         }
         self.verify_end(w, rc, problems)

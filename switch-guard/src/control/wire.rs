@@ -23,9 +23,11 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let p = params(r#"{"target":"h","toplevel":"/t","expected":"/e","place":"local","quiet":false,"router":true,"fail_verify":false}"#)
-            .unwrap();
-        assert!(p.router && p.place == "local");
+        let p = params(
+            r#"{"target":"h","toplevel":"/t","expected":"/e","place":"local","quiet":false,"routing_check":true,"fail_verify":false}"#,
+        )
+        .unwrap();
+        assert!(p.routing_check && p.place == "local");
         assert!(params(r#"{}"#).is_err() && params("[]").is_err() && reply("1").is_err());
         assert_eq!(reply(r#"{"guard":{"moved":"/x"}}"#).unwrap(), Reply::Guard(Guard::Moved("/x".into())));
         assert_eq!(reply(r#"{"guard":"locked"}"#).unwrap(), Reply::Guard(Guard::Locked));

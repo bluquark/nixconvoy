@@ -289,11 +289,10 @@ pub fn held(by: &[String], reached: bool, work_branch: bool) -> (Kind, String) {
     (Kind::Held, why)
 }
 
-/// The order targets are switched and reported in: the router last, so
-/// everything else still has connectivity while it copies.
-pub fn switch_order(names: &[String], router: &str) -> Vec<String> {
+/// The order targets are reported in.
+pub fn by_name(names: &[String]) -> Vec<String> {
     let mut v = names.to_vec();
-    v.sort_by(|a, b| (a == router, a).cmp(&(b == router, b)));
+    v.sort();
     v
 }
 
@@ -302,7 +301,6 @@ pub struct Params {
     pub cx: Context,
     /// The union commit this deploy builds.
     pub union: String,
-    pub router: String,
     pub targets: Vec<String>,
     pub candidates: Vec<String>,
     /// --evict: this checkout's view alone - refused work is taken over on
@@ -424,7 +422,7 @@ fn reverted(s: &mut Script, lin: &Provenance, p: &Params, fates: &mut BTreeMap<(
 
 pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     let mut affected = Vec::new();
-    for h in switch_order(&p.targets, &p.router) {
+    for h in by_name(&p.targets) {
         let Some(Some(running)) = p.running.get(&h) else { continue };
         let Some(built) = p.built.get(&h) else {
             return Err(Halt::Die(format!(text!(drift_no_toplevel), target = h)));
@@ -487,7 +485,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         }
         drift.insert(h.clone(), (kind, why));
     }
-    for h in switch_order(&p.candidates, &p.router) {
+    for h in by_name(&p.candidates) {
         s.print(match drift.get(&h) {
             Some((k, why)) if k.refused() => format!(text!(drift_line_refused), target = h, why = why),
             None => format!(text!(drift_line_up_to_date), target = h),
