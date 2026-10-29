@@ -2,9 +2,13 @@
 # it drives (src/nixconvoy/guard.py finds them beside itself, so the two
 # never pair with another tree's build), with mergiraf, which no
 # distribution packages, on its PATH (git and ssh are the machine's own),
-# `git review` beside it and the shell prompt segment under share/.  The test suite (tests/switch_test.py) runs against the
-# installed package as its check phase, so a deploy that moves the pin
-# pays it in its build, never in the precheck (nix/lint.nix).
+# `git review` beside it and the shell prompt segment under share/.
+#
+# The package is that build behind a symlink farm (nixconvoy-tested) whose
+# dependencies hold the test suite's pass (nix/tests.nix): what `nix run`
+# runs and the cache carries is tested.  passthru.unchecked is the build
+# itself, for a system that runs the suite through system.checks instead,
+# its closure built meanwhile; passthru.tests is the suite.
 { pkgs, switch-guard }:
 let
   inherit (pkgs) lib;
@@ -16,42 +20,45 @@ let
     root = ../.;
     fileset = lib.fileset.unions [ ../nix/kit.nix ../nix/switch-guard.nix switch-guard.fileset ];
   };
-in
-python.pkgs.buildPythonApplication {
-  pname = "nixconvoy";
-  version = "0.1.0";
-  pyproject = true;
-  src = lib.fileset.toSource {
-    root = ../.;
-    fileset = lib.fileset.unions [
-      ../pyproject.toml
-      ../src
-      ../tests
-      ../README.md
-      ../integrations/claude-code/bin/git-review
-      ../integrations/claude-code/hooks
-      ../integrations/shell/prompt.bash
+  unchecked = python.pkgs.buildPythonApplication {
+    pname = "nixconvoy";
+    version = "0.1.0";
+    pyproject = true;
+    src = lib.fileset.toSource {
+      root = ../.;
+      fileset = lib.fileset.unions [
+        ../pyproject.toml
+        ../src
+        ../integrations/claude-code/bin/git-review
+        ../integrations/claude-code/hooks
+        ../integrations/shell/prompt.bash
+      ];
+    };
+    build-system = [ python.pkgs.setuptools ];
+    doCheck = false;
+    makeWrapperArgs = [
+      "--suffix" "PATH" ":" (lib.makeBinPath [ pkgs.mergiraf ])
     ];
+    postInstall = ''
+      install -Dm755 integrations/claude-code/bin/git-review $out/bin/git-review
+      install -Dm644 integrations/shell/prompt.bash $out/share/nixconvoy/prompt.bash
+      mkdir $out/${python.sitePackages}/nixconvoy/bin
+      ln -s ${switch-guard}/bin/nixconvoy-plan ${switch-guard}/bin/nixconvoy-switch $out/${python.sitePackages}/nixconvoy/bin/
+      ln -s ${kitSrc} $out/${python.sitePackages}/nixconvoy/kit
+    '';
+    passthru = { inherit switch-guard kitSrc; unchecked = unchecked; };
+    meta.mainProgram = "nixconvoy";
   };
-  build-system = [ python.pkgs.setuptools ];
   # The suite reads /proc and flocks: Linux alone.
-  doCheck = pkgs.stdenv.hostPlatform.isLinux;
-  nativeCheckInputs = [ pkgs.git pkgs.mergiraf pkgs.jq pkgs.util-linux ];
-  checkPhase = ''
-    runHook preCheck
-    HOME=$TMPDIR PYTHONPATH=$out/${python.sitePackages} python3 tests/switch_test.py
-    runHook postCheck
-  '';
-  makeWrapperArgs = [
-    "--suffix" "PATH" ":" (lib.makeBinPath [ pkgs.mergiraf ])
-  ];
-  postInstall = ''
-    install -Dm755 integrations/claude-code/bin/git-review $out/bin/git-review
-    install -Dm644 integrations/shell/prompt.bash $out/share/nixconvoy/prompt.bash
-    mkdir $out/${python.sitePackages}/nixconvoy/bin
-    ln -s ${switch-guard}/bin/nixconvoy-plan ${switch-guard}/bin/nixconvoy-switch $out/${python.sitePackages}/nixconvoy/bin/
-    ln -s ${kitSrc} $out/${python.sitePackages}/nixconvoy/kit
-  '';
-  passthru = { inherit switch-guard kitSrc; };
-  meta.mainProgram = "nixconvoy";
+  tests = import ./tests.nix { inherit pkgs python; nixconvoy = unchecked; };
+in
+if !pkgs.stdenv.hostPlatform.isLinux then unchecked else
+pkgs.symlinkJoin {
+  name = "nixconvoy-tested-${unchecked.version}";
+  paths = [ unchecked ];
+  inherit tests;
+  # A cache holds the farm without the suite's output: substituted, not rebuilt.
+  allowSubstitutes = true;
+  passthru = { inherit unchecked tests switch-guard kitSrc; };
+  inherit (unchecked) meta;
 }

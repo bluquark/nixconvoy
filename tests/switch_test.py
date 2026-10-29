@@ -1,5 +1,5 @@
-"""nixconvoy's test suite, the package's check phase (nix/package.nix),
-run against the built package, the switch-guard cores it carries included:
+"""nixconvoy's test suite (nix/tests.nix), run against the built package,
+the switch-guard cores it carries included:
 
 - the switch step end to end against a fake target: the real
   nixconvoy-switch binary decides, the switch module's effects loop
@@ -13,8 +13,10 @@ run against the built package, the switch-guard cores it carries included:
   announcements and records, submodules, open/review/land and the Claude
   Code hooks, and init.
 
-The suite's own progress goes to stderr; what nixconvoy prints is
-swallowed unless a case captures it."""
+Each section runs in a process of its own, as many at once as there are
+cores.  The suite's own progress goes to stderr, each line prefixed by
+its section; what nixconvoy prints is swallowed unless a case captures
+it."""
 
 from __future__ import annotations
 
@@ -37,7 +39,7 @@ import threading
 import time
 import types
 from collections.abc import Callable, Iterator
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -3123,19 +3125,82 @@ def init_cases(d: Path) -> None:
     say("init: ok")
 
 
-if __name__ == "__main__":
+def in_scratch(cases: Callable[[Path], None]) -> Callable[[], None]:
+    def run() -> None:
+        with scratch_dir() as d:
+            cases(d)
+    return run
+
+
+def unit_cases() -> None:
+    for cases in (gate_cases, provenance_cases, target_cases, builder_cases, memo_cases, await_cases):
+        cases()
+
+
+# The sections, one process each (`--section <name>`), the longest first:
+# a section chdirs, sets the config and patches modules, so no process
+# holds two.
+SECTIONS: dict[str, Callable[[], None]] = {
+    **{cases.__name__.removesuffix("_cases"): in_scratch(cases)
+       for cases in (submodule_cases, open_cases, git_cases, counterpart_cases, switch_cases, announce_cases,
+                     reach_cases, guard_cases, landing_rebase_cases, names_cases, init_cases)},
+    "units": unit_cases,
+}
+
+
+def run_section(name: str) -> None:
     proc.this_machine = lambda: "tester"
     config.set_cfg(config.parse(toml()))
     # No announcement renews on its timer: announce_cases drives the renewals.
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
             mock.patch.object(checkout, "HEARTBEAT", 3600):
-        with tempfile.TemporaryDirectory() as d:
-            switch_cases(Path(d))
-        for cases in (gate_cases, provenance_cases, target_cases, builder_cases, memo_cases, await_cases):
-            cases()
-        for scratch_cases in (guard_cases, reach_cases, git_cases, landing_rebase_cases, names_cases, counterpart_cases,
-                              announce_cases,
-                              submodule_cases, open_cases,
-                              init_cases):
-            with scratch_dir() as d:
-                scratch_cases(d)
+        SECTIONS[name]()
+
+
+def relay(name: str) -> int:
+    """A section's process, its lines relayed as they come, prefixed by
+    its name, with a cache dir of its own: the sections' scratch repos
+    share tree SHAs, so one's proofs and prunes would reach another's.
+    Its exit code; 1 when it could not run or left its cache dir busy."""
+    cache = Path(tempfile.mkdtemp(prefix=f"{name}-cache-"))
+    try:
+        with subprocess.Popen([sys.executable, __file__, "--section", name], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
+                              env={**os.environ, "XDG_CACHE_HOME": str(cache)}) as child:
+            assert child.stdout
+            try:
+                for line in child.stdout:
+                    PROGRESS.write(f"[{name}] {line}")  # one write: no splicing with the other sections' lines
+                    PROGRESS.flush()
+            except BaseException:
+                child.kill()
+                raise
+        code = child.returncode
+    except Exception as e:  # noqa: BLE001 - every failure is the section's
+        say(f"[{name}] {e!r}")
+        code = 1
+    try:
+        remove_tree(cache)
+    except OSError:
+        say(f"[{name}] its cache dir could not be removed (above)")
+        code = code or 1
+    return code
+
+
+def main() -> None:
+    if sys.argv[1:2] == ["--section"]:
+        run_section(sys.argv[2])
+        return
+    given = os.environ.get("NIX_BUILD_CORES", "")
+    cores = int(given) if given.isdigit() and int(given) else (
+        len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1)
+    with ThreadPoolExecutor(min(cores, len(SECTIONS))) as pool:
+        codes = dict(zip(SECTIONS, pool.map(relay, SECTIONS), strict=True))
+    failed = [f"{name} (exit {code})" for name, code in codes.items() if code]
+    if failed:
+        say("failed: " + ", ".join(failed))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

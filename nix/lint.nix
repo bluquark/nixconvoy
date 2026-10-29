@@ -1,7 +1,7 @@
 # The repo's static checks, cheap enough to gate every deploy that moves
 # the pin: ruff and pyrefly over the Python, shellcheck over the plugins'
-# hook scripts, rustfmt and clippy over the crate.  The tests run in the
-# builds themselves: cargo test in the crate's, the suite in the package's.
+# hook scripts, rustfmt and clippy over the crate.  The tests: cargo test
+# in the crate's build, the suite in nix/tests.nix.
 { pkgs, switch-guard }:
 let
   inherit (pkgs) lib;

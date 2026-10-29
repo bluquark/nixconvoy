@@ -22,15 +22,11 @@
       default = nixconvoy;
     });
 
-    checks = forAll (pkgs: {
-      lint = import ./nix/lint.nix {
-        inherit pkgs;
-        inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) switch-guard;
-      };
-      # The package build runs the suite (nix/package.nix): named here so
-      # `nix flake check` runs it too.
-      tests = self.packages.${pkgs.stdenv.hostPlatform.system}.nixconvoy;
-    });
+    checks = forAll (pkgs: let p = self.packages.${pkgs.stdenv.hostPlatform.system}; in {
+      lint = import ./nix/lint.nix { inherit pkgs; inherit (p) switch-guard; };
+    } // (if pkgs.stdenv.hostPlatform.isLinux
+          then { inherit (p.nixconvoy) tests; }
+          else { package = p.nixconvoy; }));
 
     # The target side is pushed by each deploy (nix/kit.nix); the one module
     # left is boot assessment, whose units live in the system.
