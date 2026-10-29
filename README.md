@@ -361,6 +361,10 @@ precheck = "repo-lint"
 [hostnames.macbook]
 store = "minipc"
 
+# My Windows's machine's hostname doesn't match the WSL NixOS target name
+[hostname.windows11]
+target = "windows-wsl"
+
 # All NixOS generations must accept fresh ssh connections and retain Internet access
 [switch]
 auto_rollback_checks = [{ ssh_deadline_secs = 10 }, { internet = true }]
