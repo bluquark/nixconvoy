@@ -287,7 +287,8 @@ These are the fundamental actions to apply changes to your running fleet.
 
 You run `deploy` after staging a change in a workbranch.  `nixconvoy deploy` both commits it to the workbranch and applies it to your machines.
 
-**Guarantees:**
+`deploy` has very simple command-line interface with a fairly complex implementation (which is spelled out in the "How it works" section later).  But for the purposes of everyday usage, it's simpler and more useful to think of it in terms of the "transactional" properties it is designed to guarantee, and the usability/safety/performance implications of those properties:
+
 - **Nothing you deploy is ever silently undone.**  What gets applied is not just what is in your current branch, but the union of everything previously deployed from every ongoing workbranch.
   - Deploy aborts on a true merge conflict between two workbranches. Because nixconvoy merges are syntax-aware, adjacent-line edits aren't enough to cause an abort.
 - **No change will touch a target machine before passing prechecks (lint/static analysis).**
