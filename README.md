@@ -289,7 +289,7 @@ At a high level, here are the "transactional" properties they are designed to pr
 
 | Guarantee | Downside | Mitigation |
 |---|---|---|
-| **Nothing you deploy is ever silently undone.**  The inputs to the NixOS generation applied to your fleet is not only from what is in your current branch, but the union of everything previously deployed from every ongoing workbranch. | *Usability:* `deploy` aborts on a merge conflict between two workbranches. | nixconvoy uses a syntax-aware merge tool called `mergiraf`, so adjacent-line edits aren't enough to cause an abort. |
+| **Nothing you deploy is ever silently undone.**  The input to the NixOS generation applied to your fleet is not only your current checkout, but the union of all open workbranches. | *Usability:* `deploy` aborts on a merge conflict between two workbranches. | nixconvoy uses a syntax-aware merge tool called `mergiraf`, so adjacent-line edits aren't enough to cause an abort. |
 | **No change will touch a target machine before passing prechecks (lint/static analysis).** | *Performance:* additional work on every deploy. | nixconvoy runs precheck in parallel with the eval phase. |
 | **Two deploys running at the same time in different workbranches will serialize correctly.** | *Performance:* in many cases, deploys have to queue after one another instead of running in parallel. | |
 | **A broken NixOS generation automatically rolls itself back.** | *Performance:* deploys must wait for activation and health checks to complete. | |
