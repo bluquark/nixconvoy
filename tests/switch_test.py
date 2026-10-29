@@ -93,6 +93,45 @@ def say(line: str) -> None:
     print(line, file=PROGRESS, flush=True)
 
 
+def remove_tree(d: Path) -> None:
+    """rmtree, a failure said with what is left in `d` and every process
+    still at work there (its cwd, an open file or an argument under `d`):
+    what a removal raced, shown only while it is there."""
+    try:
+        shutil.rmtree(d)
+    except OSError as e:
+        say(f"removal of {d} failed: {e}")
+        for left in sorted(d.rglob("*")):
+            say(f"  left: {left}")
+        for pp in Path("/proc").iterdir():
+            if not pp.name.isdigit() or int(pp.name) == os.getpid():
+                continue
+            try:
+                cmd = (pp / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+                cwd = str((pp / "cwd").readlink())
+                fds = [str(f.readlink()) for f in (pp / "fd").iterdir()]
+                stat = (pp / "stat").read_text().rpartition(")")[2].split()
+            except OSError:
+                continue  # gone meanwhile, or not ours to read
+            hits = [x for x in (cwd, *fds) if x.startswith(str(d))]
+            if hits or str(d) in cmd:
+                say(f"  process {pp.name} (state {stat[0]}, parent {stat[1]}, session {stat[3]}): "
+                    f"{cmd.strip()[:200]} | cwd {cwd} | in {d}: {hits[:6]}")
+        say(f"  threads: {[x.name for x in threading.enumerate()]}; run() children: {len(proc.CHILDREN)}")
+        raise
+
+
+@contextlib.contextmanager
+def scratch_dir() -> Iterator[Path]:
+    """A temporary directory for a case's scratch repositories, removed
+    after it (remove_tree)."""
+    d = Path(tempfile.mkdtemp())
+    try:
+        yield d
+    finally:
+        remove_tree(d)
+
+
 def printed(f: Callable[[], object]) -> str:
     """What `f` prints to stdout."""
     out = io.StringIO()
@@ -1109,7 +1148,8 @@ def landing_rebase_cases(d: Path) -> None:
     # Sitting exactly on the other's tip, its state set aside as the core's
     # tmp commits: those never pass for the landed prefix (the pops after
     # the rebase would take main's own commits).
-    shutil.rmtree(d / "origin.git"), shutil.rmtree(d / "seed"), shutil.rmtree(d / "homelab9")
+    for stale in ("origin.git", "seed", "homelab9"):
+        remove_tree(d / stale)
     with scratch_origin(d, files, wb=wb) as (_origin, seed, co):
         sh(seed, "switch", "--quiet", "-c", other)
         put(seed, "a.txt", "one\nTWO-x1\nthree\n", "x1")
@@ -2994,5 +3034,5 @@ if __name__ == "__main__":
                               announce_cases,
                               submodule_cases, open_cases,
                               init_cases):
-            with tempfile.TemporaryDirectory() as d:
-                scratch_cases(Path(d))
+            with scratch_dir() as d:
+                scratch_cases(d)
