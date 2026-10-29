@@ -532,22 +532,22 @@ INIT_TOML_HOSTNAMES = M(
     "# store = \"bigbox\"        # this machine's store host, over [build] store (\"\": realise here)\n"
     "# target = \"workstation\"  # the target this machine is, when its hostname is not that name\n"
     "# parallel_eval = \"auto\"  # Determinate Nix's parallel evaluation: true, false or \"auto\" (when nix has it)")
-INIT_TOML_SWITCH = (
+INIT_TOML_SWITCH = M(
     "# How the targets are switched (every target's defaults; a [targets.<name>.switch] extends them).\n"
-    "# With auto_rollback_checks (unset: [{ ssh = true }]) a switch is confirmed: a rollback timer is armed\n"
-    "# on the target, the new system activated and verified by each check, and only then set as the\n"
-    "# profile and boot entry; otherwise it rolls back within `deadline_secs`.  A target's list is\n"
-    "# appended to this one, a `false` item striking the fleet's of its kind; with none left (or the\n"
-    "# key set to false), its switch is plain, as nixos-rebuild switch.\n"
-    "# [switch]\n"
-    "# deadline_secs = 30\n"
-    "# auto_rollback_checks = [\n"
-    "#   { ssh = true },       # a new ssh connection finds the new system running\n"
-    "#   { internet = true },  # the target reaches the internet\n"
-    "#   { bash = \"systemctl is-active -q nginx.service\" },  # run as root on the target\n"
-    "# ]\n"
+    "# A switch is confirmed: a rollback timer is armed on the target, the new system activated and,\n"
+    "# within ssh_deadline_secs of the activation's end, found running over a new ssh connection,\n"
+    "# verified by each further check and only then set as the profile and boot entry; otherwise the\n"
+    "# target rolls back on its own.  A target's list is appended to this one (its ssh_deadline_secs\n"
+    "# replacing), a `false` item striking the fleet's of its kind; auto_rollback_checks = false\n"
+    "# switches it plainly, as nixos-rebuild switch.\n"
+    "[switch]\n"
+    "auto_rollback_checks = [\n"
+    "  {{ ssh_deadline_secs = {deadline} }},\n"
+    "#   {{ internet = true }},  # the target reaches the internet\n"
+    "#   {{ bash = \"systemctl is-active -q nginx.service\" }},  # run as root on the target\n"
+    "]\n"
     "# [targets.router.switch]\n"
-    "# auto_rollback_checks = [{ routing = true }]  # this machine still reaches the internet, through it")
+    "# auto_rollback_checks = [{{ routing = true }}]  # this machine still reaches the internet, through it")
 INIT_TOML_TARGETS = (
     "# The targets: one table per nixosConfiguration (the inventory, as there is no targets_dir);\n"
     "# a nixosConfiguration added later needs its table here.\n"
@@ -753,12 +753,19 @@ CONFIG_NOT_A_STRING = M("{where}.{key} must be a string")
 CONFIG_NOT_STRINGS = M("{where}.{key} must be a list of strings")
 CONFIG_NOT_AUTO_BOOL = M('{where}.{key} must be true, false or "auto"')
 CONFIG_NOT_A_TEMPLATE = M("{CONFIG_FILE}: {key} is a template over {{{placeholder}}} alone ({error!r})")
-CONFIG_DEADLINE = M("{CONFIG_FILE}: {where}.deadline_secs is a number of seconds, above 0")
-CONFIG_CHECKS = M("{CONFIG_FILE}: {where} is a list of checks, tables like {{ ssh = true }}, or false")
+CONFIG_DEADLINE = M("{CONFIG_FILE}: {where}.ssh_deadline_secs is a number of seconds, above 0 (auto_rollback_checks = "
+                    "false switches plainly)")
+CONFIG_CHECK_DEADLINE_TWICE = M("{CONFIG_FILE}: {where} is a second ssh_deadline_secs item: one per list (a target's "
+                                "replaces [switch]'s)")
+CONFIG_CHECK_NO_DEADLINE = M("{CONFIG_FILE}: {where} has checks but no {{ ssh_deadline_secs = <seconds> }} item, their "
+                             "deadline, and [switch] gives none")
+CONFIG_DEADLINE_SECS_GONE = M("{CONFIG_FILE}: {where}.deadline_secs is gone: the deadline is auto_rollback_checks' "
+                              "{{ ssh_deadline_secs = <seconds> }} item, counted from the activation's end")
+CONFIG_CHECKS = M("{CONFIG_FILE}: {where} is a list of checks, tables like {{ ssh_deadline_secs = 10 }}, or false")
 CONFIG_CHECK_STRIKE = M("{CONFIG_FILE}: {where} strikes nothing: [switch] has no fleet checks over it (leave "
                         "the kind out instead)")
-CONFIG_CHECK_ITEM = M("{CONFIG_FILE}: {where} is a table with one key: ssh, internet or routing = true, or "
-                      "bash = \"...\" (a script); = false strikes the fleet's checks of that kind")
+CONFIG_CHECK_ITEM = M("{CONFIG_FILE}: {where} is a table with one key: ssh_deadline_secs = <seconds>, internet or "
+                      "routing = true, or bash = \"...\" (a script); = false strikes the fleet's checks of that kind")
 CONFIG_WORK_BRANCHES_IGNORED = M("note: {CONFIG_FILE}: work_branches is ignored (a work branch is any branch shaped like "
                                  "branch_prefix, {{machine}} in it any hostname): drop the line")
 CONFIG_BRANCH_PREFIX_CHARS = M("{CONFIG_FILE}: branch_prefix may hold ASCII letters, digits, '.', '-', '_', '/' and "

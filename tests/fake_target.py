@@ -44,7 +44,8 @@ def fake_target(argv: list[str]) -> int:
             print(20)
         case [h, "arm"] if h == helper:
             state["armed"] = True
-            print(f"confirmed-switch: armed, rolling back to {state['rollback_to']} in 20s unless confirmed")
+            print(f"confirmed-switch: armed, rolling back to {state['rollback_to']} unless confirmed within 20s of its "
+                  "activation")
         case [h, "activate", top] if h == helper:
             rc = int(str(state["activate_rc"]))
             if rc != 100:

@@ -360,17 +360,17 @@ precheck = "repo-lint"
 [hostnames.macbook]
 store = "minipc"
 
-# Automatically roll back if the target can no longer connect to the internet.
+# Every switch is confirmed: within 10 s of its activation the new system must be found running
+# over a new ssh connection and the checks pass, or the target rolls back on its own.  The
+# internet check: roll back if the target can no longer connect to the internet.
 [switch]
-auto_rollback_checks = [{ ssh = true }, { internet = true }]
+auto_rollback_checks = [{ ssh_deadline_secs = 10 }, { internet = true }]
 
 [targets.minipc]
 tags = ["omnibin"]
-switch = { deadline_secs = 120 }
 
 [targets.router]
 [targets.router.switch]
-deadline_secs = 20
 auto_rollback_checks = [
   { routing = true },
   { bash = '''
@@ -444,7 +444,7 @@ This section explains some of the key design decisions and implementation detail
 5. **Record** into git, phase 1.  Each target’s record commit is attached to the deploy’s announcement on the remote.
 6. **Switch**. Copy the closures to the targets and switch their NixOS generation to the new one.  Safety features:
 	1. If another switch somehow switched some targets but then somehow died before the following "record" step, then abort.  This should be very rare (for example, it may happen due to a power outage or a bug in nixconvoy) --- if it does, you can recover the affected targets using the `--evict` flag.
-	2. If the new system doesn't come up healthy within a deadline (30 seconds by default), the target machine automatically rolls itself back.  This is done using an executable running on the target, so it works even if the network was taken down.
+	2. If, within a deadline of the activation's end (10 seconds by default), the new system isn't found running over a fresh ssh connection with every configured check passing, the target machine automatically rolls itself back.  This is done using an executable running on the target, so it works even if the network was taken down.
 7. **Record** into git, phase 2.  Only after every switch succeeded, commit the incremental change onto your work branch and push it to your git remote.
 
 Also, there are two special cases: a change touching only documentation skips everything except the precheck and is simply committed immediately.  And if `--dry-activate` was specified, the process stops after step 4 and simply reports what would have gotten switched.

@@ -655,8 +655,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             ann.claimed += [n for n in plan if n not in ann.claimed]
         with ThreadPoolExecutor(len(plan)) as pool:
             switches = [pool.submit(switch, n, expected[n], tops[n].out, tops[n].kit, nixconvoy_switch,
-                                    len(plan) > 1, provenances[n], probed[n].digest,
-                                    policies[n].has("ssh"), policies[n].has("routing"))
+                                    len(plan) > 1, provenances[n], probed[n].digest, policies[n].has("routing"))
                         for n in plan]
         moved: list[SwitchedMeanwhile] = []
         failed: Fail | None = None

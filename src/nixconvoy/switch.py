@@ -141,7 +141,7 @@ def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> 
 
 def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch: str,
            quiet: bool = False, provenance: str = "", digest: str = "",
-           ssh_check: bool = True, routing_check: bool = False) -> None:
+           routing_check: bool = False) -> None:
     """Switch `target` to `toplevel` as nixconvoy-switch decides, confirmed
     through `kit`'s helper (nix/kit.nix, already copied) or plainly when
     `kit` is "".  `quiet`
@@ -150,12 +150,12 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
     transient unit on the target (as nixos-rebuild does), so they complete
     even if this ssh session dies.  `provenance` (one JSON line) is claimed on
     the target under the switch lock, `digest` the provenance_digest the probe
-    read (switch_guard_cmd).  `ssh_check` and `routing_check`: the policy's
-    checks of this machine's (config.Check) - each verification round
-    reads the running system over a new ssh connection rather than the
-    deploy's master connection, so a switch that stopped sshd admitting
-    logins fails it; and the verification requires this machine to reach
-    the internet (the router, the deploy's own way out)."""
+    read (switch_guard_cmd).  Each verification round reads the running
+    system over a new ssh connection rather than the deploy's master
+    connection, so a switch that stopped sshd admitting logins fails it;
+    `routing_check` (the policy's check of this machine's, config.Check)
+    requires this machine to reach the internet too (the router, the
+    deploy's own way out)."""
     local = target == this_target()
     held = f"[{target}] " if quiet else None
     helper = f"{kit}/confirmed-switch"
@@ -230,7 +230,7 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
             case Arm():
                 lines: list[str] = []
                 rc = stream(targets.target_cmd(target, [helper, "arm"], sudo=True), held_as=held, sink=lines)
-                return Said(rc, said(lines, r"armed, rolling back to (\S+) in "))
+                return Said(rc, said(lines, r"armed, rolling back to (\S+) unless "))
             case Helper(args):
                 if args != ["rollback"]:
                     return Code(detached([helper, *args]))
@@ -243,7 +243,7 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
             # round, retried until the deadline.
             case Running(timeout_ms):
                 try:
-                    return System(targets.running_system(target, timeout=secs(timeout_ms), fresh=ssh_check))
+                    return System(targets.running_system(target, timeout=secs(timeout_ms), fresh=True))
                 except Fail:
                     return System(None)
             case Check(timeout_ms):

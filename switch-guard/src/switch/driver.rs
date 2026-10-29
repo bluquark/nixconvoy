@@ -1,7 +1,7 @@
 //! Performs a Machine's effects: `System` is the I/O boundary (systemd,
 //! nix-env, switch-to-configuration), and `drive` the loop that feeds
 //! replies back.
-use super::core::{Action, Effect, Machine, Next, Query, Reply, Verb, P};
+use super::core::{Action, Effect, Machine, Next, Query, Reply, Verb, ACTIVATION_GUARD_SECS, P};
 use crate::config::Config;
 use crate::proc;
 use crate::record::Record;
@@ -55,7 +55,7 @@ pub fn drive(host: &mut System<'_>, mut m: Machine<String>) -> i32 {
                     }
                 },
                 Query::Running => Reply::Running(host.running()),
-                Query::StartTimer => Reply::Flag(host.start_timer()),
+                Query::StartTimer(secs) => Reply::Flag(host.start_timer(secs)),
                 Query::Generation => Reply::Generation(host.generation()),
                 Query::SetProfile(s) => Reply::Flag(host.set_profile(&s)),
                 Query::Switch(s, a) => Reply::Code(host.switch(&s, a)),
@@ -173,7 +173,7 @@ impl System<'_> {
         std::fs::read_link("/run/current-system").ok().map(|p| p.to_string_lossy().into_owned())
     }
 
-    fn start_timer(&mut self) -> bool {
+    fn start_timer(&mut self, secs: u64) -> bool {
         let Ok(me) = std::env::current_exe() else { return false };
         let me = me.to_string_lossy().into_owned();
         let config = self.s.config.to_string_lossy().into_owned();
@@ -183,7 +183,7 @@ impl System<'_> {
                 "--quiet",
                 "--collect",
                 &format!("--unit={UNIT}"),
-                &format!("--on-active={}", self.s.deadline),
+                &format!("--on-active={secs}"),
                 "--timer-property=AccuracySec=1s",
                 &me,
                 "--config",
@@ -349,7 +349,7 @@ pub fn main(args: &[String]) -> i32 {
             return 2;
         }
     };
-    drive(&mut System::new(&s), Machine::new(verb, s.deadline))
+    drive(&mut System::new(&s), Machine::new(verb, s.deadline, ACTIVATION_GUARD_SECS))
 }
 
 #[cfg(test)]

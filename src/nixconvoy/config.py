@@ -22,19 +22,20 @@ from .wire import RepoNames
 CLAUDE_WORKTREES = ".claude/worktrees"
 
 
-CHECK_KINDS = ("ssh", "internet", "routing", "bash")
+CHECK_KINDS = ("internet", "routing", "bash")
+DEADLINE_KEY = "ssh_deadline_secs"
+# The deadline of a nixconvoy.toml without [switch]; nixconvoy init writes it out.
+DEFAULT_DEADLINE = 10
 
 
 @dataclass(frozen=True)
 class Check:
-    """One auto_rollback_checks item: `ssh` (each verification round's
-    read of the running system opens a new ssh connection, so sshd must
-    admit a login; without it the deploy's master connection serves),
-    `internet` (an HTTPS
-    probe from the target), `routing` (one from this machine: the target
-    is the deploy's own way out, the router) or `bash` (`script`, run as
-    root on the target with errexit by the helper's `check` verb after its
-    probe, its last stderr line what a failed verification reports)."""
+    """One auto_rollback_checks item besides the deadline's: `internet` (an
+    HTTPS probe from the target), `routing` (one from this machine: the
+    target is the deploy's own way out, the router) or `bash` (`script`,
+    run as root on the target with errexit by the helper's `check` verb
+    after its probe, its last stderr line what a failed verification
+    reports)."""
 
     kind: str
     script: str = ""
@@ -45,20 +46,22 @@ class SwitchPolicy:
     """How a target is switched: nixconvoy.toml's `[switch]` table, the
     fleet's defaults, under a target's `[targets.<name>.switch]`."""
 
-    # Seconds after arming before an unconfirmed switch rolls back: the
-    # activation plus the verification must fit.
-    deadline: int = 30
-    # auto_rollback_checks: the fleet's, then the target's own appended (a
-    # `false` item of a kind strikes the fleet's of it; the key `false`
-    # altogether leaves none, whatever the fleet's).  Any: the switch
-    # is confirmed (nix/kit.nix's helper arms a rollback timer, the
-    # toplevel is activated with `test`, verified from here by each check,
-    # then the profile set); none: plain, as nixos-rebuild switch would.
-    checks: tuple[Check, ...] = (Check("ssh"),)
+    # auto_rollback_checks' { ssh_deadline_secs = N } item (a target's over
+    # the fleet's): the switch is confirmed - nix/kit.nix's helper arms a
+    # rollback timer, the toplevel is activated with `test`, and within N
+    # seconds of the activation's end this machine must read the new system
+    # running over a new ssh connection (so sshd must admit a login), pass
+    # each check and confirm, the profile set only then; otherwise the
+    # target rolls back on its own.  None: the key is false, or the list
+    # empty - a plain switch, as nixos-rebuild switch would.
+    deadline: int | None = DEFAULT_DEADLINE
+    # The other items: the fleet's, then the target's own appended (a
+    # `false` item of a kind strikes the fleet's of it).
+    checks: tuple[Check, ...] = ()
 
     @property
     def confirmed(self) -> bool:
-        return bool(self.checks)
+        return self.deadline is not None
 
     def has(self, kind: str) -> bool:
         return any(c.kind == kind for c in self.checks)
@@ -241,23 +244,32 @@ def _auto_bool(t: dict[str, object], k: str, where: str) -> bool | None:
     return v
 
 
-def _checks(v: object, where: str, base: tuple[Check, ...] | None) -> tuple[Check, ...]:
-    """An auto_rollback_checks list appended to `base` (the fleet's; None
-    for `[switch]` itself, which replaces the built-in default): each item
-    a table with one key of CHECK_KINDS - true (bash: the script) adds the
-    check, false strikes `base`'s of that kind."""
+def _checks(v: object, where: str, base: SwitchPolicy | None) -> SwitchPolicy:
+    """An auto_rollback_checks list over `base` (the fleet's policy; None
+    for `[switch]` itself): at most one { ssh_deadline_secs = N } item, the
+    deadline (over the fleet's), the rest each a table with one key of
+    CHECK_KINDS - true (bash: the script) appends the check, false strikes
+    `base`'s of that kind.  Checks need a deadline from one or the other."""
     if not isinstance(v, list):
         raise ConfigError(strings.CONFIG_CHECKS(where=where))
-    kept = list(base or ())
+    deadline = base.deadline if base else None
+    own_deadline = False
+    kept = list(base.checks if base else ())
     own: list[Check] = []
     for i, item in enumerate(v):
         at = f"{where}[{i}]"
         if not isinstance(item, dict) or len(item) != 1:
             raise ConfigError(strings.CONFIG_CHECK_ITEM(where=at))
         ((kind, val),) = item.items()
-        if kind not in CHECK_KINDS:
+        if kind == DEADLINE_KEY:
+            if own_deadline:
+                raise ConfigError(strings.CONFIG_CHECK_DEADLINE_TWICE(where=at))
+            if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
+                raise ConfigError(strings.CONFIG_DEADLINE(where=at))
+            own_deadline, deadline = True, val
+        elif kind not in CHECK_KINDS:
             raise ConfigError(strings.CONFIG_CHECK_ITEM(where=at))
-        if val is False:
+        elif val is False:
             if base is None:
                 raise ConfigError(strings.CONFIG_CHECK_STRIKE(where=at))
             kept = [c for c in kept if c.kind != kind]
@@ -267,26 +279,27 @@ def _checks(v: object, where: str, base: tuple[Check, ...] | None) -> tuple[Chec
             own.append(Check(kind))
         else:
             raise ConfigError(strings.CONFIG_CHECK_ITEM(where=at))
-    return (*kept, *own)
+    checks = (*kept, *own)
+    if checks and deadline is None:
+        raise ConfigError(strings.CONFIG_CHECK_NO_DEADLINE(where=where))
+    return SwitchPolicy(deadline=deadline, checks=checks)
 
 
 def _switch(t: dict[str, object], where: str, base: SwitchPolicy | None) -> SwitchPolicy:
-    """A `switch` table: `[switch]` (`base` None: the fleet's defaults
-    over the built-in ones) or a `[targets.<name>.switch]` over the
-    fleet's."""
+    """A `switch` table: `[switch]` (`base` None: the fleet's policy, the
+    built-in default unless its list says) or a `[targets.<name>.switch]`
+    over the fleet's."""
     for k in t:
-        if k not in ("deadline_secs", "auto_rollback_checks"):
+        if k == "deadline_secs":
+            raise ConfigError(strings.CONFIG_DEADLINE_SECS_GONE(where=where))
+        if k != "auto_rollback_checks":
             raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"{where}.{k}"))
-    fleet = base or SwitchPolicy()
-    d = t.get("deadline_secs", fleet.deadline)
-    if isinstance(d, bool) or not isinstance(d, int) or d <= 0:
-        raise ConfigError(strings.CONFIG_DEADLINE(where=where))
-    checks = fleet.checks
-    if t.get("auto_rollback_checks") is False:
-        checks = ()
-    elif "auto_rollback_checks" in t:
-        checks = _checks(t["auto_rollback_checks"], f"{where}.auto_rollback_checks", fleet.checks if base else None)
-    return SwitchPolicy(deadline=d, checks=checks)
+    v = t.get("auto_rollback_checks")
+    if v is False:
+        return SwitchPolicy(deadline=None)
+    if v is None:
+        return base or SwitchPolicy()
+    return _checks(v, f"{where}.auto_rollback_checks", base)
 
 
 def _strs(t: dict[str, object], k: str, where: str) -> tuple[str, ...]:

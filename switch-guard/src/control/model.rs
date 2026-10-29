@@ -1,8 +1,9 @@
 //! nixconvoy's switch step and the target's helper composed: the real
 //! control `Machine`s drive the real helper `Machine`s through ssh calls
 //! that may be delayed or lost (before or after reaching the target), against a
-//! one-second clock, the dead-man timer due exactly at its arming plus the
-//! deadline, probe timeouts, a crash of the deploying machine and a crash
+//! one-second clock, the dead-man timer due exactly at its start plus its
+//! seconds (the guard from arming, the deadline from the activation's end),
+//! probe timeouts, a crash of the deploying machine and a crash
 //! (reboot) of the target.  A probe of the target answers at once or at its
 //! timeout.  Two deploys in turn, the second taking the guard
 //! once the first finished or died, each its own toplevel.
@@ -13,10 +14,12 @@ use crate::switch::fake::{self, Outcome, World as _, OUTCOMES};
 use stateright::{Model, Property};
 
 const DEADLINE: u64 = 10;
-const HORIZON: u64 = 40;
+/// Short enough to fire within the horizon during a long activation.
+const GUARD: u64 = 20;
+const HORIZON: u64 = 30;
 /// Bounds the check fails at rather than miss part of the space (it holds
-/// about 11.3M unique states, 32.2M visited, depth 132).
-const MAX_STATES: usize = 40_000_000;
+/// about 19.7M unique states, 56.1M visited, depth 135, in 2.4 GiB).
+const MAX_STATES: usize = 80_000_000;
 const MAX_DEPTH: usize = 400;
 /// Seconds a confirm may spend between leaving nixconvoy and taking the
 /// helper's lock in a timely run.
@@ -105,8 +108,8 @@ impl fake::World<Sys> for World {
         self.runs.iter().any(|r| r.owner == Owner::Timer)
     }
 
-    fn start_timer(&mut self) {
-        self.timer_due = Some(self.clock + DEADLINE);
+    fn start_timer(&mut self, secs: u64) {
+        self.timer_due = Some(self.clock + secs);
     }
 
     fn fault(&mut self) -> bool {
@@ -147,7 +150,7 @@ fn verb_of(args: &[String]) -> Verb<Sys> {
 }
 
 fn spawn(w: &mut World, owner: Owner, verb: Verb<Sys>, confirm: bool) {
-    let mut m = Helper::new(verb, DEADLINE);
+    let mut m = Helper::new(verb, DEADLINE, GUARD);
     let step = m.decide(HReply::Start);
     let HNext::Ask(q) = step.next else { unreachable!() };
     w.runs.push(Run { owner, m, q, locked: false, confirm });
@@ -227,8 +230,8 @@ fn end_run(w: &mut World, i: usize, code: i32) {
 /// The fake target's answer to run `i`'s query under `o`, or None when `o`
 /// is not possible.
 fn target_answer(w: &mut World, i: usize, o: Outcome) -> Option<HReply<Sys>> {
-    let activation = matches!(w.runs[i].m.verb(), Verb::Activate(_));
     let q = w.runs[i].q.clone();
+    let activation = matches!((w.runs[i].m.verb(), &q), (Verb::Activate(new), HQuery::Switch(s, _)) if s == new);
     let lock = q == HQuery::Lock;
     let r = fake::answer(w, q, o, activation)?;
     if lock {

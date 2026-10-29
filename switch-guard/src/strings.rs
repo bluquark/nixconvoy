@@ -153,7 +153,7 @@ macro_rules! text {
     (switch_taking_over) => { "{P}: an unconfirmed switch from {prev} is still pending; taking over its rollback" };
     (switch_no_current_system) => { "{P}: cannot read /run/current-system" };
     (switch_timer_failed) => { "{P}: could not start the rollback timer" };
-    (switch_armed) => { "{P}: armed, rolling back to {previous} in {deadline}s unless confirmed" };
+    (switch_armed) => { "{P}: armed, rolling back to {previous} unless confirmed within {deadline}s of its activation" };
     (switch_rolled_back_not_activating) => { "{P}: already rolled back (the deadline passed first?), not activating" };
     (switch_not_armed) => { "{P}: not armed" };
     (switch_rolled_back_not_confirming) => { "{P}: already rolled back (the deadline passed first?), not confirming" };

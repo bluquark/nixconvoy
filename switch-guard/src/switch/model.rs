@@ -103,7 +103,7 @@ impl fake::World<Sys> for World {
         self.runs[TIMER].is_some()
     }
 
-    fn start_timer(&mut self) {
+    fn start_timer(&mut self, _secs: u64) {
         self.timer = true;
     }
 
@@ -130,14 +130,15 @@ enum Act {
 
 struct Target;
 
-const DEADLINE: u64 = 120;
+const DEADLINE: u64 = 10;
+const GUARD: u64 = 600;
 /// Bounds the check fails at rather than miss part of the space (it holds
 /// about 424k states, 182k unique, depth 76).
 const MAX_STATES: usize = 5_000_000;
 const MAX_DEPTH: usize = 200;
 
 fn spawn(w: &mut World, slot: usize, verb: Verb<Sys>) {
-    let mut m = Machine::new(verb, DEADLINE);
+    let mut m = Machine::new(verb, DEADLINE, GUARD);
     let step = m.decide(Reply::Start);
     assert!(step.effects.is_empty());
     let Next::Ask(q) = step.next else { panic!("a run exits before its first query") };
@@ -171,7 +172,8 @@ fn end_run(w: &mut World, slot: usize, code: i32) {
 /// attempt fails.
 fn answer(w: &mut World, slot: usize, o: Outcome) -> Option<Reply<Sys>> {
     let run = w.runs[slot].as_ref()?;
-    let activation = matches!(run.m.verb(), Verb::Activate(_));
+    // The activation's own switch, not the rollback's after a failed timer restart.
+    let activation = matches!((run.m.verb(), &run.q), (Verb::Activate(new), Query::Switch(s, _)) if s == new);
     let r = match (run.q.clone(), o) {
         (Query::SetProfile(_), Outcome::FailBefore) if w.fault() => Reply::Flag(false),
         (Query::Switch(_, Action::Test), o) if !activation && w.stuck == Some(slot) => {

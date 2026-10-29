@@ -272,7 +272,7 @@ def render(*, flake: str, system: str, ssh: str, prefix: str,
         "",
         strings.INIT_TOML_HOSTNAMES(),
         "",
-        strings.INIT_TOML_SWITCH,
+        strings.INIT_TOML_SWITCH(deadline=config.DEFAULT_DEADLINE),
         "",
         *target_tables(targets, hosts_dir if hosts_dir is not None else os.path.normpath(f"{flake}/hosts")),
     ]

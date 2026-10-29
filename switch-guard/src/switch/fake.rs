@@ -51,7 +51,8 @@ pub trait World<S> {
     fn timer_pending(&self) -> bool;
     /// The timer's rollback service is running.
     fn rollback_running(&self) -> bool;
-    fn start_timer(&mut self);
+    /// Starts the rollback timer, due in `secs`.
+    fn start_timer(&mut self, secs: u64);
     /// Spends a fault: false when none is left.
     fn fault(&mut self) -> bool;
 }
@@ -76,15 +77,15 @@ pub fn answer<S: Clone + Eq, W: World<S>>(w: &mut W, q: Query<S>, o: Outcome, ac
         (Query::ProfileSystem, Outcome::Ok) => Reply::Running(Some(w.target().profile())),
         (Query::Running, Outcome::Ok) => Reply::Running(Some(w.target().running.clone())),
         // systemd-run refuses while the unit's service still exists.
-        (Query::StartTimer, Outcome::Ok) => {
+        (Query::StartTimer(secs), Outcome::Ok) => {
             if w.timer_pending() || w.rollback_running() {
                 Reply::Flag(false)
             } else {
-                w.start_timer();
+                w.start_timer(secs);
                 Reply::Flag(true)
             }
         }
-        (Query::StartTimer, Outcome::FailBefore) if w.fault() => Reply::Flag(false),
+        (Query::StartTimer(_), Outcome::FailBefore) if w.fault() => Reply::Flag(false),
         (Query::Generation, Outcome::Ok) => Reply::Generation(Some(w.target().current as u64)),
         (Query::SetProfile(s), Outcome::Ok) => {
             let t = w.target();

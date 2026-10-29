@@ -19,8 +19,8 @@ use crate::text;
 use serde::{Deserialize, Serialize};
 
 /// No verification round starts, nor pause ends, within this long of the
-/// target's deadline: the confirm need only take the helper's lock before the
-/// timer's rollback does.
+/// target's deadline (counted from the activation's end): the confirm need
+/// only take the helper's lock before the timer's rollback does.
 pub const VERIFY_MARGIN_MS: u64 = 5_000;
 /// What one probe may take (nixconvoy's PROBE_TIMEOUT), so a stalled ssh
 /// session holds no verification past the deadline.
@@ -91,8 +91,8 @@ pub enum Query {
     },
     /// Monotonic milliseconds -> Now.
     Clock,
-    /// /run/current-system, over a new ssh connection (the policy's ssh
-    /// check: the proof that sshd admits one) -> System.
+    /// /run/current-system, over a new ssh connection (the proof that
+    /// sshd admits one) -> System.
     Running {
         timeout_ms: Option<u64>,
     },
@@ -177,9 +177,9 @@ enum Pc {
     SettingProfile,
     Switching,
     ReadingDeadline,
-    Clocking { deadline_ms: u64 },
-    Arming { w: Window },
-    Activating { w: Window },
+    Arming { deadline_ms: u64 },
+    Activating { deadline_ms: u64 },
+    Clocking { deadline_ms: u64, rc: i32 },
     Staging,
     VerifyNow { w: Window, rc: i32 },
     VerifyRunning { w: Window, rc: i32, tmo: u64 },
@@ -305,31 +305,24 @@ impl Machine {
                 Next::Done
             }
             (Pc::ReadingDeadline, Reply::Text(t)) => match t.trim().parse::<u64>() {
-                Ok(secs) => self.ask(Pc::Clocking { deadline_ms: secs * 1000 }, Query::Clock),
+                Ok(secs) => self.ask(Pc::Arming { deadline_ms: secs * 1000 }, Query::Arm),
                 Err(_) => Next::Die(format!(text!(control_no_deadline), target = target, text = t)),
             },
-            // Taken before arming, so the target's timer, started later, is
-            // never due before this side's reckoning of it.
-            (Pc::Clocking { deadline_ms }, Reply::Now(now)) => {
-                let end = now + deadline_ms;
-                let w = Window { until: end.saturating_sub(VERIFY_MARGIN_MS), hard: end.saturating_sub(CONFIRM_RESERVE_MS) };
-                self.ask(Pc::Arming { w }, Query::Arm)
-            }
             (pc @ (Pc::Arming { .. } | Pc::RollingBack { .. } | Pc::ConfirmRollingBack { .. }), Reply::Said { code, to }) => {
                 if let Some(t) = to.filter(|_| code == 0) {
                     self.rollback_to = t;
                 }
                 self.transition(pc, Reply::Code(code), fx)
             }
-            (Pc::Arming { w }, Reply::Code(rc)) => {
+            (Pc::Arming { deadline_ms }, Reply::Code(rc)) => {
                 if rc != 0 {
                     return Next::Die(format!(text!(control_arm_failed), target = target));
                 }
                 fx.push(Effect::Armed);
                 let q = self.helper(&["activate", &self.p.toplevel]);
-                self.ask(Pc::Activating { w }, q)
+                self.ask(Pc::Activating { deadline_ms }, q)
             }
-            (Pc::Activating { w }, Reply::Code(rc)) => {
+            (Pc::Activating { deadline_ms }, Reply::Code(rc)) => {
                 if !self.p.quiet {
                     fx.push(Effect::Mark(format!("verify:{target}")));
                 }
@@ -342,7 +335,15 @@ impl Machine {
                 if self.p.fail_verify {
                     return self.verify_failed(text!(control_fail_verify).to_string(), fx);
                 }
-                self.ask(Pc::VerifyNow { w, rc }, Query::Clock)
+                self.ask(Pc::Clocking { deadline_ms, rc }, Query::Clock)
+            }
+            // The target's timer restarted at the activation's end, before
+            // its exit code travelled here: its due time leads this
+            // reckoning by that trip, which CONFIRM_RESERVE_MS covers.
+            (Pc::Clocking { deadline_ms, rc }, Reply::Now(now)) => {
+                let end = now + deadline_ms;
+                let w = Window { until: end.saturating_sub(VERIFY_MARGIN_MS), hard: end.saturating_sub(CONFIRM_RESERVE_MS) };
+                self.round(w, rc, now)
             }
             (Pc::Staging, Reply::Code(c)) => {
                 fx.push(Effect::Disarmed);
@@ -354,18 +355,12 @@ impl Machine {
             }
 
             // One round of verification: a read of the running system (over
-            // a new ssh connection with the ssh check) finds the new one, the
+            // a new ssh connection) finds the new one, the
             // target's check passes (the internet
             // probe when configured, then the policy's checks),
             // and, with routing_check, this machine reaches the
             // internet too.
-            (Pc::VerifyNow { w, rc }, Reply::Now(now)) => {
-                self.cut = false;
-                match self.budget(w, now) {
-                    None => self.out_of_time_end(w, rc, Vec::new()),
-                    Some(tmo) => self.ask(Pc::VerifyRunning { w, rc, tmo }, Query::Running { timeout_ms: Some(tmo) }),
-                }
-            }
+            (Pc::VerifyNow { w, rc }, Reply::Now(now)) => self.round(w, rc, now),
             (Pc::VerifyRunning { w, rc, tmo }, Reply::System(cur)) => {
                 if cur.is_none() && tmo < PROBE_TIMEOUT_MS {
                     self.cut = true;
@@ -471,6 +466,15 @@ impl Machine {
     fn budget(&self, w: Window, now: u64) -> Option<u64> {
         let left = w.hard.saturating_sub(now);
         (left > 0).then(|| PROBE_TIMEOUT_MS.min(left))
+    }
+
+    /// A verification round starting at `now`.
+    fn round(&mut self, w: Window, rc: i32, now: u64) -> Next {
+        self.cut = false;
+        match self.budget(w, now) {
+            None => self.out_of_time_end(w, rc, Vec::new()),
+            Some(tmo) => self.ask(Pc::VerifyRunning { w, rc, tmo }, Query::Running { timeout_ms: Some(tmo) }),
+        }
     }
 
     fn out_of_time(&self) -> String {

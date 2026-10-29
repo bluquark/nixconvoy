@@ -8,11 +8,21 @@
 //! an Armed record admits an activation or a confirm, so a delayed helper
 //! run of a deploy that died cannot act on the record of the deploy that
 //! re-armed after it.
+//!
+//! The rollback timer counts the deadline from the activation's end: arm
+//! starts it with ACTIVATION_GUARD_SECS, a bound only on a helper that
+//! never gets to restart it (the deploy dead between arm and activate, or
+//! an activation stuck past any sense), and activate restarts it with the
+//! deadline once switch-to-configuration returns, however long its unit
+//! restarts took.  A guard that fired during the activation queued its
+//! rollback on the lock: the restart then fails, and the activation rolls
+//! back itself.
 use crate::record::{Phase, Record};
 use crate::text;
 use std::fmt::Display;
 
 pub const ROLLBACK_ATTEMPTS: u32 = 5;
+pub const ACTIVATION_GUARD_SECS: u64 = 600;
 pub const RETRY_SLEEP: u64 = 5;
 /// Exit code of `rollback` when the record is confirmed: nixconvoy reads
 /// it as "the confirm landed, only its relay died".
@@ -71,8 +81,8 @@ pub enum Query<S> {
     Lock,
     /// /run/current-system -> Running.
     Running,
-    /// Start the transient rollback timer -> Flag.
-    StartTimer,
+    /// Start the transient rollback timer, due in this many seconds -> Flag.
+    StartTimer(u64),
     /// The system profile's current generation -> Generation.
     Generation,
     /// `nix-env --set` -> Flag.
@@ -122,7 +132,11 @@ enum Pc<S> {
     ArmRunning(Option<S>),
     ArmTimer(S),
     ActLocked,
-    ActSwitched,
+    ActSwitched(S),
+    ActTimer {
+        previous: S,
+        code: i32,
+    },
     ConfLocked,
     ConfRunning {
         previous: S,
@@ -194,6 +208,7 @@ enum Then {
 pub struct Machine<S> {
     verb: Verb<S>,
     deadline: u64,
+    guard: u64,
     pc: Pc<S>,
 }
 
@@ -204,8 +219,8 @@ fn opt<S: Display>(s: &Option<S>) -> String {
 }
 
 impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
-    pub fn new(verb: Verb<S>, deadline: u64) -> Self {
-        Machine { verb, deadline, pc: Pc::Start }
+    pub fn new(verb: Verb<S>, deadline: u64, guard: u64) -> Self {
+        Machine { verb, deadline, guard, pc: Pc::Start }
     }
 
     pub fn verb(&self) -> &Verb<S> {
@@ -273,7 +288,7 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
                 };
                 fx.push(Effect::StopTimer);
                 fx.push(Effect::ResetFailedRollback);
-                self.ask(ArmTimer(previous), Query::StartTimer)
+                self.ask(ArmTimer(previous), Query::StartTimer(self.guard))
             }
             // Armed only with the timer pending: an Armed record admits a
             // dead deploy's delayed activation too.
@@ -287,22 +302,34 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
                 Next::Exit(0)
             }
 
-            (ActLocked, Reply::Locked(rec)) => match rec.map(|r| r.phase) {
-                Some(Phase::RolledBack) => {
+            (ActLocked, Reply::Locked(rec)) => match rec {
+                Some(Record { phase: Phase::RolledBack, .. }) => {
                     fx.push(Effect::Warn(format!(text!(switch_rolled_back_not_activating), P = P)));
                     Next::Exit(1)
                 }
-                Some(Phase::Armed) => {
+                Some(Record { previous, phase: Phase::Armed }) => {
                     let Verb::Activate(new) = &self.verb else { unreachable!() };
                     let q = Query::Switch(new.clone(), Action::Test);
-                    self.ask(ActSwitched, q)
+                    self.ask(ActSwitched(previous), q)
                 }
-                Some(Phase::Confirmed(_)) | None => {
+                Some(Record { phase: Phase::Confirmed(_), .. }) | None => {
                     fx.push(Effect::Warn(format!(text!(switch_not_armed), P = P)));
                     Next::Exit(1)
                 }
             },
-            (ActSwitched, Reply::Code(c)) => Next::Exit(c),
+            // Whatever the activation reported: a failed one is verified or
+            // rolled back within the deadline too.
+            (ActSwitched(previous), Reply::Code(code)) => {
+                fx.push(Effect::StopTimer);
+                self.ask(ActTimer { previous, code }, Query::StartTimer(self.deadline))
+            }
+            (ActTimer { previous, code }, Reply::Flag(ok)) => {
+                if !ok {
+                    fx.push(Effect::Warn(format!(text!(switch_timer_failed), P = P)));
+                    return self.rollback(previous, Then::Fail);
+                }
+                Next::Exit(code)
+            }
 
             (ConfLocked, Reply::Locked(rec)) => {
                 let Verb::Confirm { new, reboot_pending } = &self.verb else { unreachable!() };

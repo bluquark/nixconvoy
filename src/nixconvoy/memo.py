@@ -539,8 +539,8 @@ def union_config(wt: str) -> Config:
 
 
 def kit_inputs(pol: SwitchPolicy) -> tuple[object, ...]:
-    """What of a policy the kit is made from (the ssh and routing checks
-    are this machine's): nothing for a target switched plainly."""
+    """What of a policy the kit is made from (the routing check is this
+    machine's): nothing for a target switched plainly."""
     return (pol.deadline, pol.has("internet"), pol.script) if pol.confirmed else ()
 
 
