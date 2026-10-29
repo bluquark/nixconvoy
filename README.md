@@ -396,15 +396,19 @@ tags = ["lan"]
 [targets.router.switch]
 # This is a NixOS-based router/gateway providing NAT and DNS to my LAN.
 # Configure additional auto-rollback checks for it:
-# C) Routing still works (verified by the nixconvoy controller trying to reach the internet)
-# D) DNS still works (verified by custom bash script running as a one-shot after activation)
+# C) Routing still works (verified by the nixconvoy control machine trying to reach the internet)
+# D) DNS still works (verified by script running on target)
 auto_rollback_checks = [
   { controller_shell = ['[ "$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" https://www.google.com/generate_204)" = 204 ]'] },
-  { target_shell = ['''
-systemctl is-active --quiet dnsmasq || { echo "dnsmasq is not active" >&2; exit 1; }
+  { target_shell = [
+    'systemctl is-active --quiet dnsmasq || { echo "dnsmasq is not active" >&2; exit 1; }',
+    '''
 pid=$(systemctl show -p MainPID --value dnsmasq)
 [ "$pid" != 0 ] || { echo "dnsmasq is not running" >&2; exit 1; }
-'''] },
+sockets=$(ss -H -ulnp | grep -F "pid=$pid," || true)
+grep -qF " 0.0.0.0:67 " <<<"$sockets" || { echo "dnsmasq has no DHCP socket on port 67" >&2; exit 1; }
+'''
+  ] },
 ]
 
 [targets.windows-wsl]
