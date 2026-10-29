@@ -358,7 +358,7 @@ child_worktrees = ".claude/worktrees"
 precheck = "repo-lint"
 
 [hostnames.macbook]
-store = "chikuwa"
+store = "minipc"
 
 # Automatically roll back if the target can no longer connect to the internet.
 [switch]
