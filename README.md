@@ -283,25 +283,30 @@ There are three ways to use worktrees, depending on your preference:
   nixconvoy undeploy [<worktree> ... | --with-children] [--back-to <rev>]
 ```
 
-These are the fundamental actions to apply changes to your running fleet.  
+`deploy` and `undeploy` are nixconvoy's core subcommands, which apply new NixOS generations to your fleet.
 
-You run `deploy` after staging a change in a workbranch.  `nixconvoy deploy` both commits it to the workbranch and applies it to your machines.
+At a high level, here are the "transactional" properties they are designed to provide, and some of the usability & performance implications that follow:
 
-`deploy` has very simple command-line interface with a fairly complex implementation (which is spelled out in the "How it works" section later).  But for the purposes of everyday usage, it's simpler and more useful to think of it in terms of the "transactional" properties it is designed to guarantee, and the usability/safety/performance implications of those properties:
-
-- **Nothing you deploy is ever silently undone.**  What gets applied is not just what is in your current branch, but the union of everything previously deployed from every ongoing workbranch.
-  - Deploy aborts on a true merge conflict between two workbranches. Because nixconvoy merges are syntax-aware, adjacent-line edits aren't enough to cause an abort.
+- **Nothing you deploy is ever silently undone.**  What gets applied to your fleet is not only what is in your current branch, but the union of everything previously deployed from every ongoing workbranch.
+  - Usability implication: `deploy` aborts on a true merge conflict between two workbranches.  Mitigation: Because nixconvoy merges are syntax-aware, adjacent-line edits aren't enough to cause an abort.
 - **No change will touch a target machine before passing prechecks (lint/static analysis).**
-  - To reduce the performance cost of this guarantee, precheck runs in parallel with eval.
-- **A deploy running at the same time as another `deploy` (or `land`) will serialize correctly.** In most cases, deploys will queue after one another; in some cases, nixconvoy will abort one side and ask you to retry.  Either way, your git repo and NixOS fleet will remain in a consistent state throughout.
-- **A broken NixOS generation automatically rolls itself back.** If a target loses connectivity or fails its health check after switching, it rolls back automatically.
+  - Performance implication: additional tooling cost.  Mitigation: nixconvoy runs precheck in parallel with eval.
+- **A deploy running at the same time as another `deploy` (or `land`) will serialize correctly.**
+  - Usability implication: In some cases, deploys will queue after one another; in others, nixconvoy will abort one side and ask you to retry.
+- **A broken NixOS generation automatically rolls itself back.**
+  - Usability implication: If a target loses connectivity or fails its health check after switching, it rolls back automatically.
 - **Nix configuration changes are simultaneously deployed to all target machines that they affect.**
-  - Unless you provide an explicit `<target>`/`@<tag>` parameter, which restricts the set of targets considered.
+  - Performance implication: nix eval always re-runs for every target in your fleet.  Mitigation: a nixconvoy feature called the "eval memo" (separate from Nix's built-in "eval cache"), and support for Determinate Nix's "parallel eval".
+  - Usability implication: You can choose to provide an explicit `<target>`/`@<tag>` parameter, which restricts the set of targets considered.
 
 > [!NOTE]
-> To reduce the performance cost of this final guarantee, nixconvoy includes a feature called the "eval memo".  This reuses previous eval results to decide which targets could possibly be affected by a deploy.  The memo logic may have false positives (unnecessary re-evaluations) but will never have false negatives.
+> As mentioned above, nixconvoy includes a feature called the "eval memo".  This reuses previous eval results to decide which targets could possibly be affected by a deploy.  The memo logic may have false positives (unnecessary re-evaluations) but will never have false negatives.
 > 
 > The memo is keyed by a list of filenames and their content hashes.  So if you have a heterogeneous fleet, I recommend organizing your Nix config into per-feature files to fully take advantage of it.
+
+
+After staging a change in a workbranch.  `nixconvoy deploy` both commits it to the workbranch and applies it to your machines.
+
 
 **Optional flags:**
 
