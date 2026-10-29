@@ -1,5 +1,8 @@
 """nixconvoy's test suite (nix/tests.nix), run against the built package,
-the switch-guard cores it carries included:
+the switch-guard cores it carries included - or from the source tree, on
+a host with git, mergiraf and jq (`python3 tests/switch_test.py`: src/ goes
+first on the path, the cores are a nix build of the crate, its own tests
+skipped):
 
 - the switch step end to end against a fake target: the real
   nixconvoy-switch binary decides, the switch module's effects loop
@@ -43,6 +46,9 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from unittest import mock
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))  # the source tree, over an installed package
 
 from nixconvoy import (
     checkout,
@@ -2959,7 +2965,7 @@ def open_cases(d: Path) -> None:
         # nixconvoy does not manage nixconvoy never runs, the create and
         # remove do what Claude Code's own git would, the rest say nothing.
         put(plain, "q.txt", "q\n", "local only")
-        run_sh = Path(__file__).resolve().parent.parent / "integrations/claude-code/hooks/run.sh"
+        run_sh = ROOT / "integrations/claude-code/hooks/run.sh"
         tools = {t: subprocess.run(["sh", "-c", f"command -v {t}"], capture_output=True, text=True, check=False)
                  .stdout.strip() for t in ("sh", "bash", "git", "jq", "cat", "mkdir", "basename", "tail", "dirname")}
         assert all(tools.values()), tools
@@ -3152,8 +3158,29 @@ SECTIONS: dict[str, Callable[[], None]] = {
 }
 
 
+GUARD_BIN = "NIXCONVOY_TEST_GUARD_BIN"  # the cores' bin/ for a source-tree run, main() to its sections
+
+
+def guard_bin() -> str:
+    """Where the sections find nixconvoy-plan and nixconvoy-switch: "" for
+    guard's own BIN (beside the installed package), else (the source tree)
+    a nix build of the crate without its tests."""
+    if (guard.BIN / "nixconvoy-plan").is_file():
+        return ""
+    say("building the switch-guard cores (nix build .#switch-guard.unchecked)")
+    try:
+        p = subprocess.run(["nix", "build", "--no-link", "--print-out-paths", ".#switch-guard.unchecked"],
+                           cwd=ROOT, capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError) as e:
+        say(f"the cores could not be built: {getattr(e, 'stderr', '') or e}")
+        sys.exit(1)
+    return f"{p.stdout.strip()}/bin"
+
+
 def run_section(name: str) -> None:
     proc.this_machine = lambda: "tester"
+    if bin_dir := os.environ.get(GUARD_BIN):
+        guard.BIN = Path(bin_dir)
     config.set_cfg(config.parse(toml()))
     # No announcement renews on its timer: announce_cases drives the renewals.
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
@@ -3195,6 +3222,7 @@ def main() -> None:
     if sys.argv[1:2] == ["--section"]:
         run_section(sys.argv[2])
         return
+    os.environ[GUARD_BIN] = guard_bin()
     given = os.environ.get("NIX_BUILD_CORES", "")
     cores = int(given) if given.isdigit() and int(given) else (
         len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1)

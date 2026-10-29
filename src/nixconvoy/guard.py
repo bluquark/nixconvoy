@@ -36,10 +36,14 @@ Perform = Callable[[Any], Variant]
 PlanPerform = Callable[[PlanQuery], PlanReply]
 
 
+# The crate build this package carries (nix/package.nix links its binaries
+# here), nowhere else; the test suite points a source-tree run at its own.
+BIN = Path(__file__).resolve().parent / "bin"
+
+
 def binary(name: str) -> str:
-    """nixconvoy-plan or nixconvoy-switch: the crate build this package
-    carries (nix/package.nix links them under bin/ here), nowhere else."""
-    exe = Path(__file__).resolve().parent / "bin" / name
+    """nixconvoy-plan or nixconvoy-switch, under BIN."""
+    exe = BIN / name
     if not exe.is_file():
         die(strings.GUARD_MISSING(exe=exe))
     return str(exe)
