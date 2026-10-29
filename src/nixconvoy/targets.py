@@ -126,12 +126,10 @@ def ssh_opts(fresh: bool = False) -> list[str]:
 
 def target_cmd(target: str, argv: list[str], sudo: bool = False,
                fresh: bool = False) -> list[str]:
-    """`argv` on `target`: directly when it is this machine, else over ssh -
-    the deploy's master connection, or with `fresh` a new connection of its
-    own, proving sshd admits one."""
+    """`argv` on `target` over ssh (this machine too, over loopback: the
+    switch's verification then proves sshd admits a login) - the deploy's
+    master connection, or with `fresh` a new connection of its own."""
     pre = ["sudo"] if sudo else []
-    if target == proc.this_machine():
-        return [*pre, *argv]
     # The remote shell re-parses ssh's command line, hence the quoting.
     return ["ssh", *ssh_opts(fresh), ssh_address(target), *pre, *map(shlex.quote, argv)]
 
@@ -195,27 +193,17 @@ def parse_probe(stdout: str) -> Probe:
     return Probe(cur.strip() or None, text, provenance_digest(text), kit.strip())
 
 
+def probe_script() -> str:
+    """The shell of a probe, printing what parse_probe reads."""
+    return (f"cur=$(readlink {CURRENT_SYSTEM}) && echo \"$cur\" && "
+            f"{{ readlink \"{KIT_DIR}/${{cur##*/}}\" 2>/dev/null || echo; }} && "
+            f"{{ cat {PROVENANCE_FILE} 2>/dev/null || true; }}")
+
+
 def probe(name: str) -> Probe:
     """The target's running system and its provenance, in one round trip;
     running None when it cannot be read."""
-    if name == proc.this_machine():
-        try:
-            cur = str(Path(CURRENT_SYSTEM).readlink())
-        except OSError:
-            return Probe(None, "", "")
-        try:
-            text = Path(PROVENANCE_FILE).read_bytes().decode()
-        except (OSError, UnicodeDecodeError):
-            text = ""
-        try:
-            kit = str(Path(kit_link(cur)).readlink())
-        except OSError:
-            kit = ""
-        return Probe(cur, text, provenance_digest(text), kit)
-    script = (f"cur=$(readlink {CURRENT_SYSTEM}) && echo \"$cur\" && "
-              f"{{ readlink \"{KIT_DIR}/${{cur##*/}}\" 2>/dev/null || echo; }} && "
-              f"{{ cat {PROVENANCE_FILE} 2>/dev/null || true; }}")
-    p = run(target_cmd(name, ["sh", "-c", script]), check=False, timeout=PROBE_TIMEOUT)
+    p = run(target_cmd(name, ["sh", "-c", probe_script()]), check=False, timeout=PROBE_TIMEOUT)
     if p.returncode != 0:
         return Probe(None, "", "")
     return parse_probe(p.stdout)
@@ -229,11 +217,6 @@ def running_system(name: str, timeout: float = PROBE_TIMEOUT, fresh: bool = Fals
 
 def running_system_read(name: str, timeout: float = PROBE_TIMEOUT, fresh: bool = False) -> tuple[str | None, bool]:
     """running_system, and whether the read timed out rather than failed."""
-    if name == proc.this_machine():
-        try:
-            return str(Path(CURRENT_SYSTEM).readlink()), False
-        except OSError:
-            return None, False
     p = run(target_cmd(name, ["readlink", CURRENT_SYSTEM], fresh=fresh),
             check=False, timeout=timeout)
     if p.returncode != 0:
@@ -428,20 +411,8 @@ def copy_closure(target: str, paths: list[str], quiet: bool = False, fatal: bool
         return msg
     b = builder_host()
     sshopts = " ".join(ssh_opts())
-    if target == b:
+    if target == (b or proc.this_machine()):
         return None  # built there
-    if target == proc.this_machine():
-        if not b:
-            return None
-        # The outputs live on the builder: fetched for the local switch.
-        print(strings.TARGETS_FETCHING_CLOSURE(host=b))
-        p = run(["nix", "copy", "--no-check-sigs", "--from", f"ssh://{ssh_address(b)}", *paths],
-                env={"NIX_SSHOPTS": sshopts}, check=False, capture=quiet, merged=True)
-        if p.returncode != 0:
-            return failed(strings.TARGETS_FETCH_CLOSURE_FAILED(
-                host=b,
-                detail=strings.PROC_DETAIL_LINES(output=p.stdout.strip()) if p.stdout else ""))
-        return None
     tgt = ssh_address(target)
     print(strings.TARGETS_COPYING_CLOSURE(target=target))
     # Off-LAN targets (a VPS over the tailnet) substitute what they can

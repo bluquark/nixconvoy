@@ -383,7 +383,7 @@ impl Model for Composed {
                     target: "choko".into(),
                     toplevel: SYS[TOPLEVEL[d]].into(),
                     expected: SYS[w.target.running].into(),
-                    place: "local".into(),
+                    place: "blu@choko".into(),
                     quiet: false,
                     routing_check: true,
                     fail_verify: false,

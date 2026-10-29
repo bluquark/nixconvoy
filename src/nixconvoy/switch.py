@@ -100,7 +100,7 @@ class SwitchedMeanwhile(Exception):
         self.running = running
 
 
-def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> list[str]:
+def switch_guard_script(expected: str, toplevel: str, digest: str) -> str:
     """The on-target lock of a switch: a process holding fd 9 that first
     re-verifies the target still runs `expected` with the provenance whose
     provenance_digest the probe read (else MOVED, so a deploy that probed in
@@ -116,7 +116,7 @@ def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> 
              f"cat >{f}.tmp && mv -f {f}.tmp {f}")
     restore = f"if [ -e {f}.prev ]; then mv -f {f}.prev {f}; else rm -f {f}; fi"
     w = targets.PROVENANCE_WRITER
-    script = (
+    return (
         f"exec 9>{targets.SWITCH_LOCK}; "
         "flock -w 900 9 || { echo TIMEOUT; exit 1; }; "
         f"cur=$(readlink {cur_sys}); "
@@ -134,9 +134,11 @@ def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> 
         f'[ "$(readlink -f {targets.SYSTEM_PROFILE})" = "{toplevel}" ] || '
         f"{w} sh -c {shlex.quote(restore)}"
     )
-    if target == proc.this_machine():
-        return ["bash", "-c", script]
-    return ["ssh", *ssh_opts(), targets.ssh_address(target), script]
+
+
+def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> list[str]:
+    """switch_guard_script on `target`, over the deploy's master connection."""
+    return ["ssh", *ssh_opts(), targets.ssh_address(target), switch_guard_script(expected, toplevel, digest)]
 
 
 def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch: str,
@@ -156,7 +158,6 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
     `routing_check` (the policy's check of this machine's, config.Check)
     requires this machine to reach the internet too (the router, the
     deploy's own way out)."""
-    local = target == proc.this_machine()
     held = f"[{target}] " if quiet else None
     helper = f"{kit}/confirmed-switch"
     guard: subprocess.Popen[str] | None = None
@@ -280,7 +281,7 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
 
     was_finishing = proc.set_finishing(False)
     try:
-        params = SwitchParams(target, toplevel, expected, "local" if local else targets.ssh_address(target), quiet,
+        params = SwitchParams(target, toplevel, expected, targets.ssh_address(target), quiet,
                               routing_check, os.environ.get("NIXCONVOY_FAIL_VERIFY") == "1")
         drive(nixconvoy_switch, encode(params), perform, SwitchQuery, type(None),
               "nixconvoy-switch", strings.SWITCH_DURING(target=target), effect)

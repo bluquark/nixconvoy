@@ -454,10 +454,10 @@ def target_cases() -> None:
                 assert ("builder tester is unusable: its nix builds aarch64-darwin" in told) == bool(darwin & {"tester"}), told
     targets.builder_prefix.cache_clear()
     targets.builder_host.cache_clear()
-    # A target is the machine of its hostname: run directly; any other
-    # over ssh.  The hostname itself need not be a target.
+    # Every target over ssh, the machine of its hostname too (loopback).
+    # The hostname itself need not be a target.
     config.set_cfg(config.parse(toml('[targets.a]\n[targets.tester]\n', targets_dir="")))
-    assert targets.target_cmd("tester", ["true"]) == ["true"]
+    assert targets.target_cmd("tester", ["true"])[0] == "ssh" and targets.target_cmd("tester", ["true"])[-1] == "true"
     assert targets.target_cmd("a", ["true"])[0] == "ssh" and targets.flake_target_names() == ["a", "tester"]
     config.set_cfg(config.parse(toml('[targets.a]\n', targets_dir="")))
     assert targets.flake_target_names() == ["a"]
@@ -779,7 +779,7 @@ def provenance_cases() -> None:
 
 
 def guard_cases(d: Path) -> None:
-    """The real switch guard (switch_guard_cmd's script, flock and all) in a
+    """The real switch guard (switch_guard_script, flock and all) in a
     scratch directory, through the window a provenance written only after the
     switch left open: B probes while A's switch is between activation and
     confirmation."""
@@ -791,8 +791,13 @@ def guard_cases(d: Path) -> None:
         link.unlink(missing_ok=True)
         link.symlink_to(to)
 
+    # The target's scripts run here rather than over ssh to this host.
+    def probe() -> targets.Probe:
+        return targets.parse_probe(subprocess.run(["sh", "-c", targets.probe_script()], capture_output=True,
+                                                  text=True, check=True).stdout)
+
     def guard(expected: str, top: str, digest: str) -> subprocess.Popen[str]:
-        return subprocess.Popen(switch.switch_guard_cmd("tester", expected, top, digest),
+        return subprocess.Popen(["bash", "-c", switch.switch_guard_script(expected, top, digest)],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 
     def until_eof(g: subprocess.Popen[str]) -> str:
@@ -819,13 +824,13 @@ def guard_cases(d: Path) -> None:
 
     point(cur, OLD)
     point(profile, OLD)
-    b_early = targets.probe("tester")
+    b_early = probe()
     assert b_early.running == OLD and b_early.provenance == "", b_early
-    a = guard(OLD, NEW, targets.probe("tester").digest)
+    a = guard(OLD, NEW, probe().digest)
     assert lock(a, provenance_line(NEW)) == "WROTE"
-    b_claimed = targets.probe("tester")  # A claimed, not yet activated
+    b_claimed = probe()  # A claimed, not yet activated
     point(cur, NEW)  # A's test activation: verification starts
-    b_mid = targets.probe("tester")
+    b_mid = probe()
     assert b_mid.running == NEW and "refused: runs an increment" in drift(b_mid), b_mid
     # Probes from before the activation wait on A's lock and then abort.
     late = [guard(b.running or "", "/nix/store/b-system", b.digest) for b in (b_early, b_claimed)]
@@ -833,18 +838,18 @@ def guard_cases(d: Path) -> None:
     assert [lock(g, provenance_line("/nix/store/b-system")) for g in late] == [f"MOVED {NEW}"] * 2
     for g in late:
         until_eof(g)
-    assert targets.probe("tester").digest == b_mid.digest
+    assert probe().digest == b_mid.digest
     # A third switch that rolls back puts A's provenance back.
     c = guard(NEW, "/nix/store/c-system", b_mid.digest)
     assert lock(c, provenance_line("/nix/store/c-system")) == "WROTE"
     until_eof(c)
-    assert targets.probe("tester").digest == b_mid.digest
+    assert probe().digest == b_mid.digest
     # One staged for a reboot keeps its claim: the profile names it.
     c = guard(NEW, "/nix/store/c-system", b_mid.digest)
     assert lock(c, provenance_line("/nix/store/c-system")) == "WROTE"
     point(profile, "/nix/store/c-system")
     until_eof(c)
-    staged = targets.probe("tester")
+    staged = probe()
     assert '"toplevel": "/nix/store/c-system"' in staged.provenance, staged
     # Same running system, rewritten provenance: B's compare fails.
     g = guard(NEW, "/nix/store/b-system", b_mid.digest)
@@ -853,7 +858,7 @@ def guard_cases(d: Path) -> None:
     # A rolled-back switch onto a target with no provenance leaves none.
     provenance.unlink()
     point(profile, NEW)
-    g = guard(NEW, "/nix/store/d-system", targets.probe("tester").digest)
+    g = guard(NEW, "/nix/store/d-system", probe().digest)
     assert lock(g, provenance_line("/nix/store/d-system")) == "WROTE"
     until_eof(g)
     assert not provenance.exists()

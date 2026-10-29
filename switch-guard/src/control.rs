@@ -47,7 +47,7 @@ pub struct Params {
     pub toplevel: String,
     /// What the target ran when the deploy probed it.
     pub expected: String,
-    /// "local", or the ssh address.
+    /// The ssh address.
     pub place: String,
     pub quiet: bool,
     /// Verification also needs this machine on the internet (the policy's
