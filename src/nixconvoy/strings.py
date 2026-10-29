@@ -576,7 +576,9 @@ HOOK_STOP_LINE = M("{time} agent {agent} stopped: {label}: {verdict}")
 # --- submodule.py: repository and pin
 SUBMODULE_LABEL = M("submodule {name}")
 SUBMODULE_NO_DEFAULT_BRANCH = M("{repo}: origin has neither a HEAD, main nor master branch")
-SUBMODULE_PIN_FILE_STALE = M("warning: {file} does not name the rev the tree pins submodule {name} on: "
+SUBMODULE_PIN_COMMIT_MISSING = M("submodule {name}: {sha} is not in {repo}, even fetched: no pin file for it")
+SUBMODULE_PIN_NAR_FAILED = M("{name}: nix flake prefetch of {sha} failed, no NAR hash for its pin file:\n{stderr}")
+SUBMODULE_PIN_FILE_STALE = M("warning: {file} is not the pin file of the rev the tree pins submodule {name} on: "
                              "a deploy from a checkout on a work branch rewrites it")
 SUBMODULE_PIN_FILE_REWRITTEN = M("submodule {name}: {file} rewritten for {rev}")
 SUBMODULE_PIN_FILE_REMOVED = M("submodule {name}: {file} removed, its gitlink gone")

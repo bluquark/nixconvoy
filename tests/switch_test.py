@@ -1798,6 +1798,7 @@ def submodule_cases(d: Path) -> None:
     os.environ.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "protocol.file.allow",
                        "GIT_CONFIG_VALUE_0": "always"})
     from nixconvoy import submodule  # noqa: PLC0415 - after scratch_env's config
+    submodule.nar_hash = lambda name, repo, sha: f"nar:{sha}"  # noqa: ARG005 - nix is not in the suite's sandbox
     dep_origin, dep_seed = d / "dep.git", d / "dep-seed"
     sh(d, "init", "--quiet", "--bare", "-b", "main", str(dep_origin))
     sh(d, "clone", "--quiet", str(dep_origin), str(dep_seed))
@@ -1829,7 +1830,7 @@ def submodule_cases(d: Path) -> None:
 
     files = {".gitmodules": f'[submodule "dep"]\n\tpath = {path}\n\turl = {dep_origin}\n',
              "nixos/flake.lock": proc.dump_json(lock) + "\n",
-             pin_file: json.dumps({"rev": v1}, indent=2) + "\n"}
+             pin_file: submodule.pin_text(int(sh(dep_seed, "show", "-s", "--format=%ct", v1)), f"nar:{v1}")}
     with scratch_origin(d, files,
                         seeded=lambda seed: sh(seed, "update-index", "--add", "--cacheinfo", f"160000,{v1},{path}")) \
             as (origin, seed, co):
@@ -2323,7 +2324,7 @@ def submodule_cases(d: Path) -> None:
             return int(sh(dep_repo, "show", "-s", "--format=%ct", rev))
 
         submodule.set_pin(s, new_main, co)
-        assert json.loads(pins.read_text()) == {"rev": new_main}
+        assert json.loads(pins.read_text()) == {"committed": date(new_main), "narHash": f"nar:{new_main}"}
         assert pin_file in sh(co, "diff", "--cached", "--name-only").split()
         sh(dep_seed, "checkout", "--quiet", dep_main)
         put(dep_seed, "side.txt", "s\n", "side")  # diverging from new_main
@@ -2335,18 +2336,27 @@ def submodule_cases(d: Path) -> None:
         assert date(merge) == max(date(new_main), date(side)) + 1
         assert submodule.merge_commit("dep", dep_repo, new_main, side, "union") == merge  # deterministic
         submodule.set_pin(s, merge, co)
-        assert json.loads(pins.read_text()) == {"rev": merge}
-        # A stale file (a hand-moved gitlink) is rewritten by a deploy on a
-        # work branch, only said in a main checkout; the index's copy is
-        # what counts.
-        pins.write_text('{"rev": "0"}\n')
+        assert json.loads(pins.read_text()) == {"committed": date(merge), "narHash": f"nar:{merge}"}
+        # A stale file (a hand-moved gitlink: its date is not the pinned
+        # commit's) is rewritten by a deploy on a work branch, only said
+        # in a main checkout; the index's copy is what counts.
+        pins.write_text('{"committed": 1, "narHash": "nar:0"}\n')
         sh(co, "add", pin_file)
-        assert warned(lambda: submodule.heal_pins(co, None, False)) and json.loads(pins.read_text()) == {"rev": "0"}
+        assert warned(lambda: submodule.heal_pins(co, None, False)) and json.loads(pins.read_text())["committed"] == 1
         assert submodule.heal_pins(co, wb, False) == [f"submodule dep: {pin_file} rewritten for {merge[:12]}"]
-        assert json.loads(pins.read_text()) == {"rev": merge} and not sh(co, "diff", "--name-only")
+        assert json.loads(pins.read_text()) == {"committed": date(merge), "narHash": f"nar:{merge}"}
+        assert pin_file not in sh(co, "diff", "--name-only").split()  # staged as written
+        # Stale: a malformed file, an older format, a date not the commit's;
+        # not told where the repository is not cloned or lacks the commit.
+        good = submodule.pin_text(date(merge), f"nar:{merge}")
+        assert not submodule.pin_stale(s, merge, good)
+        assert all(submodule.pin_stale(s, merge, t) for t in ('{"rev": "x"}\n', "{}", "nonsense", '{"committed": "1", "narHash": "n"}\n'))
+        assert submodule.pin_stale(s, merge, submodule.pin_text(date(merge) + 1, f"nar:{merge}"))
+        assert not submodule.pin_stale(s._replace(repo=d / "nowhere"), merge, submodule.pin_text(1, "n"))
+        assert not submodule.pin_stale(s, "0" * 40, submodule.pin_text(1, "n"))
         assert submodule.heal_pins(co, wb, False) == []
         # The gitlink gone, the file goes with it; back, it is back.
-        sh(co, "rm", "--quiet", "--cached", "--", path)
+        sh(co, "update-index", "--force-remove", "--", path)  # the gitlink alone: the dir, populated by now, stays
         assert submodule.heal_pins(co, wb, False) == [f"submodule dep: {pin_file} removed, its gitlink gone"]
         # A pin file no configured submodule claims (one removed or renamed) goes too.
         stray = "nixos/submodules/.nixconvoy_submodule_gone.json"
@@ -2357,7 +2367,7 @@ def submodule_cases(d: Path) -> None:
         assert not pins.exists() and pin_file not in sh(co, "ls-files").split()
         sh(co, "update-index", "--add", "--cacheinfo", f"160000,{merge},{path}")
         assert submodule.heal_pins(co, wb, False) == [f"submodule dep: {pin_file} rewritten for {merge[:12]}"]
-        assert json.loads(pins.read_text()) == {"rev": merge}
+        assert json.loads(pins.read_text()) == {"committed": date(merge), "narHash": f"nar:{merge}"}
     say("submodules: ok")
 
 

@@ -132,9 +132,11 @@ def main_checkouts() -> list[Path]:
 
 def pin_file_of(name: str, path: str) -> str:
     """The submodule's pin file, in its gitlink's directory:
-    .nixconvoy_submodule_<name>.json, the pinned rev as JSON ({"rev"}),
-    kept by every pin (set_pin) - a nix evaluation reads no gitlink, and
-    `fetchGit` by the rev gives a flake the commit's tree and date."""
+    .nixconvoy_submodule_<name>.json, kept by every pin (set_pin): the
+    pinned commit's date and the NAR hash of its tree (pin_text) - what a
+    nix evaluation, which reads no gitlink, needs of the pin: the tree as
+    this flake's source inlines it, content-addressed with no fetch
+    (`builtins.path` with the hash), and a date for a version."""
     d = path.rpartition("/")[0]
     return f"{d}/.nixconvoy_submodule_{name}.json" if d else f".nixconvoy_submodule_{name}.json"
 
@@ -269,34 +271,104 @@ def pin_at(commit: str, path: str, cwd: Path) -> str | None:
 
 
 def set_pin(sub: Sub, sha: str, top: Path) -> None:
-    """The index of `top` pinning the submodule on `sha`, staged, its pin
-    file following (write_pin; a conflict on either resolved so)."""
+    """The index of `top` pinning the submodule on `sha`, staged, with its
+    pin file (a conflict on either resolved so); the file's content comes
+    first, so a pin whose facts cannot be had (pin_content) moves nothing."""
+    text = pin_content(sub, sha, top)
     git("update-index", "--add", "--cacheinfo", f"{GITLINK},{sha},{sub.path}", cwd=str(top))
-    write_pin(sub, sha, top)
+    put_pin(sub, text, top)
 
 
-def pin_text(sha: str) -> str:
-    return json.dumps({"rev": sha}, indent=2) + "\n"
+def pin_text(committed: int, nar: str) -> str:
+    return json.dumps({"committed": committed, "narHash": nar}, indent=2, sort_keys=True) + "\n"
+
+
+def has_commit(repo: Path, sha: str) -> bool:
+    return run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=str(repo), check=False).returncode == 0
+
+
+def with_commit(sub: Sub, sha: str, top: Path) -> Path:
+    """The submodule's repository (repository) holding `sha`, its origin
+    fetched once when it does not yet."""
+    repo = repository(sub, top)
+    if not has_commit(repo, sha) and not (fetch_once(sub.name, repo) and has_commit(repo, sha)):
+        die(strings.SUBMODULE_PIN_COMMIT_MISSING(name=sub.name, sha=sha[:12], repo=repo))
+    return repo
+
+
+def commit_time(repo: Path, sha: str) -> int:
+    """The committer date of `sha` (seconds since the epoch; a union
+    merge's is a second past its parents', merge_commit)."""
+    return int(out(["git", "show", "-s", "--format=%ct", f"{sha}^{{commit}}", "--"], cwd=str(repo)))
+
+
+def nar_hash(name: str, repo: Path, sha: str) -> str:
+    """The NAR hash of the tree of `sha` with its submodules, as nix
+    inlines it into the flake's source: `nix flake prefetch` of the
+    repository at that rev (an export nix caches: a rev seen once is
+    quick, a new one costs its export and hash)."""
+    p = run(["nix", "flake", "prefetch", "--json", "--extra-experimental-features", "nix-command flakes",
+             f"git+file://{repo}?rev={sha}&submodules=1"], check=False)
+    found = None
+    if p.returncode == 0:
+        try:
+            found = json.loads(p.stdout).get("hash")
+        except (ValueError, AttributeError):
+            found = None
+    if not isinstance(found, str) or not found:
+        die(strings.SUBMODULE_PIN_NAR_FAILED(name=name, sha=sha[:12], stderr=(p.stderr or "").strip()))
+    return found
+
+
+def pin_content(sub: Sub, sha: str, top: Path) -> str:
+    """The pin file's content for the pin `sha` (pin_text), from the
+    submodule's repository (with_commit)."""
+    repo = with_commit(sub, sha, top)
+    return pin_text(commit_time(repo, sha), nar_hash(sub.name, repo, sha))
+
+
+def put_pin(sub: Sub, text: str, top: Path) -> None:
+    (top / sub.pin_file).write_text(text, encoding="utf-8")
+    git("add", "--", sub.pin_file, cwd=str(top))
 
 
 def write_pin(sub: Sub, sha: str | None, top: Path) -> None:
-    """The submodule's pin file under `top` naming `sha`, staged; removed
-    for None (no gitlink)."""
+    """The submodule's pin file under `top` for the pin `sha`
+    (pin_content), staged; removed for None (no gitlink)."""
     if sha is None:
         git("rm", "--quiet", "--force", "--ignore-unmatch", "--", sub.pin_file, cwd=str(top))
         (top / sub.pin_file).unlink(missing_ok=True)
         return
-    (top / sub.pin_file).write_text(pin_text(sha), encoding="utf-8")
-    git("add", "--", sub.pin_file, cwd=str(top))
+    put_pin(sub, pin_content(sub, sha, top), top)
+
+
+def pin_stale(sub: Sub, cur: str | None, have: str | None) -> bool:
+    """Whether the pin file content `have` (None: no file) is not what
+    the pin `cur` (None: no gitlink) calls for: a file without a gitlink
+    or the reverse, one malformed, or one whose date is not the pinned
+    commit's - told from the repository cloned here, when it holds the
+    commit (nothing is fetched to tell: a gitlink moved by hand is caught
+    where the submodule is worked on)."""
+    if cur is None or have is None:
+        return cur is not None or have is not None
+    try:
+        d = json.loads(have)
+        committed, nar = d["committed"], d["narHash"]
+    except (ValueError, KeyError, TypeError):
+        return True
+    if not isinstance(committed, int) or not isinstance(nar, str) or not nar:
+        return True
+    if not cloned(sub) or not has_commit(sub.repo, cur):
+        return False
+    return committed != commit_time(sub.repo, cur)
 
 
 def heal_pins(top: Path, wb: str | None, dry: bool) -> list[str]:
-    """Each submodule's pin file staged under `top` rewritten
-    when it does not name the rev the index's gitlink pins (moved by
-    hand, or no file yet), removed when the gitlink is gone, as is a pin
-    file no submodule claims (one removed, renamed or moved),
-    one line each; only warned about, with no work branch to carry it or
-    for a dry activation."""
+    """Each submodule's pin file staged under `top` rewritten when it is
+    not the index's gitlink's (pin_stale: moved by hand, or no file yet),
+    removed when the gitlink is gone, as is a pin file no submodule
+    claims (one removed, renamed or moved), one line each; only warned
+    about, with no work branch to carry it or for a dry activation."""
     told = []
     claimed = {pin_file_of(n, e.path) for n, e in entries(top).items()}
     for f in out(["git", "ls-files", "--", ".nixconvoy_submodule_*.json", "*/.nixconvoy_submodule_*.json"],
@@ -313,7 +385,7 @@ def heal_pins(top: Path, wb: str | None, dry: bool) -> list[str]:
         cur = pin(sub, top)
         p = run(["git", "show", f":{sub.pin_file}"], cwd=str(top), check=False)
         have = p.stdout if p.returncode == 0 else None
-        if have == (pin_text(cur) if cur else None):
+        if not pin_stale(sub, cur, have):
             continue
         if wb is None or dry:
             print(strings.SUBMODULE_PIN_FILE_STALE(file=sub.pin_file, name=n), file=sys.stderr)
@@ -1364,7 +1436,13 @@ def restore(sub: Sub, top: Path) -> bool:
     want = main_pin(sub, top)
     if pin(sub, top) == want:
         return False
-    set_pin(sub, want, top)
+    # origin/main's own pin file goes with its pin: nothing to compute or fetch.
+    p = run(["git", "show", f"{main_ref()}:{sub.pin_file}"], cwd=str(top), check=False)
+    if p.returncode == 0 and not pin_stale(sub, want, p.stdout):
+        git("update-index", "--add", "--cacheinfo", f"{GITLINK},{want},{sub.path}", cwd=str(top))
+        put_pin(sub, p.stdout, top)
+    else:
+        set_pin(sub, want, top)
     print(strings.SUBMODULE_RESTORED(name=sub.name, main=main_short(), rev=want[:12]))
     return True
 
