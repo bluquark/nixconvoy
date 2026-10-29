@@ -46,7 +46,7 @@ from .checkout import (
     this_prefix,
     work_branch_name,
 )
-from .config import SwitchPolicy, builder_host, cfg, main_ref, remote_ref, repo_names
+from .config import SwitchPolicy, cfg, main_ref, remote_ref, repo_names
 from .guard import binary, decide
 from .memo import Top
 from .proc import PERF, Fail, die, dump_json, is_ancestor, load_json, out, rev
@@ -586,7 +586,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             print(strings.DEPLOY_DRY_KIT_REFRESH(targets=", ".join(refresh)))
             refresh = []
         if plan or refresh:
-            b = builder_host()
+            b = targets.builder_host()
             where = strings.DEPLOY_BUILD_WHERE(host=b) if b else ""
             PERF.mark("build")
             what = ", ".join([*plan, *(strings.DEPLOY_BUILD_KIT(target=h) for h in refresh)])

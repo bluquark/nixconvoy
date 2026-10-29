@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import proc, strings, targets
 from .checkout import current_branch
-from .config import cfg, main_ref, remote_ref, this_target
+from .config import cfg, main_ref, remote_ref
 from .guard import drive
 from .proc import Fail, out, rev, run, stream
 from .targets import PROBE_TIMEOUT, provenance_digest, ssh_opts
@@ -134,7 +134,7 @@ def switch_guard_cmd(target: str, expected: str, toplevel: str, digest: str) -> 
         f'[ "$(readlink -f {targets.SYSTEM_PROFILE})" = "{toplevel}" ] || '
         f"{w} sh -c {shlex.quote(restore)}"
     )
-    if target == this_target():
+    if target == proc.this_machine():
         return ["bash", "-c", script]
     return ["ssh", *ssh_opts(), targets.ssh_address(target), script]
 
@@ -156,7 +156,7 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
     `routing_check` (the policy's check of this machine's, config.Check)
     requires this machine to reach the internet too (the router, the
     deploy's own way out)."""
-    local = target == this_target()
+    local = target == proc.this_machine()
     held = f"[{target}] " if quiet else None
     helper = f"{kit}/confirmed-switch"
     guard: subprocess.Popen[str] | None = None

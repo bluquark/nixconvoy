@@ -90,22 +90,6 @@ class TargetConfig:
 
 
 @dataclass(frozen=True)
-class HostnameConfig:
-    """A `[hostnames.<hostname>]` table: what nixconvoy does differently
-    when run on that machine (proc.this_machine)."""
-
-    # The target this machine is, when its hostname is not the target's
-    # name: that target is probed, built for and switched here, without
-    # ssh.  None: the hostname itself.
-    target: str | None = None
-    # This machine's builder, over the top-level builder.
-    builder: str | None = None
-    # Determinate Nix's parallel evaluation (builtins.parallel, --eval-cores):
-    # None is "auto", on when the nix here knows the feature.
-    parallel_eval: bool | None = None
-
-
-@dataclass(frozen=True)
 class Config:
     # The directory holding flake.nix, relative to the repo root.
     flake_dir: str
@@ -130,14 +114,15 @@ class Config:
     # into .git/info/exclude); any worktree nested in a checkout is one of
     # its children, wherever it was made.
     child_worktrees: str
-    # The machine the closures are realised on, unless the hostname's
-    # table says otherwise; {local_hostname} in it is this machine's
-    # hostname, and a machine mapped to itself (by hostname or by its
-    # target) realises them here.  Its nix daemon builds them or hands
-    # them on to its own remote builders (nix.conf's builders), and the
-    # closures are copied to the targets from it.  Addressed as a target
-    # (ssh_address).
-    builder: str
+    # The machines the closures may be realised on, tried in order: the
+    # first found usable (reachable, its daemon building for this user or
+    # root, and building targets_arch) is the run's builder
+    # (targets.builder_host); {local_hostname} is this machine's
+    # hostname, which realises them here.  The builder's nix daemon builds
+    # them or hands them on to its own remote builders (nix.conf's
+    # builders), and the closures are copied to the targets from it.
+    # Addressed as a target (ssh_address).
+    builders: tuple[str, ...]
     # The remote origin/main and the work branches live on, and main's name
     # there: `remote` and `main_branch` (origin and main unless set).
     remote: str = "origin"
@@ -145,16 +130,15 @@ class Config:
     # precheck: a flake check (checks.<targets_arch>.<precheck>) proven
     # before any build; empty is none.
     precheck: str = ""
-    hostnames: dict[str, HostnameConfig] = field(default_factory=dict)
+    # Determinate Nix's parallel evaluation (builtins.parallel, --eval-cores):
+    # None is "auto", on when the nix here knows the feature.
+    parallel_eval: bool | None = None
     # [switch]: every target's switch policy unless its table overrides.
     switch: SwitchPolicy = field(default_factory=SwitchPolicy)
     targets: dict[str, TargetConfig] = field(default_factory=dict)
 
     def target(self, name: str) -> TargetConfig:
         return self.targets.get(name, TargetConfig())
-
-    def hostname(self, name: str) -> HostnameConfig:
-        return self.hostnames.get(name, HostnameConfig())
 
     def ssh_address(self, name: str) -> str:
         return self.target(name).ssh_address or self.ssh_template.format(target=name)
@@ -320,8 +304,19 @@ def _template(t: dict[str, object], k: str, placeholder: str, where: str = CONFI
     """A required, non-empty template setting, proven here to format
     with `placeholder` alone, so a stale placeholder fails as a
     ConfigError rather than in a probe."""
-    v = _str(t, k, where, None)
     key = k if where == CONFIG_FILE else f"{where}.{k}"
+    return _checked_template(_str(t, k, where, None), key, placeholder)
+
+
+def _templates(t: dict[str, object], k: str, placeholder: str) -> tuple[str, ...]:
+    """A required, non-empty list of templates (_template's), a top-level key."""
+    v = _required(t, k, CONFIG_FILE)
+    if not isinstance(v, list) or not v or not all(isinstance(s, str) for s in v):
+        raise ConfigError(strings.CONFIG_NOT_TEMPLATES(key=k, placeholder=placeholder))
+    return tuple(_checked_template(s, f"{k}[{i}]", placeholder) for i, s in enumerate(v))
+
+
+def _checked_template(v: str, key: str, placeholder: str) -> str:
     if not v:
         raise ConfigError(strings.CONFIG_EMPTY_TEMPLATE(key=key, placeholder=placeholder))
     try:
@@ -340,8 +335,8 @@ def parse(text: str) -> Config:
     if isinstance(version, bool) or version != 1:
         raise ConfigError(strings.CONFIG_VERSION(version=version))
     known = {"config_version", "flake_dir", "targets_dir", "targets_arch", "ssh_address_template", "branch_prefix",
-             "child_worktrees", "builder", "remote", "main_branch", "precheck", "hostnames", "switch", "targets",
-             "submodules", "work_branches"}
+             "child_worktrees", "builders", "parallel_eval", "remote", "main_branch", "precheck", "switch",
+             "targets", "submodules", "work_branches"}
     if "work_branches" in doc and not _noted_work_branches:
         # The allowlist this once had, superseded by branch_prefix's shape:
         # a file from before still loads, told so once per run.
@@ -354,6 +349,10 @@ def parse(text: str) -> Config:
         print(strings.CONFIG_SUBMODULES_IGNORED(), file=sys.stderr)
     if "eval" in doc:
         raise ConfigError(strings.CONFIG_EVAL_GONE())
+    if "builder" in doc:
+        raise ConfigError(strings.CONFIG_BUILDER_GONE())
+    if "hostnames" in doc:
+        raise ConfigError(strings.CONFIG_HOSTNAMES_GONE())
     for k in doc:
         if k not in known:
             raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=k))
@@ -371,23 +370,13 @@ def parse(text: str) -> Config:
     children = _str(doc, "child_worktrees", CONFIG_FILE, None).strip("/")
     if not children or ".." in children.split("/"):
         raise ConfigError(strings.CONFIG_CHILD_WORKTREES())
-    builder = _template(doc, "builder", "local_hostname")
+    builders = _templates(doc, "builders", "local_hostname")
     remote = _str(doc, "remote", CONFIG_FILE, "origin")
     if not valid_remote(remote):
         raise ConfigError(strings.CONFIG_REMOTE(remote=remote))
     main_branch = _str(doc, "main_branch", CONFIG_FILE, "main")
     if not valid_branch(main_branch, remote):
         raise ConfigError(strings.CONFIG_MAIN_BRANCH(remote=remote, main_branch=main_branch))
-    hostnames: dict[str, HostnameConfig] = {}
-    for name, h in _table(doc.get("hostnames", {}), "hostnames").items():
-        t = _table(h, f"hostnames.{name}")
-        for k in t:
-            if k not in ("target", "builder", "parallel_eval"):
-                raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"hostnames.{name}.{k}"))
-        hostnames[name] = HostnameConfig(
-            target=_str(t, "target", f"hostnames.{name}") or None,
-            builder=_template(t, "builder", "local_hostname", f"hostnames.{name}") if "builder" in t else None,
-            parallel_eval=_auto_bool(t, "parallel_eval", f"hostnames.{name}") if "parallel_eval" in t else None)
     switch = _switch(_table(doc.get("switch", {}), "switch"), "switch", None)
     targets: dict[str, TargetConfig] = {}
     for name, h in _table(doc.get("targets", {}), "targets").items():
@@ -414,11 +403,11 @@ def parse(text: str) -> Config:
         ssh_template=ssh_template,
         branch_prefix=branch_prefix,
         child_worktrees=children,
-        builder=builder,
+        builders=builders,
         remote=remote,
         main_branch=main_branch,
         precheck=_str(doc, "precheck", CONFIG_FILE),
-        hostnames=hostnames,
+        parallel_eval=_auto_bool(doc, "parallel_eval", CONFIG_FILE) if "parallel_eval" in doc else None,
         switch=switch,
         targets=targets,
     )
@@ -491,22 +480,6 @@ def remote_ref(branch: str) -> str:
     return cfg().names.remote_ref(branch)
 
 
-def this_target() -> str:
-    """The target this machine is: its hostname's `target`, else the
-    hostname itself (a machine that is no target matches none)."""
-    me = proc.this_machine()
-    return cfg().hostname(me).target or me
-
-
-def builder_host() -> str:
-    """The machine the closures are realised on: this hostname's
-    `builder`, else the top-level one; empty means here."""
-    me = proc.this_machine()
-    h = cfg().hostname(me)
-    b = (cfg().builder if h.builder is None else h.builder).format(local_hostname=me)
-    return "" if b in (me, this_target()) else b
-
-
 def parallel_eval() -> bool | None:
-    """This hostname's parallel_eval; None is auto."""
-    return cfg().hostname(proc.this_machine()).parallel_eval
+    """nixconvoy.toml's parallel_eval; None is auto."""
+    return cfg().parallel_eval

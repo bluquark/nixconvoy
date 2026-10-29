@@ -430,8 +430,6 @@ SWITCH_CHECK_INTERRUPTED = M("check interrupted: {error}")
 SWITCH_DURING = M(" while switching {target}")
 
 # --- targets.py
-TARGETS_HOSTNAME_TARGET_UNKNOWN = M("{CONFIG_FILE}: hostnames.{hostname}.target names {target}, which is no "
-                                   "target of the flake")
 TARGETS_INVENTORY_UNREADABLE = M("cannot read the target inventory under {dir}/: {error}")
 TARGETS_NONE_FOUND = M("no targets found under {dir}/")
 TARGETS_NO_TAG = M("no target carries the tag {tag} ({CONFIG_FILE}: targets.<name>.tags)")
@@ -439,9 +437,10 @@ TARGETS_PHANTOM_TAG = M("{CONFIG_FILE} tags {phantom} as {tag}, but the inventor
 TARGETS_UNKNOWN = M("unknown target(s) {unknown}; the inventory has: {inventory}")
 TARGETS_REFRESHING_KIT = M("refreshing the switch kit on {target}...")
 TARGETS_KIT_ROOT_FAILED = M("rooting the switch kit on {target} failed (exit {code}){detail}")
-TARGETS_STORE_TIMEOUT = M("`nix store {verb}` timed out after {secs} s")
-TARGETS_STORE_NO_JSON = M("`nix store {verb}` printed no JSON object:\n{output}")
-TARGETS_STORE_FAILED = M("`nix store {verb}` failed:\n{error}")
+TARGETS_NIX_TIMEOUT = M("`nix {cmd}` timed out after {secs} s")
+TARGETS_NIX_NO_JSON = M("`nix {cmd}` printed no JSON object:\n{output}")
+TARGETS_NIX_FAILED = M("`nix {cmd}` failed:\n{error}")
+TARGETS_BUILDER_ARCH = M("its nix builds {systems}, not {arch} (targets_arch)")
 TARGETS_UNTRUSTED_ROOT_FAILED = M("the nix daemon does not trust the user (nix.settings.trusted-users), and nix as root ({sudo}) failed: {error}")
 TARGETS_UNTRUSTED_NOR_ROOT = "the nix daemon does not trust the user (nix.settings.trusted-users), nor root"
 TARGETS_COPY_DRVS_FAILED = M("copying derivations to {host} failed{detail}")
@@ -453,7 +452,8 @@ TARGETS_FETCHING_CLOSURE = M("fetching the closure from {host}...")
 TARGETS_FETCH_CLOSURE_FAILED = M("fetching the closure from {host} failed; {NOTHING_DONE} - the changes are still staged{detail}")
 TARGETS_COPYING_CLOSURE = M("copying closure to {target}...")
 TARGETS_COPY_CLOSURE_FAILED = M("copying the closure to {target} failed; {NOTHING_DONE} - the changes are still staged{detail}")
-TARGETS_BUILDER_UNUSABLE = M("builder {host}: {problem}; {NOTHING_DONE}")
+TARGETS_BUILDER_SKIPPED = M("builder {host} is unusable: {problem}")
+TARGETS_NO_BUILDER = M("no usable builder ({CONFIG_FILE}: builders):\n{problems}\n{NOTHING_DONE}")
 TARGETS_ESP_SCAN_FAILED = M("could not scan {target}'s ESP for rejected generations (exit {code}); {NOTHING_DONE}")
 TARGETS_DRY_ACTIVATE_FAILED = M("dry-activating the new system on {target} failed (exit {code}); {NOTHING_DONE}{detail}")
 TARGETS_WOULD = M("  {target}: would {verb} {units}")
@@ -526,16 +526,15 @@ INIT_TOML_CHILD_WORKTREES = M(
 INIT_TOML_PRECHECK = M("# Optional: a flake check (checks.<targets_arch>.<name>) proven before any build{these}.")
 INIT_TOML_PRECHECK_THESE = M("; this flake's: {checks}")
 INIT_TOML_BUILD = (
-    "# The machine the closures are realised on (a target's name, or one ~/.ssh/config knows),\n"
-    "# from which they are copied to the targets; its nix daemon builds them or hands them to its\n"
-    "# own remote builders.  {local_hostname} is this machine's hostname: realise locally.\n"
-    "builder = \"{local_hostname}\"")
-INIT_TOML_HOSTNAMES = M(
-    "# Optional: what {TOOL} does differently on one machine, by the hostname it runs on.\n"
-    "# [hostnames.laptop]\n"
-    "# builder = \"bigbox\"      # this machine's builder, over the top-level builder\n"
-    "# target = \"workstation\"  # the target this machine is, when its hostname is not that name\n"
-    "# parallel_eval = \"auto\"  # Determinate Nix's parallel evaluation: true, false or \"auto\" (when nix has it)")
+    "# The machines the closures may be realised on (a target's name, or one ~/.ssh/config knows),\n"
+    "# tried in order: the first that is reachable, whose nix daemon builds for this user, and\n"
+    "# which builds targets_arch is the builder, from which the closures are copied to the targets;\n"
+    "# its nix daemon builds them or hands them to its own remote builders.  {local_hostname} is\n"
+    "# this machine's hostname: realise locally.\n"
+    "builders = [\"{local_hostname}\"]")
+INIT_TOML_PARALLEL_EVAL = (
+    "# Optional: Determinate Nix's parallel evaluation: true, false or \"auto\" (when nix has it).\n"
+    "# parallel_eval = \"auto\"")
 INIT_TOML_SWITCH = M(
     "# How the targets are switched (every target's defaults; a [targets.<name>.switch] extends them).\n"
     "# A switch is confirmed: a rollback timer is armed on the target, the new system activated and,\n"
@@ -781,8 +780,12 @@ CONFIG_REMOTE = M("{CONFIG_FILE}: remote is a git remote's name (letters, digits
                   "not starting with '-'), not {remote!r}")
 CONFIG_MAIN_BRANCH = M("{CONFIG_FILE}: main_branch is a branch's name (main, not {remote}/main or refs/...), "
                        "not {main_branch!r}")
-CONFIG_EVAL_GONE = M("{CONFIG_FILE}: [eval] is gone: precheck is a top-level key, parallel is a "
-                     "[hostnames.<hostname>] table's parallel_eval")
+CONFIG_EVAL_GONE = M("{CONFIG_FILE}: [eval] is gone: precheck and parallel_eval are top-level keys")
+CONFIG_BUILDER_GONE = M("{CONFIG_FILE}: builder is gone: builders is a list of machines tried in order, the first "
+                        "usable one realising the closures (builders = [\"{{local_hostname}}\"] realises here)")
+CONFIG_HOSTNAMES_GONE = M("{CONFIG_FILE}: [hostnames] is gone: a machine falls through builders to one that can "
+                          "build, parallel_eval is a top-level key, and a target is the machine of its hostname")
+CONFIG_NOT_TEMPLATES = M("{CONFIG_FILE}: {key} is a non-empty list of templates over {{{placeholder}}}")
 CONFIG_TARGET_DIR = M("{CONFIG_FILE}: targets.{name}.dir is a directory inside the repository, "
                       "relative to its root, not {dir!r}")
 CONFIG_TARGET_DIR_ROOT = M("{CONFIG_FILE}: targets.{name}.dir names the repository root: leave it out instead")

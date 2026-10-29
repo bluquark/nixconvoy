@@ -9,13 +9,14 @@ import os
 import re
 import shlex
 import socket
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import NamedTuple
 
 from . import proc, strings
-from .config import builder_host, cfg, this_target
+from .config import cfg
 from .proc import die, load_json, run
 
 # Seconds one probe of a target may take, so a stalled ssh session holds
@@ -73,7 +74,7 @@ ROOT_NIX = ("--store", "daemon", "--extra-experimental-features", "nix-command")
 def flake_target_names() -> list[str]:
     """The deployable targets: <targets_dir>/<name>/ maps 1:1 to
     nixosConfigurations, or without targets_dir the `[targets.<name>]`
-    tables do.  A hostname's `target` must be one of them."""
+    tables do."""
     names = cfg().inventory
     if not names:
         d = cfg().targets_path
@@ -83,9 +84,6 @@ def flake_target_names() -> list[str]:
             die(strings.TARGETS_INVENTORY_UNREADABLE(dir=d, error=error))
         if not names:
             die(strings.TARGETS_NONE_FOUND(dir=d))
-    me = proc.this_machine()
-    if cfg().hostname(me).target and this_target() not in names:
-        die(strings.TARGETS_HOSTNAME_TARGET_UNKNOWN(hostname=me, target=this_target()))
     return names
 
 
@@ -132,7 +130,7 @@ def target_cmd(target: str, argv: list[str], sudo: bool = False,
     the deploy's master connection, or with `fresh` a new connection of its
     own, proving sshd admits one."""
     pre = ["sudo"] if sudo else []
-    if target == this_target():
+    if target == proc.this_machine():
         return [*pre, *argv]
     # The remote shell re-parses ssh's command line, hence the quoting.
     return ["ssh", *ssh_opts(fresh), ssh_address(target), *pre, *map(shlex.quote, argv)]
@@ -200,7 +198,7 @@ def parse_probe(stdout: str) -> Probe:
 def probe(name: str) -> Probe:
     """The target's running system and its provenance, in one round trip;
     running None when it cannot be read."""
-    if name == this_target():
+    if name == proc.this_machine():
         try:
             cur = str(Path(CURRENT_SYSTEM).readlink())
         except OSError:
@@ -231,7 +229,7 @@ def running_system(name: str, timeout: float = PROBE_TIMEOUT, fresh: bool = Fals
 
 def running_system_read(name: str, timeout: float = PROBE_TIMEOUT, fresh: bool = False) -> tuple[str | None, bool]:
     """running_system, and whether the read timed out rather than failed."""
-    if name == this_target():
+    if name == proc.this_machine():
         try:
             return str(Path(CURRENT_SYSTEM).readlink()), False
         except OSError:
@@ -277,30 +275,53 @@ def sandbox_opts(dry_run: list[str], drvs: list[str]) -> tuple[str, ...]:
     return UNSANDBOXED
 
 
-def store_info(prefix: tuple[str, ...], via: tuple[str, ...]) -> dict[str, object] | str:
-    """What `nix store info --json` reports through `via` (the ssh prefix
+def nix_json(prefix: tuple[str, ...], via: tuple[str, ...], *verbs: tuple[str, ...]) -> dict[str, object] | str:
+    """What `nix <verbs[0]> --json` reports through `via` (the ssh prefix
     reaching the builder, empty here) with `prefix` (SUDO or nothing)
-    before nix, or the failure text.  A nix without the verb (before 2.19,
-    Lix) is asked by its old name, `nix store ping`."""
+    before nix, or the failure text.  A nix without the verb (before 2.19
+    or Lix, whose names differ) is asked by each later spelling in turn."""
     t = BUILDER_TIMEOUT + (CONNECT_GRACE if via else 0)
     err = ""
-    for verb in ("info", "ping"):
-        p = run([*via, *prefix, "nix", *(ROOT_NIX if prefix else ROOT_NIX[2:]), "store", verb, "--json"],
+    for verb in verbs:
+        p = run([*via, *prefix, "nix", *(ROOT_NIX if prefix else ROOT_NIX[2:]), *verb, "--json"],
                 check=False, timeout=t)
         if p.timed_out:
-            return strings.TARGETS_STORE_TIMEOUT(verb=verb, secs=t)
+            return strings.TARGETS_NIX_TIMEOUT(cmd=" ".join(verb), secs=t)
         if p.returncode == 0:
             try:
                 info = load_json(p.stdout)
             except ValueError:
                 info = None
             if not isinstance(info, dict):
-                return strings.TARGETS_STORE_NO_JSON(verb=verb, output=p.stdout.strip())
+                return strings.TARGETS_NIX_NO_JSON(cmd=" ".join(verb), output=p.stdout.strip())
             return info
         err = p.stderr.strip()
         if "not a recognised command" not in err:
             break
-    return strings.TARGETS_STORE_FAILED(verb=verb, error=err)
+    return strings.TARGETS_NIX_FAILED(cmd=" ".join(verb), error=err)
+
+
+def store_info(prefix: tuple[str, ...], via: tuple[str, ...]) -> dict[str, object] | str:
+    """`nix store info` (`nix store ping` before 2.19)."""
+    return nix_json(prefix, via, ("store", "info"), ("store", "ping"))
+
+
+def platforms(via: tuple[str, ...]) -> set[str] | str:
+    """The systems the nix through `via` builds: its `system` and
+    `extra-platforms` settings (`nix config show`; `nix show-config`
+    before 2.20), or the failure text."""
+    info = nix_json((), via, ("config", "show"), ("show-config",))
+    if isinstance(info, str):
+        return info
+    found: set[str] = set()
+    for key in ("system", "extra-platforms"):
+        setting = info.get(key)
+        v = setting.get("value") if isinstance(setting, dict) else None
+        if isinstance(v, str):
+            found.update(v.split())
+        elif isinstance(v, list):
+            found.update(x for x in v if isinstance(x, str))
+    return found
 
 
 def trusts(info: dict[str, object]) -> bool:
@@ -409,7 +430,7 @@ def copy_closure(target: str, paths: list[str], quiet: bool = False, fatal: bool
     sshopts = " ".join(ssh_opts())
     if target == b:
         return None  # built there
-    if target == this_target():
+    if target == proc.this_machine():
         if not b:
             return None
         # The outputs live on the builder: fetched for the local switch.
@@ -443,19 +464,47 @@ def copy_closure(target: str, paths: list[str], quiet: bool = False, fatal: bool
     return None
 
 
-def check_builder() -> None:
-    """Fail before any nix work when a builder is set but cannot build:
-    unreachable, or its daemon neither trusting the user nor running nix
-    as root (builder_prefix), rather than on ssh's own timeout or nix's
-    ignored-setting warning deep in a build - the reach check a builder
-    always had, now also proving it can build.  This machine's own daemon
-    is asked once a build comes (build_cmd)."""
-    b = builder_host()
-    if not b:
-        return
-    pre = builder_prefix(("ssh", *ssh_opts(), ssh_address(b)))
+def builder_problem(host: str) -> str | None:
+    """Why `host` ("" for this machine) cannot realise the closures, or
+    None: unreachable or its daemon neither trusting the user nor running
+    nix as root (builder_prefix), or its nix not building targets_arch
+    (platforms)."""
+    via = ("ssh", *ssh_opts(), ssh_address(host)) if host else ()
+    pre = builder_prefix(via)
     if isinstance(pre, str):
-        die(strings.TARGETS_BUILDER_UNUSABLE(host=b, problem=pre))
+        return pre
+    systems = platforms(via)
+    if isinstance(systems, str):
+        return systems
+    arch = cfg().targets_arch
+    if arch not in systems:
+        return strings.TARGETS_BUILDER_ARCH(arch=arch, systems=", ".join(sorted(systems)) or "nothing")
+    return None
+
+
+@functools.cache
+def builder_host() -> str:
+    """The machine the closures are realised on, chosen once per run
+    before any nix work: the first of nixconvoy.toml's `builders` without
+    a builder_problem, each skipped one told; "" is this machine.  Dies
+    when none is usable, rather than on ssh's own timeout or nix's
+    ignored-setting warning deep in a build."""
+    me = proc.this_machine()
+    problems: list[str] = []
+    for b in cfg().builders:
+        name = b.format(local_hostname=me)
+        problem = builder_problem("" if name == me else name)
+        if problem is None:
+            return "" if name == me else name
+        problems.append(strings.TARGETS_BUILDER_SKIPPED(host=name, problem=problem))
+        print(problems[-1], file=sys.stderr)
+    return die(strings.TARGETS_NO_BUILDER(problems="\n".join(problems)))
+
+
+def check_builder() -> None:
+    """The builder chosen (builder_host), so a deploy with none usable
+    ends before any nix work."""
+    builder_host()
 
 
 def rejected_generation(target: str, toplevel: str) -> str | None:
