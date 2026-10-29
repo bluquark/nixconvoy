@@ -291,22 +291,23 @@ At a high level, here are the "transactional" properties they are designed to pr
   - Usability implication: `deploy` aborts on a true merge conflict between two workbranches.  Mitigation: Because nixconvoy merges are syntax-aware, adjacent-line edits aren't enough to cause an abort.
 - **No change will touch a target machine before passing prechecks (lint/static analysis).**
   - Performance implication: additional tooling cost.  Mitigation: nixconvoy runs precheck in parallel with eval.
-- **A deploy running at the same time as another `deploy` (or `land`) will serialize correctly.**
-  - Usability implication: In some cases, deploys will queue after one another; in others, nixconvoy will abort one side and ask you to retry.
+- **Two deploys running at the same time in different workbranches will serialize correctly.**
+  - Performance implication: In most cases, deploys will queue after one another.
+  - Usability implication: in rarer cases, nixconvoy will abort one side and ask you to retry.
 - **A broken NixOS generation automatically rolls itself back.**
-  - Usability implication: If a target loses connectivity or fails its health check after switching, it rolls back automatically.
+  - Performance implication: Deploys must wait for activation and health checks to complete.
 - **Nix configuration changes are simultaneously deployed to all target machines that they affect.**
-  - Performance implication: nix eval always re-runs for every target in your fleet.  Mitigation: a nixconvoy feature called the "eval memo" (separate from Nix's built-in "eval cache"), and support for Determinate Nix's "parallel eval".
+  - Performance implication: nix eval always re-runs for every machine in your fleet, to determine which targets are affected.  Mitigation: a nixconvoy feature called the "eval memo" (separate from Nix's built-in "eval cache"), and support for Determinate Nix's "parallel eval".
   - Usability implication: You can choose to provide an explicit `<target>`/`@<tag>` parameter, which restricts the set of targets considered.
 
 > [!NOTE]
-> As mentioned above, nixconvoy includes a feature called the "eval memo".  This reuses previous eval results to decide which targets could possibly be affected by a deploy.  The memo logic may have false positives (unnecessary re-evaluations) but will never have false negatives.
+> As mentioned above, nixconvoy includes a feature called the "eval memo".  This reuses the config-file -> target mappings computed by previous evals (including evals from other worktrees).  The memo logic may have false positives (unnecessary re-evaluations) but is designed to never have false negatives.
 > 
-> The memo is keyed by a list of filenames and their content hashes.  So if you have a heterogeneous fleet, I recommend organizing your Nix config into per-feature files to fully take advantage of it.
+> The memo is keyed by a list of filenames and their content hashes.  So if you have a heterogeneous fleet where eval is costly, I recommend splitting your Nix config into per-feature files, loading those features by explicit filename instead of relying on lazy Nix magic, and verifying eval time went down in nixconvoy's performance log.
 
+### `nixconvoy deploy <flags>`
 
 After staging a change in a workbranch.  `nixconvoy deploy` both commits it to the workbranch and applies it to your machines.
-
 
 **Optional flags:**
 
@@ -317,6 +318,8 @@ After staging a change in a workbranch.  `nixconvoy deploy` both commits it to t
 | `-m <msg>` | The commit message on the workbranch for this deploy increment.  (Note that these commit messages get hidden in nixconvoy's internal branches after `nixconvoy land` so it's optional.) |
 | `--evict` | Deploy exactly what's on this branch, skipping over nixconvoy's usual union-of-workbranches step and forcing the target to match it even if that would violate nixconvoy's normal guarantees.<br><br>Called "evict" because it evicts all other workbranches's ongoing work from the target.  This is a recovery command in case something went wrong and nixconvoy's union mechanism or safety systems are wedged.  |
 | `--dry-activate` | Run prechecks, evaluation, and build, but don't actually switch the machines to the new NixOS generation. |
+
+### `nixconvoy undeploy <flags>`
 
 `nixconvoy undeploy` is the reverse of deploy.  Run without flags, it undoes the latest deploy.
 
