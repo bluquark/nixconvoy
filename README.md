@@ -287,18 +287,15 @@ There are three ways to use worktrees, depending on your preference:
 
 At a high level, here are the "transactional" properties they are designed to provide, and some of the usability & performance implications that follow:
 
-- **Nothing you deploy is ever silently undone.**  What gets applied to your fleet is not only what is in your current branch, but the union of everything previously deployed from every ongoing workbranch.
-  - Usability implication: `deploy` aborts on a true merge conflict between two workbranches.  Mitigation: Because nixconvoy merges are syntax-aware, adjacent-line edits aren't enough to cause an abort.
-- **No change will touch a target machine before passing prechecks (lint/static analysis).**
-  - Performance implication: additional tooling cost.  Mitigation: nixconvoy runs precheck in parallel with eval.
-- **Two deploys running at the same time in different workbranches will serialize correctly.**
-  - Performance implication: In most cases, deploys will queue after one another.
-  - Usability implication: in rarer cases, nixconvoy will abort one side and ask you to retry.
-- **A broken NixOS generation automatically rolls itself back.**
-  - Performance implication: Deploys must wait for activation and health checks to complete.
-- **Nix configuration changes are simultaneously deployed to all target machines that they affect.**
-  - Performance implication: nix eval always re-runs for every machine in your fleet, to determine which targets are affected.  Mitigation: a nixconvoy feature called the "eval memo" (separate from Nix's built-in "eval cache"), and support for Determinate Nix's "parallel eval".
-  - Usability implication: You can choose to provide an explicit `<target>`/`@<tag>` parameter, which restricts the set of targets considered.
+| Guarantee | Implication | Mitigation |
+|---|---|---|
+| **Nothing you deploy is ever silently undone.**  What gets applied to your fleet is not only what is in your current branch, but the union of everything previously deployed from every ongoing workbranch. | Usability: `deploy` aborts on a true merge conflict between two workbranches. | Because nixconvoy merges are syntax-aware, adjacent-line edits aren't enough to cause an abort. |
+| **No change will touch a target machine before passing prechecks (lint/static analysis).** | Performance: additional tooling cost. | nixconvoy runs precheck in parallel with eval. |
+| **Two deploys running at the same time in different workbranches will serialize correctly.** | Performance: in most cases, deploys will queue after one another. | |
+| | Usability: in rarer cases, nixconvoy will abort one side and ask you to retry. | |
+| **A broken NixOS generation automatically rolls itself back.** | Performance: deploys must wait for activation and health checks to complete. | |
+| **Nix configuration changes are simultaneously deployed to all target machines that they affect.** | Performance: nix eval always re-runs for every machine in your fleet, to determine which targets are affected. | A nixconvoy feature called the "eval memo" (separate from Nix's built-in "eval cache"), and support for Determinate Nix's "parallel eval". |
+| | Usability: every machine is considered by default. | You can choose to provide an explicit `<target>`/`@<tag>` parameter, which restricts the set of targets considered. |
 
 > [!NOTE]
 > As mentioned above, nixconvoy includes a feature called the "eval memo".  This reuses the config-file -> target mappings computed by previous evals (including evals from other worktrees).  The memo logic may have false positives (unnecessary re-evaluations) but is designed to never have false negatives.
