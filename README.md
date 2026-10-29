@@ -85,7 +85,7 @@ nix.settings = {
 
 </details>
 
-Then, `cd` into your NixOS checkout (Nixconvoy refuses to run unless it's within a git checkout) and run **`nixconvoy init`**.  Then review the generated `nixconvoy.toml` and commit it to your main branch.  If all the config represents your setup correctly, then you are ready to go.
+Then, `cd` into your NixOS checkout and run **`nixconvoy init`**.  Review the `nixconvoy.toml` config file it generated, and commit it to your main branch.  When it represents your setup correctly, then you are ready to go.
 
 <details>
 <summary><b>Bash PS1 helper (optional)</b></summary>
