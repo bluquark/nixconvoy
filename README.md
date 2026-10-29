@@ -357,18 +357,18 @@ branch_prefix = "work/{machine}/"
 child_worktrees = ".claude/worktrees"
 precheck = "repo-lint"
 
+# On my macbook, the arch is not "x86_64-linux" so use the minipc as NixOS store and builder
 [hostnames.macbook]
 store = "minipc"
 
-# Every switch is confirmed: within 10 s of its activation the new system must be found running
-# over a new ssh connection and the checks pass, or the target rolls back on its own.  The
-# internet check: roll back if the target can no longer connect to the internet.
+# All NixOS generations must accept fresh ssh connections and retain Internet access
 [switch]
 auto_rollback_checks = [{ ssh_deadline_secs = 10 }, { internet = true }]
 
 [targets.minipc]
-tags = ["omnibin"]
+tags = ["lan"]
 
+# My NixOS-based router must continue to provide Internet and DNS access to others
 [targets.router]
 [targets.router.switch]
 auto_rollback_checks = [
@@ -381,11 +381,11 @@ pid=$(systemctl show -p MainPID --value dnsmasq)
 ]
 
 [targets.windows-wsl]
-# Switched plainly: WSL networking isn't controlled by NixOS.
-switch = { auto_rollback_checks = [] }
-# ssh_address template override because the target hostname doesn't correspond to the domain name
+tags = ["lan"]
+# No need for auto-rollback on WSL
+switch = { auto_rollback_checks = false }
+# This target's hostname doesn't correspond to its domain name
 ssh_address = "bluquark@windows.home.bluquark.net"
-tags = ["omnibin"]
 
 [targets.hetzner1]
 tags = ["vps"]
