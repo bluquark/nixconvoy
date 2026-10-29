@@ -315,11 +315,13 @@ You run `deploy` after staging a change in a workbranch.  `nixconvoy deploy` bot
 
 `nixconvoy undeploy` is the reverse of deploy.  Run without flags, it undoes the latest deploy.
 
+`undeploy`'s transactional properties and much of its implementation are identical to `deploy`, but some of the command-line parameters are more similar to `review`/`land` because they label previously deployed commits to act on.  `undeploy` automatically switches back the same targets that the original `deploy` acted upon, and removes `deploy`'s commits from the workbranch (nondestructively --- they still are rooted in the `nixconvoy-history` branch).  Note that `undeploy` does not use NixOS-level rollback, it pushes a fresh NixOS generation (because it does the "merged union of all workbranches" as `deploy` does).
+
 | `undeploy` flag | |
 |---|---|
 | `<worktree>` | the name of a specific child worktree to undeploy. |
 | `--with-children` | undeploy all child worktrees of this parent worktree.  Same effect as listing all child worktrees one by one. |
-| `--back-to <rev>` | the revision to undeploy back to.  `--back-to HEAD^1` does the same as no flags.  `--back-to origin/main` undeploys all unlanded changes in this workbranch, effectively  turning it back into a freshly opened workbranch. |
+| `--back-to <rev>` | the revision to undeploy back to.  `--back-to HEAD^1` does the same as no flags.  `--back-to origin/main` undeploys all unlanded changes in this workbranch, effectively turning it back into a freshly opened workbranch. |
 
 ## Reviewing and landing
 
