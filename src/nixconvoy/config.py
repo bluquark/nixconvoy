@@ -85,6 +85,22 @@ class TargetConfig:
 
 
 @dataclass(frozen=True)
+class HostnameConfig:
+    """A `[hostnames.<hostname>]` table: what nixconvoy does differently
+    when run on that machine (proc.this_machine)."""
+
+    # The target this machine is, when its hostname is not the target's
+    # name: that target is probed, built for and switched here, without
+    # ssh.  None: the hostname itself.
+    target: str | None = None
+    # The store host for this machine, over `[build] store`.
+    store: str | None = None
+    # Determinate Nix's parallel evaluation (builtins.parallel, --eval-cores):
+    # None is "auto", on when the nix here knows the feature.
+    parallel_eval: bool | None = None
+
+
+@dataclass(frozen=True)
 class Config:
     # The directory holding flake.nix, relative to the repo root.
     flake_dir: str
@@ -109,28 +125,30 @@ class Config:
     # into .git/info/exclude); any worktree nested in a checkout is one of
     # its children, wherever it was made.
     child_worktrees: str
-    # Determinate Nix's parallel evaluation (builtins.parallel, --eval-cores):
-    # None is "auto", on when the nix here knows the feature.
-    parallel_eval: bool | None
     # The remote origin/main and the work branches live on, and main's name
     # there: `remote` and `main_branch` (origin and main unless set).
     remote: str = "origin"
     main_branch: str = "main"
-    # eval.precheck: a flake check (checks.<targets_arch>.<precheck>) proven
+    # precheck: a flake check (checks.<targets_arch>.<precheck>) proven
     # before any build; empty is none.
     precheck: str = ""
-    # The machine whose store the closures are realised in, by the hostname
-    # nixconvoy runs on ("*": any other); a machine mapped to itself, or to
-    # nothing, realises them here.  Its nix daemon builds them or hands them
-    # on to its own remote builders (nix.conf's builders), and the closures
-    # are copied to the targets from it.  Addressed as a target (ssh_address).
-    store: dict[str, str] = field(default_factory=dict)
+    # [build] store: the machine whose store the closures are realised in,
+    # unless the hostname's table says otherwise; a machine mapped to
+    # itself, or to nothing, realises them here.  Its nix daemon builds
+    # them or hands them on to its own remote builders (nix.conf's
+    # builders), and the closures are copied to the targets from it.
+    # Addressed as a target (ssh_address).
+    store: str = ""
+    hostnames: dict[str, HostnameConfig] = field(default_factory=dict)
     # [switch]: every target's switch policy unless its table overrides.
     switch: SwitchPolicy = field(default_factory=SwitchPolicy)
     targets: dict[str, TargetConfig] = field(default_factory=dict)
 
     def target(self, name: str) -> TargetConfig:
         return self.targets.get(name, TargetConfig())
+
+    def hostname(self, name: str) -> HostnameConfig:
+        return self.hostnames.get(name, HostnameConfig())
 
     def ssh_address(self, name: str) -> str:
         return self.target(name).ssh_address or self.ssh_template.format(target=name)
@@ -298,8 +316,8 @@ def parse(text: str) -> Config:
     if isinstance(version, bool) or version != 1:
         raise ConfigError(strings.CONFIG_VERSION(version=version))
     known = {"config_version", "flake_dir", "targets_dir", "targets_arch", "ssh_address_template", "branch_prefix",
-             "child_worktrees", "remote", "main_branch", "eval", "build", "switch", "targets", "submodules",
-             "work_branches"}
+             "child_worktrees", "remote", "main_branch", "precheck", "build", "hostnames", "switch", "targets",
+             "submodules", "work_branches"}
     if "work_branches" in doc and not _noted_work_branches:
         # The allowlist this once had, superseded by branch_prefix's shape:
         # a file from before still loads, told so once per run.
@@ -310,6 +328,8 @@ def parse(text: str) -> Config:
         # checkout's submodules, every .gitmodules entry one (submodule.py).
         _noted_submodules.append(True)
         print(strings.CONFIG_SUBMODULES_IGNORED(), file=sys.stderr)
+    if "eval" in doc:
+        raise ConfigError(strings.CONFIG_EVAL_GONE())
     for k in doc:
         if k not in known:
             raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=k))
@@ -333,29 +353,22 @@ def parse(text: str) -> Config:
     main_branch = _str(doc, "main_branch", CONFIG_FILE, "main")
     if not valid_branch(main_branch, remote):
         raise ConfigError(strings.CONFIG_MAIN_BRANCH(remote=remote, main_branch=main_branch))
-    ev = _table(_required(doc, "eval", CONFIG_FILE), "eval")
-    for k in ev:
-        if k not in ("parallel", "precheck"):
-            raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"eval.{k}"))
     build = _table(doc.get("build", {}), "build")
     for k in build:
-        if k not in ("store", "builder"):
+        if k not in ("store",):
             raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"build.{k}"))
-    # `builder` is the key's older name, still read.
-    if "store" in build and "builder" in build:
-        raise ConfigError(strings.CONFIG_STORE_AND_BUILDER())
-    key = "builder" if "builder" in build else "store"
-    raw_store = build.get(key, {})
-    if isinstance(raw_store, str):
-        store = {"*": raw_store}
-    elif not isinstance(raw_store, dict):
-        raise ConfigError(strings.CONFIG_STORE_TYPE(key=key))
-    else:
-        store = {}
-        for k, v in raw_store.items():
-            if not isinstance(v, str):
-                raise ConfigError(strings.CONFIG_STORE_ENTRY(key=key, name=k))
-            store[k] = v
+    if not isinstance(build.get("store", ""), str):
+        raise ConfigError(strings.CONFIG_STORE_TYPE())
+    hostnames: dict[str, HostnameConfig] = {}
+    for name, h in _table(doc.get("hostnames", {}), "hostnames").items():
+        t = _table(h, f"hostnames.{name}")
+        for k in t:
+            if k not in ("target", "store", "parallel_eval"):
+                raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"hostnames.{name}.{k}"))
+        hostnames[name] = HostnameConfig(
+            target=_str(t, "target", f"hostnames.{name}") or None,
+            store=_str(t, "store", f"hostnames.{name}") if "store" in t else None,
+            parallel_eval=_auto_bool(t, "parallel_eval", f"hostnames.{name}") if "parallel_eval" in t else None)
     switch = _switch(_table(doc.get("switch", {}), "switch"), "switch", None)
     targets: dict[str, TargetConfig] = {}
     for name, h in _table(doc.get("targets", {}), "targets").items():
@@ -384,9 +397,9 @@ def parse(text: str) -> Config:
         child_worktrees=children,
         remote=remote,
         main_branch=main_branch,
-        precheck=_str(ev, "precheck", "eval"),
-        parallel_eval=_auto_bool(ev, "parallel", "eval"),
-        store=store,
+        precheck=_str(doc, "precheck", CONFIG_FILE),
+        store=_str(build, "store", "build"),
+        hostnames=hostnames,
         switch=switch,
         targets=targets,
     )
@@ -459,12 +472,22 @@ def remote_ref(branch: str) -> str:
     return cfg().names.remote_ref(branch)
 
 
-def store_host() -> str:
-    """The machine whose store the closures are realised in: NIXCONVOY_STORE,
-    else the config's entry for this machine; empty means here."""
-    env = os.environ.get("NIXCONVOY_STORE")
-    if env is not None:
-        return env
+def this_target() -> str:
+    """The target this machine is: its hostname's `target`, else the
+    hostname itself (a machine that is no target matches none)."""
     me = proc.this_machine()
-    b = cfg().store.get(me, cfg().store.get("*", ""))
-    return "" if b == me else b
+    return cfg().hostname(me).target or me
+
+
+def store_host() -> str:
+    """The machine whose store the closures are realised in: this
+    hostname's `store`, else `[build] store`; empty means here."""
+    me = proc.this_machine()
+    h = cfg().hostname(me)
+    b = cfg().store if h.store is None else h.store
+    return "" if b in (me, this_target()) else b
+
+
+def parallel_eval() -> bool | None:
+    """This hostname's parallel_eval; None is auto."""
+    return cfg().hostname(proc.this_machine()).parallel_eval

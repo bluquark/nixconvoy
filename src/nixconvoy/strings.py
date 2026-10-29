@@ -425,6 +425,8 @@ SWITCH_CHECK_INTERRUPTED = M("check interrupted: {error}")
 SWITCH_DURING = M(" while switching {target}")
 
 # --- targets.py
+TARGETS_HOSTNAME_TARGET_UNKNOWN = M("{CONFIG_FILE}: hostnames.{hostname}.target names {target}, which is no "
+                                   "target of the flake")
 TARGETS_INVENTORY_UNREADABLE = M("cannot read the target inventory under {dir}/: {error}")
 TARGETS_NONE_FOUND = M("no targets found under {dir}/")
 TARGETS_NO_TAG = M("no target carries the tag {tag} ({CONFIG_FILE}: targets.<name>.tags)")
@@ -516,15 +518,20 @@ INIT_TOML_CHILD_WORKTREES = M(
     "# but is primarily intended to hook into worktrees that harnesses automatically create to isolate their"
     " subagents.\n"
     "# The default directory is set to Claude Code's, so that {TOOL}'s Claude Code plugin works out of the box.")
-INIT_TOML_PARALLEL = "# Determinate Nix's parallel evaluation: true, false or \"auto\" (on when nix has it)"
 INIT_TOML_PRECHECK = M("# Optional: a flake check (checks.<targets_arch>.<name>) proven before any build{these}.")
 INIT_TOML_PRECHECK_THESE = M("; this flake's: {checks}")
 INIT_TOML_BUILD = (
-    "# Optional: realise the closures in another machine's store, keyed by the hostname nixconvoy\n"
-    "# runs on (\"*\": any other machine; a machine mapped to itself realises locally); that\n"
-    "# machine's nix daemon builds them or hands them to its own remote builders.\n"
+    "# Optional: realise the closures in another machine's store (a target's name, or one\n"
+    "# ~/.ssh/config knows); that machine's nix daemon builds them or hands them to its own\n"
+    "# remote builders.  A machine mapped to itself realises locally.\n"
     "# [build]\n"
-    "# store = { \"*\" = \"bigbox\" }")
+    "# store = \"bigbox\"")
+INIT_TOML_HOSTNAMES = M(
+    "# Optional: what {TOOL} does differently on one machine, by the hostname it runs on.\n"
+    "# [hostnames.laptop]\n"
+    "# store = \"bigbox\"        # this machine's store host, over [build] store (\"\": realise here)\n"
+    "# target = \"workstation\"  # the target this machine is, when its hostname is not that name\n"
+    "# parallel_eval = \"auto\"  # Determinate Nix's parallel evaluation: true, false or \"auto\" (when nix has it)")
 INIT_TOML_SWITCH = (
     "# How the targets are switched (every target's defaults; a [targets.<name>.switch] extends them).\n"
     "# With auto_rollback_checks (unset: [{ ssh = true }]) a switch is confirmed: a rollback timer is armed\n"
@@ -758,10 +765,10 @@ CONFIG_REMOTE = M("{CONFIG_FILE}: remote is a git remote's name (letters, digits
                   "not starting with '-'), not {remote!r}")
 CONFIG_MAIN_BRANCH = M("{CONFIG_FILE}: main_branch is a branch's name (main, not {remote}/main or refs/...), "
                        "not {main_branch!r}")
-CONFIG_STORE_AND_BUILDER = M("{CONFIG_FILE}: build.store and build.builder are the same setting; keep build.store")
-CONFIG_STORE_TYPE = M("{CONFIG_FILE}: build.{key} is a machine name, or a table of them keyed by "
-                      "the hostname {TOOL} runs on")
-CONFIG_STORE_ENTRY = M("{CONFIG_FILE}: build.{key}.{name} must be a string")
+CONFIG_EVAL_GONE = M("{CONFIG_FILE}: [eval] is gone: precheck is a top-level key, parallel is a "
+                     "[hostnames.<hostname>] table's parallel_eval")
+CONFIG_STORE_TYPE = M("{CONFIG_FILE}: build.store is a machine name; a [hostnames.<hostname>] table's "
+                      "store sets one machine's")
 CONFIG_TARGET_DIR = M("{CONFIG_FILE}: targets.{name}.dir is a directory inside the repository, "
                       "relative to its root, not {dir!r}")
 CONFIG_TARGET_DIR_ROOT = M("{CONFIG_FILE}: targets.{name}.dir names the repository root: leave it out instead")

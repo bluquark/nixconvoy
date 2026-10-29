@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from . import proc, strings
-from .config import cfg, store_host
+from .config import cfg, store_host, this_target
 from .proc import die, load_json, run
 
 # Seconds one probe of a target may take, so a stalled ssh session holds
@@ -72,16 +72,19 @@ ROOT_NIX = ("--store", "daemon", "--extra-experimental-features", "nix-command")
 def flake_target_names() -> list[str]:
     """The deployable targets: <targets_dir>/<name>/ maps 1:1 to
     nixosConfigurations, or without targets_dir the `[targets.<name>]`
-    tables do."""
-    if cfg().inventory:
-        return cfg().inventory
-    d = cfg().targets_path
-    try:
-        names = sorted(e.name for e in Path(d).iterdir() if e.is_dir())
-    except OSError as error:
-        die(strings.TARGETS_INVENTORY_UNREADABLE(dir=d, error=error))
+    tables do.  A hostname's `target` must be one of them."""
+    names = cfg().inventory
     if not names:
-        die(strings.TARGETS_NONE_FOUND(dir=d))
+        d = cfg().targets_path
+        try:
+            names = sorted(e.name for e in Path(d).iterdir() if e.is_dir())
+        except OSError as error:
+            die(strings.TARGETS_INVENTORY_UNREADABLE(dir=d, error=error))
+        if not names:
+            die(strings.TARGETS_NONE_FOUND(dir=d))
+    me = proc.this_machine()
+    if cfg().hostname(me).target and this_target() not in names:
+        die(strings.TARGETS_HOSTNAME_TARGET_UNKNOWN(hostname=me, target=this_target()))
     return names
 
 
@@ -128,7 +131,7 @@ def target_cmd(target: str, argv: list[str], sudo: bool = False,
     the deploy's master connection, or with `fresh` a new connection of its
     own, proving sshd admits one."""
     pre = ["sudo"] if sudo else []
-    if target == proc.this_machine():
+    if target == this_target():
         return [*pre, *argv]
     # The remote shell re-parses ssh's command line, hence the quoting.
     return ["ssh", *ssh_opts(fresh), ssh_address(target), *pre, *map(shlex.quote, argv)]
@@ -196,7 +199,7 @@ def parse_probe(stdout: str) -> Probe:
 def probe(name: str) -> Probe:
     """The target's running system and its provenance, in one round trip;
     running None when it cannot be read."""
-    if name == proc.this_machine():
+    if name == this_target():
         try:
             cur = str(Path(CURRENT_SYSTEM).readlink())
         except OSError:
@@ -222,7 +225,7 @@ def probe(name: str) -> Probe:
 def running_system(name: str, timeout: float = PROBE_TIMEOUT, fresh: bool = False) -> str | None:
     """The target's /run/current-system (`fresh`: over a new ssh connection),
     or None if it cannot be read."""
-    if name == proc.this_machine():
+    if name == this_target():
         try:
             return str(Path(CURRENT_SYSTEM).readlink())
         except OSError:
@@ -400,7 +403,7 @@ def copy_closure(target: str, paths: list[str], quiet: bool = False, fatal: bool
     sshopts = " ".join(ssh_opts())
     if target == b:
         return None  # built there
-    if target == proc.this_machine():
+    if target == this_target():
         if not b:
             return None
         # The outputs live on the store host: fetched for the local switch.

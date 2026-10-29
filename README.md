@@ -355,13 +355,10 @@ targets_arch = "x86_64-linux"
 ssh_address_template = "bluquark@{target}.home.bluquark.net"
 branch_prefix = "work/{machine}/"
 child_worktrees = ".claude/worktrees"
-
-[eval]
-parallel = "auto"
 precheck = "repo-lint"
 
-[build]
-store = { macbook = "chikuwa" }
+[hostnames.macbook]
+store = "chikuwa"
 
 # Automatically roll back if the target can no longer connect to the internet.
 [switch]

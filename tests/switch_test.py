@@ -399,29 +399,41 @@ def target_cases() -> None:
     assert targets.expand_targets(["@vps"], inv) == ["a", "b"]
     assert targets.expand_targets(["b", "@vps"], inv) == ["b", "a"]
     assert targets.expand_targets(["@lab", "c"], inv) == ["b", "c"]
-    env_store = os.environ.pop("NIXCONVOY_STORE", None)
-    try:
-        for build, want in (('[build]\nstore = "big"\n', "big"),
-                            ('[build]\nstore = "tester"\n', ""),
-                            ('[build]\nstore = ""\n', ""),
-                            ('[build]\nstore = { }\n', ""),
-                            ("", ""),
-                            ('[build]\nstore = { "*" = "big" }\n', "big"),
-                            ('[build]\nstore = { "*" = "big", tester = "tester" }\n', ""),
-                            ('[build]\nstore = { "*" = "big", tester = "other" }\n', "other"),
-                            ('[build]\nstore = { other = "big" }\n', ""),
-                            ('[build]\nbuilder = { "*" = "big", tester = "other" }\n', "other")):
-            config.set_cfg(config.parse(toml(build)))
-            assert config.store_host() == want, (build, config.store_host())
-        config.set_cfg(config.parse(toml('[build]\nstore = { "*" = "big" }\n')))
-        os.environ["NIXCONVOY_STORE"] = ""
-        assert config.store_host() == ""
-        os.environ["NIXCONVOY_STORE"] = "env"
-        assert config.store_host() == "env"
-    finally:
-        os.environ.pop("NIXCONVOY_STORE", None)
-        if env_store is not None:
-            os.environ["NIXCONVOY_STORE"] = env_store
+    # [build] store for every machine, a [hostnames.<hostname>] table's
+    # over it; a machine mapped to itself (by hostname or by its target)
+    # realises here.
+    for build, want in (('[build]\nstore = "big"\n', "big"),
+                        ('[build]\nstore = "tester"\n', ""),
+                        ('[build]\nstore = ""\n', ""),
+                        ("", ""),
+                        ('[build]\nstore = "big"\n[hostnames.tester]\nstore = "tester"\n', ""),
+                        ('[build]\nstore = "big"\n[hostnames.tester]\nstore = ""\n', ""),
+                        ('[build]\nstore = "big"\n[hostnames.tester]\nstore = "other"\n', "other"),
+                        ('[build]\nstore = "big"\n[hostnames.tester]\ntarget = "big"\n', ""),
+                        ('[hostnames.tester]\nstore = "other"\n', "other"),
+                        ('[hostnames.other]\nstore = "big"\n', "")):
+        config.set_cfg(config.parse(toml(build)))
+        assert config.store_host() == want, (build, config.store_host())
+    # The target this machine is: its hostname unless the table says.
+    for extra, want in (("", "tester"), ('[hostnames.tester]\ntarget = "box"\n', "box"),
+                        ('[hostnames.tester]\ntarget = ""\n', "tester"), ('[hostnames.other]\ntarget = "box"\n', "tester")):
+        config.set_cfg(config.parse(toml(extra)))
+        assert config.this_target() == want, (extra, config.this_target())
+    # Where the hostname was compared with a target's name, the target
+    # this machine is: run directly, the hostname's own name over ssh;
+    # the deploy's inventory names it or the deploy dies.
+    config.set_cfg(config.parse(toml('[targets.a]\n[targets.box]\n[hostnames.tester]\ntarget = "box"\n', targets_dir="")))
+    assert targets.target_cmd("box", ["true"]) == ["true"]
+    assert targets.target_cmd("tester", ["true"])[0] == "ssh" and targets.flake_target_names() == ["a", "box"]
+    config.set_cfg(config.parse(toml('[targets.a]\n[hostnames.tester]\ntarget = "box"\n', targets_dir="")))
+    assert "hostnames.tester.target names box" in dies(targets.flake_target_names)
+    config.set_cfg(config.parse(toml('[targets.a]\n', targets_dir="")))
+    assert targets.flake_target_names() == ["a"]  # the hostname itself need not be one
+    for extra, want in (("", None), ('[hostnames.tester]\nparallel_eval = "auto"\n', None),
+                        ('[hostnames.tester]\nparallel_eval = false\n', False),
+                        ('[hostnames.other]\nparallel_eval = false\n', None)):
+        config.set_cfg(config.parse(toml(extra)))
+        assert config.parallel_eval() is want, (extra, config.parallel_eval())
     config.set_cfg(config.parse(toml('[targets.a]\ntags = ["vps"]\n[targets.zz]\ntags = ["vps"]\n')))
     for bad in (["@nope"], ["zz"], ["@vps"]):
         try:
@@ -439,10 +451,14 @@ def target_cases() -> None:
     # The allowlist of before loads still, ignored.
     assert config.parse(toml('work_branches = ["work/tester/"]\n')).branch_prefix == "work/{machine}/"
     for bad_cfg, hint in ((toml('[targets.a]\ntag = ["vps"]\n'), "unknown key targets.a.tag"),
-                          (toml('[build]\nstore = { big = 3 }\n'), "build.store.big must be a string"),
+                          (toml('[build]\nstore = { big = "x" }\n'), "build.store is a machine name"),
                           (toml('[build]\nstore = 3\n'), "build.store is a machine name"),
-                          (toml('[build]\nbuilder = 3\n'), "build.builder is a machine name"),
-                          (toml('[build]\nstore = "a"\nbuilder = "a"\n'), "the same setting"),
+                          (toml('[build]\nbuilder = "a"\n'), "unknown key build.builder"),
+                          (toml('[hostnames.a]\nstore = 3\n'), "hostnames.a.store must be a string"),
+                          (toml('[hostnames.a]\ntarget = 3\n'), "hostnames.a.target must be a string"),
+                          (toml('[hostnames.a]\nparallel_eval = 1\n'), "hostnames.a.parallel_eval must be true, false"),
+                          (toml('[hostnames.a]\nparallel = true\n'), "unknown key hostnames.a.parallel"),
+                          (toml('[hostnames]\na = "x"\n'), "hostnames.a must be a table"),
                           (toml().replace("config_version = 1", "config_version = true"), "not supported"),
                           (toml('[build]\nunreachable_hint = "zzz"\n'), "unknown key build.unreachable_hint"),
                           (toml('[targets.a]\nlocal_only = true\n'), "unknown key targets.a.local_only"),
@@ -476,9 +492,8 @@ def target_cases() -> None:
                           (toml(branch_prefix="work/{{machine}}/"), "branch_prefix may hold"),
                           (toml(branch_prefix="w\u00f6rk/{machine}/"), "branch_prefix may hold"),
                           (toml().replace('child_worktrees = ".claude/worktrees"\n', ""), "child_worktrees is required"),
-                          (toml().replace('[eval]\nparallel = "auto"\n', ""), "eval is required"),
-                          (toml().replace('parallel = "auto"\n', ""), "eval.parallel is required"),
-                          (toml().replace('parallel = "auto"\n', 'parallel = "auto"\ncores = 2\n'), "unknown key eval.cores")):
+                          (toml('[eval]\nparallel = "auto"\n'), "[eval] is gone"),
+                          (toml("precheck = 1\n"), "precheck must be a string")):
         try:
             config.parse(bad_cfg)
         except config.ConfigError as e:
@@ -795,12 +810,11 @@ def guard_cases(d: Path) -> None:
 
 def toml(extra: str = "", precheck: str = "", **over: str) -> str:
     """A nixconvoy.toml with every required key (the defaults the scratch
-    repos use, `over` overriding), `extra` appended before the [eval] table
-    and `precheck` in it."""
+    repos use, `over` overriding) and `precheck`, `extra` appended."""
     keys = {"flake_dir": ".", "targets_dir": "hosts", "targets_arch": "x86_64-linux", "ssh_address_template": "{target}",
             "branch_prefix": "work/{machine}/", "child_worktrees": ".claude/worktrees", **over}
     return ("config_version = 1\n" + "".join(f'{k} = "{v}"\n' for k, v in keys.items())
-            + extra + '[eval]\nparallel = "auto"\n' + (f'precheck = "{precheck}"\n' if precheck else ""))
+            + (f'precheck = "{precheck}"\n' if precheck else "") + extra)
 
 
 def sh(cwd: Path, *args: str) -> str:
@@ -2964,7 +2978,7 @@ def init_cases(d: Path) -> None:
         assert (c.flake_dir, c.targets_dir, c.targets_arch) == ("nixos", "", "aarch64-linux"), c
         assert c.inventory == ["a", "b"] and c.target_root("a") is None
         assert c.ssh_template == me + "@{target}" and c.branch_prefix == "nixconvoy/", c
-        assert c.child_worktrees == ".claude/worktrees" and c.parallel_eval is None and not c.precheck
+        assert c.child_worktrees == ".claude/worktrees" and not c.hostnames and not c.precheck
         assert (c.remote, c.main_branch) == ("origin", "main"), c  # no remote: assumed
         assert set(c.targets) == {"a", "b"} and not c.target("a").dir
         text = (repo / "nixconvoy.toml").read_text()
