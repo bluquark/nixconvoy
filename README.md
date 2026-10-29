@@ -352,23 +352,41 @@ config_version = 1
 flake_dir = "nixos"
 targets_dir = "nixos/hosts"
 targets_arch = "x86_64-linux"
+
 ssh_address_template = "bluquark@{target}.home.bluquark.net"
-branch_prefix = "work/{local_hostname}/"
+
+# Prefix for all nixconvoy workbranches (visible in `git branch`).
+# {local_hostname} can be omitted for concision, if you only ever launch nixconvoy from one machine.
+branch_prefix = "nixconvoy/{local_hostname}/"
+
+# The subdirectory child worktrees are placed in.
+# I put it inside .claude to be compatible with nixconvoy's Claude Code plugin. 
 child_worktrees = ".claude/worktrees"
-# On my macbook, the arch is not "x86_64-linux" so use the minipc as builder
+
+# List of build machines with fallbacks if the earlier ones are unavailable.
+# The {local_hostname} is considered unavailable if it's the wrong CPU architecture (i.e. my Macbook).
 builders = ["{local_hostname}", "minipc"]
+
+# Precheck step that runs in parallel with eval.  Should be an executable from your PATH.
 precheck = "repo-lint"
 
-# All NixOS generations must accept fresh ssh connections and retain Internet access
+# Configure automatic rollback if after activating the new NixOS generation, if:
+# A) a fresh ssh connection from the host doesn't reach the target within 10s, or
+# B) the target cannot reach the internet
 [switch]
 auto_rollback_checks = [{ ssh_deadline_secs = 10 }, { internet = true }]
 
+# Targets are named by their flake.
 [targets.minipc]
+# This tag can be used in `nixconvoy deploy` using the @ notation
 tags = ["lan"]
 
-# My NixOS-based router must continue to provide Internet and DNS access to others
 [targets.router]
 [targets.router.switch]
+# This is a NixOS-based router/gateway providing NAT and DNS to my LAN.
+# Configure additional auto-rollback checks for it:
+# C) Routing still works (verified by the nixconvoy controller trying to reach the internet)
+# D) DNS still works (verified by custom bash script running as a one-shot after activation)
 auto_rollback_checks = [
   { routing = true },
   { bash = '''
