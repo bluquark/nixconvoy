@@ -108,14 +108,13 @@ class Entry(NamedTuple):
     url: str
 
 
-def primary(top: Path) -> Path:
+def primary(top: Path) -> Path | None:
     """The primary worktree of the repository `top` is a worktree of, whose
     .git is the common git dir: the main checkout, or `top` itself when
-    it is a clone of its own."""
+    it is a clone of its own.  None for a bare common dir, which no
+    worktree's directory holds."""
     common = git_common(top)
-    if common is None or common.name != ".git":
-        die(strings.SUBMODULE_NO_PRIMARY(top=top))
-    return common.parent
+    return common.parent if common is not None and common.name == ".git" else None
 
 
 def is_main(top: Path) -> bool:
@@ -125,9 +124,14 @@ def is_main(top: Path) -> bool:
 
 def main_checkouts() -> list[Path]:
     """The main checkouts reached from here: the primary worktree when it
-    is one, and the clones beside with the same origin that are."""
+    is one, and the clones beside with the same origin that are.  None
+    with no submodule declared here (nothing to look for)."""
     here = Path.cwd().resolve()
-    return [d for d in sorted({primary(here), *sibling_checkouts(here)}) if is_main(d)]
+    if not entries(here):
+        return []
+    main = primary(here)
+    found = {*sibling_checkouts(here), *([main] if main is not None else [])}
+    return [d for d in sorted(found) if is_main(d)]
 
 
 def pin_file_of(name: str, path: str) -> str:
@@ -565,16 +569,37 @@ def repository(sub: Sub, top: Path) -> Path:
     branch at that rev; origin's refs beyond its branches come with the
     first fetch)."""
     main = primary(top)
+    if main is None:
+        die(strings.SUBMODULE_NO_PRIMARY(top=top))
+    common = git_common(top)
+    assert common is not None
+    # Where the gitlink is: the primary worktree, else `top` itself (the
+    # submodule added on its branch, not landed yet: git then keeps the
+    # repository under the worktree's own modules dir, and the working
+    # tree is this checkout's).
+    if main != top.resolve() and not run(["git", "ls-files", "-s", "--", sub.path], cwd=str(main), check=False).stdout:
+        main = top.resolve()
     wt = main / sub.path
-    if cloned(sub) and (wt / ".git").exists():
-        return sub.repo
-    p = git("submodule", "update", "--quiet", "--init", "--", sub.path, cwd=str(main), check=False)
-    if p.returncode != 0 or not cloned(sub):
-        die(strings.SUBMODULE_INIT_FAILED(name=sub.name, primary=main, stderr=(p.stderr or "").strip()))
-    if is_main(main):
-        git("checkout", "--quiet", "-B", default_branch(sub.repo), "HEAD", cwd=str(wt))
+    # Two deploys meeting an uncloned submodule at once: one clones, the other finds it.
+    with common_state_path("submodule-init.lock", common).open("w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        if (wt / ".git").exists() and cloned(sub_of(sub.name, Entry(sub.path, ""), main)):
+            return sub_of(sub.name, Entry(sub.path, ""), main).repo
+        p = git("submodule", "update", "--quiet", "--init", "--", sub.path, cwd=str(main), check=False)
+        repo = sub_of(sub.name, Entry(sub.path, ""), main).repo
+        if p.returncode != 0 or not (repo / "HEAD").exists():
+            die(strings.SUBMODULE_INIT_FAILED(name=sub.name, primary=main, stderr=(p.stderr or "").strip()))
+        if is_main(main):
+            git("checkout", "--quiet", "-B", default_branch(repo), "HEAD", cwd=str(wt))
+        else:
+            # A checkout on a work branch (a clone, or the gitlink's own
+            # branch): the pinned rev on that branch, as `open --submodule`
+            # plants it, rather than a detached HEAD no deploy can carry.
+            wb = identity_of(main, branch_of(main)).wb
+            if wb is not None and rev_in(wt, f"refs/remotes/origin/{wb}") is None:
+                git("checkout", "--quiet", "-B", wb, "HEAD", cwd=str(wt))
     print(strings.SUBMODULE_CLONED(name=sub.name, dir=wt))
-    return sub.repo
+    return repo
 
 
 def union_rev(sub: Sub, top: Path, ours: str, theirs: str) -> str | None:
@@ -819,7 +844,7 @@ def create(name: str, wb: str) -> Path:
     origin = run(["git", "remote", "get-url", "origin"], cwd=str(repo), check=False).stdout.strip()
     if not same_repo(origin, entry.url):
         die(strings.SUBMODULE_ORIGIN_MISMATCH(name=name, repo=repo, origin=origin, url=entry.url,
-                                              primary=primary(top), path=entry.path))
+                                              primary=primary(top) or top, path=entry.path))
     git("worktree", "prune", cwd=str(repo), check=False)
     p = git("fetch", "--quiet", "origin", cwd=str(repo), check=False)
     if p.returncode != 0:
@@ -1027,25 +1052,29 @@ def catch_up_repos() -> bool:
 def catch_up_repo(sub: Sub, main: Path) -> str | None:
     """The main checkout's working tree of the submodule (worked in by
     nobody) brought onto the default branch at the rev the checkout pins
-    - so the gitlink there stays clean, and an evaluation of that tree
-    reads the pinned rev - or at the branch's tip as fetched when the pin
-    is not on it; its edits ride along (`checkout -B`, refused where they
-    would be overwritten).  One on another branch, holding commits of its
-    own or whose origin cannot be fetched is left alone (the commits
-    said).  The problem, or None."""
+    - so the gitlink there stays clean (a dirty one would ride the
+    checkout's next catch-up as a tmp commit, to conflict with a moved
+    pin), and an evaluation of that tree reads the pinned rev - or at
+    the branch's tip as fetched when the pin is unknown here; its edits
+    ride along (`checkout -B`, refused where they would be overwritten).
+    One on another branch or holding commits of its own is left alone
+    and said, one whose origin cannot be fetched left alone.  The
+    problem, or None."""
     if not fetch_once(sub.name, sub.repo):
         return None
     default = default_branch(sub.repo)
     upstream = f"refs/remotes/origin/{default}"
     d = str(sub.dir)
     pinned = pin_at("HEAD", sub.path, main)
-    want = (pinned if pinned and rev_in(sub.dir, f"{pinned}^{{commit}}") and is_ancestor(pinned, upstream, cwd=d)
-            else rev_in(sub.dir, upstream))
-    assert want is not None
+    want = pinned if pinned and rev_in(sub.dir, f"{pinned}^{{commit}}") else rev_in(sub.dir, upstream)
+    if want is None:
+        return strings.SUBMODULE_REPO_NO_DEFAULT(repo=sub.dir, name=sub.name, default=default)
     with repo_lock(sub.repo):  # another checkout's sweep, reaching the same repository
         cur = branch_at(sub.dir)
-        if (cur is not None and cur != default) or (cur == default and rev_in(sub.dir, "HEAD") == want):
+        if cur == default and rev_in(sub.dir, "HEAD") == want:
             return None
+        if cur is not None and cur != default:
+            return strings.SUBMODULE_REPO_OFF_DEFAULT(repo=sub.dir, name=sub.name, cur=cur, default=default)
         if not is_ancestor("HEAD", upstream, cwd=d):
             return strings.SUBMODULE_REPO_OWN_COMMITS(repo=sub.dir, name=sub.name, default=default)
         p = git("checkout", "--quiet", "-B", default, want, cwd=d, check=False)
@@ -1395,8 +1424,10 @@ def remove_one(sub: Sub) -> None:
     deinit`), its HEAD detached for the branch to go."""
     repo = sub.repo
     cur = branch_at(sub.dir)
-    gitdir = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-dir"], cwd=str(sub.dir))).resolve()
-    if gitdir == repo:
+    # A broken worktree (its repository moved away) answers nothing: removed as a linked one.
+    gitdir = run(["git", "rev-parse", "--path-format=absolute", "--git-dir"], cwd=str(sub.dir),
+                 check=False).stdout.strip()
+    if gitdir and Path(gitdir).resolve() == repo:
         top = out(["git", "rev-parse", "--show-toplevel"], cwd=str(sub.dir.parent))
         git("submodule", "deinit", "--quiet", "--force", "--", sub.path, cwd=top, check=False)
         head = rev_in(repo, "HEAD")

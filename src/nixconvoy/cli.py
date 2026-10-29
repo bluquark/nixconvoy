@@ -165,8 +165,8 @@ def dispatch() -> None:
         return
     if subcmd == "close":
         force = "--force" in flags
-        # One kind of name per call: a submodule's (declared, configured or
-        # not: never a worktree's), a path's, else a subagent worktree's.
+        # One kind of name per call: a submodule's (declared: never a
+        # worktree's), a path's, else a subagent worktree's.
         declared = names.gitmodule_names(Path.cwd())
         kinds = {"submodule" if n in declared else "path" if is_path(n) else "worktree" for n in given}
         if len(kinds) > 1:

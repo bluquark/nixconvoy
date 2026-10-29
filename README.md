@@ -394,12 +394,6 @@ tags = ["omnibin"]
 tags = ["vps"]
 [targets.hetzner2]
 tags = ["vps"]
-
-# External github projects I maintain that I deploy onto my homelab
-[submodules.ebook-reader]
-repo = "~/projects/japanese/ebook-reader"
-[submodules.home-widget]
-repo = "~/projects/android/home-widget"
 ```
 ## AGENTS.md
 
@@ -534,7 +528,7 @@ Nixconvoy has support for git submodules.  If you don't write your own software 
 
 Submodules are one of git's mechanisms for loading a dependency (whose source of truth is an external git repo) into one of your checkout's subdirectories.  This is particularly useful for developers who maintain a public repository and also run it as part of their private NixOS fleet (in my own environment, I use nixconvoy's submodule support to work on nixconvoy itself).  It can also be used for your private fork of a dependency --- although for that, git subtrees are a simpler alternative that also works.
 
-To start using submodules, first clone the dependency's git repo in one central location (submodules also have a single "main" checkout and multiple "worktree" checkouts).  In your main NixOS config repo, register your submodule in `nixconvoy.toml` and create a gitlink for it using `git submodule add --name <input> <url> <path>`.  Then, target the flake in your nix config to use that submodule directory instead of the usual public repository, using a relative path input (`path:./<path>`) with `inputs.self.submodules = true`.  After a submodule is registered with nixconvoy, do not use raw `git` commands to modify it.
+In your main NixOS config repo, create a gitlink for it using `git submodule add --name <input> <url> <path>`.  Then, target the flake in your nix config to use that submodule directory instead of the usual public repository, using a relative path input (`path:./<path>`) with `inputs.self.submodules = true`.  After a submodule is registered with nixconvoy, do not use raw `git` commands to modify it.
 
 Then, when you're ready to make a private change to it, open a nixconvoy worktree using `nixconvoy open`, then populate the subdirectory using `nixconvoy open --submodule`.  All the other features of nixconvoy compose nicely with submodules.  You can stage a change inside one and run `nixconvoy deploy` from the worktree root as usual.
 

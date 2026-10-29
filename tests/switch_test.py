@@ -2054,9 +2054,9 @@ def submodule_cases(d: Path) -> None:
         assert sh(ax, "rev-parse", "HEAD") == dep_main
         assert sh(main_wt, "rev-parse", "HEAD") == v1
         sh(main_wt, "switch", "--quiet", "-c", "aside")
-        with contextlib.redirect_stdout(io.StringIO()) as noted:
-            assert submodule.catch_up_repos()
-        assert sh(main_wt, "rev-parse", "HEAD") == v1 and not noted.getvalue()
+        with contextlib.redirect_stderr(io.StringIO()) as said:
+            assert not submodule.catch_up_repos()
+        assert sh(main_wt, "rev-parse", "HEAD") == v1 and "on aside, not main, left as it is" in said.getvalue()
         sh(main_wt, "switch", "--quiet", "main")
         with contextlib.redirect_stdout(io.StringIO()) as noted:
             assert submodule.catch_up_repos()  # the pin is still v1: settled, silent

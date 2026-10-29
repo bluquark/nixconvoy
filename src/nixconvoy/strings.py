@@ -632,6 +632,9 @@ SUBMODULE_CLONED = M("submodule {name}: cloned, {dir}")
 SUBMODULE_REPO_OWN_COMMITS = M("{repo} (submodule {name}): holds commits not on origin/{default}, left as it is; "
                                "`{TOOL} open --submodule {name}` is where {name} is worked on")
 SUBMODULE_REPO_AT = M("{default} at {rev}")
+SUBMODULE_REPO_OFF_DEFAULT = M("{repo} (submodule {name}): on {cur}, not {default}, left as it is "
+                               "(the main checkout's gitlink is dirty until it is back on {default})")
+SUBMODULE_REPO_NO_DEFAULT = M("{repo} (submodule {name}): origin/{default} is not here; fetched?")
 
 # --- submodule.py: open --submodule
 SUBMODULE_NOT_A_SUBMODULE = M("{name} is no submodule of this repository{hint}: `git submodule add --name {name} "
