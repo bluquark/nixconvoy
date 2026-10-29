@@ -40,6 +40,9 @@ let
     ${lib.optionalString isBash ''shellcheck --shell=bash "$scriptPath"''}
     cp "$scriptPath" $out
   '') checks;
+  # What a failing statement with nothing on stderr is reported by: its
+  # first line (held in a file: statement text in the runner's own script
+  # would meet its shellcheck).
   firstLine = c: lib.head (lib.filter (l: l != "") (lib.splitString "\n" c) ++ [ "" ]);
   checksApp = pkgs.writeShellApplication {
     name = "confirmed-switch-checks";
@@ -47,7 +50,7 @@ let
     runtimeInputs = tools;
     text = ''
       scripts=(${lib.concatMapStringsSep " " lib.escapeShellArg scripts})
-      names=(${lib.concatMapStringsSep " " (c: lib.escapeShellArg (firstLine c)) checks})
+      mapfile -t names <${pkgs.writeText "confirmed-switch-check-names" (lib.concatMapStrings (c: firstLine c + "\n") checks)}
       [ "''${#scripts[@]}" != 0 ] || exit 0
       replay() { cat "$1"; [ ! -s "$1" ] || [ -z "$(tail -c 1 "$1")" ] || echo; }
       tmp=$(mktemp -d)
