@@ -382,7 +382,7 @@ pid=$(systemctl show -p MainPID --value dnsmasq)
 
 [targets.windows-wsl]
 # Switched without checks: WSL networking isn't controlled by NixOS.
-switch = { auto_rollback_checks = [{ ssh = false }, { internet = false }] }
+switch = { auto_rollback_checks = false }
 # 'windows-wsl' does not have its own distinct domain/IP address
 ssh_address = "bluquark@windows.home.bluquark.net"
 tags = ["omnibin"]

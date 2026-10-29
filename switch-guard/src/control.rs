@@ -91,8 +91,8 @@ pub enum Query {
     },
     /// Monotonic milliseconds -> Now.
     Clock,
-    /// /run/current-system, over a new ssh connection: the proof that sshd
-    /// admits one -> System.
+    /// /run/current-system, over a new ssh connection (the policy's ssh
+    /// check: the proof that sshd admits one) -> System.
     Running {
         timeout_ms: Option<u64>,
     },
@@ -353,8 +353,9 @@ impl Machine {
                 })
             }
 
-            // One round of verification: a new ssh connection finds the
-            // target running the new system, its check passes (the internet
+            // One round of verification: a read of the running system (over
+            // a new ssh connection with the ssh check) finds the new one, the
+            // target's check passes (the internet
             // probe when configured, then the policy's checks),
             // and, with routing_check, this machine reaches the
             // internet too.

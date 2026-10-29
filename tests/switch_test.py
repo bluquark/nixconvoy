@@ -471,6 +471,7 @@ def target_cases() -> None:
                           (toml('[switch]\nauto_rollback_checks = [{ bash = true }]\n'), "auto_rollback_checks[0] is a table"),
                           (toml('[switch]\nauto_rollback_checks = [{ ssh = true }, { dns = true }]\n'), "checks[1] is a table"),
                           (toml('[switch]\nauto_rollback_checks = [{ ssh = true, internet = true }]\n'), "checks[0] is a table"),
+                          (toml('[switch]\nauto_rollback_checks = [{ internet = false }]\n'), "checks[0] strikes nothing"),
                           (toml(ssh_address_template="x@{host}"), "over {target} alone"),
                           (toml(branch_prefix="{host}-d"), "over {machine} alone"),
                           # No defaults: every scalar key is required.
@@ -508,12 +509,16 @@ def target_cases() -> None:
                           '{ bash = "fleet" }]\n'
                           '[targets.a.switch]\nauto_rollback_checks = [{ ssh = false }, { routing = true }, '
                           '{ bash = "one" }, { bash = false }, { bash = "two" }]\n'
-                          '[targets.b]\nswitch = { auto_rollback_checks = [{ ssh = false }, { internet = false }, '
+                          '[targets.b]\nswitch = { auto_rollback_checks = false }\n'
+                          '[targets.e]\nswitch = { auto_rollback_checks = [{ ssh = false }, { internet = false }, '
                           '{ bash = false }] }\n'))
     a, b, d = c.switch_policy("a"), c.switch_policy("b"), c.switch_policy("d")
     assert a.checks == (Check("internet"), Check("routing"), Check("bash", "one"), Check("bash", "two")), a
-    assert a.confirmed and a.deadline == 45 and not a.has("ssh") and a.script == "(\none\n)\n(\ntwo\n)", a
+    assert a.confirmed and a.deadline == 45 and not a.has("ssh") and a.script == "(\n:\none\n)\n(\n:\ntwo\n)", a
     assert b.checks == () and not b.confirmed and b.deadline == 45 and b.script == "", b
+    assert c.switch_policy("e") == b
+    assert config.parse(toml('[switch]\nauto_rollback_checks = false\n[targets.a.switch]\n'
+                             'auto_rollback_checks = [{ bash = "x" }]\n')).switch_policy("a").checks == (Check("bash", "x"),)
     assert d == c.switch and d.checks == (Check("ssh"), Check("internet"), Check("bash", "fleet")), d
     assert config.parse(toml()).switch.checks == (Check("ssh"),)
     assert config.parse(toml('[switch]\nauto_rollback_checks = []\n')).switch.checks == ()

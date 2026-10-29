@@ -49,7 +49,8 @@ class SwitchPolicy:
     # activation plus the verification must fit.
     deadline: int = 30
     # auto_rollback_checks: the fleet's, then the target's own appended (a
-    # `false` item of a kind strikes the fleet's of it).  Any: the switch
+    # `false` item of a kind strikes the fleet's of it; the key `false`
+    # altogether leaves none, whatever the fleet's).  Any: the switch
     # is confirmed (nix/kit.nix's helper arms a rollback timer, the
     # toplevel is activated with `test`, verified from here by each check,
     # then the profile set); none: plain, as nixos-rebuild switch would.
@@ -66,8 +67,8 @@ class SwitchPolicy:
     def script(self) -> str:
         """The bash checks, in order, as the one errexit script the kit
         carries: each in a subshell of its own, so one's early `exit 0` or
-        `set +e` reaches no other."""
-        return "\n".join(f"(\n{c.script}\n)" for c in self.checks if c.kind == "bash")
+        `set +e` reaches no other (the `:` keeps a blank one a subshell)."""
+        return "\n".join(f"(\n:\n{c.script}\n)" for c in self.checks if c.kind == "bash")
 
 
 @dataclass(frozen=True)
@@ -240,14 +241,14 @@ def _auto_bool(t: dict[str, object], k: str, where: str) -> bool | None:
     return v
 
 
-def _checks(v: object, where: str, base: tuple[Check, ...]) -> tuple[Check, ...]:
-    """An auto_rollback_checks list appended to `base` (the fleet's; the
-    built-in default for `[switch]` itself, which it replaces): each item
+def _checks(v: object, where: str, base: tuple[Check, ...] | None) -> tuple[Check, ...]:
+    """An auto_rollback_checks list appended to `base` (the fleet's; None
+    for `[switch]` itself, which replaces the built-in default): each item
     a table with one key of CHECK_KINDS - true (bash: the script) adds the
     check, false strikes `base`'s of that kind."""
     if not isinstance(v, list):
         raise ConfigError(strings.CONFIG_CHECKS(where=where))
-    kept = list(base)
+    kept = list(base or ())
     own: list[Check] = []
     for i, item in enumerate(v):
         at = f"{where}[{i}]"
@@ -257,6 +258,8 @@ def _checks(v: object, where: str, base: tuple[Check, ...]) -> tuple[Check, ...]
         if kind not in CHECK_KINDS:
             raise ConfigError(strings.CONFIG_CHECK_ITEM(where=at))
         if val is False:
+            if base is None:
+                raise ConfigError(strings.CONFIG_CHECK_STRIKE(where=at))
             kept = [c for c in kept if c.kind != kind]
         elif kind == "bash" and isinstance(val, str):
             own.append(Check(kind, val))
@@ -279,8 +282,10 @@ def _switch(t: dict[str, object], where: str, base: SwitchPolicy | None) -> Swit
     if isinstance(d, bool) or not isinstance(d, int) or d <= 0:
         raise ConfigError(strings.CONFIG_DEADLINE(where=where))
     checks = fleet.checks
-    if "auto_rollback_checks" in t:
-        checks = _checks(t["auto_rollback_checks"], f"{where}.auto_rollback_checks", fleet.checks if base else ())
+    if t.get("auto_rollback_checks") is False:
+        checks = ()
+    elif "auto_rollback_checks" in t:
+        checks = _checks(t["auto_rollback_checks"], f"{where}.auto_rollback_checks", fleet.checks if base else None)
     return SwitchPolicy(deadline=d, checks=checks)
 
 
