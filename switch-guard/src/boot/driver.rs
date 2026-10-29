@@ -489,13 +489,28 @@ fn entry(s: &Settings) -> String {
     String::from_utf16_lossy(&units).trim_end_matches('\0').to_string()
 }
 
+/// Whether the ESP shows the counter taken off the booted entry: nothing
+/// under its counted name, the uncounted name in its place.  The rename
+/// read back rather than taken from the unit that did it, which a switch
+/// stops and starts again.
+fn blessed_on_esp(s: &Settings, entry: &str) -> bool {
+    let counted = count_file(&s.esp, entry);
+    let Some(good) = counted.file_name().and_then(|n| n.to_str()).and_then(Stub::uncounted) else { return false };
+    !counted.exists() && counted.with_file_name(good).exists()
+}
+
+/// The file LoaderBootCountPath names (`\EFI\Linux\<stub>`), on the ESP.
+fn count_file(esp: &Path, entry: &str) -> PathBuf {
+    esp.join(entry.trim_start_matches('\\').replace('\\', "/"))
+}
+
 /// The judge: arms the hardware watchdog and reboot-on-panic as soon as
 /// D-Bus is up, reboots when the gate fails or will never run, and disarms
 /// once systemd-bless-boot has removed the counter.
 fn run_watch(s: &Settings) -> i32 {
     let clock = Clock::new(s);
     let entry = entry(s);
-    if unit_state(s, BLESS).0 == "active" {
+    if unit_state(s, BLESS).0 == "active" || blessed_on_esp(s, &entry) {
         say(&format!(text!(boot_already_blessed), entry = entry));
         return 0;
     }
@@ -514,6 +529,7 @@ fn run_watch(s: &Settings) -> i32 {
     say(&format!(text!(boot_assessing), entry = entry, watchdog = s.runtime_watchdog, deadline = s.deadline));
     loop {
         let bless = match unit_state(s, BLESS) {
+            _ if blessed_on_esp(s, &entry) => Bless::Active,
             (a, _) if a == "active" => Bless::Active,
             (a, _) if a == "failed" => Bless::Failed,
             (a, false) if a == "inactive" => Bless::Gone,
@@ -576,5 +592,17 @@ pub fn main(args: &[String]) -> i32 {
             warn(USAGE);
             2
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn count_file_is_the_variable_on_the_esp() {
+        let esp = Path::new("/boot");
+        assert_eq!(count_file(esp, r"\EFI\Linux\x+1-1.efi"), PathBuf::from("/boot/EFI/Linux/x+1-1.efi"));
+        assert_eq!(count_file(esp, ""), PathBuf::from("/boot"));
     }
 }

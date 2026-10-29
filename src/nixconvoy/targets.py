@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from . import proc, strings
-from .config import cfg, store_host, this_target
+from .config import builder_host, cfg, this_target
 from .proc import die, load_json, run
 
 # Seconds one probe of a target may take, so a stalled ssh session holds
@@ -54,7 +54,7 @@ SSH_KEEPALIVE = ("-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3")
 # Seconds `nix store info` or `nix config show` may take on the builder
 # (well under 0.1 s): a longer wait means a stuck daemon or connection.
 BUILDER_TIMEOUT = 10
-# What the first ssh to a store host may add: it opens the deploy's master
+# What the first ssh to a builder may add: it opens the deploy's master
 # connection (ConnectTimeout 8, the key exchange, nix's own start).
 CONNECT_GRACE = 20
 # How the build runs where the daemon does not trust the user: as root,
@@ -279,7 +279,7 @@ def sandbox_opts(dry_run: list[str], drvs: list[str]) -> tuple[str, ...]:
 
 def store_info(prefix: tuple[str, ...], via: tuple[str, ...]) -> dict[str, object] | str:
     """What `nix store info --json` reports through `via` (the ssh prefix
-    reaching the store host, empty here) with `prefix` (SUDO or nothing)
+    reaching the builder, empty here) with `prefix` (SUDO or nothing)
     before nix, or the failure text.  A nix without the verb (before 2.19,
     Lix) is asked by its old name, `nix store ping`."""
     t = BUILDER_TIMEOUT + (CONNECT_GRACE if via else 0)
@@ -316,7 +316,7 @@ def builder_prefix(via: tuple[str, ...]) -> list[str] | str:
     """What the build phase's `nix` runs under through `via`: nothing when
     the daemon trusts the user (store_info), BUILD_OPTS being honoured from
     a trusted user alone, else SUDO, proven by the same probe as root.  The
-    failure text when the user is neither (or the probe fails: a store host
+    failure text when the user is neither (or the probe fails: a builder
     unreachable, its nix unusable); once per builder for the run."""
     info = store_info((), via)
     if isinstance(info, str):
@@ -334,7 +334,7 @@ def builder_prefix(via: tuple[str, ...]) -> list[str] | str:
 
 def build_cmd(opts: tuple[str, ...], via: list[str]) -> list[str] | str:
     """The `nix build` prefix the .drvs follow, run through `via` (the ssh
-    prefix reaching the store host, empty here) under builder_prefix, or
+    prefix reaching the builder, empty here) under builder_prefix, or
     the failure text."""
     pre = builder_prefix(tuple(via))
     if isinstance(pre, str):
@@ -366,11 +366,11 @@ def build_on(host: str, drvs: list[str], what: str,
 
 def build_drvs(drvs: list[str], what: str, opts: tuple[str, ...] = (),
                capture: bool = False) -> str | None:
-    """Realise `drvs` in the store host's store when set, else here.  The failure
+    """Realise `drvs` in the builder's store when set, else here.  The failure
     text (naming `what`, with the build output when `capture` kept it off
     the terminal) or None; the caller dies, since this also runs on the
     precheck thread."""
-    b = store_host()
+    b = builder_host()
     if b:
         return build_on(b, drvs, what, opts, capture)
     build = build_cmd(opts, [])
@@ -405,14 +405,14 @@ def copy_closure(target: str, paths: list[str], quiet: bool = False, fatal: bool
         if fatal:
             die(msg)
         return msg
-    b = store_host()
+    b = builder_host()
     sshopts = " ".join(ssh_opts())
     if target == b:
         return None  # built there
     if target == this_target():
         if not b:
             return None
-        # The outputs live on the store host: fetched for the local switch.
+        # The outputs live on the builder: fetched for the local switch.
         print(strings.TARGETS_FETCHING_CLOSURE(host=b))
         p = run(["nix", "copy", "--no-check-sigs", "--from", f"ssh://{ssh_address(b)}", *paths],
                 env={"NIX_SSHOPTS": sshopts}, check=False, capture=quiet, merged=True)
@@ -428,7 +428,7 @@ def copy_closure(target: str, paths: list[str], quiet: bool = False, fatal: bool
     # LAN a straight copy beats any download and per-path probe.
     subst = ["-s"] if off_lan(tgt) else []
     if b:
-        # The outputs live on the store host, not here.
+        # The outputs live on the builder, not here.
         there = shlex.quote(" ".join(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *SSH_KEEPALIVE]))
         p = run(["ssh", *ssh_opts(), ssh_address(b),
                  f"NIX_SSHOPTS={there} nix copy {' '.join(subst)} --to ssh://{tgt} {' '.join(paths)}"],
@@ -443,19 +443,19 @@ def copy_closure(target: str, paths: list[str], quiet: bool = False, fatal: bool
     return None
 
 
-def check_store() -> None:
-    """Fail before any nix work when a store host is set but cannot build:
+def check_builder() -> None:
+    """Fail before any nix work when a builder is set but cannot build:
     unreachable, or its daemon neither trusting the user nor running nix
     as root (builder_prefix), rather than on ssh's own timeout or nix's
-    ignored-setting warning deep in a build - the reach check a store host
+    ignored-setting warning deep in a build - the reach check a builder
     always had, now also proving it can build.  This machine's own daemon
     is asked once a build comes (build_cmd)."""
-    b = store_host()
+    b = builder_host()
     if not b:
         return
     pre = builder_prefix(("ssh", *ssh_opts(), ssh_address(b)))
     if isinstance(pre, str):
-        die(strings.TARGETS_STORE_HOST_UNUSABLE(host=b, problem=pre))
+        die(strings.TARGETS_BUILDER_UNUSABLE(host=b, problem=pre))
 
 
 def rejected_generation(target: str, toplevel: str) -> str | None:

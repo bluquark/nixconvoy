@@ -155,8 +155,8 @@ def work_shape() -> str:
 
 @functools.cache
 def shape_re(shape: str) -> re.Pattern[str]:
-    """`shape` as a prefix pattern, {machine} in it any one path segment."""
-    return re.compile("[^/]+".join(re.escape(p) for p in shape.format(machine="\0").split("\0")))
+    """`shape` as a prefix pattern, {local_hostname} in it any one path segment."""
+    return re.compile("[^/]+".join(re.escape(p) for p in shape.format(local_hostname="\0").split("\0")))
 
 
 def listed(name: str, shape: str | None = None) -> bool:
@@ -165,7 +165,7 @@ def listed(name: str, shape: str | None = None) -> bool:
 
 
 def this_prefix() -> str:
-    return cfg().branch_prefix.format(machine=proc.this_machine())
+    return cfg().branch_prefix.format(local_hostname=proc.this_machine())
 
 
 def owned(name: str) -> bool:
@@ -291,7 +291,7 @@ def note_prefix(top: Path) -> None:
         c = config.load(top)
     except config.ConfigError:
         return
-    for name, text in (("branch-prefix", c.branch_prefix.format(machine=proc.this_machine())),
+    for name, text in (("branch-prefix", c.branch_prefix.format(local_hostname=proc.this_machine())),
                        ("main-ref", c.names.main_short)):
         with contextlib.suppress(OSError):
             p = common_state_path(name, common)

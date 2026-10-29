@@ -5,7 +5,7 @@ switch-guard crate's are in switch-guard/src/strings.rs.
 
 A message is a template over named fields, filled by calling it -
 LAND_NO_MSG_FILE(wb=wb) - and the vocabulary below fills itself ({TOOL},
-{CONFIG_FILE}, ...).  A literal brace is doubled: {{machine}}.  A text
+{CONFIG_FILE}, ...).  A literal brace is doubled: {{local_hostname}}.  A text
 with no fields at all is a plain str, used as it is.  Edit the wording
 freely; keep each {field}."""
 
@@ -453,7 +453,7 @@ TARGETS_FETCHING_CLOSURE = M("fetching the closure from {host}...")
 TARGETS_FETCH_CLOSURE_FAILED = M("fetching the closure from {host} failed; {NOTHING_DONE} - the changes are still staged{detail}")
 TARGETS_COPYING_CLOSURE = M("copying closure to {target}...")
 TARGETS_COPY_CLOSURE_FAILED = M("copying the closure to {target} failed; {NOTHING_DONE} - the changes are still staged{detail}")
-TARGETS_STORE_HOST_UNUSABLE = M("store host {host}: {problem}; {NOTHING_DONE}")
+TARGETS_BUILDER_UNUSABLE = M("builder {host}: {problem}; {NOTHING_DONE}")
 TARGETS_ESP_SCAN_FAILED = M("could not scan {target}'s ESP for rejected generations (exit {code}); {NOTHING_DONE}")
 TARGETS_DRY_ACTIVATE_FAILED = M("dry-activating the new system on {target} failed (exit {code}); {NOTHING_DONE}{detail}")
 TARGETS_WOULD = M("  {target}: would {verb} {units}")
@@ -515,8 +515,8 @@ INIT_SYSTEM_GUESSED = "guessed"
 INIT_TOML_REMOTE = "# The remote the work branches are pushed to and main is landed on, and main's name there."
 INIT_TOML_BRANCH_PREFIX = M(
     "# A checkout's work branch is <branch_prefix><leaf>, `open <path>` naming it after the path.\n"
-    "# {{machine}} in the prefix is this machine's hostname, a namespace per machine when you want one.\n"
-    "# Every branch shaped so ({{machine}} any hostname) is a work branch {TOOL} unions into a deploy;\n"
+    "# {{local_hostname}} in the prefix is this machine's hostname, a namespace per machine when you want one.\n"
+    "# Every branch shaped so ({{local_hostname}} any hostname) is a work branch {TOOL} unions into a deploy;\n"
     "# a pushed branch shaped otherwise is ignored.")
 INIT_TOML_CHILD_WORKTREES = M(
     "# Child worktrees are an optional feature of {TOOL} that can be used by hand if desired,\n"
@@ -526,15 +526,14 @@ INIT_TOML_CHILD_WORKTREES = M(
 INIT_TOML_PRECHECK = M("# Optional: a flake check (checks.<targets_arch>.<name>) proven before any build{these}.")
 INIT_TOML_PRECHECK_THESE = M("; this flake's: {checks}")
 INIT_TOML_BUILD = (
-    "# Optional: realise the closures in another machine's store (a target's name, or one\n"
-    "# ~/.ssh/config knows); that machine's nix daemon builds them or hands them to its own\n"
-    "# remote builders.  A machine mapped to itself realises locally.\n"
-    "# [build]\n"
-    "# store = \"bigbox\"")
+    "# The machine the closures are realised on (a target's name, or one ~/.ssh/config knows),\n"
+    "# from which they are copied to the targets; its nix daemon builds them or hands them to its\n"
+    "# own remote builders.  {local_hostname} is this machine's hostname: realise locally.\n"
+    "builder = \"{local_hostname}\"")
 INIT_TOML_HOSTNAMES = M(
     "# Optional: what {TOOL} does differently on one machine, by the hostname it runs on.\n"
     "# [hostnames.laptop]\n"
-    "# store = \"bigbox\"        # this machine's store host, over [build] store (\"\": realise here)\n"
+    "# builder = \"bigbox\"      # this machine's builder, over the top-level builder\n"
     "# target = \"workstation\"  # the target this machine is, when its hostname is not that name\n"
     "# parallel_eval = \"auto\"  # Determinate Nix's parallel evaluation: true, false or \"auto\" (when nix has it)")
 INIT_TOML_SWITCH = M(
@@ -758,6 +757,7 @@ CONFIG_NOT_A_STRING = M("{where}.{key} must be a string")
 CONFIG_NOT_STRINGS = M("{where}.{key} must be a list of strings")
 CONFIG_NOT_AUTO_BOOL = M('{where}.{key} must be true, false or "auto"')
 CONFIG_NOT_A_TEMPLATE = M("{CONFIG_FILE}: {key} is a template over {{{placeholder}}} alone ({error!r})")
+CONFIG_EMPTY_TEMPLATE = M("{CONFIG_FILE}: {key} is a template over {{{placeholder}}}, not empty")
 CONFIG_DEADLINE = M("{CONFIG_FILE}: {where}.ssh_deadline_secs is a number of seconds, above 0 (auto_rollback_checks = "
                     "false switches plainly)")
 CONFIG_CHECK_DEADLINE_TWICE = M("{CONFIG_FILE}: {where} is a second ssh_deadline_secs item: one per list (a target's "
@@ -773,9 +773,9 @@ CONFIG_CHECK_STRIKE = M("{CONFIG_FILE}: {where} strikes nothing: [switch] has no
 CONFIG_CHECK_ITEM = M("{CONFIG_FILE}: {where} is a table with one key: ssh_deadline_secs = <seconds>, internet or "
                       "routing = true, or bash = \"...\" (a script); = false strikes the fleet's checks of that kind")
 CONFIG_WORK_BRANCHES_IGNORED = M("note: {CONFIG_FILE}: work_branches is ignored (a work branch is any branch shaped like "
-                                 "branch_prefix, {{machine}} in it any hostname): drop the line")
+                                 "branch_prefix, {{local_hostname}} in it any hostname): drop the line")
 CONFIG_BRANCH_PREFIX_CHARS = M("{CONFIG_FILE}: branch_prefix may hold ASCII letters, digits, '.', '-', '_', '/' and "
-                               "{{machine}} only: {branch_prefix!r}")
+                               "{{local_hostname}} only: {branch_prefix!r}")
 CONFIG_CHILD_WORKTREES = M("{CONFIG_FILE}: child_worktrees is a directory inside the checkout")
 CONFIG_REMOTE = M("{CONFIG_FILE}: remote is a git remote's name (letters, digits, '.', '-', '_', "
                   "not starting with '-'), not {remote!r}")
@@ -783,8 +783,6 @@ CONFIG_MAIN_BRANCH = M("{CONFIG_FILE}: main_branch is a branch's name (main, not
                        "not {main_branch!r}")
 CONFIG_EVAL_GONE = M("{CONFIG_FILE}: [eval] is gone: precheck is a top-level key, parallel is a "
                      "[hostnames.<hostname>] table's parallel_eval")
-CONFIG_STORE_TYPE = M("{CONFIG_FILE}: build.store is a machine name; a [hostnames.<hostname>] table's "
-                      "store sets one machine's")
 CONFIG_TARGET_DIR = M("{CONFIG_FILE}: targets.{name}.dir is a directory inside the repository, "
                       "relative to its root, not {dir!r}")
 CONFIG_TARGET_DIR_ROOT = M("{CONFIG_FILE}: targets.{name}.dir names the repository root: leave it out instead")

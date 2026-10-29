@@ -16,6 +16,11 @@ fn parses_stub_names() {
     assert_eq!(p("nixos-generation-12-ab+0-2.efi"), Some(Stub { gen: 12, tries_left: Some(0) }));
     assert_eq!(p("nixos-generation-12-ab+10-1.efi"), Some(Stub { gen: 12, tries_left: Some(10) }));
     assert_eq!(p("systemd-bootx64.efi"), None);
+    let u = Stub::uncounted;
+    assert_eq!(u("nixos-generation-12-ab+1-1.efi").as_deref(), Some("nixos-generation-12-ab.efi"));
+    assert_eq!(u("nixos-generation-12-ab+2.efi").as_deref(), Some("nixos-generation-12-ab.efi"));
+    assert_eq!(u("nixos-generation-12-ab.efi"), None);
+    assert_eq!(u("nixos-generation-12-ab+2"), None);
 }
 
 /// The ESP as the install sees it: lzbt keeps exactly the generations it

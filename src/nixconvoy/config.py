@@ -98,8 +98,8 @@ class HostnameConfig:
     # name: that target is probed, built for and switched here, without
     # ssh.  None: the hostname itself.
     target: str | None = None
-    # The store host for this machine, over `[build] store`.
-    store: str | None = None
+    # This machine's builder, over the top-level builder.
+    builder: str | None = None
     # Determinate Nix's parallel evaluation (builtins.parallel, --eval-cores):
     # None is "auto", on when the nix here knows the feature.
     parallel_eval: bool | None = None
@@ -116,12 +116,12 @@ class Config:
     # The targets' system (checks.<targets_arch>.<precheck> is the precheck).
     targets_arch: str
     # A target's ssh address (user@name): nixconvoy.toml's
-    # ssh_address_template, over {target}; the store host is addressed through it too.
+    # ssh_address_template, over {target}; the builder is addressed through it too.
     ssh_template: str
     # A checkout owns "<prefix><leaf>", its subagent worktrees "<prefix><leaf>-<name>"
-    # (the main checkout's "<prefix>main-<name>"); {machine}, when the
+    # (the main checkout's "<prefix>main-<name>"); {local_hostname}, when the
     # template has it, is this machine's hostname.  Also the shape of every
-    # work branch nixconvoy unions, {machine} standing for any hostname
+    # work branch nixconvoy unions, {local_hostname} standing for any hostname
     # (checkout.listed, the plan cores' `listed`): a pushed branch not
     # shaped so is ignored.
     branch_prefix: str
@@ -130,6 +130,14 @@ class Config:
     # into .git/info/exclude); any worktree nested in a checkout is one of
     # its children, wherever it was made.
     child_worktrees: str
+    # The machine the closures are realised on, unless the hostname's
+    # table says otherwise; {local_hostname} in it is this machine's
+    # hostname, and a machine mapped to itself (by hostname or by its
+    # target) realises them here.  Its nix daemon builds them or hands
+    # them on to its own remote builders (nix.conf's builders), and the
+    # closures are copied to the targets from it.  Addressed as a target
+    # (ssh_address).
+    builder: str
     # The remote origin/main and the work branches live on, and main's name
     # there: `remote` and `main_branch` (origin and main unless set).
     remote: str = "origin"
@@ -137,13 +145,6 @@ class Config:
     # precheck: a flake check (checks.<targets_arch>.<precheck>) proven
     # before any build; empty is none.
     precheck: str = ""
-    # [build] store: the machine whose store the closures are realised in,
-    # unless the hostname's table says otherwise; a machine mapped to
-    # itself, or to nothing, realises them here.  Its nix daemon builds
-    # them or hands them on to its own remote builders (nix.conf's
-    # builders), and the closures are copied to the targets from it.
-    # Addressed as a target (ssh_address).
-    store: str = ""
     hostnames: dict[str, HostnameConfig] = field(default_factory=dict)
     # [switch]: every target's switch policy unless its table overrides.
     switch: SwitchPolicy = field(default_factory=SwitchPolicy)
@@ -172,7 +173,7 @@ class Config:
     def inventory(self) -> list[str]:
         """The targets `[targets.<name>]` names; empty with targets_dir set
         (targets.flake_target_names lists its subdirectories then).  A
-        store host that is no target has no table: the ssh address
+        builder that is no target has no table: the ssh address
         template (or ~/.ssh/config) addresses it."""
         return [] if self.targets_dir else sorted(self.targets)
 
@@ -315,15 +316,18 @@ _noted_work_branches: list[bool] = []
 _noted_submodules: list[bool] = []
 
 
-def _template(t: dict[str, object], k: str, placeholder: str) -> str:
-    """A required template setting, proven here to format with
-    `placeholder` alone, so a stale placeholder fails as a ConfigError
-    rather than in a probe."""
-    v = _str(t, k, CONFIG_FILE, None)
+def _template(t: dict[str, object], k: str, placeholder: str, where: str = CONFIG_FILE) -> str:
+    """A required, non-empty template setting, proven here to format
+    with `placeholder` alone, so a stale placeholder fails as a
+    ConfigError rather than in a probe."""
+    v = _str(t, k, where, None)
+    key = k if where == CONFIG_FILE else f"{where}.{k}"
+    if not v:
+        raise ConfigError(strings.CONFIG_EMPTY_TEMPLATE(key=key, placeholder=placeholder))
     try:
         v.format(**{placeholder: "x"})
     except (KeyError, IndexError, ValueError) as e:
-        raise ConfigError(strings.CONFIG_NOT_A_TEMPLATE(key=k, placeholder=placeholder, error=e)) from e
+        raise ConfigError(strings.CONFIG_NOT_A_TEMPLATE(key=key, placeholder=placeholder, error=e)) from e
     return v
 
 
@@ -336,7 +340,7 @@ def parse(text: str) -> Config:
     if isinstance(version, bool) or version != 1:
         raise ConfigError(strings.CONFIG_VERSION(version=version))
     known = {"config_version", "flake_dir", "targets_dir", "targets_arch", "ssh_address_template", "branch_prefix",
-             "child_worktrees", "remote", "main_branch", "precheck", "build", "hostnames", "switch", "targets",
+             "child_worktrees", "builder", "remote", "main_branch", "precheck", "hostnames", "switch", "targets",
              "submodules", "work_branches"}
     if "work_branches" in doc and not _noted_work_branches:
         # The allowlist this once had, superseded by branch_prefix's shape:
@@ -359,35 +363,30 @@ def parse(text: str) -> Config:
     targets_dir = _str(doc, "targets_dir", CONFIG_FILE)
     targets_arch = _str(doc, "targets_arch", CONFIG_FILE, None)
     ssh_template = _template(doc, "ssh_address_template", "target")
-    branch_prefix = _template(doc, "branch_prefix", "machine")
-    # ASCII, and braces only as {machine}: the nix side (a deploy-time
+    branch_prefix = _template(doc, "branch_prefix", "local_hostname")
+    # ASCII, and braces only as {local_hostname}: the nix side (a deploy-time
     # regex over it) and the shape matchers read it verbatim.
-    if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch_prefix.replace("{machine}", "")):
+    if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch_prefix.replace("{local_hostname}", "")):
         raise ConfigError(strings.CONFIG_BRANCH_PREFIX_CHARS(branch_prefix=branch_prefix))
     children = _str(doc, "child_worktrees", CONFIG_FILE, None).strip("/")
     if not children or ".." in children.split("/"):
         raise ConfigError(strings.CONFIG_CHILD_WORKTREES())
+    builder = _template(doc, "builder", "local_hostname")
     remote = _str(doc, "remote", CONFIG_FILE, "origin")
     if not valid_remote(remote):
         raise ConfigError(strings.CONFIG_REMOTE(remote=remote))
     main_branch = _str(doc, "main_branch", CONFIG_FILE, "main")
     if not valid_branch(main_branch, remote):
         raise ConfigError(strings.CONFIG_MAIN_BRANCH(remote=remote, main_branch=main_branch))
-    build = _table(doc.get("build", {}), "build")
-    for k in build:
-        if k not in ("store",):
-            raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"build.{k}"))
-    if not isinstance(build.get("store", ""), str):
-        raise ConfigError(strings.CONFIG_STORE_TYPE())
     hostnames: dict[str, HostnameConfig] = {}
     for name, h in _table(doc.get("hostnames", {}), "hostnames").items():
         t = _table(h, f"hostnames.{name}")
         for k in t:
-            if k not in ("target", "store", "parallel_eval"):
+            if k not in ("target", "builder", "parallel_eval"):
                 raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"hostnames.{name}.{k}"))
         hostnames[name] = HostnameConfig(
             target=_str(t, "target", f"hostnames.{name}") or None,
-            store=_str(t, "store", f"hostnames.{name}") if "store" in t else None,
+            builder=_template(t, "builder", "local_hostname", f"hostnames.{name}") if "builder" in t else None,
             parallel_eval=_auto_bool(t, "parallel_eval", f"hostnames.{name}") if "parallel_eval" in t else None)
     switch = _switch(_table(doc.get("switch", {}), "switch"), "switch", None)
     targets: dict[str, TargetConfig] = {}
@@ -415,10 +414,10 @@ def parse(text: str) -> Config:
         ssh_template=ssh_template,
         branch_prefix=branch_prefix,
         child_worktrees=children,
+        builder=builder,
         remote=remote,
         main_branch=main_branch,
         precheck=_str(doc, "precheck", CONFIG_FILE),
-        store=_str(build, "store", "build"),
         hostnames=hostnames,
         switch=switch,
         targets=targets,
@@ -499,12 +498,12 @@ def this_target() -> str:
     return cfg().hostname(me).target or me
 
 
-def store_host() -> str:
-    """The machine whose store the closures are realised in: this
-    hostname's `store`, else `[build] store`; empty means here."""
+def builder_host() -> str:
+    """The machine the closures are realised on: this hostname's
+    `builder`, else the top-level one; empty means here."""
     me = proc.this_machine()
     h = cfg().hostname(me)
-    b = cfg().store if h.store is None else h.store
+    b = (cfg().builder if h.builder is None else h.builder).format(local_hostname=me)
     return "" if b in (me, this_target()) else b
 
 

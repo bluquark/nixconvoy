@@ -83,6 +83,13 @@ impl Stub {
         };
         Some(Stub { gen, tries_left })
     }
+
+    /// `name` with its counter taken off: what systemd-bless-boot renames
+    /// a counted stub to.  None for a name carrying no counter.
+    pub fn uncounted(name: &str) -> Option<String> {
+        let (base, _) = name.strip_suffix(".efi")?.split_once('+')?;
+        Some(format!("{base}.efi"))
+    }
 }
 
 /// One line of the boot log: when a boot began, and the generation it booted

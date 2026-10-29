@@ -353,16 +353,17 @@ flake_dir = "nixos"
 targets_dir = "nixos/hosts"
 targets_arch = "x86_64-linux"
 ssh_address_template = "bluquark@{target}.home.bluquark.net"
-branch_prefix = "work/{machine}/"
+branch_prefix = "work/{local_hostname}/"
 child_worktrees = ".claude/worktrees"
+builder = "{local_hostname}"
 precheck = "repo-lint"
 
-# On my macbook, the arch is not "x86_64-linux" so use the minipc as NixOS store and builder
+# On my macbook, the arch is not "x86_64-linux" so use the minipc as builder
 [hostnames.macbook]
-store = "minipc"
+builder = "minipc"
 
 # My Windows's machine's hostname doesn't match the WSL NixOS target name
-[hostname.windows11]
+[hostnames.windows11]
 target = "windows-wsl"
 
 # All NixOS generations must accept fresh ssh connections and retain Internet access

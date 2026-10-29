@@ -244,6 +244,9 @@ in
       restartIfChanged = false;
       serviceConfig = {
         Type = "exec";
+        # Active once done: a switch starts multi-user.target's inactive
+        # wants again, and a boot is judged once.
+        RemainAfterExit = true;
         ExecStart = run "watch";
         EnvironmentFile = lib.mkIf (cfg.noticeEnvironmentFile != null) cfg.noticeEnvironmentFile;
       };

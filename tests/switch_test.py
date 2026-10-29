@@ -332,7 +332,7 @@ def builder_cases() -> None:
     upstream's 0/1; a store not saying), SUDO when it does not and nix as
     root is trusted, refused with the probe's failure otherwise; a nix
     without `store info` asked by `store ping`; build_cmd carries the
-    prefix (with ROOT_NIX), check_store the refusal for a store host alone."""
+    prefix (with ROOT_NIX), check_builder the refusal for a builder alone."""
     Reply = tuple[int, str, str]
     cmds: list[list[str]] = []
 
@@ -367,25 +367,25 @@ def builder_cases() -> None:
     try:
         for replies, want in cases:
             targets.builder_prefix.cache_clear()
-            config.set_cfg(config.parse(toml('[build]\nstore = "big"\n')))
+            config.set_cfg(config.parse(toml(builder="big")))
             with mock.patch.object(targets, "run", fake(replies)):
                 via = ["ssh", "me@big"]
                 if isinstance(want, str):
-                    assert want in dies(targets.check_store), (replies, dies(targets.check_store))
+                    assert want in dies(targets.check_builder), (replies, dies(targets.check_builder))
                     assert want in str(targets.build_cmd((), via)), replies
                 else:
-                    targets.check_store()
+                    targets.check_builder()
                     assert targets.builder_prefix(tuple(via)) == want, (replies, targets.builder_prefix(tuple(via)))
                     assert targets.build_cmd((), via) == [*want, "nix", *(targets.ROOT_NIX if want else ()), "build",
                                                           "--no-link", *targets.BUILD_OPTS]
-        # Without a store host nothing is asked before a build comes; the
+        # Without a builder nothing is asked before a build comes; the
         # local probe then carries NIX_CONFIG through sudo.
         targets.builder_prefix.cache_clear()
         config.set_cfg(config.parse(toml()))
         run = fake({("user", "info"): (0, '{"trusted":false}', ""), ("sudo", "info"): (0, '{"trusted":true}', "")})
         with mock.patch.object(targets, "run", run):
             cmds.clear()
-            targets.check_store()
+            targets.check_builder()
             assert not cmds
             os.environ["NIX_CONFIG"] = "builders ="
             assert targets.build_cmd((), [])[:4] == [*targets.SUDO, "--preserve-env=NIX_CONFIG"]
@@ -400,7 +400,7 @@ def builder_cases() -> None:
 
 def target_cases() -> None:
     """expand_targets: names and @tags from nixconvoy.toml, once each; the
-    store host by the machine nixconvoy runs on."""
+    builder by the machine nixconvoy runs on."""
     config.set_cfg(config.parse(toml(
         '[targets.a]\ntags = ["vps"]\n[targets.b]\ntags = ["vps", "lab"]\n'
         '[targets.c]\ntags = ["lab"]\n')))
@@ -409,21 +409,21 @@ def target_cases() -> None:
     assert targets.expand_targets(["@vps"], inv) == ["a", "b"]
     assert targets.expand_targets(["b", "@vps"], inv) == ["b", "a"]
     assert targets.expand_targets(["@lab", "c"], inv) == ["b", "c"]
-    # [build] store for every machine, a [hostnames.<hostname>] table's
-    # over it; a machine mapped to itself (by hostname or by its target)
-    # realises here.
-    for build, want in (('[build]\nstore = "big"\n', "big"),
-                        ('[build]\nstore = "tester"\n', ""),
-                        ('[build]\nstore = ""\n', ""),
-                        ("", ""),
-                        ('[build]\nstore = "big"\n[hostnames.tester]\nstore = "tester"\n', ""),
-                        ('[build]\nstore = "big"\n[hostnames.tester]\nstore = ""\n', ""),
-                        ('[build]\nstore = "big"\n[hostnames.tester]\nstore = "other"\n', "other"),
-                        ('[build]\nstore = "big"\n[hostnames.tester]\ntarget = "big"\n', ""),
-                        ('[hostnames.tester]\nstore = "other"\n', "other"),
-                        ('[hostnames.other]\nstore = "big"\n', "")):
-        config.set_cfg(config.parse(toml(build)))
-        assert config.store_host() == want, (build, config.store_host())
+    # The top-level builder for every machine, a [hostnames.<hostname>]
+    # table's over it; a machine mapped to itself (by hostname or by its
+    # target) realises here.
+    for build, want in ((toml(builder="big"), "big"),
+                        (toml(builder="tester"), ""),
+                        (toml(builder="{local_hostname}"), ""),
+                        (toml(), ""),
+                        (toml('[hostnames.tester]\nbuilder = "tester"\n', builder="big"), ""),
+                        (toml('[hostnames.tester]\nbuilder = "{local_hostname}"\n', builder="big"), ""),
+                        (toml('[hostnames.tester]\nbuilder = "other"\n', builder="big"), "other"),
+                        (toml('[hostnames.tester]\ntarget = "big"\n', builder="big"), ""),
+                        (toml('[hostnames.tester]\nbuilder = "other"\n'), "other"),
+                        (toml('[hostnames.other]\nbuilder = "big"\n'), "")):
+        config.set_cfg(config.parse(build))
+        assert config.builder_host() == want, (build, config.builder_host())
     # The target this machine is: its hostname unless the table says.
     for extra, want in (("", "tester"), ('[hostnames.tester]\ntarget = "box"\n', "box"),
                         ('[hostnames.tester]\ntarget = ""\n', "tester"), ('[hostnames.other]\ntarget = "box"\n', "tester")):
@@ -452,25 +452,28 @@ def target_cases() -> None:
             pass
         else:
             raise AssertionError(bad)
-    for shape, name, want in (("work/{machine}/", "work/tester/3", True), ("work/{machine}/", "work/x/1-agent-a", True),
-                              ("work/{machine}/", "work/tester", False), ("work/{machine}/", "work//3", False),
-                              ("work/{machine}/", "main", False), ("nixconvoy/", "nixconvoy/lab5", True),
-                              ("nixconvoy/", "nixconvoy", False), ("{machine}-deploys", "a-deploys1", True),
-                              ("{machine}-deploys", "a/b-deploys1", False)):
+    for shape, name, want in (("work/{local_hostname}/", "work/tester/3", True), ("work/{local_hostname}/", "work/x/1-agent-a", True),
+                              ("work/{local_hostname}/", "work/tester", False), ("work/{local_hostname}/", "work//3", False),
+                              ("work/{local_hostname}/", "main", False), ("nixconvoy/", "nixconvoy/lab5", True),
+                              ("nixconvoy/", "nixconvoy", False), ("{local_hostname}-deploys", "a-deploys1", True),
+                              ("{local_hostname}-deploys", "a/b-deploys1", False)):
         assert checkout.listed(name, shape) == want, (shape, name)
     # The allowlist of before loads still, ignored.
-    assert config.parse(toml('work_branches = ["work/tester/"]\n')).branch_prefix == "work/{machine}/"
+    assert config.parse(toml('work_branches = ["work/tester/"]\n')).branch_prefix == "work/{local_hostname}/"
     for bad_cfg, hint in ((toml('[targets.a]\ntag = ["vps"]\n'), "unknown key targets.a.tag"),
-                          (toml('[build]\nstore = { big = "x" }\n'), "build.store is a machine name"),
-                          (toml('[build]\nstore = 3\n'), "build.store is a machine name"),
-                          (toml('[build]\nbuilder = "a"\n'), "unknown key build.builder"),
-                          (toml('[hostnames.a]\nstore = 3\n'), "hostnames.a.store must be a string"),
+                          (toml('[build]\nstore = "a"\n'), "unknown key build"),
+                          (toml(builder="{host}"), "builder is a template over {local_hostname} alone"),
+                          (toml(builder=""), "builder is a template over {local_hostname}, not empty"),
+                          (toml('[hostnames.a]\nbuilder = ""\n'), "hostnames.a.builder is a template over {local_hostname}, not empty"),
+                          (toml().replace('builder = "{local_hostname}"\n', ""), "builder is required"),
+                          (toml('[hostnames.a]\nbuilder = 3\n'), "hostnames.a.builder must be a string"),
+                          (toml('[hostnames.a]\nbuilder = "{host}"\n'),
+                           "hostnames.a.builder is a template over {local_hostname} alone"),
                           (toml('[hostnames.a]\ntarget = 3\n'), "hostnames.a.target must be a string"),
                           (toml('[hostnames.a]\nparallel_eval = 1\n'), "hostnames.a.parallel_eval must be true, false"),
                           (toml('[hostnames.a]\nparallel = true\n'), "unknown key hostnames.a.parallel"),
                           (toml('[hostnames]\na = "x"\n'), "hostnames.a must be a table"),
                           (toml().replace("config_version = 1", "config_version = true"), "not supported"),
-                          (toml('[build]\nunreachable_hint = "zzz"\n'), "unknown key build.unreachable_hint"),
                           (toml('[targets.a]\nlocal_only = true\n'), "unknown key targets.a.local_only"),
                           (toml('[switch]\nconfirmed = false\n'), "unknown key switch.confirmed"),
                           (toml('[switch]\ndeadline = 20\n'), "unknown key switch.deadline"),
@@ -495,7 +498,7 @@ def target_cases() -> None:
                           (toml('[switch]\nauto_rollback_checks = [{ ssh_deadline_secs = 5, internet = true }]\n'), "checks[0] is a table"),
                           (toml('[switch]\nauto_rollback_checks = [{ internet = false }]\n'), "checks[0] strikes nothing"),
                           (toml(ssh_address_template="x@{host}"), "over {target} alone"),
-                          (toml(branch_prefix="{host}-d"), "over {machine} alone"),
+                          (toml(branch_prefix="{host}-d"), "over {local_hostname} alone"),
                           # No defaults: every scalar key is required.
                           ("", "config_version is required"),
                           (toml().replace('flake_dir = "."\n', ""), "flake_dir is required"),
@@ -509,11 +512,11 @@ def target_cases() -> None:
                           (toml(main_branch="refs/heads/main"), "main_branch is a branch's name"),
                           (toml().replace('targets_arch = "x86_64-linux"\n', ""), "targets_arch is required"),
                           (toml().replace('ssh_address_template = "{target}"\n', ""), "ssh_address_template is required"),
-                          (toml().replace('branch_prefix = "work/{machine}/"\n', ""), "branch_prefix is required"),
+                          (toml().replace('branch_prefix = "work/{local_hostname}/"\n', ""), "branch_prefix is required"),
                           (toml(branch_prefix="bad branch/"), "branch_prefix may hold"),
                           (toml(branch_prefix="a*b/"), "branch_prefix may hold"),
-                          (toml(branch_prefix="work/{{machine}}/"), "branch_prefix may hold"),
-                          (toml(branch_prefix="w\u00f6rk/{machine}/"), "branch_prefix may hold"),
+                          (toml(branch_prefix="work/{{local_hostname}}/"), "branch_prefix may hold"),
+                          (toml(branch_prefix="w\u00f6rk/{local_hostname}/"), "branch_prefix may hold"),
                           (toml().replace('child_worktrees = ".claude/worktrees"\n', ""), "child_worktrees is required"),
                           (toml('[eval]\nparallel = "auto"\n'), "[eval] is gone"),
                           (toml("precheck = 1\n"), "precheck must be a string")):
@@ -843,7 +846,8 @@ def toml(extra: str = "", precheck: str = "", **over: str) -> str:
     """A nixconvoy.toml with every required key (the defaults the scratch
     repos use, `over` overriding) and `precheck`, `extra` appended."""
     keys = {"flake_dir": ".", "targets_dir": "hosts", "targets_arch": "x86_64-linux", "ssh_address_template": "{target}",
-            "branch_prefix": "work/{machine}/", "child_worktrees": ".claude/worktrees", **over}
+            "branch_prefix": "work/{local_hostname}/", "child_worktrees": ".claude/worktrees",
+            "builder": "{local_hostname}", **over}
     return ("config_version = 1\n" + "".join(f'{k} = "{v}"\n' for k, v in keys.items())
             + (f'precheck = "{precheck}"\n' if precheck else "") + extra)
 
@@ -976,9 +980,10 @@ def reach_cases(d: Path) -> None:
         put(co, "nixos/hosts/b/unused.nix", "{ }\n", "unused under b")
         assert reached() == {"a", "b"}
         sh(co, "reset", "--quiet", "--hard", "HEAD~2")
-        # Every table is a target, a store host's too (one that is no
+        # Every table is a target, a builder's too (one that is no
         # target needs no table).
-        c = config.parse(tables + '[build]\nstore = "big"\n[targets.big]\nssh_address = "me@big"\n')
+        c = config.parse(tables.replace('builder = "{local_hostname}"', 'builder = "big"')
+                         + '[targets.big]\nssh_address = "me@big"\n')
         assert c.inventory == ["a", "b", "big"], c.inventory
         # A second directory holding subdirectories named after the
         # targets, which flake.nix names too (shared profiles): neither is
@@ -1323,7 +1328,7 @@ def git_cases(d: Path) -> None:
 
         def stage(wt: str, union: str, listed: list[str], branches: list[tuple[str, str]]) -> bool:
             assert sh(Path(wt), "rev-parse", "HEAD") == union
-            assert listed == ["work/{machine}/"], listed
+            assert listed == ["work/{local_hostname}/"], listed
             assert [b for b, _ in branches] == ["work/other/1"], branches
             staged.append(sorted(p.name for p in Path(wt).iterdir()))
             return False
