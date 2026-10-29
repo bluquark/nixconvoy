@@ -131,14 +131,13 @@ enum Act {
 struct Target;
 
 const DEADLINE: u64 = 10;
-const GUARD: u64 = 600;
 /// Bounds the check fails at rather than miss part of the space (it holds
-/// about 424k states, 182k unique, depth 76).
+/// about 188k states, 78k unique, depth 73).
 const MAX_STATES: usize = 5_000_000;
 const MAX_DEPTH: usize = 200;
 
 fn spawn(w: &mut World, slot: usize, verb: Verb<Sys>) {
-    let mut m = Machine::new(verb, DEADLINE, GUARD);
+    let mut m = Machine::new(verb, DEADLINE);
     let step = m.decide(Reply::Start);
     assert!(step.effects.is_empty());
     let Next::Ask(q) = step.next else { panic!("a run exits before its first query") };

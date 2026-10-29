@@ -837,8 +837,11 @@ class Now(Newtype):
 
 
 @dataclass(frozen=True)
-class System(Newtype):
-    value: str | None
+class System(Variant):
+    """The running system, or None with whether the read timed out."""
+
+    system: str | None
+    timed_out: bool
 
 
 @dataclass(frozen=True)
@@ -854,4 +857,13 @@ class Done(Variant):
     pass
 
 
-SwitchReply = Guard | Code | Said | Text | Now | System | Checked | Flag | Done
+@dataclass(frozen=True)
+class Reached(Variant):
+    """Whether this machine reached the internet, and if not whether the
+    probe timed out."""
+
+    ok: bool
+    timed_out: bool
+
+
+SwitchReply = Guard | Code | Said | Text | Now | System | Checked | Reached | Done

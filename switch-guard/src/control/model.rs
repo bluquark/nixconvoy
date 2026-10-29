@@ -1,9 +1,8 @@
 //! nixconvoy's switch step and the target's helper composed: the real
 //! control `Machine`s drive the real helper `Machine`s through ssh calls
 //! that may be delayed or lost (before or after reaching the target), against a
-//! one-second clock, the dead-man timer due exactly at its start plus its
-//! seconds (the guard from arming, the deadline from the activation's end),
-//! probe timeouts, a crash of the deploying machine and a crash
+//! one-second clock, the dead-man timer due exactly at the activation's end
+//! plus the deadline, probe timeouts, a crash of the deploying machine and a crash
 //! (reboot) of the target.  A probe of the target answers at once or at its
 //! timeout.  Two deploys in turn, the second taking the guard
 //! once the first finished or died, each its own toplevel.
@@ -13,13 +12,13 @@ use crate::switch::core::{Action, Effect as HEffect, Machine as Helper, Next as 
 use crate::switch::fake::{self, Outcome, World as _, OUTCOMES};
 use stateright::{Model, Property};
 
-const DEADLINE: u64 = 10;
-/// Short enough to fire within the horizon during a long activation.
-const GUARD: u64 = 20;
-const HORIZON: u64 = 30;
+/// Shorter than the default: the window's rounds are what branch, and a
+/// few of them exercise the orderings the margins allow.
+const DEADLINE: u64 = 7;
+const HORIZON: u64 = 20;
 /// Bounds the check fails at rather than miss part of the space (it holds
-/// about 19.7M unique states, 56.1M visited, depth 135, in 2.4 GiB).
-const MAX_STATES: usize = 80_000_000;
+/// about 11.3M unique states, 32.4M visited, depth 134, in 1.5 GiB).
+const MAX_STATES: usize = 45_000_000;
 const MAX_DEPTH: usize = 400;
 /// Seconds a confirm may spend between leaving nixconvoy and taking the
 /// helper's lock in a timely run.
@@ -150,7 +149,7 @@ fn verb_of(args: &[String]) -> Verb<Sys> {
 }
 
 fn spawn(w: &mut World, owner: Owner, verb: Verb<Sys>, confirm: bool) {
-    let mut m = Helper::new(verb, DEADLINE, GUARD);
+    let mut m = Helper::new(verb, DEADLINE);
     let step = m.decide(HReply::Start);
     let HNext::Ask(q) = step.next else { unreachable!() };
     w.runs.push(Run { owner, m, q, locked: false, confirm });
@@ -420,13 +419,17 @@ impl Model for Composed {
                     (CQuery::ProbeHelper, true) if w.fault() => CReply::Code(255),
                     (CQuery::Deadline, false) => CReply::Text(DEADLINE.to_string()),
                     (CQuery::Clock, false) => CReply::Now(w.clock * 1000),
-                    (CQuery::Running { .. }, false) => CReply::System(Some(SYS[w.target.running].into())),
-                    (CQuery::Running { timeout_ms }, true) if timeout_ms.is_none_or(timed_out) => CReply::System(None),
+                    (CQuery::Running { .. }, false) => CReply::System { system: Some(SYS[w.target.running].into()), timed_out: false },
+                    // A failed probe times out: whether it was refused at
+                    // once instead only shapes the report, not the outcome.
+                    (CQuery::Running { timeout_ms }, true) if timeout_ms.is_none_or(timed_out) => {
+                        CReply::System { system: None, timed_out: true }
+                    }
                     // The target's own checks pass or not, at any moment.
                     (CQuery::Check { .. }, false) => CReply::Checked { code: 0, last: None },
                     (CQuery::Check { .. }, true) => CReply::Checked { code: 1, last: Some("x".into()) },
-                    (CQuery::Internet { .. }, false) => CReply::Flag(true),
-                    (CQuery::Internet { timeout_ms }, true) if timed_out(timeout_ms) => CReply::Flag(false),
+                    (CQuery::Internet { .. }, false) => CReply::Reached { ok: true, timed_out: false },
+                    (CQuery::Internet { timeout_ms }, true) if timed_out(timeout_ms) => CReply::Reached { ok: false, timed_out: true },
                     (CQuery::Sleep { ms }, false) if timed_out(ms) => CReply::Done,
                     _ => return None,
                 };

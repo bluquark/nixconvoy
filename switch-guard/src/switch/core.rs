@@ -9,20 +9,21 @@
 //! run of a deploy that died cannot act on the record of the deploy that
 //! re-armed after it.
 //!
-//! The rollback timer counts the deadline from the activation's end: arm
-//! starts it with ACTIVATION_GUARD_SECS, a bound only on a helper that
-//! never gets to restart it (the deploy dead between arm and activate, or
-//! an activation stuck past any sense), and activate restarts it with the
-//! deadline once switch-to-configuration returns, however long its unit
-//! restarts took.  A guard that fired during the activation queued its
-//! rollback on the lock: the restart then fails, and the activation rolls
-//! back itself.
+//! The rollback timer counts the deadline from the activation's end:
+//! activate starts it once switch-to-configuration returns, however long
+//! its unit restarts took, and arm starts none.  A timer running through
+//! the activation would protect nothing - its rollback can only queue on
+//! switch-to-configuration's lock behind a stuck activation - and would
+//! undo a slow one that finished.  A deploy dead before its activation
+//! leaves an Armed record and no timer, which the next arm takes over by
+//! the profile still naming its previous system; one dead with the target
+//! running its unconfirmed system (a rollback that gave up) is taken over
+//! with the timer started at arm, so that duty outlives this deploy too.
 use crate::record::{Phase, Record};
 use crate::text;
 use std::fmt::Display;
 
 pub const ROLLBACK_ATTEMPTS: u32 = 5;
-pub const ACTIVATION_GUARD_SECS: u64 = 600;
 pub const RETRY_SLEEP: u64 = 5;
 /// Exit code of `rollback` when the record is confirmed: nixconvoy reads
 /// it as "the confirm landed, only its relay died".
@@ -208,7 +209,6 @@ enum Then {
 pub struct Machine<S> {
     verb: Verb<S>,
     deadline: u64,
-    guard: u64,
     pc: Pc<S>,
 }
 
@@ -219,8 +219,8 @@ fn opt<S: Display>(s: &Option<S>) -> String {
 }
 
 impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
-    pub fn new(verb: Verb<S>, deadline: u64, guard: u64) -> Self {
-        Machine { verb, deadline, guard, pc: Pc::Start }
+    pub fn new(verb: Verb<S>, deadline: u64) -> Self {
+        Machine { verb, deadline, pc: Pc::Start }
     }
 
     pub fn verb(&self) -> &Verb<S> {
@@ -279,27 +279,25 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
                 self.ask(ArmRunning(inherited), Query::Running)
             }
             (ArmRunning(inherited), Reply::Running(cur)) => {
-                if let Some(prev) = inherited.as_ref().filter(|p| cur.as_ref() != Some(*p)) {
-                    fx.push(Effect::Say(format!(text!(switch_taking_over), P = P, prev = prev)));
-                }
+                let off = inherited.as_ref().filter(|p| cur.as_ref() != Some(*p)).cloned();
                 let Some(previous) = inherited.or(cur) else {
                     fx.push(Effect::Warn(format!(text!(switch_no_current_system), P = P)));
                     return Next::Exit(1);
                 };
                 fx.push(Effect::StopTimer);
                 fx.push(Effect::ResetFailedRollback);
-                self.ask(ArmTimer(previous), Query::StartTimer(self.guard))
+                if let Some(prev) = off {
+                    fx.push(Effect::Say(format!(text!(switch_taking_over), P = P, prev = prev)));
+                    return self.ask(ArmTimer(previous), Query::StartTimer(self.deadline));
+                }
+                self.armed(previous, fx)
             }
-            // Armed only with the timer pending: an Armed record admits a
-            // dead deploy's delayed activation too.
             (ArmTimer(previous), Reply::Flag(ok)) => {
                 if !ok {
                     fx.push(Effect::Warn(format!(text!(switch_timer_failed), P = P)));
                     return self.rollback(previous, Then::Fail);
                 }
-                fx.push(Effect::Persist(Record { previous: previous.clone(), phase: Phase::Armed }));
-                fx.push(Effect::Say(format!(text!(switch_armed), P = P, previous = previous, deadline = self.deadline)));
-                Next::Exit(0)
+                self.armed(previous, fx)
             }
 
             (ActLocked, Reply::Locked(rec)) => match rec {
@@ -447,6 +445,12 @@ impl<S: Clone + Eq + Display + std::fmt::Debug> Machine<S> {
             Verb::Confirm { new, .. } | Verb::Activate(new) => new,
             _ => unreachable!(),
         }
+    }
+
+    fn armed(&mut self, previous: S, fx: &mut Vec<Effect<S>>) -> Next<S> {
+        fx.push(Effect::Persist(Record { previous: previous.clone(), phase: Phase::Armed }));
+        fx.push(Effect::Say(format!(text!(switch_armed), P = P, previous = previous, deadline = self.deadline)));
+        Next::Exit(0)
     }
 
     fn confirm_failed(&mut self, previous: S, fx: &mut Vec<Effect<S>>) -> Next<S> {

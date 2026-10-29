@@ -19,20 +19,22 @@ use crate::text;
 use serde::{Deserialize, Serialize};
 
 /// No verification round starts, nor pause ends, within this long of the
-/// target's deadline (counted from the activation's end): the confirm need
-/// only take the helper's lock before the timer's rollback does.
-pub const VERIFY_MARGIN_MS: u64 = 5_000;
+/// target's deadline (counted from the activation's end): a round (1.8 s
+/// at the median) started later would be cut by the hard stop.
+pub const VERIFY_MARGIN_MS: u64 = 3_000;
 /// What one probe may take (nixconvoy's PROBE_TIMEOUT), so a stalled ssh
 /// session holds no verification past the deadline.
 pub const PROBE_TIMEOUT_MS: u64 = 20_000;
 /// Every probe ends this long before the target's deadline, whenever its
-/// round began: the confirm's ssh round trip and systemd-run start fit in
-/// it.  Each probe's timeout is cut to that hard stop, so the probes of the
-/// last round (running system, check, this machine's internet) cannot add up
-/// past the timer.
+/// round began: the confirm's ssh round trip and systemd-run start (90 ms
+/// warm, 600 ms cold, measured) fit in it, as does the activate call's
+/// return trip, by which the target's restarted timer leads the window
+/// (Pc::Clocking).  Each probe's timeout is cut to that hard stop, so the
+/// probes of the last round (running system, check, this machine's
+/// internet) cannot add up past the timer.
 pub const CONFIRM_RESERVE_MS: u64 = 2_000;
 pub const INTERNET_TIMEOUT_MS: u64 = 8_000;
-pub const VERIFY_PAUSE_MS: u64 = 3_000;
+pub const VERIFY_PAUSE_MS: u64 = 1_000;
 /// The rollback exit code that means the confirm landed after all.
 pub const ALREADY_CONFIRMED: i32 = crate::switch::core::ALREADY_CONFIRMED;
 /// ssh's own exit code: the session died (the keepalives cut a stalled
@@ -91,8 +93,9 @@ pub enum Query {
     },
     /// Monotonic milliseconds -> Now.
     Clock,
-    /// /run/current-system, over a new ssh connection (the proof that
-    /// sshd admits one) -> System.
+    /// /run/current-system -> System: a verification round's read (a
+    /// timeout) over a new ssh connection, the proof that sshd admits one;
+    /// the report's after a failed rollback (None) over the deploy's.
     Running {
         timeout_ms: Option<u64>,
     },
@@ -100,7 +103,7 @@ pub enum Query {
     Check {
         timeout_ms: u64,
     },
-    /// Whether this machine reaches the internet -> Flag.
+    /// Whether this machine reaches the internet -> Reached.
     Internet {
         timeout_ms: u64,
     },
@@ -126,13 +129,23 @@ pub enum Reply {
     },
     Text(String),
     Now(u64),
-    System(Option<String>),
+    /// The running system, or None with whether the read timed out
+    /// (a refusal is a failure of record, a timeout on a cut budget not).
+    System {
+        system: Option<String>,
+        timed_out: bool,
+    },
     /// `code` < 0: timed out.  `last`: its last stderr line.
     Checked {
         code: i32,
         last: Option<String>,
     },
-    Flag(bool),
+    /// Whether this machine reached the internet, and if not whether the
+    /// probe timed out.
+    Reached {
+        ok: bool,
+        timed_out: bool,
+    },
     Done,
 }
 
@@ -215,7 +228,7 @@ pub struct Machine {
     /// The last round's problems that the deadline did not cut short.
     last: Vec<String>,
     /// This round ran out of time, or a probe timed out on a budget the
-    /// deadline cut.
+    /// deadline cut (a refusal within one is a failure of record).
     cut: bool,
 }
 
@@ -339,7 +352,8 @@ impl Machine {
             }
             // The target's timer restarted at the activation's end, before
             // its exit code travelled here: its due time leads this
-            // reckoning by that trip, which CONFIRM_RESERVE_MS covers.
+            // reckoning by that trip (the return leg of a 90 ms round
+            // trip), which CONFIRM_RESERVE_MS covers twenty times over.
             (Pc::Clocking { deadline_ms, rc }, Reply::Now(now)) => {
                 let end = now + deadline_ms;
                 let w = Window { until: end.saturating_sub(VERIFY_MARGIN_MS), hard: end.saturating_sub(CONFIRM_RESERVE_MS) };
@@ -361,8 +375,8 @@ impl Machine {
             // and, with routing_check, this machine reaches the
             // internet too.
             (Pc::VerifyNow { w, rc }, Reply::Now(now)) => self.round(w, rc, now),
-            (Pc::VerifyRunning { w, rc, tmo }, Reply::System(cur)) => {
-                if cur.is_none() && tmo < PROBE_TIMEOUT_MS {
+            (Pc::VerifyRunning { w, rc, tmo }, Reply::System { system: cur, timed_out }) => {
+                if cur.is_none() && timed_out && tmo < PROBE_TIMEOUT_MS {
                     self.cut = true;
                 }
                 if cur.as_deref() != Some(self.p.toplevel.as_str()) {
@@ -400,9 +414,9 @@ impl Machine {
                     self.ask(Pc::VerifyInternet { w, rc, problems, tmo }, Query::Internet { timeout_ms: tmo })
                 }
             },
-            (Pc::VerifyInternet { w, rc, mut problems, tmo }, Reply::Flag(ok)) => {
+            (Pc::VerifyInternet { w, rc, mut problems, tmo }, Reply::Reached { ok, timed_out }) => {
                 if !ok {
-                    self.cut |= tmo < INTERNET_TIMEOUT_MS;
+                    self.cut |= timed_out && tmo < INTERNET_TIMEOUT_MS;
                     problems.push(text!(control_no_internet).to_string());
                 }
                 self.verify_end(w, rc, problems)
@@ -450,7 +464,7 @@ impl Machine {
                 let pc = Pc::Reporting { fallout: Fallout::ConfirmFailed, problem: String::new() };
                 self.ask(pc, Query::Running { timeout_ms: None })
             }
-            (Pc::Reporting { fallout, problem }, Reply::System(cur)) => {
+            (Pc::Reporting { fallout, problem }, Reply::System { system: cur, .. }) => {
                 let cur = cur.unwrap_or_else(|| text!(control_nothing_reachable).to_string());
                 Next::Die(match fallout {
                     Fallout::VerifyFailed => format!(text!(control_rollback_failed), target = target, problem = problem, cur = cur),

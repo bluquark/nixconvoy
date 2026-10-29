@@ -219,30 +219,30 @@ def switch_scenarios(d: Path) -> None:
 
     # A batch sibling's die() sweeps this switch's verification probes:
     # those rounds fail and are retried, the switch still confirmed.
-    running_system, run = targets.running_system, switch.run
+    running_system_read, run = targets.running_system_read, switch.run
     swept: list[str] = []
 
-    def swept_running(*args: Any, **kwargs: Any) -> str | None:
+    def swept_running(*args: Any, **kwargs: Any) -> tuple[str | None, bool]:
         if "running" not in swept:
             swept.append("running")
             raise proc.Fail("another target's switch failed")
-        return running_system(*args, **kwargs)
+        return running_system_read(*args, **kwargs)
 
     def swept_check(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if cmd[-1] == "check" and "check" not in swept:
             swept.append("check")
             raise proc.Fail("another target's switch failed")
         return run(cmd, **kwargs)
-    with mock.patch.object(targets, "running_system", swept_running), mock.patch.object(switch, "run", swept_check):
+    with mock.patch.object(targets, "running_system_read", swept_running), mock.patch.object(switch, "run", swept_check):
         died, s = scenario("probes swept")
     assert died is None and s["running"] == NEW and swept == ["running", "check"], (died, s, swept)
 
     # A batch sibling's die() on its worker thread: this switch, armed,
     # still verifies and is confirmed; one not armed yet stops there.
-    def sibling_died(*args: Any, **kwargs: Any) -> str | None:
+    def sibling_died(*args: Any, **kwargs: Any) -> tuple[str | None, bool]:
         proc.EXITING = "a sibling's switch failed"
-        return running_system(*args, **kwargs)
-    with mock.patch.object(targets, "running_system", sibling_died), mock.patch.object(proc, "EXITING", None):
+        return running_system_read(*args, **kwargs)
+    with mock.patch.object(targets, "running_system_read", sibling_died), mock.patch.object(proc, "EXITING", None):
         died, s = scenario("sibling died while armed")
     assert died is None and s["running"] == NEW, (died, s)
     with mock.patch.object(proc, "EXITING", "a sibling's switch failed"):
@@ -472,8 +472,9 @@ def target_cases() -> None:
                           (toml('[switch]\ndeadline_secs = 20\n'), "switch.deadline_secs is gone"),
                           (toml('[switch]\nauto_rollback_checks = [{ ssh = true }]\n'), "checks[0] is a table"),
                           (toml('[switch]\nauto_rollback_checks = [{ internet = true }]\n'), "has checks but no { ssh_deadline_secs"),
-                          (toml('[switch]\nauto_rollback_checks = false\n[targets.a.switch]\n'
+                          (toml('[switch]\nauto_rollback_checks = []\n[targets.a.switch]\n'
                                 'auto_rollback_checks = [{ bash = "x" }]\n'), "targets.a.switch.auto_rollback_checks has checks but no"),
+                          (toml('[switch]\nauto_rollback_checks = false\n'), "switch.auto_rollback_checks is a list"),
                           (toml('[switch]\nauto_rollback_checks = [{ ssh_deadline_secs = 5 }, { ssh_deadline_secs = 6 }]\n'),
                            "checks[1] is a second ssh_deadline_secs"),
                           (toml('[switch]\nauto_rollback_checks = 1\n'), "switch.auto_rollback_checks is a list"),
@@ -514,20 +515,20 @@ def target_cases() -> None:
     # A target's checks are appended to the fleet's ([switch]'s), a false
     # item striking the fleet's of its kind (never the target's own), its
     # ssh_deadline_secs item replacing the fleet's; the deadline alone
-    # confirms, false (or an empty [switch] list) is a plain switch.
+    # confirms, an empty list (at either level) is a plain switch.
     Check, Policy = config.Check, config.SwitchPolicy
     c = config.parse(toml('[switch]\nauto_rollback_checks = [{ ssh_deadline_secs = 45 }, { internet = true }, '
                           '{ bash = "fleet" }]\n'
                           '[targets.a.switch]\nauto_rollback_checks = [{ routing = true }, '
                           '{ bash = "one" }, { bash = false }, { bash = "two" }, { ssh_deadline_secs = 20 }]\n'
-                          '[targets.b]\nswitch = { auto_rollback_checks = false }\n'
+                          '[targets.b]\nswitch = { auto_rollback_checks = [] }\n'
                           '[targets.e]\nswitch = { auto_rollback_checks = [{ internet = false }, { bash = false }] }\n'))
     a, b, d, e = (c.switch_policy(n) for n in "abde")
     assert a.checks == (Check("internet"), Check("routing"), Check("bash", "one"), Check("bash", "two")), a
     assert a.confirmed and a.deadline == 20 and a.script == "(\n:\none\n)\n(\n:\ntwo\n)", a
     assert b == Policy(None, ()) and not b.confirmed and b.script == "", b
     assert e == Policy(45, ()) and e.confirmed, e
-    assert config.parse(toml('[switch]\nauto_rollback_checks = false\n[targets.a.switch]\n'
+    assert config.parse(toml('[switch]\nauto_rollback_checks = []\n[targets.a.switch]\n'
                              'auto_rollback_checks = [{ ssh_deadline_secs = 5 }, { bash = "x" }]\n')
                         ).switch_policy("a") == Policy(5, (Check("bash", "x"),))
     assert d == c.switch and d == Policy(45, (Check("internet"), Check("bash", "fleet"))), d

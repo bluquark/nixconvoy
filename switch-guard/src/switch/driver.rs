@@ -1,7 +1,7 @@
 //! Performs a Machine's effects: `System` is the I/O boundary (systemd,
 //! nix-env, switch-to-configuration), and `drive` the loop that feeds
 //! replies back.
-use super::core::{Action, Effect, Machine, Next, Query, Reply, Verb, ACTIVATION_GUARD_SECS, P};
+use super::core::{Action, Effect, Machine, Next, Query, Reply, Verb, P};
 use crate::config::Config;
 use crate::proc;
 use crate::record::Record;
@@ -349,7 +349,7 @@ pub fn main(args: &[String]) -> i32 {
             return 2;
         }
     };
-    drive(&mut System::new(&s), Machine::new(verb, s.deadline, ACTIVATION_GUARD_SECS))
+    drive(&mut System::new(&s), Machine::new(verb, s.deadline))
 }
 
 #[cfg(test)]

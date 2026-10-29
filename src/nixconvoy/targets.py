@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import socket
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import NamedTuple
@@ -225,16 +226,21 @@ def probe(name: str) -> Probe:
 def running_system(name: str, timeout: float = PROBE_TIMEOUT, fresh: bool = False) -> str | None:
     """The target's /run/current-system (`fresh`: over a new ssh connection),
     or None if it cannot be read."""
+    return running_system_read(name, timeout, fresh)[0]
+
+
+def running_system_read(name: str, timeout: float = PROBE_TIMEOUT, fresh: bool = False) -> tuple[str | None, bool]:
+    """running_system, and whether the read timed out rather than failed."""
     if name == this_target():
         try:
-            return str(Path(CURRENT_SYSTEM).readlink())
+            return str(Path(CURRENT_SYSTEM).readlink()), False
         except OSError:
-            return None
+            return None, False
     p = run(target_cmd(name, ["readlink", CURRENT_SYSTEM], fresh=fresh),
             check=False, timeout=timeout)
     if p.returncode != 0:
-        return None
-    return p.stdout.strip() or None
+        return None, p.timed_out
+    return p.stdout.strip() or None, False
 
 
 def sandbox_opts(dry_run: list[str], drvs: list[str]) -> tuple[str, ...]:
@@ -468,14 +474,19 @@ def rejected_generation(target: str, toplevel: str) -> str | None:
     return p.stdout.strip() or None
 
 
-def internet_reachable(timeout: float = 8) -> bool:
-    """Whether this machine reaches the internet."""
+def internet_reachable(timeout: float = 8) -> tuple[bool, bool]:
+    """Whether this machine reaches the internet, and if not whether the
+    probe timed out rather than failed."""
     try:
         with urllib.request.urlopen("https://www.google.com/generate_204",
                                     timeout=timeout) as r:
-            return r.status == 204
+            return r.status == 204, False
+    except TimeoutError:
+        return False, True
+    except urllib.error.URLError as e:
+        return False, isinstance(e.reason, TimeoutError)
     except (OSError, ValueError, http.client.HTTPException):
-        return False
+        return False, False
 
 
 def unit_changes(dry_activate: str) -> dict[str, list[str]]:

@@ -52,8 +52,8 @@ class SwitchPolicy:
     # seconds of the activation's end this machine must read the new system
     # running over a new ssh connection (so sshd must admit a login), pass
     # each check and confirm, the profile set only then; otherwise the
-    # target rolls back on its own.  None: the key is false, or the list
-    # empty - a plain switch, as nixos-rebuild switch would.
+    # target rolls back on its own.  None: the list is empty - a plain
+    # switch, as nixos-rebuild switch would.
     deadline: int | None = DEFAULT_DEADLINE
     # The other items: the fleet's, then the target's own appended (a
     # `false` item of a kind strikes the fleet's of it).
@@ -246,12 +246,15 @@ def _auto_bool(t: dict[str, object], k: str, where: str) -> bool | None:
 
 def _checks(v: object, where: str, base: SwitchPolicy | None) -> SwitchPolicy:
     """An auto_rollback_checks list over `base` (the fleet's policy; None
-    for `[switch]` itself): at most one { ssh_deadline_secs = N } item, the
-    deadline (over the fleet's), the rest each a table with one key of
-    CHECK_KINDS - true (bash: the script) appends the check, false strikes
-    `base`'s of that kind.  Checks need a deadline from one or the other."""
+    for `[switch]` itself): empty, a plain switch; else at most one
+    { ssh_deadline_secs = N } item, the deadline (over the fleet's), the
+    rest each a table with one key of CHECK_KINDS - true (bash: the script)
+    appends the check, false strikes `base`'s of that kind.  Checks need a
+    deadline from one or the other."""
     if not isinstance(v, list):
         raise ConfigError(strings.CONFIG_CHECKS(where=where))
+    if not v:
+        return SwitchPolicy(deadline=None)
     deadline = base.deadline if base else None
     own_deadline = False
     kept = list(base.checks if base else ())
@@ -295,8 +298,6 @@ def _switch(t: dict[str, object], where: str, base: SwitchPolicy | None) -> Swit
         if k != "auto_rollback_checks":
             raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"{where}.{k}"))
     v = t.get("auto_rollback_checks")
-    if v is False:
-        return SwitchPolicy(deadline=None)
     if v is None:
         return base or SwitchPolicy()
     return _checks(v, f"{where}.auto_rollback_checks", base)

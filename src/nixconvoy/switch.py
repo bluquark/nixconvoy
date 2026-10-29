@@ -31,13 +31,13 @@ from .wire import (
     Done,
     Effect,
     Failed,
-    Flag,
     Guard,
     Helper,
     Internet,
     Locked,
     Now,
     ProbeHelper,
+    Reached,
     Running,
     Said,
     SetProfile,
@@ -240,12 +240,16 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
             case Clock():
                 return Now(proc.monotonic_ms())
             # A verification probe killed by another target's die() is a failed
-            # round, retried until the deadline.
+            # round, retried until the deadline.  A round's read opens a new
+            # connection; the report's after a failed rollback (no budget:
+            # PROBE_TIMEOUT) takes the deploy's, which a locked-out target
+            # may still serve.
             case Running(timeout_ms):
                 try:
-                    return System(targets.running_system(target, timeout=secs(timeout_ms), fresh=True))
+                    return System(*targets.running_system_read(target, timeout=secs(timeout_ms),
+                                                               fresh=timeout_ms is not None))
                 except Fail:
-                    return System(None)
+                    return System(None, True)
             case Check(timeout_ms):
                 t = secs(timeout_ms)
                 try:
@@ -255,7 +259,7 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
                 lines = (p.stderr or "").strip().splitlines()
                 return Checked(p.returncode, lines[-1] if lines else None)
             case Internet(timeout_ms):
-                return Flag(targets.internet_reachable(secs(timeout_ms)))
+                return Reached(*targets.internet_reachable(secs(timeout_ms)))
             case Sleep(ms):
                 time.sleep(secs(ms))
                 return Done()

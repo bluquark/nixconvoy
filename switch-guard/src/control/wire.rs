@@ -32,7 +32,8 @@ mod tests {
         assert_eq!(reply(r#"{"guard":{"moved":"/x"}}"#).unwrap(), Reply::Guard(Guard::Moved("/x".into())));
         assert_eq!(reply(r#"{"guard":"locked"}"#).unwrap(), Reply::Guard(Guard::Locked));
         assert_eq!(reply(r#"{"checked":{"code":-9,"last":null}}"#).unwrap(), Reply::Checked { code: -9, last: None });
-        assert_eq!(reply(r#"{"system":null}"#).unwrap(), Reply::System(None));
+        assert_eq!(reply(r#"{"system":{"system":null,"timed_out":true}}"#).unwrap(), Reply::System { system: None, timed_out: true });
+        assert_eq!(reply(r#"{"reached":{"ok":false,"timed_out":false}}"#).unwrap(), Reply::Reached { ok: false, timed_out: false });
         assert_eq!(reply(r#"{"said":{"code":0,"to":"/p"}}"#).unwrap(), Reply::Said { code: 0, to: Some("/p".into()) });
         assert_eq!(reply(r#""done""#).unwrap(), Reply::Done);
         assert!(reply(r#""start""#).is_err());

@@ -538,7 +538,7 @@ INIT_TOML_SWITCH = M(
     "# within ssh_deadline_secs of the activation's end, found running over a new ssh connection,\n"
     "# verified by each further check and only then set as the profile and boot entry; otherwise the\n"
     "# target rolls back on its own.  A target's list is appended to this one (its ssh_deadline_secs\n"
-    "# replacing), a `false` item striking the fleet's of its kind; auto_rollback_checks = false\n"
+    "# replacing), a `false` item striking the fleet's of its kind; auto_rollback_checks = []\n"
     "# switches it plainly, as nixos-rebuild switch.\n"
     "[switch]\n"
     "auto_rollback_checks = [\n"
@@ -754,14 +754,15 @@ CONFIG_NOT_STRINGS = M("{where}.{key} must be a list of strings")
 CONFIG_NOT_AUTO_BOOL = M('{where}.{key} must be true, false or "auto"')
 CONFIG_NOT_A_TEMPLATE = M("{CONFIG_FILE}: {key} is a template over {{{placeholder}}} alone ({error!r})")
 CONFIG_DEADLINE = M("{CONFIG_FILE}: {where}.ssh_deadline_secs is a number of seconds, above 0 (auto_rollback_checks = "
-                    "false switches plainly)")
+                    "[] switches plainly)")
 CONFIG_CHECK_DEADLINE_TWICE = M("{CONFIG_FILE}: {where} is a second ssh_deadline_secs item: one per list (a target's "
                                 "replaces [switch]'s)")
 CONFIG_CHECK_NO_DEADLINE = M("{CONFIG_FILE}: {where} has checks but no {{ ssh_deadline_secs = <seconds> }} item, their "
                              "deadline, and [switch] gives none")
 CONFIG_DEADLINE_SECS_GONE = M("{CONFIG_FILE}: {where}.deadline_secs is gone: the deadline is auto_rollback_checks' "
                               "{{ ssh_deadline_secs = <seconds> }} item, counted from the activation's end")
-CONFIG_CHECKS = M("{CONFIG_FILE}: {where} is a list of checks, tables like {{ ssh_deadline_secs = 10 }}, or false")
+CONFIG_CHECKS = M("{CONFIG_FILE}: {where} is a list of checks, tables like {{ ssh_deadline_secs = 10 }} ([] switches "
+                  "plainly)")
 CONFIG_CHECK_STRIKE = M("{CONFIG_FILE}: {where} strikes nothing: [switch] has no fleet checks over it (leave "
                         "the kind out instead)")
 CONFIG_CHECK_ITEM = M("{CONFIG_FILE}: {where} is a table with one key: ssh_deadline_secs = <seconds>, internet or "
