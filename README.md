@@ -287,13 +287,13 @@ There are three ways to use worktrees, depending on your preference:
 
 At a high level, here are the "transactional" properties they are designed to provide, and some of the usability & performance implications that follow:
 
-| Guarantee | Downside | Mitigation |
+| Guarantee | Cost | Mitigation |
 |---|---|---|
 | **Nothing you deploy is ever silently undone.**  The input to the NixOS generation applied to your fleet is not only your current checkout, but the union of all open workbranches. | *Usability:* `deploy` aborts on a merge conflict between two workbranches. | nixconvoy uses a syntax-aware merge tool called `mergiraf`, so adjacent-line edits aren't enough to cause an abort. |
-| **No change will touch a target machine before passing prechecks (lint/static analysis).** | *Performance:* additional work on every deploy. | nixconvoy runs precheck in parallel with the eval phase. |
-| **Two deploys running at the same time in different workbranches will serialize correctly.** | *Performance:* in many cases, deploys have to queue after one another instead of running in parallel. | |
-| **A broken NixOS generation automatically rolls itself back.** | *Performance:* deploys must wait for activation and health checks to complete. | |
-| **Nix configuration changes are simultaneously deployed to all target machines that they affect.** | *Performance:* nix eval always re-runs for every machine in your fleet, to determine which targets are affected. | A nixconvoy feature called the "eval memo" (separate from Nix's built-in "eval cache"), and support for Determinate Nix's "parallel eval". |
+| **No change will touch a target machine before passing prechecks (lint/static analysis).** | Additional work on every deploy. | nixconvoy runs precheck in parallel with the eval phase. |
+| **Two deploys running at the same time in different workbranches will serialize correctly.** | In many cases, deploys have to queue after one another instead of running in parallel. | |
+| **A broken NixOS generation automatically rolls itself back.** | Deploys must wait for activation and health checks to complete. | |
+| **Nix configuration changes are simultaneously deployed to all target machines that they affect.** | Nix eval always re-runs for every machine in your fleet, to determine which targets are affected. | A nixconvoy feature called the "eval memo" (separate from Nix's built-in "eval cache"), and support for Determinate Nix's "parallel eval". |
 | | *Usability:* the deploy fails if any machine is turned off or otherwise inaccessible.  | You can choose to provide an explicit `<target>`/`@<tag>` parameter, which restricts the set of targets considered. |
 
 > [!NOTE]
