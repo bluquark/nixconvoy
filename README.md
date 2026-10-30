@@ -293,11 +293,11 @@ At a high level, here are the "transactional" properties they are designed to pr
 | **No change will touch a target machine before passing prechecks (lint/static analysis).** | Additional work on every deploy. | nixconvoy runs precheck in parallel with the eval phase. |
 | **Two deploys running at the same time in different workbranches will serialize correctly.** | In many cases, deploys have to queue after one another instead of running in parallel. | |
 | **A broken NixOS generation automatically rolls itself back.** | Queued deploys must wait for activation and health checks to complete. | |
-| **Nix configuration changes are simultaneously deployed to all target machines that they affect.** | Additional Nix eval runs to determine which targets are affected. | A nixconvoy feature called the "eval memo" (separate from Nix's built-in eval cache), and support for Determinate Nix's "parallel eval". |
-| | The deploy fails if any machine is turned off or otherwise inaccessible.  | You can choose to provide an explicit `<target>`/`@<tag>` parameter, which restricts the set of targets considered. |
+| **Nix configuration changes are simultaneously deployed to all target machines that they affect.** | The deploy fails if any machine is turned off or otherwise inaccessible.<br><br>Additional Nix eval runs to determine which targets are affected. | You can choose to provide an explicit `<target>`/`@<tag>` parameter, which restricts the set of targets considered.<br><br>A nixconvoy feature called the "eval memo" (separate from Nix's built-in eval cache), and support for Determinate Nix's "parallel eval". |
+|  |  |  |
 
 > [!NOTE]
-> As mentioned above, nixconvoy includes a feature called the "eval memo".  This reuses the config-file -> target mappings computed by previous evals (including evals from other worktrees).  The data structure is keyed by a list of filenames and their content hashes.  The memo logic may have false positives (unnecessary re-evaluations) but is designed to never have false negatives.
+> As mentioned in the last row, nixconvoy includes a feature called the "eval memo".  This reuses the config-file -> target mappings computed by previous evals (including evals from other worktrees).  The data structure is keyed by a list of filenames and their content hashes.  The memo logic may have false positives (unnecessary re-evaluations) but is designed to never have false negatives.
 > 
 > Recommendation: If you have a heterogeneous fleet where eval is costly, split your Nix config into per-feature files, load those files by explicit filename instead of relying on lazy Nix magic, and verify eval time went down in nixconvoy's performance log.
 
