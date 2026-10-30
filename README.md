@@ -289,12 +289,12 @@ At a high level, here are the "transactional" properties they are designed to pr
 
 | Guarantee | Cost | Mitigation |
 |---|---|---|
-| **Nothing you deploy is ever silently undone.**  The input to the NixOS generation applied to your fleet is not only your current checkout, but the union of all open workbranches. | *Usability:* `deploy` aborts on a merge conflict between two workbranches. | nixconvoy uses a syntax-aware merge tool called `mergiraf`, so adjacent-line edits aren't enough to cause an abort. |
+| **Nothing you deploy is ever silently undone.**  The input to the NixOS generation applied to your fleet is not only your current checkout, but the union of all open workbranches. | `deploy` aborts on a merge conflict between two workbranches. | nixconvoy uses a syntax-aware merge tool called `mergiraf`, so adjacent-line edits aren't enough to cause an abort. |
 | **No change will touch a target machine before passing prechecks (lint/static analysis).** | Additional work on every deploy. | nixconvoy runs precheck in parallel with the eval phase. |
 | **Two deploys running at the same time in different workbranches will serialize correctly.** | In many cases, deploys have to queue after one another instead of running in parallel. | |
 | **A broken NixOS generation automatically rolls itself back.** | Deploys must wait for activation and health checks to complete. | |
 | **Nix configuration changes are simultaneously deployed to all target machines that they affect.** | Nix eval always re-runs for every machine in your fleet, to determine which targets are affected. | A nixconvoy feature called the "eval memo" (separate from Nix's built-in "eval cache"), and support for Determinate Nix's "parallel eval". |
-| | *Usability:* the deploy fails if any machine is turned off or otherwise inaccessible.  | You can choose to provide an explicit `<target>`/`@<tag>` parameter, which restricts the set of targets considered. |
+| | The deploy fails if any machine is turned off or otherwise inaccessible.  | You can choose to provide an explicit `<target>`/`@<tag>` parameter, which restricts the set of targets considered. |
 
 > [!NOTE]
 > As mentioned above, nixconvoy includes a feature called the "eval memo".  This reuses the config-file -> target mappings computed by previous evals (including evals from other worktrees).  The data structure is keyed by a list of filenames and their content hashes.  The memo logic may have false positives (unnecessary re-evaluations) but is designed to never have false negatives.
