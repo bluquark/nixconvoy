@@ -244,18 +244,19 @@ Deploying and committing changes:
 
 ## Checkouts
 
-Nixconvoy distinguishes two kinds of checkout.  Your **main checkout** is the
-normal git checkout you had on your workstation before you adopted nixconvoy.  You can keep landing
-changes to its `main` branch with regular git commands and then deploy them with nixconvoy.  **Nixconvoy
-worktrees** are for work-in-progress changes.  These are created using `nixconvoy open <worktree-path> [--branch <workbranch-name>]`, removed with `nixconvoy close`, and carry their own workbranch.
+Nixconvoy distinguishes two kinds of checkout.
 
-Some rules follow from this:
-
-- Most nixconvoy subcommands read from `main` or `origin/main`, but the only one that writes to `main` is `nixconvoy land`.
-- In a worktree, write only via `nixconvoy` commands, never raw `git`, and generally deploy before you land.
+Your **main checkout** is the
+normal git checkout you had on your workstation before you adopted nixconvoy.  Nixconvoy stores data in it, but does not claim full ownership over it. You can keep landing changes to its `main` branch with regular git commands.
 
 > [!NOTE]
-> Strictly speaking, worktrees and workbranches are separate concepts, corresponding to git worktrees and git branches respectively.  Some nixconvoy subcommands operate on git worktrees, some on git branches, and some both at the same time.  But in the nixconvoy mental model, these are mostly 1:1.   `nixconvoy open` creates both a worktree and its dedicated branch, `nixconvoy close` removes both, and the other subcommands generally assume each worktree hasn't been switched away from the branch that nixconvoy created for it.
+> Most nixconvoy subcommands *read* from the `main` branch, but the only one that *writes* to it is `nixconvoy land`.
+
+**Nixconvoy
+worktrees** are for work-in-progress changes.  These are created using `nixconvoy open <worktree-path> [--branch <workbranch-name>]` and removed with `nixconvoy close`.  They carry their own workbranch, which should only be committed to using `nixconvoy deploy`.
+
+> [!NOTE]
+> Strictly speaking, worktrees and workbranches are separate concepts, corresponding to git worktrees and git branches respectively.  But in the nixconvoy mental model, these are mostly 1:1.   Nixconvoy subcommands generally assume a worktree hasn't been manually switched away from the workbranch that nixconvoy created for it.
 
 There are three ways to use worktrees, depending on your preference:
 - **Long-lived worktrees** with a generic name.  This is how I prefer to use nixconvoy most of the time.  For my homelab, my main checkout lives in `~/projects/homelab` while I have 4 nixconvoy worktrees `~/projects/homelab1`, ...,  `~/projects/homelab4`.  I created them with a command like:
@@ -285,29 +286,22 @@ There are three ways to use worktrees, depending on your preference:
 
 `deploy` and `undeploy` are nixconvoy's core subcommands, which apply new NixOS generations to your fleet.
 
-At a high level, here are the "transactional" properties they are designed to provide, and some of the usability & performance implications that follow:
+At a high level, here are the "transactional" properties they are designed to provide.  Some of these come with costs, which partly explains why they aren't all standard capabilities of fleet deployment tools.  nixconvoy's philosophy is to provide mitigations to make these costs rare and manageable.
 
 | Guarantee | Cost | Mitigation |
 |---|---|---|
-| **Nothing you deploy is ever silently undone.**  The input to the NixOS generation applied to your fleet is not only your current checkout, but the union of all open workbranches. | `deploy` aborts on a merge conflict between two workbranches. | nixconvoy uses a syntax-aware merge tool called `mergiraf`, so adjacent-line edits aren't enough to cause an abort. |
-| **No change will touch a target machine before passing prechecks (lint/static analysis).** | Additional work on every deploy. | nixconvoy runs precheck in parallel with the eval phase. |
-| **Two deploys running at the same time in different workbranches will serialize correctly.** | In many cases, deploys have to queue after one another instead of running in parallel. | |
-| **A broken NixOS generation automatically rolls itself back.** | Queued deploys must wait for activation and health checks to complete. | |
-| **Nix configuration changes are simultaneously deployed to all target machines that they affect.** | The deploy fails if any machine is turned off or otherwise inaccessible.<br><br>Additional Nix eval runs to determine which targets are affected. | You can choose to provide an explicit `<target>`/`@<tag>` parameter, which restricts the set of targets considered.<br><br>A nixconvoy feature called the "eval memo" (separate from Nix's built-in eval cache), and support for Determinate Nix's "parallel eval". |
+| **Nothing you deploy is ever silently undone.**  The input to the NixOS generation applied to your fleet is not only your current checkout, but the union of all open workbranches. |  Harder to keep track of what config ended up running on a given machine.<br><br>`deploy` can abort on a merge conflict between two workbranches. | The union result is visible on `nixconvoy-history/<target>`.<br><br>nixconvoy uses a syntax-aware merge tool called `mergiraf`, so even two edits of the same line don't necessarily cause a merge conflict. |
+| **Two deploys running at the same time in different worktrees will serialize correctly.** | Trivial (lockfiles). | |
+| **Every deploy runs prechecks (lint/static analysis).** | Additional work on every deploy. | nixconvoy runs precheck in parallel with Nix's eval phase, when there is often CPU to spare. |
+| **Every deploy runs auto-rollback checks (connectivity checks).** | Trivial (small script runs after activation). | |
+| **No arguments means "deploy to all targets".** | The deploy fails if any machine is turned off or otherwise inaccessible.<br><br>Extra Nix eval runs for targets that turn out to be unchanged. | You can choose to provide an explicit `<target>`/`@<tag>` parameter, which restricts the set of targets considered.<br><br>A nixconvoy optimization called the "eval memo" (additive to Nix's built-in eval cache), and support for Determinate Nix's "parallel eval". |
 |  |  |  |
 
-> [!NOTE]
-> As mentioned in the last row, nixconvoy includes a data structure called the "eval memo", which can skip the eval phase by reusing the results of previous evals known to have the same inputs (including evals done in other worktrees).  The data structure is keyed by a list of filenames and their content hashes.  The memo logic may have false positives (unnecessary re-evaluations) but is designed to never have false negatives.
-> 
-> Recommendation: If you have a heterogeneous fleet where eval is costly, split your Nix config into per-feature files, load those files by explicit filename instead of relying on lazy Nix magic, and verify eval time went down in nixconvoy's performance log.
+### `nixconvoy deploy`
 
-### `nixconvoy deploy <flags>`
+After you've staged a git change, `nixconvoy deploy` both commits it to the workbranch and applies it to your machines.
 
-After staging a change in a workbranch.  `nixconvoy deploy` both commits it to the workbranch and applies it to your machines.
-
-**Optional flags:**
-
-| `deploy` flag | |
+| `deploy` flag | *(all flags are optional)* |
 |---|---|
 | `<target>` | Restrict the deploy to only this machine.  If none is specified, all affected machines will be deployed to.  Can list more than one, separated by spaces.<br><br>(In general, I recommend not going out of your way to specify targets unless it's important for safety reasons not to deploy to certain machines.) |
 | `@<tag>` | Similar to `<target>` --- restrict the deploy to only machines with this tag. |
@@ -315,17 +309,22 @@ After staging a change in a workbranch.  `nixconvoy deploy` both commits it to t
 | `--evict` | Deploy exactly what's on this branch, skipping over nixconvoy's usual union-of-workbranches step and forcing the target to match it even if that would violate nixconvoy's normal guarantees.<br><br>Called "evict" because it evicts all other workbranches's ongoing work from the target.  This is a recovery command in case something went wrong and nixconvoy's union mechanism or safety systems are wedged.  |
 | `--dry-activate` | Run prechecks, evaluation, and build, but don't actually switch the machines to the new NixOS generation. |
 
-### `nixconvoy undeploy <flags>`
+### `nixconvoy undeploy`
 
-`nixconvoy undeploy` is the reverse of deploy.  Run without flags, it undoes the latest deploy.
+`nixconvoy undeploy` is the reverse of deploy.  Specifically, it resets the workbranch to a previous commit, and deploys to all targets affected by that.
 
-`undeploy`'s transactional properties and much of its implementation are identical to `deploy`, but some of the command-line parameters are more similar to `review`/`land` because they label previously deployed commits to act on.  `undeploy` automatically switches back the same targets that the original `deploy` acted upon, and removes `deploy`'s commits from the workbranch (nondestructively --- they still are rooted in the `nixconvoy-history` branch).  Note that `undeploy` does not use NixOS-level rollback, it pushes a fresh NixOS generation (because it does the "merged union of all workbranches" as `deploy` does).
+`undeploy`'s transactional properties and much of its implementation are identical to `deploy`, but its command-line parameters resemble `review`/`land` (because it also acts on previously deployed commits).
 
-| `undeploy` flag | |
+| `undeploy` flag | *(all flags are optional)*  |
 |---|---|
 | `<worktree>` | the name of a specific child worktree to undeploy. |
 | `--with-children` | undeploy all child worktrees of this parent worktree.  Same effect as listing all child worktrees one by one. |
-| `--back-to <rev>` | the revision to undeploy back to.  `--back-to HEAD^1` does the same as no flags.  `--back-to origin/main` undeploys all unlanded changes in this workbranch, effectively turning it back into a freshly opened workbranch. |
+| `--back-to <rev>` | the revision to undeploy back to.  `--back-to HEAD^1` has the same effect as no flags.  `--back-to origin/main` undeploys all unlanded changes in this workbranch, effectively turning it back into a freshly opened workbranch. |
+
+> [!NOTE]
+> `undeploy` does not switch back to a previous NixOS generation, it pushes a fresh generation (because it does a "merged union of all workbranches" just as `deploy` does).
+>
+> `undeploy` cannot undo a commit that has already landed onto main.  Use plain `git revert` on the main checkout followed by a regular `deploy`.
 
 ## Reviewing and landing
 
@@ -341,7 +340,7 @@ After staging a change in a workbranch.  `nixconvoy deploy` both commits it to t
 > [!NOTE]
 > If there is a conflict, the other worktree will be untouched and flagged in `land`'s stdout, and the next deploy on that worktree will try to rebase onto `main` again.
 
-| `land` flag | |
+| `land` flag | *(all flags are optional)*  |
 |---|---|
 | `<worktree>` | the name of a specific child worktree to land, if you're using child worktrees. |
 | `--with-children` | land all child worktrees of this parent worktree.  Same effect as listing all child worktrees one by one. |
