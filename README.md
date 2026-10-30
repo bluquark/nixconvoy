@@ -293,7 +293,7 @@ At a high level, here are the "transactional" properties they are designed to pr
 | **No change will touch a target machine before passing prechecks (lint/static analysis).** | Additional work on every deploy. | nixconvoy runs precheck in parallel with the eval phase. |
 | **Two deploys running at the same time in different workbranches will serialize correctly.** | In many cases, deploys have to queue after one another instead of running in parallel. | |
 | **A broken NixOS generation automatically rolls itself back.** | Queued deploys must wait for activation and health checks to complete. | |
-| **Nix configuration changes are simultaneously deployed to all target machines that they affect.** | Nix eval always re-runs for every machine in your fleet, to determine which targets are affected. | A nixconvoy feature called the "eval memo" (separate from Nix's built-in "eval cache"), and support for Determinate Nix's "parallel eval". |
+| **Nix configuration changes are simultaneously deployed to all target machines that they affect.** | Additional Nix eval runs to determine which targets are affected. | A nixconvoy feature called the "eval memo" (separate from Nix's built-in eval cache), and support for Determinate Nix's "parallel eval". |
 | | The deploy fails if any machine is turned off or otherwise inaccessible.  | You can choose to provide an explicit `<target>`/`@<tag>` parameter, which restricts the set of targets considered. |
 
 > [!NOTE]
