@@ -208,12 +208,14 @@ $ nixconvoy close ~/homelab-firewall
 $ nixconvoy close ~/homelab-jellyfin
 ```
 
-This is just an interleaved version of the sequential flow above... but notice the second deploy I highlighted with exclamation marks.  `~/homelab-jellyfin/` doesn't have the changes in `nftables.nix`, so if this were plain `nixos-rebuild`, the first round of firewall changes would accidentally get removed from the running system!
+This is just an interleaved version of the sequential flow above... but notice the second deploy I highlighted with exclamation marks.  `~/homelab-jellyfin/` doesn't have the changes in `nftables.nix`.  So if this were plain `nixos-rebuild`, the first round of security-critical firewall changes would accidentally get removed from the running system!
 
-This is the property of NixOS that can make it tricky to multitask on without switching to a full GitOps-style pipeline (where even the smallest change is required to be pushed to GitHub before getting deployed to a machine).  But with nixconvoy, the problem "magically" doesn't happen!
+Absence-means-removal is one of the best properties of NixOS, but for me, it sometimes got in the way of casual multitasking --- when I just want to deploy stuff from different checkouts without thinking too hard about sequencing and version control.  The initial idea behind nixconvoy was, what if there existed a deploy tool where accidental removal "magically" can't happen?
 
 > [!NOTE]
-> How?  nixconvoy actually *does* have a full GitOps-style pipeline in its implementation details: it merely presents itself as a simple push-based deploy tool.  It uses that to remember everything you previously deployed in other worktrees, and merge those changes together in /tmp before applying your latest change.  Nixconvoy uses a syntax-aware merge tool called `mergiraf`, so this process is mostly transparent except when two worktrees changed the exact same line of config.
+> So what's the trick?  Nixconvoy uses git worktrees and refs to keep track of everything you have been deploying.  Instead of deploying what's in your current checkout, it merges your latest staged changes with other checkouts' deployed-but-not-landed changes, then builds the NixOS generation from that.
+>
+> Merge conflicts are also less frequent with nixconvoy than with a default installation of `git merge`, because nixconvoy bundles in a syntax-aware merge tool called `mergiraf`.
 
 ## Parallel use with coding agents
 
