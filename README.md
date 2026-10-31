@@ -157,6 +157,13 @@ $ nixconvoy deploy
 $ nixconvoy land -m "Add Jellyfin"
 ```
 
+> [!NOTE]
+> As illustrated above, the default way to use nixconvoy is to deploy-then-land.  What if you prefer to land-then-deploy?
+>
+> There are two ways:
+> 1. On your `main` branch, commit using plain `git commit`, then  `nixconvoy deploy`
+> 2. On a workbranch, `nixconvoy deploy @test-vms` (e.g.), then `nixconvoy land --not-yet-deployed`, then `nixconvoy deploy`
+
 ## Basic parallel use
 
 Where things get interesting is when you spin up more than one worktree.  As a reminder, a git worktree is a directory containing another checkout of a local git repo, linked to it in a parent/child relationship.
@@ -220,7 +227,7 @@ After an agent reports that it's done, review the diff of all of the code change
 
 # Basic concepts
 
-## Command-line reference
+## Command-line overview
 
 ```xml
 Setting up a repository:
@@ -286,7 +293,7 @@ There are three ways to use worktrees, depending on your preference:
 
 `deploy` and `undeploy` are nixconvoy's core subcommands, which apply new NixOS generations to your fleet.
 
-At a high level, here are the "transactional" properties they are designed to provide.  Some of these come with costs, which partly explains why they aren't all standard capabilities of fleet deployment tools.  nixconvoy's philosophy is to provide mitigations to make these costs rare and manageable.
+At a high level, here are the "transactional" properties they are designed to provide.  Some of these come along with tradeoffs: nixconvoy's philosophy is to provide options and optimizations to keep them manageable.
 
 | Guarantee | Cost | Mitigation |
 |---|---|---|
@@ -540,7 +547,7 @@ Also, there are two special cases: a change touching only documentation skips ev
 
 Nixconvoy is written in a mix of Python and Rust.  Python is used for the script-like code, while Rust is used for core logic, particularly the `deploy` state machine (with its multiple error conditions and concurrency).  The Rust core is tested using stateright and property tests.
 
-The code was written via coding agent, mostly Fable.  This README you're reading was written artisanally in a text editor.  Either way, I take responsibility for the quality of the result.
+The code was written via coding agent, mostly Fable.  This README you're reading was written artisanally in a text editor followed by LLM review.  I take responsibility for the quality of the result.
 
 # Advanced features
 
@@ -562,15 +569,13 @@ Then, when you're ready to make a private change to it, open a nixconvoy worktre
 <br>
 Nixconvoy includes an optional module to have smarter behavior for which NixOS generations are selectable on the boot screen.  Compatible with lanzaboote only, and not enabled by default.
 
-Using nixconvoy as intended can rapidly create a rather large number of NixOS generations, so if your `/boot` partition is on the smaller side, lanzaboote's default "preserve latest N generations" will preserve a bunch of near-identical generations --- not a terribly useful backup plan if the change that broke boot was deployed, say, N+5 generations ago.  So on each nixconvoy deploy, the module performs its own custom generation pruning by age and by proven bootability.
+Using nixconvoy as intended can rapidly create a rather large number of NixOS generations, so if your `/boot` partition is on the smaller side, lanzaboote's default "preserve latest N generations" might preserve a bunch of near-identical generations --- not a terribly useful backup plan if the change that broke boot was deployed, say, N+5 generations ago.  So on each nixconvoy deploy, the module performs its own custom generation pruning by age and by proven bootability.
 
 </details>
 
-# Limitations and alternatives
+# Limitations
 
-## Missing features
-
-There are some features that other NixOS deployment tools support but nixconvoy doesn't, either because I didn't get around to them yet or because they're fundamentally hard to square with nixconvoy's design goals:
+There are some features that other NixOS deployment tools support but nixconvoy doesn't, either because they haven't been a high priority for me or because they're fundamentally hard to square with nixconvoy's design goals:
 
 * nixconvoy only supports flake-based NixOS configurations.
 * The build host and targets must all be Linux, all of the same CPU architecture.
@@ -578,17 +583,4 @@ There are some features that other NixOS deployment tools support but nixconvoy 
 * Nixconvoy's ssh user must have passwordless sudo on the entire NixOS fleet.
 * No offline deploys --- every deploy requires the Git origin to be reachable.
 
-If one of these is a hard blocker for you, consider an alternative NixOS deployment tool, such as deploy-rs or colmena.
-
-## Deploy-then-land bias
-
-nixconvoy has a "soft" limitation in its overall design: generally speaking, it assumes that you'll deploy changes onto your fleet first, and land them onto your main branch once they're proven to work.  In other words, a "test in production & rollback if it breaks" kind of workflow.  That is how I prefer to work, at least when I'm not maintaining mission-critical infrastructure (and currently I'm not).  It's just faster, and one of nixconvoy's primary goals is to enable you to work fast.
-
-The reverse order (land then deploy) is certainly supported --- two ways to do it are:
-
-* committing using plain `git commit` on the `main` branch followed by `nixconvoy deploy`
-* running e.g. `nixconvoy deploy @test-vms` first, followed by `nixconvoy land --not-yet-deployed`, followed by `nixconvoy deploy`
-
-As the `@test-vms` example gestures at, one reason you might want to "land before deploying" is if you want to test a change in an experimental environment before it makes it to any production machine.  Another reason is if you have teammates that are required to code-review your change.
-
-If you have such "enterprisey" needs, it may be possible to adapt nixconvoy to your use case, for example by giving developers ssh keys only to test machines, while the real production fleet has a builder with a private checkout with a job that runs `nixconvoy pull` and `nixconvoy deploy` on a regular basis.  (Indeed, this is similar to how I do nightly security updates on my NixOS fleet.)  But you may also find it more natural to use a deploy tool designed primarily for pull-based GitOps, such as comin.
+If one of these is a hard blocker for you, consider an alternative NixOS deployment tool, such as deploy-rs, colmena or comin.
