@@ -114,7 +114,7 @@ This will cause subagents to spawn inside a nixconvoy-managed child worktree.  I
 With the plugin, you can fire off a sweeping prompt like:
 
 ```markdown
-Audit all of my miniPC's systemd units for security hardening opportunities.
+Audit all of my server's systemd units for security hardening opportunities.
 Then divide them into 10 nonconflicting groups and launch one subagent to harden each.
 ```
 
@@ -127,34 +127,38 @@ The 10 subagents will go off and work for a while, and as long as they don't tou
 
 # Tutorial
 
-To begin with a concrete example, let's say you are maintaining a nascent NixOS homelab with one workstation and one headless mini-PC.  Your source of truth is a private repo called "homelab" on GitHub, and you work from a persistent local clone of it called `~/homelab` on your workstation.
+To begin with a concrete example, let's say you are maintaining a nascent NixOS homelab with one workstation and one headless server.  Your git remote is a private repo called "homelab" on GitHub, and you have a local clone of it on your workstation called `~/homelab`.  It already includes a working NixOS configuration for your server that you've previously deployed using `nixos-rebuild`.
 
-Now, let's assume you have two features you want to work on today for your mini-PC: 1) tighten your firewall security to protect your machine against a recent CVE, and 2) install Jellyfin.
+## Basic use
 
-## Basic sequential use
+After following the Installation instructions above to set `~/homelab` up with nixconvoy, the next step is to create your first nixconvoy-managed worktree, using `nixconvoy open`.
 
-Nixconvoy is built around two fundamental commands, `nixconvoy deploy` and `nixconvoy land`.  Both of these operate on one git feature branch or worktree.  `deploy` applies the currently staged changes to your NixOS fleet.  `land` rolls up all changes that have been applied since the last `land` into one git commit, which is pushed to both `main` and `origin/main`.
+> [!NOTE]
+> `nixconvoy open <worktree-path> [--branch <branch-suffix>]` creates a new worktree (by invoking `git worktree add` internally), then switches it to a new feature branch prefixed by `nixconvoy/` (or any other pattern of your choice specified by the `branch_prefix` setting).
+> 
+> As a reminder, a git worktree is a directory containing another checkout of a local git repo, linked to it in a parent/child relationship tracked by git.  Worktrees function similarly to regular checkouts, except they don't have a `.git` directory: their git objects are stored in their parent's.  This means creating/deleting worktrees can be as safe and lightweight as switching branches within a single checkout.
 
-If you want, you can start by ignoring all of nixconvoy's more advanced capabilities, and simply use it like `nixos-rebuild`.  With this traditional sequential workflow, here's what it might look like to code and test the two changes in feature branches of `~/homelab`:
+Then, stage a change and run `nixconvoy deploy` --- this subcommand commits your changes to the branch nixconvoy created for the worktree, and applies a new NixOS generation to your server.  You can repeatedly stage more incremental changes and `deploy` them.  When you're done, `nixconvoy land` rolls up the entire series of deployed changes into one git commit, and applies it to both `main` and `origin/main`.
+
+Concretely:
 
 ```console
-$ cd ~/homelab/nixos/hosts/minipc/
-$ git checkout -b nixconvoy/firewall
-$ vim nftables.nix
+$ cd ~/homelab/
+$ nixconvoy open ../homelab-firewall
+
+$ cd ~/homelab-firewall/
+# vim nixos/hosts/server/firewall.nix
 $ git add -A
 $ nixconvoy deploy
+$
+$ vim nixos/hosts/server/nftables.nix
+$ git add -A
+$ nixconvoy deploy
+$
 $ nixconvoy land -m "Tighten firewall"
 
-$ # First feature complete: begin second feature
-$ git checkout main  
-$ git checkout -b nixconvoy/jellyfin
-$ vim configuration.nix jellyfin.nix
-$ git add -A
-$ nixconvoy deploy
-$ vim jellyfin.nix  # it installed but needs more configuration tweaks
-$ # git add -A
-$ nixconvoy deploy
-$ nixconvoy land -m "Add Jellyfin"
+$ cd ~/homelab/
+$ nixconvoy close ../homelab-firewall
 ```
 
 > [!NOTE]
@@ -164,11 +168,11 @@ $ nixconvoy land -m "Add Jellyfin"
 > 1. On your `main` branch, commit using plain `git commit`, then  `nixconvoy deploy`
 > 2. On a workbranch, `nixconvoy deploy @test-vms` (e.g.), then `nixconvoy land --not-yet-deployed`, then `nixconvoy deploy`
 
-## Basic parallel use
+## Basic multitasking
 
-Where things get interesting is when you spin up more than one worktree.  As a reminder, a git worktree is a directory containing another checkout of a local git repo, linked to it in a parent/child relationship.
+Now, let's assume you have two independent improvements you want to work on today for your server: 1) tighten your firewall security to protect your machine against a recent CVE, and 2) install Jellyfin.
 
-You can spin up one worktree per task: 
+You can spin up one worktree per task:
 
 ```console
 $ cd ~/homelab/
@@ -176,39 +180,41 @@ $ nixconvoy open ~/homelab-firewall
 $ nixconvoy open ~/homelab-jellyfin
 ```
 
-(`nixconvoy open` creates a new work branch intended to be used exclusively by nixconvoy, then creates a new worktree that checks it out using `git worktree add`.)
-
-With this approach, you can safely work on both features at the same time:
+Now you can safely work on both features and deploy their incremental changes in any order:
 
 ```console
-$ cd ~/homelab-firewall/nixos/hosts/minipc/
-$ vim nftables.nix
+$ cd ~/homelab-firewall/
+$ vim nixos/hosts/server/firewall.nix
 $ git add -A
 $ nixconvoy deploy
 
 $ # Hmm, not quite done, I need to research this more, let's work on jellyfin for now
-
-$ cd ~/homelab-jellyfin/nixos/hosts/minipc/
-$ vim -o configuration.nix jellyfin.nix
-$ git add -A
-$ nixconvoy deploy  # !! this affects the same machine as the unfinished firewall change !!
-$ nixconvoy land -m "Add Jellyfin"
-$ cd ~
-
-$ # Back to half-finished original task...
-$ cd ~/homelab-firewall/nixos/hosts/minipc/
-$ vim nftables.nix  # add the missing bugfix
+$ cd ~/homelab-jellyfin/
+$ vim -o nixos/hosts/server/configuration.nix nixos/hosts/server/jellyfin.nix
 $ git add -A
 $ nixconvoy deploy
-$ nixconvoy land -m "Tighten firewall"
+$ cd ~
 
-$ # Worktrees are now synced to origin/main, it's safe to remove them
+$ # Back to the half-finished firewall task...
+$ cd ~/homelab-firewall/
+$ vim nixos/hosts/server/nftables.nix
+$ git add -A
+$ nixconvoy deploy
+
+$ # All done for the day, land both features and clean up
+$ cd ~/homelab-firewall/
+$ nixconvoy land -m "Tighten firewall"
+$ cd ~/homelab-jellyfin/
+$ nixconvoy land -m "Add Jellyfin"
+$
 $ cd ~
 $ nixconvoy close ~/homelab-firewall
 $ nixconvoy close ~/homelab-jellyfin
 ```
 
-This is just an interleaved version of the sequential flow above... but notice the second deploy I highlighted with exclamation marks.  `~/homelab-jellyfin/` doesn't have the changes in `nftables.nix`.  So if this were plain `nixos-rebuild`, the first round of security-critical firewall changes would accidentally get removed from the running system!
+Notice the ordering of the config changes and deploys.  `~/homelab-jellyfin/` doesn't have the changes in `firewall.nix`, and vice versa.  So if you tried this with ordinary git checkouts and ordinary `nixos-rebuild`, the first round of security-critical firewall changes would accidentally get removed from the server when Jellyfin was deployed --- then later, Jellyfin would get uninstalled when the second round of firewall changes was deployed!
+
+But this multitasking difficulty doesn't arise with nixconvoy --- assuming each edit being made to the .nix files is purely adding lines, then nixconvoy guarantees that each `deploy` will be purely additive as well.
 
 Absence-means-removal is one of the best properties of NixOS, but for me, it sometimes got in the way of casual multitasking --- when I just want to deploy stuff from different checkouts without thinking too hard about sequencing and version control.  The initial idea behind nixconvoy was, what if there existed a deploy tool where accidental removal "magically" can't happen?
 
@@ -217,9 +223,9 @@ Absence-means-removal is one of the best properties of NixOS, but for me, it som
 >
 > Merge conflicts are also less frequent with nixconvoy than with a default installation of `git merge`, because nixconvoy bundles in a syntax-aware merge tool called `mergiraf`.
 
-## Parallel use with coding agents
+## Multitasking with coding agents
 
-Parallel-use scenarios are especially likely to arise if you manage your NixOS fleet with coding agents.  In an agent workflow, the example might look something like this: start one coding agent per worktree in separate windows, prompt each of them with their respective task, then walk away to make some tea.  Given access to nixconvoy and instructions to use it, a decent agent will make sure to deploy their changes to your fleet and verify it actually works before declaring their work finished.
+Multitasking scenarios are especially likely to arise if you manage your NixOS fleet with coding agents.  In an agent workflow, the example might look something like this: start one coding agent per worktree in separate windows, prompt each of them with their respective task, then walk away to make some tea.  Given access to nixconvoy and instructions to use it (see suggested `AGENTS.md` text below), a decent agent will make sure to deploy their changes to your fleet and verify it actually works before declaring their work finished.
 
 After an agent reports that it's done, review the diff of all of the code changes it has deployed for this task using `nixconvoy review`.  If it still needs more work, prompt the agent some more.  If it's irredeemable garbage, wipe your machines clean of it with `nixconvoy undeploy --back-to origin/main`.  Finally, when you're happy with its work, `nixconvoy land` to promote the change to your main git branch and rebase all local worktrees on top of it (which will make every other agent notice it and consider it authoritative).
 
@@ -236,7 +242,7 @@ Setting up a repository:
   nixconvoy init [<flake-dir>]
 
 Managing worktrees:
-  nixconvoy open <worktree-path> [--branch <workbranch>]
+  nixconvoy open <worktree-path> [--branch <branch-suffix>]
   nixconvoy open --child <worktree-path>
   nixconvoy open --submodule <submodule>
   nixconvoy close [<worktree-path> ... | <submodule> ...] [--force]
