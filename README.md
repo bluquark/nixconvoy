@@ -578,7 +578,7 @@ Using nixconvoy as intended can rapidly create a rather large number of NixOS ge
 There are some features that other NixOS deployment tools support but nixconvoy doesn't, either because they haven't been a high priority for me or because they're fundamentally hard to square with nixconvoy's design goals:
 
 * nixconvoy only supports flake-based NixOS configurations.
-* The build host and targets must all be Linux, all of the same CPU architecture.
+* The build and target machines must all be Linux, all of the same CPU architecture.
 * nixconvoy does not support boot or test goals (i.e. all nixconvoy deploys switch the target to the new generation without delay).
 * Nixconvoy's ssh user must have passwordless sudo on the entire NixOS fleet.
 * No offline deploys --- every deploy requires the Git origin to be reachable.
