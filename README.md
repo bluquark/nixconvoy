@@ -216,7 +216,7 @@ Notice the ordering of the config changes and deploys.  `~/homelab-jellyfin/` do
 
 But this multitasking difficulty doesn't arise with nixconvoy --- assuming each edit being made to the .nix files is purely adding lines, then nixconvoy guarantees that each `deploy` will be purely additive as well.
 
-Absence-means-removal is one of the best properties of NixOS, but for me, it sometimes got in the way of casual multitasking --- when I just want to deploy stuff from different checkouts without thinking too hard about sequencing and version control.  The initial idea behind nixconvoy was, what if there existed a deploy tool where accidental removal "magically" can't happen?
+Absence-means-removal is one of the best properties of NixOS, but for me, it sometimes got in the way of casual multitasking --- when I just want to deploy stuff from different checkouts without thinking too hard about sequencing and version control.  The initial desire motivating nixconvoy was, what if there existed a deploy tool where accidental removal "magically" doesn't happen?
 
 > [!NOTE]
 > So what's the trick?  Nixconvoy uses git worktrees and refs to keep track of everything you have been deploying.  Instead of deploying what's in your current checkout, it merges your latest staged changes with other checkouts' deployed-but-not-landed changes, then builds the NixOS generation from that.
@@ -555,7 +555,7 @@ Also, there are two special cases: a change touching only documentation skips ev
 
 Nixconvoy is written in a mix of Python and Rust.  Python is used for the script-like code, while Rust is used for core logic, particularly the `deploy` state machine (with its multiple error conditions and concurrency).  The Rust core is tested using stateright and property tests.
 
-The code was written via coding agent, mostly Fable.  This README you're reading was written artisanally in a text editor followed by LLM review.  I take responsibility for the quality of the result.
+The code was written via coding agent, mostly Fable.  This documentation was written artisanally in a text editor followed by LLM review.
 
 # Advanced features
 
