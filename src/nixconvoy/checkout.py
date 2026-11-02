@@ -94,7 +94,9 @@ TMP_PREFIX = "nixconvoy-"
 # the next deploy's end), which carries each target's deploy record as a
 # parent from before its switch until refs/heads/<DEPLOYED_PREFIX>/<target>
 # holds it.  A dead deploy's announcement stays, its records with it,
-# until a deploy there ends well.  Fetches prune, so a deletion reaches every clone; local copies
+# until a deploy there ends well - or, a main checkout's, until origin's
+# history branches hold its records (a later deploy's chained on them).
+# Fetches prune, so a deletion reaches every clone; local copies
 # are never deleted by hand, since every worktree on the machine reads
 # the same refs.
 PENDING_REFS = "refs/nixconvoy/deploying/branch"
@@ -922,7 +924,7 @@ def await_background_push(*, wait: bool = True) -> bool:
     alive = push_in_flight(f)
     if alive and not wait:
         return True
-    deadline = time.monotonic() + 60
+    deadline = time.monotonic() + PUSH_WAIT
     while alive and time.monotonic() < deadline:
         time.sleep(0.05)
         alive = push_in_flight(f)
@@ -1225,7 +1227,8 @@ def announcements() -> tuple[list[Pending], dict[str, str]]:
     already, for its records alone, and is under way until settled; one
     that died carrying records keeps them on origin until the next deploy
     from its checkout renews the key, pushing them to their history
-    branches."""
+    branches - or until those branches hold them all (records_held), a
+    later deploy's record chained on them: cleared then, too."""
     depth = PENDING_REFS.count("/") + 1
     fmt = (f"%(refname:strip={depth})%09%(objectname)%09%(authordate:unix)"
            "%09%(committerdate:unix)%09%(parent)%09%(subject)")
@@ -1236,12 +1239,22 @@ def announcements() -> tuple[list[Pending], dict[str, str]]:
         key, sha, since, at, parents, subject = ln.split("\t", 5)
         branch = key.partition("@")[0]
         settled = subject.endswith(SETTLED)
-        if branch == cfg().main_branch and (settled or " " not in parents) \
-                and is_ancestor(f"{sha}^", main_ref()):
+        records = tuple(parents.split()[1:])
+        if branch == cfg().main_branch and is_ancestor(f"{sha}^", main_ref()) \
+                and (settled or not records or records_held(records)):
             cleared[key] = sha
             continue
-        found.append(Pending(key, branch, sha, int(since), int(at), settled, tuple(parents.split()[1:])))
+        found.append(Pending(key, branch, sha, int(since), int(at), settled, records))
     return found, cleared
+
+
+def records_held(records: tuple[str, ...]) -> bool:
+    """Whether origin's history branches as fetched hold every one of
+    `records`: where a deploy's ending push puts a target's record, and
+    where a later deploy's record chained on it takes it."""
+    p = run(["git", "rev-list", "-n1", *records, "--not", f"--glob=refs/remotes/{cfg().remote}/{DEPLOYED_PREFIX}/*"],
+            check=False)
+    return p.returncode == 0 and not p.stdout.strip()
 
 
 def pending_announcements() -> list[Pending]:
@@ -1290,6 +1303,11 @@ def record_commit(target: str, union: str, parents: list[str], subject: str, doc
 # How long a deploy's ending push waits for the lock of the one before
 # (held past the deadline's kill: pathological).
 PUSH_LOCK_WAIT = 10
+# How long a run waits for a background push: the next run for the one
+# before, before anything of its own (then it is killed); a oneshot
+# service's run for its own, before its end ends the unit (then it is
+# left to that).
+PUSH_WAIT = 60
 
 
 def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str]) -> str | None:
@@ -1374,7 +1392,24 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str])
                                      stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
                                      pass_fds=(lock.fileno(),))
     f.pid.write_text(str(child.pid))
-    print(strings.CHECKOUT_PUSHING_BG(what=", ".join(what) or strings.CHECKOUT_PUSHING_CLEARED))
+    what_s = ", ".join(what) or strings.CHECKOUT_PUSHING_CLEARED
+    if not proc.oneshot_run():
+        print(strings.CHECKOUT_PUSHING_BG(what=what_s))
+        return problem
+    # The run's end ends the unit, which kills the push: waited for, its
+    # failure told here as well as by the next run, which collects it.
+    print(strings.CHECKOUT_PUSHING_WAITED(what=what_s), flush=True)
+    deadline = time.monotonic() + PUSH_WAIT
+    while push_in_flight(f) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if f.status.exists():
+        status = f.status.read_text().strip()
+    else:
+        status = strings.CHECKOUT_PUSH_TIMED_OUT if push_in_flight(f) else strings.CHECKOUT_PUSH_GONE
+    if status != "0":
+        log = f.log.read_text().strip() if f.log.exists() else ""
+        print(strings.CHECKOUT_PUSH_WAITED_FAILED(status=status, log=strings.CHECKOUT_PUSH_BG_LOG(log=log) if log else ""),
+              file=sys.stderr)
     return problem
 
 

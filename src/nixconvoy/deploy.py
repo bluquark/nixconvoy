@@ -567,12 +567,15 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                 provenances[h] = dump_json({**doc, "toplevel": tops[h].out, "record": records[h]})
             # A target an earlier run from this checkout switched without
             # its push landing (died, or its push failed) runs a record its
-            # history branch lacks: carried and pushed with this run's, so
-            # the branch chains on it - whether or not this run switches it.
+            # history branch lacks (not as an ancestor of its tip either:
+            # a later deploy there chained on it): carried and pushed with
+            # this run's, so the branch chains on it - whether or not this
+            # run switches it.
             for h, pr in probed.items():
                 r = previous_record(pr.provenance)
+                tip = rev(remote_ref(f"{DEPLOYED_PREFIX}/{h}"))
                 if h not in records and r and by_me(pr.provenance, me) and rev(f"{r}^{{commit}}") \
-                        and r != rev(remote_ref(f"{DEPLOYED_PREFIX}/{h}")):
+                        and (tip is None or not is_ancestor(r, tip)):
                     records[h] = r
 
         # A candidate up to date (running the union's toplevel, not left

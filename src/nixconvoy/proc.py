@@ -328,6 +328,50 @@ def this_machine() -> str:
     return socket.gethostname().split(".")[0]
 
 
+def cgroup_unit(cgroup: str) -> str | None:
+    """The systemd service a /proc/<pid>/cgroup listing puts the process
+    in: the innermost .service on its path, or None."""
+    for ln in cgroup.splitlines():
+        for seg in reversed(ln.split(":", 2)[-1].split("/")):
+            if seg.endswith(".service"):
+                return seg
+    return None
+
+
+def ancestors(pid: int) -> set[int]:
+    """The pids of `pid`'s ancestors, up to init."""
+    found: set[int] = set()
+    while pid > 1:
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+            pid = int(stat.rpartition(")")[2].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+        found.add(pid)
+    return found
+
+
+def oneshot_run() -> bool:
+    """Whether this process's exit ends the systemd service its cgroup
+    names: this process is the unit's main process, or the unit is
+    Type=oneshot with its main process among this one's ancestors.  The
+    unit's end kills what its cgroup still holds, so nothing started here
+    outlives the run (push_deployed waits for its push instead)."""
+    try:
+        unit = cgroup_unit(Path("/proc/self/cgroup").read_text())
+        if unit is None:
+            return False
+        p = run(["systemctl", "show", "-p", "Type", "-p", "MainPID", unit], check=False)
+    except OSError:
+        return False
+    props = dict(ln.split("=", 1) for ln in p.stdout.splitlines() if "=" in ln)
+    main_pid = props.get("MainPID", "")
+    if not main_pid.isdigit():
+        return False
+    me = os.getpid()
+    return int(main_pid) == me or (props.get("Type") == "oneshot" and int(main_pid) in ancestors(me))
+
+
 def monotonic_ms() -> int:
     return int(time.monotonic() * 1000)
 

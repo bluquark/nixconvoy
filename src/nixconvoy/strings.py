@@ -320,6 +320,8 @@ CHECKOUT_PUSH_WB_FAILED = M("pushing {wb} failed - it moved on {remote}, but thi
 CHECKOUT_PUSHED = M("pushed {wb} ({sha})")
 CHECKOUT_PUSHING_BRANCH = M("{wb} ({sha})")
 CHECKOUT_PUSHING_BG = M("pushing {what} in the background")
+CHECKOUT_PUSHING_WAITED = M("pushing {what} (a service's run: waited for)")
+CHECKOUT_PUSH_WAITED_FAILED = M("note: the push failed ({status}); the next run's push retries it{log}")
 CHECKOUT_PUSHING_CLEARED = "the cleared announcement"
 
 # --- checkout.py: worktree locks

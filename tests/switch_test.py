@@ -1934,14 +1934,16 @@ def announce_cases(d: Path) -> None:
         sh(co, *checkout.fetch_args())
         assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{key}") == ""
         # One announcing a HEAD main holds already (a deploy with nothing
-        # pending, announced for its records) is under way, not cleared,
-        # until settled.
+        # pending, announced for its records - new ones: a record origin's
+        # history branch holds, as its tip or an ancestor, is not carried)
+        # is under way, not cleared, until settled.
         ann = checkout.Announce("main", "HEAD")
         assert ann.collect(), ann.detail
-        assert ann.carry({"a": rec2}) is None
+        rec2b = checkout.record_commit("a", snap, [rec2, main], "three again", "{}")
+        assert ann.carry({"a": rec2b}) is None
         sh(co, *checkout.fetch_args())
         assert [p.key for p in checkout.pending_announcements()] == [key] and checkout.announcements()[1] == {}
-        checkout.push_deployed(None, ann, {"a": rec2})
+        checkout.push_deployed(None, ann, {"a": rec2b})
         checkout.await_background_push()
         sh(co, *checkout.fetch_args())
         assert checkout.pending_announcements() == [] and list(checkout.announcements()[1]) == [key]
@@ -1976,9 +1978,34 @@ def announce_cases(d: Path) -> None:
         sh(co, *checkout.fetch_args())
         assert list(checkout.announced(None)) == [wb]
         # Atomic: the history branch did not move either.
-        assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/a") == rec2
+        assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/a") == rec2b
         assert checkout.clear_refspec(wb) == [f"--force-with-lease={checkout.PENDING_REFS}/{wb}:{ann.sha}",
                                               f":{checkout.PENDING_REFS}/{wb}"]
+        sh(co, "push", "--quiet", "origin", f":{checkout.PENDING_REFS}/{wb}")
+        # A main checkout's announcement carrying records, unsettled (its
+        # deploy died, or its ending push did - a oneshot service's end
+        # killed it), is under way until origin's history branches hold
+        # every record it carries: cleared then, and swept.
+        sh(co, "push", "--quiet", "origin", "HEAD:main")
+        sh(co, *checkout.fetch_args())
+        ann = checkout.Announce("main", "HEAD")
+        assert ann.collect(), ann.detail
+        rec3 = checkout.record_commit("a", snap, [rec2b, main], "four", "{}")
+        rec4 = checkout.record_commit("b", snap, [rec2, main], "four", "{}")
+        assert ann.carry({"a": rec3, "b": rec4}) is None
+        ann.stop()
+        sh(co, *checkout.fetch_args())
+        assert [p.key for p in checkout.pending_announcements()] == [key] and checkout.announcements()[1] == {}
+        sh(co, "push", "--quiet", "origin", f"+{rec3}:refs/heads/{checkout.DEPLOYED_PREFIX}/a")
+        sh(co, *checkout.fetch_args())
+        assert [p.key for p in checkout.pending_announcements()] == [key] and checkout.announcements()[1] == {}
+        later = checkout.record_commit("b", snap, [rec4, main], "five", "{}")
+        sh(co, "push", "--quiet", "origin", f"+{later}:refs/heads/{checkout.DEPLOYED_PREFIX}/b")
+        sh(co, *checkout.fetch_args())
+        assert checkout.pending_announcements() == [] and list(checkout.announcements()[1]) == [key]
+        checkout.push_deployed(None, None, {})
+        checkout.await_background_push()
+        assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{key}") == ""
     say("announcements: ok")
 
 
@@ -3204,8 +3231,38 @@ def in_scratch(cases: Callable[[Path], None]) -> Callable[[], None]:
     return run
 
 
+def service_cases() -> None:
+    """A oneshot service's run (proc.oneshot_run): the unit from the cgroup
+    path, its main process among the ancestors."""
+    assert proc.cgroup_unit("0::/system.slice/dtach-bash2.service\n") == "dtach-bash2.service"
+    assert proc.cgroup_unit("0::/system.slice/system-x.slice/x@1.service/sub\n") == "x@1.service"
+    assert proc.cgroup_unit("0::/user.slice/user-1000.slice/session-3.scope\n") is None
+    assert proc.cgroup_unit("") is None
+    assert os.getppid() in proc.ancestors(os.getpid()) and os.getpid() not in proc.ancestors(os.getpid())
+    assert proc.ancestors(1) == set()
+    assert proc.cgroup_unit("0::/system.slice/sshd@3-[::1]:22-[::1]:5.service\n") == "sshd@3-[::1]:22-[::1]:5.service"
+    with mock.patch.object(proc, "cgroup_unit", return_value="x.service"), \
+            mock.patch.object(proc, "run", side_effect=OSError("no systemctl")):
+        assert not proc.oneshot_run()
+    with mock.patch.object(proc, "cgroup_unit", return_value="x.service"), \
+            mock.patch.object(proc, "run", return_value=proc.Completed([], 0, f"Type=oneshot\nMainPID={os.getppid()}\n", "")):
+        assert proc.oneshot_run()
+    with mock.patch.object(proc, "cgroup_unit", return_value="x.service"), \
+            mock.patch.object(proc, "run", return_value=proc.Completed([], 0, f"Type=simple\nMainPID={os.getppid()}\n", "")):
+        assert not proc.oneshot_run()
+    # Its own process the unit's main one: its exit ends the unit, whatever the type.
+    for kind in ("oneshot", "simple"):
+        with mock.patch.object(proc, "cgroup_unit", return_value="x.service"), \
+                mock.patch.object(proc, "run", return_value=proc.Completed([], 0, f"Type={kind}\nMainPID={os.getpid()}\n", "")):
+            assert proc.oneshot_run()
+    with mock.patch.object(proc, "cgroup_unit", return_value="x.service"), \
+            mock.patch.object(proc, "run", return_value=proc.Completed([], 1, "", "")):
+        assert not proc.oneshot_run()
+
+
 def unit_cases() -> None:
-    for cases in (gate_cases, provenance_cases, target_cases, builder_cases, memo_cases, await_cases):
+    for cases in (gate_cases, provenance_cases, target_cases, builder_cases, memo_cases, await_cases,
+                  service_cases):
         cases()
 
 
