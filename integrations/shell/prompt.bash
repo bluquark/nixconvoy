@@ -1,4 +1,4 @@
-# A prompt segment for a checkout nixconvoy manages: the ref (a feature
+# A prompt segment for a checkout nixconvoy manages: the ref (a work
 # branch of this machine's by its suffix, <branch_prefix>3 -> 3, a
 # subagent's 3-<name>, with COMMIT_MSG.md's subject - the readable name
 # of its work), +N commits beyond origin/main, ", unstaged edits" and
@@ -7,7 +7,7 @@
 # a fresh one does not count), ", submodule X" for each submodule
 # worktree planted in the checkout (nixconvoy open --submodule) holding
 # edits or commits beyond its upstream.  One git status call carries most
-# of it (nixconvoy points every feature branch's upstream at main as fetched, so
+# of it (nixconvoy points every work branch's upstream at main as fetched, so
 # branch.ab is the count beyond main); only a detached HEAD, having no
 # upstream, costs a count of its own.  The prefix comes from the
 # nixconvoy/branch-prefix note `nixconvoy init` and every later command

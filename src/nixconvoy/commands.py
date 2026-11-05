@@ -16,10 +16,10 @@ from . import config, lanes, names, strings, submodule
 from .checkout import (
     DEPLOYED_TRAILER,
     KEPT_EDIT,
-    LINEAGE_REFS,
     LOCK_FILE,
     MACHINE_ENV,
     PENDING_REFS,
+    PROVENANCE_REFS,
     REWRITTEN_REFS,
     SESSIONLESS,
     STALE_STAMP,
@@ -40,7 +40,6 @@ from .checkout import (
     editor,
     ensure_rebased,
     ensure_sole_writer,
-    feature_branch_name,
     fetch_args,
     flock_holder,
     forget_pushed,
@@ -66,7 +65,7 @@ from .checkout import (
     push_cmd,
     push_in_flight,
     ran,
-    require_feature_branch,
+    require_work_branch,
     restage_msg,
     sibling_checkouts,
     sole_writer_problem,
@@ -79,6 +78,7 @@ from .checkout import (
     trailer_targets,
     tree_less_msg,
     unstage_msg,
+    work_branch_name,
     worktree_lock,
     write_holder,
 )
@@ -424,9 +424,9 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
         if not catch_up_rest(held):
             die(strings.LAND_CATCH_UP_FAILED())
         return
-    fb = require_feature_branch("land")
+    fb = require_work_branch("land")
     if current_branch() != fb:
-        die(strings.LAND_NOT_ON_FEATURE_BRANCH(fb=fb, cur=current_branch() or strings.LAND_DETACHED_HEAD))
+        die(strings.LAND_NOT_ON_WORK_BRANCH(fb=fb, cur=current_branch() or strings.LAND_DETACHED_HEAD))
     if staged_differs(less_msg=True):
         die(strings.LAND_STAGED)
     ensure_sole_writer(fb)  # origin's copy is reset at the end: it must be ours
@@ -482,7 +482,7 @@ def deployed_targets(commits: str) -> list[str]:
 
 
 def undeploy(back_to: str = "HEAD^", as_if: dict[str, str] | None = None) -> bool:
-    """Undo the feature branch's increments from HEAD back to `back_to` (cli
+    """Undo the work branch's increments from HEAD back to `back_to` (cli
     docstring: Undeploy) ahead of the deploy the caller runs at once, which
     reverts them on the targets: whether any target runs what was undone,
     so that deploy is due.
@@ -495,10 +495,10 @@ def undeploy(back_to: str = "HEAD^", as_if: dict[str, str] | None = None) -> boo
     ident = checkout_identity()
     here = Path.cwd().resolve()
     if ident.kind == "sub" and ident.fb and current_branch() != ident.fb and sub_parent(here):
-        die(strings.UNDEPLOY_SUB_NOT_ON_FEATURE_BRANCH(label=sub_label(here), fb=ident.fb, name=here.name))
-    fb = require_feature_branch("undeploy")
+        die(strings.UNDEPLOY_SUB_NOT_ON_WORK_BRANCH(label=sub_label(here), fb=ident.fb, name=here.name))
+    fb = require_work_branch("undeploy")
     if current_branch() != fb:
-        die(strings.UNDEPLOY_NOT_ON_FEATURE_BRANCH(fb=fb, cur=current_branch() or strings.LAND_DETACHED_HEAD))
+        die(strings.UNDEPLOY_NOT_ON_WORK_BRANCH(fb=fb, cur=current_branch() or strings.LAND_DETACHED_HEAD))
     main = rev(main_ref())
     if main is None:
         die(strings.LAND_MAIN_NOT_FOUND(main=main_short()))
@@ -613,7 +613,7 @@ def close_submodules(names: list[str], *, force: bool = False) -> None:
             why = submodule.keeps(sub, top)
             if why is not None and not force:
                 die(strings.CLOSE_SUBMODULE_KEPT(name=name, why=why))
-            if feature_branch_name() and submodule.off_default(sub, top):
+            if work_branch_name() and submodule.off_default(sub, top):
                 submodule.restore(sub, top)
             submodule.remove_one(sub)
         except Fail:
@@ -927,7 +927,7 @@ def transcript_cwd(path: Path, *, last: bool = False) -> Path | None:
 
 
 def finish(fb: str, lease: str, onto: str | None = None) -> None:
-    """The checked-out feature branch after a land or undeploy, now at `onto`
+    """The checked-out work branch after a land or undeploy, now at `onto`
     (origin/main's commit, the default, or an earlier increment), moved
     there on origin too, over `lease` (ensure_sole_writer's).  A subagent
     worktree left with nothing stays, idle: `close` removes it (the
@@ -968,7 +968,7 @@ def remove_sub(here: Path, branches: list[str]) -> None:
 
 
 def sub_branches(here: Path, cur: str | None, branches: list[str]) -> list[str]:
-    """The subagent worktree `here`'s own branches only - its feature branch
+    """The subagent worktree `here`'s own branches only - its work branch
     (`branches`), the fresh one it was created on (a hand commit's
     post-commit hook pushes it) and the checked-out `cur` when named after
     it - never another checkout's it may have checked out to read.  The
@@ -1005,12 +1005,12 @@ def drop_branches(names: list[str]) -> list[str]:
             for b in pushed:
                 del gone[b]
     # The gone branches' announcements and, of those gone from origin
-    # too, lineages, on their own: a stale lease (origin moved since the
+    # too, provenances, on their own: a stale lease (origin moved since the
     # fetch) must not count as a branch deletion failed.
     for b in gone:
         git("update-ref", "-d", f"{REWRITTEN_REFS}/{b}", check=False)
     clears = [spec for b in names for spec in clear_refspec(b)]
-    clears += [f":{LINEAGE_REFS}/{b}" for b in gone if rev(f"{LINEAGE_REFS}/{b}")]
+    clears += [f":{PROVENANCE_REFS}/{b}" for b in gone if rev(f"{PROVENANCE_REFS}/{b}")]
     if clears:
         p = git_remote("push", "--quiet", cfg().remote, *clears, check=False)
         if p.returncode != 0:
@@ -1044,7 +1044,7 @@ def find_sub(name: str, verb: str = "close") -> Path:
 
 
 def status() -> None:
-    """Every checkout on this machine as a tree, and the feature branches only
+    """Every checkout on this machine as a tree, and the work branches only
     origin holds (cli docstring: Status)."""
     paint = painter()
     git_remote(*fetch_args("--no-auto-gc"), check=False)
@@ -1289,7 +1289,7 @@ def default_base(root: Path) -> str:
 
 def open_checkout(path: Path, branch: str | None) -> Path:
     """`nixconvoy open <path>`: an agent checkout - a worktree of this
-    repository at `path`, outside every checkout, on a feature branch of this
+    repository at `path`, outside every checkout, on a work branch of this
     machine's: `branch` (a suffix, or the whole name under this machine's
     prefix), else <branch_prefix><path's name>, refused when origin holds
     that branch or a subagent branch under it (a removed checkout's, or
@@ -1323,7 +1323,7 @@ def open_checkout(path: Path, branch: str | None) -> Path:
     elif not branch.startswith(prefix) and "/" not in branch:
         branch = f"{prefix}{branch}"
     if not owned(branch):
-        die(strings.OPEN_NOT_FEATURE_BRANCH(branch=branch, prefix=prefix))
+        die(strings.OPEN_NOT_WORK_BRANCH(branch=branch, prefix=prefix))
     if branch.removeprefix(prefix) == "main" or "-" in branch.removeprefix(prefix):
         # "<branch-suffix>-<name>" is a subagent worktree's branch, "main-<name>" the main checkout's.
         die(strings.OPEN_BAD_SUFFIX(branch=branch, prefix=prefix))
@@ -1367,8 +1367,8 @@ def open_checkout(path: Path, branch: str | None) -> Path:
 
 
 def close_checkout(path: Path, *, force: bool = False) -> None:
-    """`nixconvoy close <path>`: the agent checkout at `path` (on its feature
-    branch: a main checkout is refused) removed with its feature branch, here
+    """`nixconvoy close <path>`: the agent checkout at `path` (on its work
+    branch: a main checkout is refused) removed with its work branch, here
     and on origin, when it holds nothing of its own - no edits, nothing
     beyond origin/main, no submodule holding anything - or `force`."""
     here = Path.cwd().resolve()
@@ -1438,9 +1438,9 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
         return
     if sub_parent(here) is not None:
         die(strings.LAND_CHILDREN_FROM_SUB)
-    fb = require_feature_branch("land --with-children")
+    fb = require_work_branch("land --with-children")
     if current_branch() != fb:
-        die(strings.LAND_NOT_ON_FEATURE_BRANCH(fb=fb, cur=current_branch() or strings.LAND_DETACHED_HEAD))
+        die(strings.LAND_NOT_ON_WORK_BRANCH(fb=fb, cur=current_branch() or strings.LAND_DETACHED_HEAD))
     ensure_sole_writer(fb)  # every branch is reset on origin at the end: all must be ours
     if staged_differs(less_msg=True):
         die(strings.LAND_STAGED)
@@ -1450,7 +1450,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
         die(strings.LAND_MAIN_NOT_FOUND(main=main_short()))
     refuse_no_message(fb, message)
     main_tree = out(["git", "rev-parse", f"{main}^{{tree}}"])
-    # The participants: each sub on its feature branch with work beyond main.
+    # The participants: each sub on its work branch with work beyond main.
     parts: list[tuple[Path, str]] = []
     locks: list[IO[str]] = []
     try:
@@ -1576,7 +1576,6 @@ __all__ = [
     "close_submodules",
     "close_worktrees",
     "enter_sub",
-    "feature_branch_name",
     "has_increments",
     "land",
     "land_with_children",
@@ -1587,4 +1586,5 @@ __all__ = [
     "status",
     "subs_of",
     "undeploy",
+    "work_branch_name",
 ]

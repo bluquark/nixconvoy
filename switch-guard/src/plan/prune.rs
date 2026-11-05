@@ -134,7 +134,7 @@ fn holder(s: &mut Script, p: &Params) -> Run<Result<(), Outcome>> {
     Ok(Ok(()))
 }
 
-/// Its feature branch and its branch, or why it is kept.
+/// Its work branch and its branch, or why it is kept.
 fn judge(s: &mut Script, p: &Params) -> Run<Result<(String, Option<String>), Outcome>> {
     if let Err(o) = holder(s, p)? {
         return Ok(Err(o));
@@ -150,9 +150,9 @@ fn judge(s: &mut Script, p: &Params) -> Run<Result<(String, Option<String>), Out
     }
     let cur = s.text(Query::CurrentBranch)?;
     let Some(fb) = s.text(Query::OwnBranch)? else {
-        return kept(text!(prune_no_feature_branch));
+        return kept(text!(prune_no_work_branch));
     };
-    // On its own feature branch it is judged like any checkout: idle once the
+    // On its own work branch it is judged like any checkout: idle once the
     // branch is reset onto main (a land, or an undeploy back to it), holding work before.
     let on_fb = cur.as_deref() == Some(fb.as_str());
     if on_fb && !fb.ends_with(&format!("-{}", p.name)) {

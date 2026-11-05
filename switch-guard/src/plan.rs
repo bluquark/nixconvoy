@@ -1,6 +1,6 @@
 //! nixconvoy's decisions about the checkout and the targets as Sans-I/O cores
 //! (nixconvoy-plan): which targets a deploy may switch (drift), how a checkout is
-//! brought onto origin/main (rebase), how the union of the feature branches
+//! brought onto origin/main (rebase), how the union of the work branches
 //! is built and kept current (union) and whether a subagent worktree is
 //! removed (prune).  nixconvoy performs each query - git,
 //! a worktree, the eval/build/copy of a union - and feeds the result back.
@@ -56,7 +56,7 @@ impl Names {
     }
 }
 
-/// Whether `name` is a feature branch: shaped like one of `shapes` (each a
+/// Whether `name` is a work branch: shaped like one of `shapes` (each a
 /// branch_prefix, `{local_hostname}` in it any one path segment), as a prefix.
 pub fn listed<'a>(shapes: impl IntoIterator<Item = &'a str>, name: &str) -> bool {
     shapes.into_iter().any(|s| shaped(s, name))
@@ -151,7 +151,7 @@ pub enum Query {
         name: String,
     },
     Fetch,
-    /// Push the local feature branch, leased on origin's tip as fetched -> Ran.
+    /// Push the local work branch, leased on origin's tip as fetched -> Ran.
     Push {
         branch: String,
     },
@@ -172,7 +172,7 @@ pub enum Query {
         upstream: String,
     },
     /// Whether HEAD is already on origin: an ancestor of origin/main or of
-    /// origin's tip of a listed feature branch -> Flag.
+    /// origin's tip of a listed work branch -> Flag.
     Pushed,
     /// Whether HEAD holds nothing of its own beyond origin: Pushed, or its
     /// tree less MSG_FILE an origin/main commit's past their merge base (a
@@ -200,9 +200,9 @@ pub enum Query {
         branch: String,
     },
 
-    /// The feature branches' shapes (branch_prefix) as the checkout now has it -> Names.
+    /// The work branches' shapes (branch_prefix) as the checkout now has it -> Names.
     Listed,
-    /// origin's feature branches (the refs shaped so) and their tips, in ref order -> Refs.
+    /// origin's work branches (the refs shaped so) and their tips, in ref order -> Refs.
     Branches,
     /// Whether `sha` changes nothing but MSG_FILE since its merge base with
     /// origin/main -> Flag.
@@ -304,11 +304,11 @@ pub enum Query {
         start: Option<u64>,
         own_ends: bool,
     },
-    /// Whether a background push of its feature branch runs -> Flag.
+    /// Whether a background push of its work branch runs -> Flag.
     PushInFlight,
     /// Whether another worktree lives under its directory -> Flag.
     Nested,
-    /// The feature branch it owns -> Text.
+    /// The work branch it owns -> Text.
     OwnBranch,
     /// Whether `sha` has commits on no origin ref -> Flag.
     Unpushed {

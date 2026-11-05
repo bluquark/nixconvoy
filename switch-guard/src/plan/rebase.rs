@@ -1,9 +1,9 @@
-//! How nixconvoy brings a checkout onto origin/main and onto its feature
+//! How nixconvoy brings a checkout onto origin/main and onto its work
 //! branch.  A detached HEAD (made by hand) is moved along when it is
 //! behind origin/main; one at commits already on origin - a review
-//! subagent's checkout of a feature branch's tip, which stays where the
+//! subagent's checkout of a work branch's tip, which stays where the
 //! review reads it - is left alone; one carrying commits of its own is
-//! refused, since switching to the feature branch would strand them.
+//! refused, since switching to the work branch would strand them.
 //!
 //! The same routine (`onto`) brings a submodule worktree onto its repository's
 //! default branch, under the Onto params: nixconvoy runs it in that
@@ -43,12 +43,12 @@ pub enum Op {
     /// default branch as fetched), a dead run's tmp commits unwound first;
     /// Err says why it was left as it was.
     Onto { upstream: String },
-    /// Fetch, then bring the checkout and its feature branch (None: the main
+    /// Fetch, then bring the checkout and its work branch (None: the main
     /// checkout has none) onto origin/main and push the branch.
     Sync { fb: Option<String> },
-    /// Leave the checkout on its feature branch, coming from main, from a
+    /// Leave the checkout on its work branch, coming from main, from a
     /// detached HEAD or from a branch with nothing of its own.
-    OnFeatureBranch { fb: String },
+    OnWorkBranch { fb: String },
 }
 
 /// What happened, or (Err) why the checkout was left as it was.
@@ -73,7 +73,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
             pop_tmp(s)?;
             onto(s, n, upstream)
         }
-        Op::OnFeatureBranch { fb } => on_feature_branch(s, n, fb).map(|()| Ok(String::new())),
+        Op::OnWorkBranch { fb } => on_work_branch(s, n, fb).map(|()| Ok(String::new())),
     }
 }
 
@@ -234,7 +234,7 @@ fn sync(s: &mut Script, n: &Names, fb: Option<&str>) -> Run<Outcome> {
     Ok(Ok(if steps.is_empty() { text!(rebase_up_to_date).into() } else { steps.join(text!(rebase_steps_joiner)) }))
 }
 
-/// Plain `git pull --rebase` on the feature branch then means the same
+/// Plain `git pull --rebase` on the work branch then means the same
 /// catch-up deploys do.  Pushes are unaffected: each names its refspec.
 fn ensure_upstream(s: &mut Script, n: &Names, fb: &str) -> Run<()> {
     if s.text(Query::Upstream { branch: fb.into() })?.as_deref() != Some(format!("{}\trefs/heads/{}", n.remote, n.main).as_str()) {
@@ -243,7 +243,7 @@ fn ensure_upstream(s: &mut Script, n: &Names, fb: &str) -> Run<()> {
     Ok(())
 }
 
-fn on_feature_branch(s: &mut Script, n: &Names, fb: &str) -> Run<()> {
+fn on_work_branch(s: &mut Script, n: &Names, fb: &str) -> Run<()> {
     let cur = branch(s)?;
     if cur.as_deref() == Some(fb) {
         return ensure_upstream(s, n, fb);

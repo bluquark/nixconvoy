@@ -56,7 +56,7 @@ def provenance_doc(*, union: str, main: str | None, branches: dict[str, str | No
                 own: str, head: str | None, base: str | None, snap: str, announce: str,
                 at: float, machine: str, checkout: str, pid: int, key: str = "") -> dict[str, object]:
     """The provenance of a deploy's union, before its toplevel and record are
-    added: `branches` the other feature branches' unioned tips, `own` the
+    added: `branches` the other work branches' unioned tips, `own` the
     checked-out branch the union was built on (`head`, or `snap`, the commit
     the branch gets once the staged increment runs), `base` origin's tip of
     it, `announce` the increment's announcement and `key` its ref's name
@@ -80,7 +80,7 @@ def provenance_doc(*, union: str, main: str | None, branches: dict[str, str | No
 def provenance_record(union: str, branches: list[tuple[str, str]], snap: str,
                    announce: str = "", key: str = "") -> dict[str, object]:
     """provenance_doc for this deploy, from the refs it built its union on;
-    `snap` the increment's feature-branch commit (deployed_commit), or ""."""
+    `snap` the increment's work-branch commit (deployed_commit), or ""."""
     own = current_branch() or cfg().main_branch  # detached: at origin/main (ensure_rebased)
     return provenance_doc(
         union=union, main=rev(main_ref()), branches=dict(branches),

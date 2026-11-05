@@ -61,7 +61,7 @@ pub struct Provenance {
     /// sorted.
     pub branches: Vec<String>,
     /// The tip of each of those the union held (the deploying checkout's own: the
-    /// feature-branch commit its pending increment became).
+    /// work-branch commit its pending increment became).
     pub tips: BTreeMap<String, String>,
     /// The deploying checkout's own branch when what it unioned of it was not on
     /// origin yet, with the origin tip that push moves.
@@ -186,7 +186,7 @@ pub struct Context {
     pub names: Names,
     /// This checkout: (machine, checkout directory).
     pub me: (String, String),
-    /// The branches its union may contain besides main: the feature
+    /// The branches its union may contain besides main: the work
     /// branches' shapes (branch_prefix).
     pub listed: BTreeSet<String>,
     /// This run's fetched origin tip of each branch.

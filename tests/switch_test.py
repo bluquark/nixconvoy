@@ -948,7 +948,7 @@ def scratch_origin(d: Path, files: dict[str, str], *, fb: str | None = None,
                    seeded: Callable[[Path], object] = lambda _seed: None,
                    names: RepoNames = NAMES) -> Iterator[tuple[Path, Path, Path]]:
     """(origin, seed, co): a bare origin whose main holds a nixconvoy.toml
-    (its feature branches work/<machine>/...), `files` and what `seeded`
+    (its work branches work/<machine>/...), `files` and what `seeded`
     adds in the seed clone, and the checkout co cloned from it, on `fb`
     when given and the cwd throughout.  `names` other than origin/main
     name the remote and main in both clones and in the toml (the suite's
@@ -972,7 +972,7 @@ def scratch_origin(d: Path, files: dict[str, str], *, fb: str | None = None,
     config.set_root(co)
     try:
         if fb is not None:
-            checkout.ensure_on_feature_branch(fb)
+            checkout.ensure_on_work_branch(fb)
         yield origin, seed, co
     finally:
         os.chdir(prev)
@@ -1193,10 +1193,10 @@ def lanes_cases(d: Path) -> None:
         o1, o2 = sh(co, "rev-parse", f"{tip}~2"), sh(co, "rev-parse", f"{tip}~1")
 
         # The commit of the branch standing for the one a record holds.
-        def lineage(rewritten: dict[str, str]) -> None:
-            """The branch's lineage as fetched from origin."""
-            checkout.write_lineage(other, rewritten)
-            sh(co, "update-ref", f"{checkout.LINEAGE_REFS}/{other}", proc.rev(f"{checkout.REWRITTEN_REFS}/{other}") or "")
+        def provenance(rewritten: dict[str, str]) -> None:
+            """The branch's provenance as fetched from origin."""
+            checkout.write_provenance(other, rewritten)
+            sh(co, "update-ref", f"{checkout.PROVENANCE_REFS}/{other}", proc.rev(f"{checkout.REWRITTEN_REFS}/{other}") or "")
             sh(co, "update-ref", "-d", f"{checkout.REWRITTEN_REFS}/{other}")
 
         ahead = out_at(co, tip, "pending")
@@ -1205,21 +1205,21 @@ def lanes_cases(d: Path) -> None:
         assert lanes.carried_commit(other, ahead, tip) == tip  # its push on its way
         # Reset back within its increments: what is left of it.
         assert lanes.carried_commit(other, tip, o2) == o2
-        # No lineage places it: dropped, as is a commit not here at all.
+        # No provenance places it: dropped, as is a commit not here at all.
         assert lanes.carried_commit(other, was1, tip) is None and lanes.carried_commit(other, "f" * 40, tip) is None
         # A rebase's rewrite.
-        lineage({was1: o1})
+        provenance({was1: o1})
         assert lanes.carried_commit(other, was1, tip) == o1
         assert lanes.carried_commit(other, out_at(co, main0, "never replayed"), tip) is None
         # One the rebase dropped (its change upstream already) stands for
         # the one before it; one not in this repository, for its rewrite -
         # unless the branch dropped that since.
         assert lanes.carried_commit(other, out_at(co, was1, "dropped by the rebase"), tip) == o1
-        lineage({was1: o1, "e" * 40: o2, "d" * 40: was1})
+        provenance({was1: o1, "e" * 40: o2, "d" * 40: was1})
         assert lanes.carried_commit(other, "e" * 40, tip) == o2 and lanes.carried_commit(other, "d" * 40, tip) is None
-        lineage({was1: o1})
-        assert checkout.read_lineage(other) == {was1: o1}
-        assert checkout.read_lineage(fb) == {} and checkout.read_lineage(fb, local=True) == {}
+        provenance({was1: o1})
+        assert checkout.read_provenance(other) == {was1: o1}
+        assert checkout.read_provenance(fb) == {} and checkout.read_provenance(fb, local=True) == {}
 
         # The targets behind the branch: those reading what it changed past
         # the commit their record holds.
@@ -1493,7 +1493,7 @@ def names_cases(d: Path) -> None:
         # An upstream on another remote is re-pointed.
         sh(co, "remote", "add", "origin", str(_origin))
         sh(co, "config", f"branch.{fb}.remote", "origin")
-        checkout.ensure_on_feature_branch(fb)
+        checkout.ensure_on_work_branch(fb)
         assert sh(co, "config", f"branch.{fb}.remote") == "up"
         sh(co, "remote", "remove", "origin")
         put(seed, "a.txt", "ONE\n", "upstream")
@@ -1784,11 +1784,11 @@ def git_cases(d: Path) -> None:
         sh(seed, "push", "--quiet", "origin", "work/other/1")
         sh(co, "fetch", "--quiet")
         err = dies(union)
-        assert "cannot union feature branch work/other/1;" in err, err
+        assert "cannot union work branch work/other/1;" in err, err
         assert "\n  b.txt\n" in err, err
 
         # A sync from main: a main checkout there, so main is fast-forwarded
-        # and the feature branch left where it was; back on the branch, it is
+        # and the work branch left where it was; back on the branch, it is
         # rebased and pushed.
         sh(co, "switch", "--quiet", "main")
         sh(seed, "switch", "--quiet", "main")
@@ -1803,30 +1803,30 @@ def git_cases(d: Path) -> None:
         assert good and f"rebased {fb}" in status and status.endswith(f"pushed {fb}"), status
         assert proc.is_ancestor("refs/remotes/origin/main", f"refs/remotes/origin/{fb}")
         assert checkout.update_checkout(co) == (True, "up to date")
-        # The rebase's rewrites are the branch's lineage, pushed with it.
-        kept = checkout.read_lineage(fb, local=True)
+        # The rebase's rewrites are the branch's provenance, pushed with it.
+        kept = checkout.read_provenance(fb, local=True)
         assert kept[tip] == sh(co, "rev-parse", fb), kept
         assert set(sh(co, "rev-list", f"origin/main..{fb}").split()) <= set(kept.values()), kept
-        assert sh(seed, "ls-remote", "origin", f"{checkout.LINEAGE_REFS}/{fb}").split()[0] == proc.rev(
+        assert sh(seed, "ls-remote", "origin", f"{checkout.PROVENANCE_REFS}/{fb}").split()[0] == proc.rev(
             f"{checkout.REWRITTEN_REFS}/{fb}")
         sh(co, *checkout.fetch_args())
-        assert checkout.read_lineage(fb) == kept
+        assert checkout.read_provenance(fb) == kept
         # A later rebase's are composed in, and only the rewrites the
         # branch still holds are kept: the tip replayed again, a commit
         # replayed for the first time, the rest dropped by that rebase.
         checkout.note_rewritten(fb, {kept[tip]: "c" * 40, "d" * 40: "e" * 40}, {"c" * 40, "e" * 40})
-        assert checkout.read_lineage(fb, local=True) == {tip: "c" * 40, kept[tip]: "c" * 40, "d" * 40: "e" * 40}
-        assert checkout.read_lineage(fb) == kept
-        sh(co, "update-ref", f"{checkout.REWRITTEN_REFS}/{fb}", proc.rev(f"{checkout.LINEAGE_REFS}/{fb}") or "")
+        assert checkout.read_provenance(fb, local=True) == {tip: "c" * 40, kept[tip]: "c" * 40, "d" * 40: "e" * 40}
+        assert checkout.read_provenance(fb) == kept
+        sh(co, "update-ref", f"{checkout.REWRITTEN_REFS}/{fb}", proc.rev(f"{checkout.PROVENANCE_REFS}/{fb}") or "")
 
-        # A review subagent's worktree: a detached HEAD at another feature
+        # A review subagent's worktree: a detached HEAD at another work
         # branch's tip.  Nothing of its own, so a pull leaves it alone...
         def left_alone(got: tuple[bool, str]) -> bool:
             return got[0] and got[1].startswith("detached HEAD left as is")
         rv = co / "worktrees" / "review"
         sh(co, "worktree", "add", "--quiet", "--detach", str(rv), "origin/work/other/1")
         assert left_alone(got := checkout.update_checkout(rv)), got
-        # ...while its own feature branch, not checked out, is rebased in a
+        # ...while its own work branch, not checked out, is rebased in a
         # throwaway worktree and pushed.
         own = checkout.identity_of(rv.resolve(), None).fb
         assert own is not None
@@ -1874,7 +1874,7 @@ def git_cases(d: Path) -> None:
         assert rv.exists() and Path.cwd().resolve() == co.resolve()
         (rv / "u.txt").unlink()
         # A sweep removes one whose session is dead, but not while it owns a
-        # local feature branch carrying commits origin lacks.
+        # local work branch carrying commits origin lacks.
         exited = subprocess.Popen(["true"])
         exited.wait()
         sh(co, "worktree", "lock", "--reason", f"claude agent review (pid {exited.pid})", str(rv))
@@ -1903,7 +1903,7 @@ def git_cases(d: Path) -> None:
         try:
             pidf.write_text(str(running.pid))
             out = printed(lambda: commands.close_worktrees([]))
-            assert "/review: kept, a push of its feature branch is in flight" in out, out
+            assert "/review: kept, a push of its work branch is in flight" in out, out
             os.chdir(rv)
             try:
                 assert checkout.await_background_push(wait=False) and pidf.exists()
@@ -2035,7 +2035,7 @@ def git_cases(d: Path) -> None:
         assert held is not None
         err = dies(lambda: commands.undeploy("origin/main"))
         held.close()
-        assert "homelab9/review is not on its feature branch" in err and "nothing to undeploy" in err, err
+        assert "homelab9/review is not on its work branch" in err and "nothing to undeploy" in err, err
         sh(rv, "reset", "--quiet", "--hard")
         assert rv.exists() and not sh(rv, "status", "--porcelain")
         os.chdir(co)
@@ -2098,7 +2098,7 @@ def git_cases(d: Path) -> None:
         co9, fb9 = d / "homelab90", "work/tester/90"
         sh(d, "clone", "--quiet", str(origin), str(co9))
         os.chdir(co9)
-        checkout.ensure_on_feature_branch(fb9)
+        checkout.ensure_on_work_branch(fb9)
         assert "nothing to undeploy: no increment beyond origin/main" in dies(commands.undeploy)
         put(co9, "i1.txt", "one\n", "inc 1\n\nReaches: a\nApplied: a")  # Applied: the trailer key before the rename, still read
         put(co9, "i2.txt", "two\n", "inc 2\n\nReaches: a, b\nDeployed: a, b")
@@ -2273,7 +2273,7 @@ def announce_cases(d: Path) -> None:
         assert ann.carry({}) is None
         assert sh(co, "log", "-1", "--format=%P", ann.sha).split() == [sh(co, "rev-parse", "HEAD")]
         assert ann.carry({"a": rec1, "b": rec2}) is None
-        # The push that ends the deploy, atomic: the feature branch, the
+        # The push that ends the deploy, atomic: the work branch, the
         # records onto the history branches and the announcement deleted.
         checkout.adopt_commit(fb, committed)
         checkout.push_deployed(fb, ann, {"a": rec1, "b": rec2})
@@ -2464,7 +2464,7 @@ def submodule_cases(d: Path) -> None:
             as (origin, seed, co):
         dep_repo = co / ".git/modules/dep"  # the repository, as git keeps a submodule's
         assert (co / path).is_dir() and not any((co / path).iterdir())  # unpopulated, as cloned
-        checkout.ensure_on_feature_branch(fb)
+        checkout.ensure_on_work_branch(fb)
         assert submodule.present(co) == []
         assert "no submodule of this repository (they are: dep)" in dies(lambda: submodule.create("other", fb))
         ax = submodule.create("dep", fb)
@@ -2585,7 +2585,7 @@ def submodule_cases(d: Path) -> None:
         co8, fb8 = d / "homelab8", "work/tester/8"
         sh(d, "clone", "--quiet", str(origin), str(co8))
         os.chdir(co8)
-        checkout.ensure_on_feature_branch(fb8)
+        checkout.ensure_on_work_branch(fb8)
         ax8 = submodule.create("dep", fb8)
         put(ax8, "tool2.py", "b\n")
         submodule.sync(fb8, "dep: b")
@@ -2622,7 +2622,7 @@ def submodule_cases(d: Path) -> None:
         os.chdir(co)
         sh(co, "fetch", "--quiet")
         err = dies(union)
-        assert f"cannot union feature branch {fb8};" in err and path in err, err
+        assert f"cannot union work branch {fb8};" in err and path in err, err
         sh(ax8, "reset", "--quiet", "--hard", b1)
         sh(ax8, "push", "--quiet", "--force", "origin", fb8)
         sh(co8, "reset", "--quiet", "--hard", "HEAD~1")
@@ -2949,7 +2949,7 @@ def submodule_cases(d: Path) -> None:
         co7, fb7 = d / "homelab7", "work/tester/7"
         sh(d, "clone", "--quiet", str(origin), str(co7))
         os.chdir(co7)
-        checkout.ensure_on_feature_branch(fb7)
+        checkout.ensure_on_work_branch(fb7)
         ax7 = submodule.create("dep", fb7)
         submodule.sync(fb7, None)
         assert sh(ax7, "rev-parse", "HEAD") == new_main
@@ -3018,7 +3018,7 @@ def submodule_cases(d: Path) -> None:
         submodule.set_pin(s, merge, co)
         assert json.loads(pins.read_text()) == {"committed": date(merge), "narHash": f"nar:{merge}"}
         # A stale file (a hand-moved gitlink: its date is not the pinned
-        # commit's) is rewritten by a deploy on a feature branch, only said
+        # commit's) is rewritten by a deploy on a work branch, only said
         # in a main checkout; the index's copy is what counts.
         pins.write_text('{"committed": 1, "narHash": "nar:0"}\n')
         sh(co, "add", pin_file)
@@ -3054,7 +3054,7 @@ def submodule_cases(d: Path) -> None:
         co5, fb5 = d / "homelab5", "work/tester/5"
         sh(d, "clone", "--quiet", str(origin), str(co5))
         os.chdir(co5)
-        checkout.ensure_on_feature_branch(fb5)
+        checkout.ensure_on_work_branch(fb5)
         ax5 = submodule.create("dep", fb5)
         submodule.sync(fb5, None)
         put(ax5, "tool5.py", "five\n")
@@ -3087,7 +3087,7 @@ def open_cases(d: Path) -> None:
     branch and lock, reused on a second open; a worktree nested anywhere
     in a checkout is its subagent's, another repository's is not.  `open
     <path>` / `close <path>`: an agent checkout beside the others on a
-    free listed feature branch.  `land --with-children`: the checkout and its
+    free listed work branch.  `land --with-children`: the checkout and its
     subagent worktree landed as one commit."""
     scratch_env()
     # No flake here to scan: what each branch has not deployed is given.
@@ -3207,7 +3207,7 @@ def open_cases(d: Path) -> None:
         checkout.ensure_sole_writer("work/tester/other")
         put(one, "d.txt", "d\n", "mine")
         os.chdir(one)
-        checkout.push_feature_branch("work/tester/other")
+        checkout.push_work_branch("work/tester/other")
         os.chdir(co)
         assert checkout.pushed_tip("work/tester/other") == sh(one, "rev-parse", "HEAD")
         checkout.ensure_sole_writer("work/tester/other")
@@ -3224,7 +3224,7 @@ def open_cases(d: Path) -> None:
         sh(seed, "push", "--quiet", "--force", "origin", "HEAD:refs/heads/work/tester/other")
         sh(co, "fetch", "--quiet")
         assert "moved on origin" in dies(lambda: checkout.ensure_sole_writer("work/tester/other"))
-        assert "moved on origin" in dies(lambda: checkout.push_feature_branch("work/tester/other"))
+        assert "moved on origin" in dies(lambda: checkout.push_work_branch("work/tester/other"))
         # The message's remedy: this checkout's increments carried onto
         # origin's copy, which the branch then contains - with a staged
         # edit riding along, and still once a moved main rebases it again.
@@ -3263,8 +3263,8 @@ def open_cases(d: Path) -> None:
         assert checkout.identity_of(five.resolve(), "work/tester/homelab5") == checkout.Checkout("agent", "work/tester/homelab5")
         assert "exists already" in dies(lambda: commands.open_checkout(d / "homelab5", None))
         assert "nested" in dies(lambda: commands.open_checkout(co / "inside", None))
-        assert "not a feature branch" in dies(lambda: commands.open_checkout(d / "x", "work/other/1"))
-        # A main checkout is never closed: off its feature branch, that is what
+        assert "not a work branch" in dies(lambda: commands.open_checkout(d / "x", "work/other/1"))
+        # A main checkout is never closed: off its work branch, that is what
         # an agent checkout is.
         sh(five, "switch", "--quiet", "--detach")
         assert "is a main checkout (detached)" in dies(lambda: commands.close_checkout(d / "homelab5"))
@@ -3283,7 +3283,7 @@ def open_cases(d: Path) -> None:
         assert "primary worktree" in dies(lambda: commands.close_checkout(co))
         os.chdir(co)
         # land --with-children: the parent's increment and the sub's, each deployed
-        # (committed on its feature branch and pushed), land as one commit
+        # (committed on its work branch and pushed), land as one commit
         # under the parent's COMMIT_MSG.md with the sub's appended; every
         # branch resets onto it.
         put(co, "p.txt", "parent\n")
@@ -3744,7 +3744,7 @@ def init_cases(d: Path) -> None:
     """`nixconvoy init`: nixconvoy.toml from the repository (the flake under
     nixos/, the nixosConfigurations as nix names them - a fake nix here -
     the one system literal), the ssh address template as this user, this
-    machine's feature-branch pattern, nothing staged; a second init refused;
+    machine's work-branch pattern, nothing staged; a second init refused;
     refused without nix."""
     scratch_env()
 

@@ -1,4 +1,4 @@
-"""The checkouts of the repo on this machine and their feature branches:
+"""The checkouts of the repo on this machine and their work branches:
 identity, locks, the staged snapshot, pushes, and the git queries
 nixconvoy-plan's rebase core asks."""
 
@@ -50,8 +50,8 @@ from .wire import (
     Flag,
     HeadSubject,
     Ok,
-    OnFeatureBranch,
     OnOrigin,
+    OnWorkBranch,
     OpInProgress,
     PlanQuery,
     PlanReply,
@@ -74,7 +74,7 @@ from .wire import (
 )
 
 # Identity for machinery commits (snapshots, union merges); the fixed date
-# makes an unchanged union re-create the same commit hash.  Feature-branch and
+# makes an unchanged union re-create the same commit hash.  Work-branch and
 # landing commits use the user's identity.
 MACHINE_ENV = {
     "GIT_AUTHOR_NAME": "nixconvoy",
@@ -102,13 +102,13 @@ TMP_PREFIX = "nixconvoy-"
 # the same refs.
 PENDING_REFS = "refs/nixconvoy/deploying/branch"
 DEPLOYED_PREFIX = "nixconvoy-history"
-# A feature branch's lineage (read_lineage): on origin, and here as fetched,
-# LINEAGE_REFS/<branch>, pushed with the branch (push_refspecs) from
+# A work branch's provenance (read_provenance): on origin, and here as fetched,
+# PROVENANCE_REFS/<branch>, pushed with the branch (push_refspecs) from
 # REWRITTEN_REFS/<branch>, this repository's own copy, which a rebase here
 # moves before the push.
-LINEAGE_REFS = "refs/nixconvoy/lineage"
+PROVENANCE_REFS = "refs/nixconvoy/provenance"
 REWRITTEN_REFS = "refs/nixconvoy/rewritten"
-LINEAGE_FILE = "lineage.json"
+PROVENANCE_FILE = "provenance.json"
 # A deploy renews its announcement every HEARTBEAT seconds while it runs; a
 # deploy waiting for it (deploy.await_pending) takes it for dead and goes
 # on without it - to be refused by the drift core, which names the dead
@@ -150,11 +150,11 @@ def fetch_args(*flags: str) -> list[str]:
     """`git fetch origin` of the branches and nixconvoy's own refs."""
     return ["fetch", "--quiet", "--prune", *flags, cfg().remote,
             f"+refs/heads/*:refs/remotes/{cfg().remote}/*", f"+{PENDING_REFS}/*:{PENDING_REFS}/*",
-            f"+{LINEAGE_REFS}/*:{LINEAGE_REFS}/*"]
+            f"+{PROVENANCE_REFS}/*:{PROVENANCE_REFS}/*"]
 
 
-def feature_shape() -> str:
-    """The shape of the feature branches nixconvoy may union or own: the
+def work_shape() -> str:
+    """The shape of the work branches nixconvoy may union or own: the
     invoking checkout's working-tree copy of nixconvoy.toml's
     branch_prefix (config.root(), wherever the run has moved to), read
     afresh each time (a rebase may have changed it)."""
@@ -171,8 +171,8 @@ def shape_re(shape: str) -> re.Pattern[str]:
 
 
 def listed(name: str, shape: str | None = None) -> bool:
-    """Whether `name` is a feature branch: shaped like `shape` (the feature shape)."""
-    return shape_re(feature_shape() if shape is None else shape).match(name) is not None
+    """Whether `name` is a work branch: shaped like `shape` (the work shape)."""
+    return shape_re(work_shape() if shape is None else shape).match(name) is not None
 
 
 def this_prefix() -> str:
@@ -180,13 +180,13 @@ def this_prefix() -> str:
 
 
 def owned(name: str) -> bool:
-    """A feature branch this machine may write: named with its prefix (another
+    """A work branch this machine may write: named with its prefix (another
     machine's is only ever unioned)."""
     return name.startswith(this_prefix())
 
 
 class Checkout(NamedTuple):
-    # "main" (no feature branch of its own), "agent" (a feature branch) or "sub"
+    # "main" (no work branch of its own), "agent" (a work branch) or "sub"
     # (a subagent worktree nested in another checkout).
     kind: str
     fb: str | None
@@ -289,7 +289,7 @@ def state_dir(d: Path) -> Path:
 def note_prefix(top: Path) -> None:
     """This machine's expanded branch_prefix, and origin/main by its
     configured names, written into the repository's common git dir for the
-    shell prompt (integrations/shell/prompt.bash), which shows a feature
+    shell prompt (integrations/shell/prompt.bash), which shows a work
     branch by its suffix and its lead over main: bash reads a line there
     where it could not read nixconvoy.toml at every prompt.  Written by
     `init` and refreshed by every later command; a repository without a
@@ -312,11 +312,11 @@ def note_prefix(top: Path) -> None:
 
 def identity_of(here: Path, cur: str | None) -> Checkout:
     """What the checkout at `here` with `cur` checked out is: on one of
-    this machine's feature branches it owns that branch (a subagent's
+    this machine's work branches it owns that branch (a subagent's
     when it is nested in another checkout); a subagent worktree on
-    any other branch owns <parent's feature branch>-<name> (<branch_prefix>main-<name>
+    any other branch owns <parent's work branch>-<name> (<branch_prefix>main-<name>
     under the main checkout); anything else is the main checkout, with no
-    feature branch of its own."""
+    work branch of its own."""
     parent = sub_parent(here)
     if cur and owned(cur):
         return Checkout("sub" if parent is not None else "agent", cur)
@@ -331,13 +331,13 @@ def checkout_identity() -> Checkout:
     return identity_of(Path.cwd().resolve(), current_branch())
 
 
-def feature_branch_name() -> str | None:
-    """The feature branch of the current checkout; None for the main checkout."""
+def work_branch_name() -> str | None:
+    """The work branch of the current checkout; None for the main checkout."""
     return checkout_identity().fb
 
 
-def require_feature_branch(what: str) -> str:
-    fb = feature_branch_name()
+def require_work_branch(what: str) -> str:
+    fb = work_branch_name()
     if fb is None:
         die(strings.CHECKOUT_NEEDS_FB(what=what, prefix=this_prefix()))
     return fb
@@ -516,7 +516,7 @@ class GitQueries:
     def __init__(self, names: RepoNames | None = None, as_if: Mapping[str, str] | None = None) -> None:
         self.aside = ""
         self.aside_branch = ""
-        # The feature branches taken to be at these commits, not at origin's
+        # The work branches taken to be at these commits, not at origin's
         # tips of them (an undeploy's dry activation).
         self.as_if = as_if or {}
         # The repository's names (a submodule's own, when the core runs there).
@@ -710,7 +710,7 @@ def sibling_checkouts(here: Path | None = None) -> list[Path]:
 
 def update_checkout(path: Path) -> tuple[bool, str]:
     """Fetch and bring the checkout at `path` onto origin/main under its
-    deploy lock, pushing its feature branch (origin's copy is what every other
+    deploy lock, pushing its work branch (origin's copy is what every other
     deploy unions), then its submodule worktrees onto their default
     branches (submodule.catch_up): (ok, what happened).  A checkout that
     cannot be is left exactly as it was; a submodule that cannot be is
@@ -724,7 +724,7 @@ def update_checkout(path: Path) -> tuple[bool, str]:
         if lock is None:
             return False, strings.CHECKOUT_SKIPPED_LOCKED(holder=lock_holder())
         try:
-            fb = feature_branch_name()
+            fb = work_branch_name()
             done = decide(RebaseParams(cfg().names, Sync(fb)))
             good, status = isinstance(done, Ok), done.value
             if good and fb is not None:
@@ -757,9 +757,9 @@ def catch_up(paths: list[Path]) -> bool:
     return good
 
 
-def ensure_on_feature_branch(fb: str) -> None:
+def ensure_on_work_branch(fb: str) -> None:
     prev = current_branch()
-    decide(RebaseParams(cfg().names, OnFeatureBranch(fb)))
+    decide(RebaseParams(cfg().names, OnWorkBranch(fb)))
     if (prev is not None and prev not in (fb, cfg().main_branch) and current_branch() == fb
             and checkout_identity().kind == "sub"):
         # The fresh branch a subagent's worktree was created on, replaced.
@@ -880,7 +880,7 @@ def staged_snapshot() -> str:
 
 
 def deployed_commit(snap: str, msg: str) -> str:
-    """The feature-branch commit of the increment `snap` deploys: exactly the
+    """The work-branch commit of the increment `snap` deploys: exactly the
     snapshot's tree on HEAD, with the user's identity.  Made before the
     switch, so the provenance the targets get names the commit origin will hold
     (a later deploy anywhere can then tell what became of it); dangling if
@@ -890,7 +890,7 @@ def deployed_commit(snap: str, msg: str) -> str:
 
 
 def adopt_commit(fb: str, c: str) -> None:
-    """`c` (deployed_commit) onto the feature branch once its increment runs.
+    """`c` (deployed_commit) onto the work branch once its increment runs.
     The soft reset leaves the index alone, so anything staged mid-deploy
     stays staged on top."""
     git("reset", "--quiet", "--soft", c)
@@ -998,7 +998,7 @@ def await_background_push(*, wait: bool = True) -> bool:
     return False
 
 
-# The tip this repository last pushed onto a feature branch (or took from
+# The tip this repository last pushed onto a work branch (or took from
 # origin's copy at open): the proof that origin's copy is ours to push over.
 PUSHED_REFS = "refs/nixconvoy/pushed"
 
@@ -1016,7 +1016,7 @@ def forget_pushed(fb: str) -> None:
 
 
 def adopt_origin_tip(fb: str) -> None:
-    """Origin's copy of the feature branch, taken as this checkout's (open by
+    """Origin's copy of the work branch, taken as this checkout's (open by
     name), noted as pushed."""
     up = rev(remote_ref(fb))
     if up is not None:
@@ -1024,7 +1024,7 @@ def adopt_origin_tip(fb: str) -> None:
 
 
 def sole_writer_problem(fb: str) -> str | None:
-    """Why origin's tip of the feature branch is not this checkout's to push
+    """Why origin's tip of the work branch is not this checkout's to push
     over, or None: it is, when it is on origin/main (reset, landed or
     undone from elsewhere), in the local branch, the tip this repository
     last pushed or took from origin (PUSHED_REFS), or a tip the local
@@ -1046,7 +1046,7 @@ def sole_writer_problem(fb: str) -> str | None:
 
 
 def ensure_sole_writer(fb: str) -> str:
-    """Die unless origin's tip of the feature branch is this checkout's
+    """Die unless origin's tip of the work branch is this checkout's
     (sole_writer_problem): before a deploy rebases or switches, a land
     pushes main or an undeploy resets anything, and before every push of
     the branch.  Returns that tip ("" for none), the lease the push takes
@@ -1058,20 +1058,20 @@ def ensure_sole_writer(fb: str) -> str:
 
 
 def push_refspecs(fb: str, lease: str) -> list[str]:
-    """The feature branch's local tip, CAS against `lease`: origin's tip as
+    """The work branch's local tip, CAS against `lease`: origin's tip as
     ensure_sole_writer proved it this checkout's ("" for no branch); its
-    lineage with it when origin's differs, so the two are pushed atomically."""
+    provenance with it when origin's differs, so the two are pushed atomically."""
     mine = rev(f"{REWRITTEN_REFS}/{fb}")
-    lineage = [f"+{REWRITTEN_REFS}/{fb}:{LINEAGE_REFS}/{fb}"] if mine and mine != rev(f"{LINEAGE_REFS}/{fb}") else []
-    return [f"{fb}:refs/heads/{fb}", f"--force-with-lease=refs/heads/{fb}:{lease}", *lineage]
+    provenance = [f"+{REWRITTEN_REFS}/{fb}:{PROVENANCE_REFS}/{fb}"] if mine and mine != rev(f"{PROVENANCE_REFS}/{fb}") else []
+    return [f"{fb}:refs/heads/{fb}", f"--force-with-lease=refs/heads/{fb}:{lease}", *provenance]
 
 
 def push_cmd(fb: str, lease: str) -> list[str]:
     return ["push", "--quiet", "--atomic", cfg().remote, *push_refspecs(fb, lease)]
 
 
-def push_feature_branch(fb: str) -> None:
-    """Push the feature branch (a deploy's end pushes in the background instead:
+def push_work_branch(fb: str) -> None:
+    """Push the work branch (a deploy's end pushes in the background instead:
     push_deployed)."""
     head = rev(f"refs/heads/{fb}")
     if head is None or rev(remote_ref(fb)) == head:
@@ -1267,7 +1267,7 @@ def announcements() -> tuple[list[Pending], dict[str, str]]:
     """Origin's announcements as fetched: the pending ones, and the cleared
     ones (key -> commit) a deploy's ending push sweeps away: main's whose
     announced HEAD origin/main holds (a main checkout's push, outside
-    nixconvoy, is what ends its pending state; a feature branch's is deleted
+    nixconvoy, is what ends its pending state; a work branch's is deleted
     by its own deploy's end), once settled or carrying no record - a main
     checkout's deploy with nothing pending announces a HEAD main holds
     already, for its records alone, and is under way until settled; one
@@ -1361,7 +1361,7 @@ def push_deployed(fb: str | None, ann: Announce | None, records: dict[str, str],
     """The push that ends a deploy, in the background, atomic - all of it
     lands or none, so a deploy waiting on the announcement finds the
     branch moved when it clears, and a settled announcement never outlives
-    records its history refs lack: the feature branch, leased on origin's tip
+    records its history refs lack: the work branch, leased on origin's tip
     as fetched; each switched target's record onto
     refs/heads/DEPLOYED_PREFIX/<target>; the branch's announcement deleted
     (this run's, or an earlier run's whose push failed; unleased, a
@@ -1476,7 +1476,7 @@ def origin_tips(cwd: str | None = None, names: RepoNames | None = None) -> dict[
 
 
 def listed_tips(cwd: str | None = None, names: RepoNames | None = None) -> dict[str, str]:
-    """origin_tips narrowed to main and the feature branches."""
+    """origin_tips narrowed to main and the work branches."""
     names = names or cfg().names
     return {b: t for b, t in origin_tips(cwd, names).items() if b == names.main or listed(b)}
 
@@ -1599,15 +1599,15 @@ def rewrite_log(d: Path | None) -> Iterator[tuple[list[str], Callable[[], dict[s
         shutil.rmtree(where, ignore_errors=True)
 
 
-def read_lineage(branch: str, *, local: bool = False) -> dict[str, str]:
-    """`branch`'s lineage as origin has it (as fetched) - or, `local`, as
+def read_provenance(branch: str, *, local: bool = False) -> dict[str, str]:
+    """`branch`'s provenance as origin has it (as fetched) - or, `local`, as
     this repository's own rebases left it, origin's when it made none:
     each commit a rebase of the branch replayed, by its rewrite on the
     branch.  A deploy record names the commit of the branch its target
     runs; this is how that commit is found on the branch after a rebase
     (lanes.carried_commit)."""
-    for ref in ([f"{REWRITTEN_REFS}/{branch}"] if local else []) + [f"{LINEAGE_REFS}/{branch}"]:
-        p = run(["git", "cat-file", "blob", f"{ref}:{LINEAGE_FILE}"], check=False)
+    for ref in ([f"{REWRITTEN_REFS}/{branch}"] if local else []) + [f"{PROVENANCE_REFS}/{branch}"]:
+        p = run(["git", "cat-file", "blob", f"{ref}:{PROVENANCE_FILE}"], check=False)
         if p.returncode != 0:
             continue
         try:
@@ -1620,24 +1620,24 @@ def read_lineage(branch: str, *, local: bool = False) -> dict[str, str]:
     return {}
 
 
-def write_lineage(branch: str, rewritten: dict[str, str]) -> None:
-    """`rewritten` as this repository's own copy of `branch`'s lineage: a
-    commit of LINEAGE_FILE alone, the same one for the same lineage."""
+def write_provenance(branch: str, rewritten: dict[str, str]) -> None:
+    """`rewritten` as this repository's own copy of `branch`'s provenance: a
+    commit of PROVENANCE_FILE alone, the same one for the same provenance."""
     text = proc.dump_json({"rewritten": dict(sorted(rewritten.items()))}) + "\n"
     blob = out(["git", "hash-object", "-w", "--stdin"], input=text)
-    tree = out(["git", "mktree"], input=f"100644 blob {blob}\t{LINEAGE_FILE}\n")
-    commit = out(["git", "commit-tree", tree, "-m", strings.CHECKOUT_LINEAGE_SUBJECT(branch=branch)], env=MACHINE_ENV)
+    tree = out(["git", "mktree"], input=f"100644 blob {blob}\t{PROVENANCE_FILE}\n")
+    commit = out(["git", "commit-tree", tree, "-m", strings.CHECKOUT_PROVENANCE_SUBJECT(branch=branch)], env=MACHINE_ENV)
     git("update-ref", f"{REWRITTEN_REFS}/{branch}", commit)
 
 
 def note_rewritten(branch: str, rewritten: dict[str, str], held: set[str]) -> None:
     """A rebase of `branch` replayed `rewritten` (old -> new), leaving it
-    with the commits `held` of its own: composed into its lineage, of
+    with the commits `held` of its own: composed into its provenance, of
     which only the rewrites the branch still holds are kept."""
     if not rewritten:
         return
-    earlier = {a: rewritten.get(b, b) for a, b in read_lineage(branch, local=True).items()}
-    write_lineage(branch, {old: new for old, new in {**earlier, **rewritten}.items() if new in held})
+    earlier = {a: rewritten.get(b, b) for a, b in read_provenance(branch, local=True).items()}
+    write_provenance(branch, {old: new for old, new in {**earlier, **rewritten}.items() if new in held})
 
 
 def rebase_solving(d: Path, upstream: str, base: str | None, rewritten: dict[str, str]) -> bool:
@@ -1675,7 +1675,7 @@ def tree_less_msg(ref: str, cwd: str | None = None) -> str:
 
 def on_origin(cwd: str | None = None, names: RepoNames | None = None) -> bool:
     """Whether HEAD holds nothing of its own beyond origin: it is an
-    ancestor of origin/main or of origin's tip of a listed feature branch, or
+    ancestor of origin/main or of origin's tip of a listed work branch, or
     its tree less MSG_FILE is that of an origin/main commit past their
     merge base (a review checkout of a tip since landed).  `names`: the
     repository's, a submodule's own where the core runs there."""

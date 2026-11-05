@@ -1,5 +1,5 @@
-//! nixconvoy's union of the feature branches (its steps 3-4 and the retries
-//! around 5-7): every other listed feature branch on origin that still
+//! nixconvoy's union of the work branches (its steps 3-4 and the retries
+//! around 5-7): every other listed work branch on origin that still
 //! declares changes is merged onto this checkout's snapshot, structural
 //! conflicts resolved by mergiraf and COMMIT_MSG.md dropped, into a
 //! deterministic commit on origin/main - so the eval memo stays valid
@@ -7,12 +7,12 @@
 //!
 //! The union is first built from the previous fetch's refs, while this
 //! run's fetch is still in flight; once it lands, a moved origin/main or
-//! feature branch redoes the union (and so does a conflict, which the fetch
+//! work branch redoes the union (and so does a conflict, which the fetch
 //! may have resolved).  Then, before anything is evaluated, a deploy under
 //! way elsewhere whose increment reaches a target this checkout's work
 //! reaches too is waited for (Query::AwaitPending), and the union redone
 //! with what it pushed: building without it would only end refused, or
-//! rebuilt, once it switched.  A feature branch that moves while the union
+//! rebuilt, once it switched.  A work branch that moves while the union
 //! builds would be reverted on its targets by switching without it, so
 //! the build is redone then too; ATTEMPTS such moves of origin end the
 //! run (a wait is another deploy's progress, not a move, and counts for
@@ -41,7 +41,7 @@ pub const WAITS: usize = 10;
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Params {
     pub names: Names,
-    /// This checkout's feature branch.
+    /// This checkout's work branch.
     pub fb: String,
     /// --evict: no other branch.
     pub evict: bool,
@@ -74,7 +74,7 @@ struct Conflict {
 }
 
 /// What the passes over origin's branches carry between them: the
-/// feature branches' shapes the last one read, and the unlisted branches
+/// work branches' shapes the last one read, and the unlisted branches
 /// already named.
 struct Seen {
     listed: Vec<String>,
@@ -202,7 +202,7 @@ fn lane_guidance(targets: &[String], c: &Conflict) -> String {
     )
 }
 
-/// Collects this run's fetch, once: whether it moved origin/main or a feature
+/// Collects this run's fetch, once: whether it moved origin/main or a work
 /// branch, in which case the checkout is brought onto it first.
 fn origin_moved(s: &mut Script, p: &Params, branches: &[(String, String)], fetched: &mut bool, seen: &mut Seen) -> Run<bool> {
     if *fetched {

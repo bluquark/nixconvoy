@@ -292,11 +292,11 @@ class Sync(Variant):
 
 
 @dataclass(frozen=True)
-class OnFeatureBranch(Variant):
+class OnWorkBranch(Variant):
     fb: str
 
 
-RebaseOp = PopTmp | EnsureRebased | Onto | Sync | OnFeatureBranch
+RebaseOp = PopTmp | EnsureRebased | Onto | Sync | OnWorkBranch
 
 
 @dataclass(frozen=True)

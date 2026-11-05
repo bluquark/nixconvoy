@@ -19,7 +19,7 @@ MSG_FILE = "COMMIT_MSG.md"
 EVICT_FLAG = "--evict"
 DRY_FLAG = "--dry-activate"
 BACK_TO_FLAG = "--back-to"
-# The tail of every failure before any target is switched (the feature branch is
+# The tail of every failure before any target is switched (the work branch is
 # committed only after the switches).
 NOTHING_DONE = "nothing was switched or committed"
 VOCAB = {k: v for k, v in globals().items() if k.isupper() and isinstance(v, str)}
@@ -85,7 +85,7 @@ LAND_HOLDS_BACK = M("{fb} is not yet deployed to {them}: work of it reaches {it_
 LAND_NOT_YET_DEPLOYED = M("landing with {them} not yet deployed: the next deploy anywhere rolls the landed work out there")
 LAND_NO_MSG_FILE = M("{fb} has no {MSG_FILE}; write one (it becomes the main commit message), or pass -m <msg>")
 LAND_MAIN_MOVED_DURING_EDIT = M("{main} moved while the message was being edited; re-run (the edit is kept)")
-LAND_NOT_ON_FEATURE_BRANCH = M("land runs from the feature branch ({fb}); currently on {cur}")
+LAND_NOT_ON_WORK_BRANCH = M("land runs from the work branch ({fb}); currently on {cur}")
 LAND_DETACHED_HEAD = "(detached HEAD)"
 LAND_STAGED = "staged but undeployed changes present; deploy or unstage them first"
 LAND_NO_CHANGES = M("no changes vs {main} to land")
@@ -135,9 +135,9 @@ LAND_CHILD_TREE_KEPT = M("note: {name}'s working tree kept as it was (a file in 
 PULL_LEFT_AS_THEY_WERE = "pull left some checkouts or submodule repositories as they were (above)"
 
 # --- commands.py: undeploy
-UNDEPLOY_SUB_NOT_ON_FEATURE_BRANCH = M("{label} is not on its feature branch {fb} (nothing deployed from it yet): "
+UNDEPLOY_SUB_NOT_ON_WORK_BRANCH = M("{label} is not on its work branch {fb} (nothing deployed from it yet): "
                                        "nothing to undeploy; `{TOOL} close {name} --force` discards it")
-UNDEPLOY_NOT_ON_FEATURE_BRANCH = M("undeploy runs from the feature branch ({fb}); currently on {cur}")
+UNDEPLOY_NOT_ON_WORK_BRANCH = M("undeploy runs from the work branch ({fb}); currently on {cur}")
 UNDEPLOY_NO_SUCH_COMMIT = M("{BACK_TO_FLAG} {back_to}: no such commit")
 UNDEPLOY_NOT_ON_BRANCH = M("{BACK_TO_FLAG} {back_to} ({sha}) is not on {fb}")
 UNDEPLOY_NOTHING_BEYOND_MAIN = M("nothing to undeploy: no increment beyond {main}")
@@ -187,11 +187,11 @@ CLOSE_PRIMARY = M("{path} is the primary worktree, which holds the repository")
 CLOSE_IS_SUB = M("{path} is a subagent worktree: `{TOOL} close {name}`")
 CLOSE_HOLDS_SUBS = M("{path} holds the subagent worktrees {names}: close them first")
 CLOSE_RUNNING_IN = M("{holder} is running in {where}")
-CLOSE_MAIN_CHECKOUT_ON = M("{path} is a main checkout (on {branch}), not an agent's on its feature branch")
-CLOSE_MAIN_CHECKOUT_DETACHED = M("{path} is a main checkout (detached), not an agent's on its feature branch")
+CLOSE_MAIN_CHECKOUT_ON = M("{path} is a main checkout (on {branch}), not an agent's on its work branch")
+CLOSE_MAIN_CHECKOUT_DETACHED = M("{path} is a main checkout (detached), not an agent's on its work branch")
 CLOSE_KEPT_EDITS = "edits or untracked files"
 CLOSE_KEPT_COMMITS = M("commits not on {main}")
-CLOSE_KEPT_BRANCH = M("its feature branch {fb}, with commits not on {main}")
+CLOSE_KEPT_BRANCH = M("its work branch {fb}, with commits not on {main}")
 CLOSE_KEPT_SUBMODULE = "a submodule holding something"
 CLOSE_CHECKOUT_HOLDS = M("{path} holds {kept}: land or undeploy it first (--force removes it anyway)")
 CLOSE_CHECKOUT_REMOVED = M("checkout {path} removed, with {branches} here and on {remote}")
@@ -210,7 +210,7 @@ OPEN_NESTED = M("{path} would be nested in the checkout {up}: `{TOOL} open --chi
                 "worktree there; an agent checkout goes beside the checkouts")
 OPEN_BRANCH_HELD = M("{remote} holds {held}: a removed checkout's, or another machine's (the prefix "
                      "shared).  `--branch {name}` makes it this checkout's, `--branch <branch-suffix>` opens another")
-OPEN_NOT_FEATURE_BRANCH = M("{branch} is not a feature branch of this machine's: one named {prefix}<branch-suffix>; "
+OPEN_NOT_WORK_BRANCH = M("{branch} is not a work branch of this machine's: one named {prefix}<branch-suffix>; "
                             "`--branch <branch-suffix>` names one")
 OPEN_BAD_SUFFIX = M("{branch}: a checkout's branch is {prefix}<branch-suffix> with a suffix that is not 'main' "
                     "and holds no '-'; name one with --branch <branch-suffix>")
@@ -259,8 +259,8 @@ STATUS_PENDING_SETTLED = M("{key}: {summary} (settled, awaiting its push)")
 STATUS_PENDING_DEAD = M("{entry} - not renewed for {minutes:.0f} min: dead?")
 
 
-# --- checkout.py: feature branch
-CHECKOUT_NEEDS_FB = M("{what} needs a feature branch, and this checkout has none: "
+# --- checkout.py: work branch
+CHECKOUT_NEEDS_FB = M("{what} needs a work branch, and this checkout has none: "
                       "`git checkout -b {prefix}<branch-suffix>` and re-run")
 
 # --- checkout.py: deploy lock holders
@@ -303,7 +303,7 @@ CHECKOUT_NO_MSG_FILE_YET = M("note: {fb} carries work but no {MSG_FILE} yet - la
 CHECKOUT_INDEX_UNMERGED = M("cannot snapshot the index{of} (unmerged paths?)")
 CHECKOUT_INDEX_OF = M(" of {cwd}")
 CHECKOUT_SNAPSHOT_SUBJECT = "staged snapshot (not yet committed)"
-CHECKOUT_LINEAGE_SUBJECT = M("lineage of {branch}")
+CHECKOUT_PROVENANCE_SUBJECT = M("provenance of {branch}")
 CHECKOUT_WITH_MAIN_SUBJECT = M("{main} merged for a dry activation")
 CHECKOUT_WITH_MAIN_CONFLICT = M("{DRY_FLAG}: {main} does not merge cleanly into this checkout's work, which a dry "
                                 "activation does not rebase; `{TOOL} pull` first")
@@ -325,7 +325,7 @@ CHECKOUT_PUSH_BG_FAILED = M("note: the previous run's background push failed ({s
 CHECKOUT_PUSH_BG_FAILED_FINAL = M("note: the last background push of {where} failed ({status}): the deploy records "
                                   "it carried are not on {remote}, and nothing retries them{log}")
 CHECKOUT_PUSH_BG_LOG = M(":\n{log}")
-CHECKOUT_SOLE_WRITER = M("{fb} moved on {remote} ({sha}): another checkout deployed on it, but a feature branch has one "
+CHECKOUT_SOLE_WRITER = M("{fb} moved on {remote} ({sha}): another checkout deployed on it, but a work branch has one "
                          "writer.  `git log refs/heads/{fb}..{up_ref}` shows what it holds; in that "
                          "branch's checkout, `git rebase --autostash {up_ref}` carries this checkout's "
                          "increments onto it, or `git checkout -b {prefix}<branch-suffix>` moves them to a branch of their "
@@ -371,7 +371,7 @@ REVIEW_WORKTREE_HEADING = M("══ {label} ══")
 
 # --- union.py
 UNION_MERGE_SUBJECT = M("union {name}")
-UNION_COMMIT_SUBJECT = "deploy union of feature branches"
+UNION_COMMIT_SUBJECT = "deploy union of work branches"
 
 
 # --- proc.py
@@ -395,9 +395,9 @@ DEPLOY_KILLED_BY_SIGNAL = M("killed by signal {signum}")
 DEPLOY_RUNNING_PRECHECK = "running the precheck..."
 DEPLOY_REACHES_NONE = M("reaches no target: committed onto {fb} and pushed; nothing built or switched (the probes' results dropped)")
 DEPLOY_FOREIGN_INCREMENTS = M("{remote} holds {fb} with increments this worktree never pushed: another worktree of this name?  `git log {main_ref}..{remote_fb}` shows them; open this worktree under another name, or `git branch {fb} {remote_fb}` to take them over")
-DEPLOY_NOT_FEATURE_BRANCH = M("on branch {branch}, not a feature branch of this machine's ({prefix}<branch-suffix>); the main checkout deploys from {main_branch} (a hand commit there is claimed as {main_branch}'s until pushed)")
+DEPLOY_NOT_WORK_BRANCH = M("on branch {branch}, not a work branch of this machine's ({prefix}<branch-suffix>); the main checkout deploys from {main_branch} (a hand commit there is claimed as {main_branch}'s until pushed)")
 DEPLOY_INCREMENT_NAME = M("{checkout}: increment {n}")
-DEPLOY_STAGED_ON_MAIN = "staged changes in the main checkout, which has no feature branch: commit them by hand here, or stage them in a checkout on a feature branch"
+DEPLOY_STAGED_ON_MAIN = "staged changes in the main checkout, which has no work branch: commit them by hand here, or stage them in a checkout on a work branch"
 DEPLOY_REACHES_NO_TARGET = "the increment reaches no target"
 DEPLOY_NOTHING_STAGED = "nothing is staged; stage the change or drop -m"
 DEPLOY_ANNOUNCEMENT_KEPT_RECORDS = M("note: {targets} were switched (or a switch was started), so this deploy's announcement stays, carrying their deploy records: re-run to finish the deploy, or clear it (git push {remote} :{pending_refs}/{key})")
@@ -533,11 +533,11 @@ INIT_SYSTEM_GUESS_NOTE = M("system guessed from this machine's architecture{seve
 INIT_SYSTEM_GUESSED = "guessed"
 
 # --- init.py: render (the comments of the nixconvoy.toml written)
-INIT_TOML_REMOTE = "# The remote the feature branches are pushed to and main is landed on, and main's name there."
+INIT_TOML_REMOTE = "# The remote the work branches are pushed to and main is landed on, and main's name there."
 INIT_TOML_BRANCH_PREFIX = M(
-    "# A checkout's feature branch is <branch_prefix><branch-suffix>, `open <path>` naming it after the path.\n"
+    "# A checkout's work branch is <branch_prefix><branch-suffix>, `open <path>` naming it after the path.\n"
     "# {{local_hostname}} in the prefix is this machine's hostname, a namespace per machine when you want one.\n"
-    "# Every branch shaped so ({{local_hostname}} any hostname) is a feature branch {TOOL} unions into a deploy;\n"
+    "# Every branch shaped so ({{local_hostname}} any hostname) is a work branch {TOOL} unions into a deploy;\n"
     "# a pushed branch shaped otherwise is ignored.")
 INIT_TOML_CHILD_WORKTREES = M(
     "# Child worktrees are an optional feature of {TOOL} that can be used by hand if desired,\n"
@@ -616,11 +616,11 @@ SUBMODULE_NO_DEFAULT_BRANCH = M("{repo}: origin has neither a HEAD, main nor mas
 SUBMODULE_PIN_COMMIT_MISSING = M("submodule {name}: {sha} is not in {repo}, even fetched: no pin file for it")
 SUBMODULE_PIN_NAR_FAILED = M("{name}: nix flake prefetch of {sha} failed, no NAR hash for its pin file:\n{stderr}")
 SUBMODULE_PIN_FILE_STALE = M("warning: {file} is not the pin file of the rev the tree pins submodule {name} on: "
-                             "a deploy from a checkout on a feature branch rewrites it")
+                             "a deploy from a checkout on a work branch rewrites it")
 SUBMODULE_PIN_FILE_REWRITTEN = M("submodule {name}: {file} rewritten for {rev}")
 SUBMODULE_PIN_FILE_REMOVED = M("submodule {name}: {file} removed, its gitlink gone")
 SUBMODULE_PIN_FILE_UNCLAIMED = M("warning: {file} is no submodule's pin file: "
-                                 "a deploy from a checkout on a feature branch removes it")
+                                 "a deploy from a checkout on a work branch removes it")
 SUBMODULE_PIN_FILE_UNCLAIMED_REMOVED = M("{file} removed: no submodule's pin file")
 SUBMODULE_FETCH_FAILED = M("note: submodule {name}: fetching its origin failed:\n{stderr}")
 SUBMODULE_PAST_REFS_DELETE_FAILED = M("warning: submodule {name}: deleting its past refs on its origin failed:\n"
@@ -697,8 +697,8 @@ SUBMODULE_DROPPED = M("submodule {name}'s worktree ({dir}) was reset below the w
 SUBMODULE_CATCH_UP_UNFETCHED = M("submodule {name}: its origin could not be fetched (above), so its branch "
                                  "cannot be brought onto the default branch before it is pinned")
 SUBMODULE_PINNED_ON = M("submodule {name}: pinned on {rev} ({fb})")
-SUBMODULE_IN_MAIN_CHECKOUT = ("a submodule worktree in the main checkout, which has no feature branch to carry it: "
-                              "remove it, or work in a checkout on a feature branch")
+SUBMODULE_IN_MAIN_CHECKOUT = ("a submodule worktree in the main checkout, which has no work branch to carry it: "
+                              "remove it, or work in a checkout on a work branch")
 SUBMODULE_UNSTAGED_NOT_DEPLOYED = M("note: submodule {name} has unstaged edits, which are not deployed")
 SUBMODULE_STAGED_DRY = M("submodule {name} has staged changes, which a dry activation cannot carry "
                          "(the build fetches the submodule from its origin): deploy, or unstage them")
@@ -756,7 +756,7 @@ SUBMODULE_KEEP_CHANGES = "it has uncommitted or untracked changes"
 SUBMODULE_KEEP_NO_DEFAULT = "its repository's origin has no default branch to judge it against"
 SUBMODULE_KEEP_COMMITS = M("it carries commits not on origin/{default}; land or undeploy this checkout")
 SUBMODULE_KEEP_PIN = M("the tree still pins a rev not on origin/{default}; land or undeploy this checkout")
-SUBMODULE_BRANCH_NOT_OURS = M("submodule {name}: {branch} is no feature branch of this machine's; kept")
+SUBMODULE_BRANCH_NOT_OURS = M("submodule {name}: {branch} is no work branch of this machine's; kept")
 SUBMODULE_BRANCH_DELETE_FAILED = M("warning: deleting submodule {name}'s {branch} on its origin failed:\n{stderr}")
 SUBMODULE_REMOVED = M("submodule {name}: worktree removed{with_branch}")
 SUBMODULE_REMOVED_WITH = M(" with {branch}")
@@ -803,7 +803,7 @@ CONFIG_CHECK_ITEM = M("{CONFIG_FILE}: {where} is a table with one key: ssh_deadl
 CONFIG_CHECK_SHELL = M("{CONFIG_FILE}: {where}.{kind} is a list of statements (strings), each run in a shell of its own, "
                        "or false (striking the fleet's)")
 CONFIG_CHECK_KIND_GONE = M("{CONFIG_FILE}: {where}: `{kind}` is gone: use {instead}")
-CONFIG_WORK_BRANCHES_IGNORED = M("note: {CONFIG_FILE}: work_branches is ignored (a feature branch is any branch shaped like "
+CONFIG_WORK_BRANCHES_IGNORED = M("note: {CONFIG_FILE}: work_branches is ignored (a work branch is any branch shaped like "
                                  "branch_prefix, {{local_hostname}} in it any hostname): drop the line")
 CONFIG_BRANCH_PREFIX_CHARS = M("{CONFIG_FILE}: branch_prefix may hold ASCII letters, digits, '.', '-', '_', '/' and "
                                "{{local_hostname}} only: {branch_prefix!r}")

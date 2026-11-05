@@ -1,4 +1,4 @@
-"""`nixconvoy orphans`: this machine's subagent feature branches on origin
+"""`nixconvoy orphans`: this machine's subagent work branches on origin
 that nobody holds (cli docstring: Orphans)."""
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ def find() -> list[tuple[str, Path | None, str]]:
         print(strings.ORPHANS_FETCH_FAILED(stderr=(fetched.stderr or "").strip()), file=sys.stderr)
     prefix = this_prefix()
     tips = origin_tips()
-    feature = [b for b in tips if listed(b)]
+    work = [b for b in tips if listed(b)]
     here = Path.cwd().resolve()
     owners: dict[str, Path] = {}
     for d in [here, *sibling_checkouts(here)]:
@@ -59,13 +59,13 @@ def find() -> list[tuple[str, Path | None, str]]:
         if fb is not None:
             owners.setdefault(fb, d)
     found = []
-    for b in sorted(feature):
+    for b in sorted(work):
         if not b.startswith(prefix) or "-" not in b[len(prefix):]:
             continue
         d = owners.get(b)
         if d is not None and held(d):
             continue
-        others = [remote_ref(o) for o in [cfg().main_branch, *feature] if o != b and o in tips]
+        others = [remote_ref(o) for o in [cfg().main_branch, *work] if o != b and o in tips]
         own = run(["git", "rev-list", "-n", "1", remote_ref(b), "--not", *others],
                   check=False).stdout.strip()
         if not own:

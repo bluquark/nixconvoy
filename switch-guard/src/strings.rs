@@ -69,7 +69,7 @@ macro_rules! text {
     (rebase_setting_upstream) => { "setting {branch}'s upstream" };
     (rebase_other_branch) => { "on branch {other}, which carries commits not on {main_short}; deploys run from {fb} or from {main}" };
     (rebase_switch_failed) => { "cannot switch to {fb} with the current staged/working-tree changes:\n{detail}\nresolve by hand, then re-run" };
-    (rebase_switched) => { "switched to feature branch {fb}" };
+    (rebase_switched) => { "switched to work branch {fb}" };
 
     // --- plan/prune.rs
     (prune_fetch_failed) => { "{remote} could not be fetched to judge it:\n{detail}" };
@@ -81,15 +81,15 @@ macro_rules! text {
     (prune_hand_lock) => { "locked by hand ({why}): `git worktree unlock` it to let prune judge it" };
     (prune_session_runs) => { "the claude session that spawned its agent still runs" };
     (prune_op_in_progress) => { "a {op} is in progress" };
-    (prune_push_in_flight) => { "a push of its feature branch is in flight" };
+    (prune_push_in_flight) => { "a push of its work branch is in flight" };
     (prune_nested) => { "another worktree lives inside it" };
-    (prune_no_feature_branch) => { "it owns no feature branch" };
-    (prune_foreign_branch) => { "it has {fb}, another checkout's feature branch, checked out" };
-    (prune_pushed_increments) => { "its feature branch {fb} carries pushed increments: land or undeploy decides it" };
+    (prune_no_work_branch) => { "it owns no work branch" };
+    (prune_foreign_branch) => { "it has {fb}, another checkout's work branch, checked out" };
+    (prune_pushed_increments) => { "its work branch {fb} carries pushed increments: land or undeploy decides it" };
     (prune_off_pushed_branch) => { "it is not on {fb}, which carries pushed increments; `git switch {fb}` there to discard them" };
     (prune_unpushed) => { "it owns {fb}, which carries commits not on {remote} (a deploy whose push failed?); push it or `git switch {fb}` there and undeploy --back-to {main_short}" };
     (prune_dirty) => { "it has uncommitted or untracked changes, which the removal would lose; commit or discard them (git status there)" };
-    (prune_not_on_origin) => { "it carries commits not on {remote}, which the removal would lose; push them (git push {remote} HEAD:{main}) or deploy from the feature branch" };
+    (prune_not_on_origin) => { "it carries commits not on {remote}, which the removal would lose; push them (git push {remote} HEAD:{main}) or deploy from the work branch" };
     (prune_occupied) => { "a process works in it" };
     (prune_remove_refused) => { "git refused to remove it:\n{detail}" };
 
@@ -103,17 +103,17 @@ macro_rules! text {
     (union_tree_failed) => { "writing the union's tree failed" };
     (union_commit_failed) => { "committing the union failed" };
     (union_checking_out) => { "checking out the union" };
-    (union_conflict) => { "cannot union feature branch {name}; mergiraf could not resolve:\n  {files}\nits last deploy: {summary}\noptions:\n  - fix or rebase that branch in its own checkout, redeploy from there, re-run here\n  - if that work is abandoned: git push --force-with-lease {remote} {main_short}:{name}\n  - --evict deploys ignoring all other branches, reverting their work on every target it switches (each returns there with its own checkout's next deploy)" };
+    (union_conflict) => { "cannot union work branch {name}; mergiraf could not resolve:\n  {files}\nits last deploy: {summary}\noptions:\n  - fix or rebase that branch in its own checkout, redeploy from there, re-run here\n  - if that work is abandoned: git push --force-with-lease {remote} {main_short}:{name}\n  - --evict deploys ignoring all other branches, reverting their work on every target it switches (each returns there with its own checkout's next deploy)" };
     (union_lane_left) => { "warning: not deploying to {targets}: {why}" };
     (union_lane) => { "union for {targets}, the other branches as deployed there:" };
-    (union_lane_conflict) => { "cannot union feature branch {name} as {targets} {run} it ({short}); mergiraf could not resolve:\n  {files}\noptions:\n  - deploy its tip there from its own checkout (nixconvoy deploy {args}) or land it, then re-run here\n  - --evict deploys ignoring all other branches, reverting their work on every target it switches (each returns there with its own checkout's next deploy)" };
+    (union_lane_conflict) => { "cannot union work branch {name} as {targets} {run} it ({short}); mergiraf could not resolve:\n  {files}\noptions:\n  - deploy its tip there from its own checkout (nixconvoy deploy {args}) or land it, then re-run here\n  - --evict deploys ignoring all other branches, reverting their work on every target it switches (each returns there with its own checkout's next deploy)" };
     (union_fetching) => { "fetching {remote}" };
     (union_origin_moved) => { "{remote} moved since the last fetch; redoing the union" };
     (union_refreshing) => { "bringing the checkout onto {main_short}" };
     (union_creating_worktree) => { "creating the union worktree" };
     (union_waited_too_often) => { "waited for {WAITS} deploys in one run; re-run" };
     (union_redo_after_wait) => { "redoing the union with what that deploy pushed" };
-    (union_moved_during_build) => { "feature branches moved during the build; rebuilding the union" };
+    (union_moved_during_build) => { "work branches moved during the build; rebuilding the union" };
     (union_kept_moving) => { "{remote} kept moving during {ATTEMPTS} attempts; re-run" };
 
     // --- control.rs

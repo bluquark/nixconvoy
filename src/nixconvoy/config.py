@@ -125,7 +125,7 @@ class Config:
     # A checkout owns "<prefix><branch-suffix>", its subagent worktrees "<prefix><branch-suffix>-<name>"
     # (the main checkout's "<prefix>main-<name>"); {local_hostname}, when the
     # template has it, is this machine's hostname.  Also the shape of every
-    # feature branch nixconvoy unions, {local_hostname} standing for any hostname
+    # work branch nixconvoy unions, {local_hostname} standing for any hostname
     # (checkout.listed, the plan cores' `listed`): a pushed branch not
     # shaped so is ignored.
     branch_prefix: str
@@ -143,7 +143,7 @@ class Config:
     # builders), and the closures are copied to the targets from it.
     # Addressed as a target (ssh_address).
     builders: tuple[str, ...]
-    # The remote origin/main and the feature branches live on, and main's name
+    # The remote origin/main and the work branches live on, and main's name
     # there: `remote` and `main_branch` (origin and main unless set).
     remote: str = "origin"
     main_branch: str = "main"

@@ -510,7 +510,7 @@ proptest! {
         }
     }
 
-    /// Sync from main: the feature branch is rebased aside (its worktree
+    /// Sync from main: the work branch is rebased aside (its worktree
     /// always dropped) and pushed when origin's copy differs, or reported
     /// and left as it was.
     #[test]
@@ -602,7 +602,7 @@ fn pops_only_tmp_commits() {
 }
 
 #[test]
-fn moves_onto_the_feature_branch() {
+fn moves_onto_the_work_branch() {
     let s = Shape {
         root: vec![(0, Some(0))],
         main: vec![],
@@ -616,22 +616,22 @@ fn moves_onto_the_feature_branch() {
     let mut r = build(&s);
     r.branches.remove(FB);
     r.head = Head::On("main".into());
-    let (asked, fx, out) = run(&mut r.clone(), Op::OnFeatureBranch { fb: FB.into() }, 100);
+    let (asked, fx, out) = run(&mut r.clone(), Op::OnWorkBranch { fb: FB.into() }, 100);
     assert_eq!(out, Some(Ok(Ok(String::new()))));
     assert!(asked.contains(&Query::Switch { branch: FB.into(), start: Some("HEAD".into()) }), "{asked:?}");
-    assert_eq!(fx, [Effect::Print(format!("switched to feature branch {FB}"))]);
+    assert_eq!(fx, [Effect::Print(format!("switched to work branch {FB}"))]);
     r.origin.insert(FB.into(), r.branches["main"].clone());
-    let (asked, _, _) = run(&mut r.clone(), Op::OnFeatureBranch { fb: FB.into() }, 100);
+    let (asked, _, _) = run(&mut r.clone(), Op::OnWorkBranch { fb: FB.into() }, 100);
     assert!(asked.contains(&Query::Switch { branch: FB.into(), start: Some(format!("refs/remotes/origin/{FB}")) }), "{asked:?}");
     // From a HEAD detached at origin/main.
     r.head = Head::Detached(r.branches["main"].clone());
-    let (asked, _, out) = run(&mut r.clone(), Op::OnFeatureBranch { fb: FB.into() }, 100);
+    let (asked, _, out) = run(&mut r.clone(), Op::OnWorkBranch { fb: FB.into() }, 100);
     assert_eq!(out, Some(Ok(Ok(String::new()))));
     assert!(asked.contains(&Query::Switch { branch: FB.into(), start: Some(format!("refs/remotes/origin/{FB}")) }), "{asked:?}");
     // A detached HEAD with a commit of its own would be stranded by the switch.
     r.index.insert(3, 3);
     r.answer(&Query::Commit { msg: "by hand".into() });
-    let (_, _, out) = run(&mut r.clone(), Op::OnFeatureBranch { fb: FB.into() }, 100);
+    let (_, _, out) = run(&mut r.clone(), Op::OnWorkBranch { fb: FB.into() }, 100);
     assert_eq!(
         out,
         Some(Err("the detached HEAD carries commits not on origin/main; push them (git push origin HEAD:main) or put them on a branch, then re-run".into()))
@@ -639,24 +639,24 @@ fn moves_onto_the_feature_branch() {
     // A fresh branch with nothing of its own (a subagent worktree's) is fine too.
     r.head = Head::On("feature".into());
     r.branches.insert("feature".into(), r.branches["main"].clone());
-    let (asked, _, out) = run(&mut r.clone(), Op::OnFeatureBranch { fb: FB.into() }, 100);
+    let (asked, _, out) = run(&mut r.clone(), Op::OnWorkBranch { fb: FB.into() }, 100);
     assert_eq!(out, Some(Ok(Ok(String::new()))));
     assert!(asked.iter().any(|q| matches!(q, Query::Switch { branch, .. } if branch == FB)), "{asked:?}");
     r.index.insert(3, 3);
     r.work = r.index.clone();
     r.answer(&Query::Commit { msg: "feature work".into() });
-    let (_, _, out) = run(&mut r.clone(), Op::OnFeatureBranch { fb: FB.into() }, 100);
+    let (_, _, out) = run(&mut r.clone(), Op::OnWorkBranch { fb: FB.into() }, 100);
     assert_eq!(out, Some(Err(format!("on branch feature, which carries commits not on origin/main; deploys run from {FB} or from main"))));
-    // ...unless those commits are pushed on a feature branch (its parent's).
+    // ...unless those commits are pushed on a work branch (its parent's).
     r.origin.insert("haswell-wsl-deploys2".into(), r.branches["feature"].clone());
-    let (asked, _, out) = run(&mut r, Op::OnFeatureBranch { fb: FB.into() }, 100);
+    let (asked, _, out) = run(&mut r, Op::OnWorkBranch { fb: FB.into() }, 100);
     assert_eq!(out, Some(Ok(Ok(String::new()))));
     assert!(asked.contains(&Query::Pushed), "{asked:?}");
 }
 
 #[test]
 fn leaves_a_review_checkout_alone() {
-    // A review subagent checks out a feature branch's tip: a detached HEAD with
+    // A review subagent checks out a work branch's tip: a detached HEAD with
     // commits beyond origin/main that are all on origin.  It stays put
     // (the review reads it), and is no checkout to deploy from.
     let s = Shape {
@@ -704,7 +704,7 @@ fn reports_what_blocks_a_rebase() {
         ask([pre(), vec![Reply::Text(None), Reply::Text(None), Reply::Flag(false), Reply::Flag(true), Reply::Text(None)]].concat()),
         Ok(Ok(LEFT.into()))
     );
-    // The main checkout syncs without a feature branch.
+    // The main checkout syncs without a work branch.
     let mut it = vec![ran(true), some("x"), Reply::Flag(true)].into_iter();
     let out = drive(Replay::new(with(Op::Sync { fb: None }), program), 20, move |_| it.next().unwrap()).2;
     assert_eq!(out, Ok(Ok("up to date".into())));

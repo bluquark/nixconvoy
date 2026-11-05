@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import IO, NoReturn
 
 from . import commands, config, hooks, init, names, orphans, proc, review, strings, submodule
-from .checkout import lock_checkout, lock_holder, note_prefix, require_feature_branch, sub_parent
+from .checkout import lock_checkout, lock_holder, note_prefix, require_work_branch, sub_parent
 from .deploy import deploy
 from .proc import PERF, TOOL, Fail, die, ok, out, painter
 from .strings import BACK_TO_FLAG, DRY_FLAG, EVICT_FLAG
@@ -160,7 +160,7 @@ def dispatch() -> None:
         if len(given) != 1 or child + bool(branch) + sub_flag > 1:
             bad_usage()
         if sub_flag:
-            submodule.create(given[0], require_feature_branch("open --submodule"))
+            submodule.create(given[0], require_work_branch("open --submodule"))
         elif child:
             commands.open_worktree(given[0], None)
         else:

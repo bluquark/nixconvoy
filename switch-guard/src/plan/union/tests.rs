@@ -25,7 +25,7 @@ struct Origin {
     conflicts: BTreeMap<String, Vec<(String, bool)>>,
     refs: Refs,
     main: String,
-    /// The feature branches' shapes in the checkout, and after a refresh.
+    /// The work branches' shapes in the checkout, and after a refresh.
     listed: Vec<String>,
     refreshed_listed: Option<Vec<String>>,
     /// What the fetch finds, and each build after it.
@@ -120,7 +120,7 @@ fn answer(o: &mut Origin, t: &mut Trace, q: &Query) -> Reply {
         Query::Summary { sha } => Reply::Text(Some(format!("summary of {sha}"))),
         Query::Merge { name, sha } => {
             assert!(t.pending.is_none(), "merging over an unresolved merge");
-            assert!(o.listed.contains(name), "merging {name}, not a feature branch by the shapes now");
+            assert!(o.listed.contains(name), "merging {name}, not a work branch by the shapes now");
             let files = o.conflicts.get(sha).cloned().unwrap_or_default();
             if files.is_empty() {
                 t.merged.push(name.clone());
@@ -336,7 +336,7 @@ proptest! {
                     }
                 }
             }
-            Err(msg) if msg.starts_with("cannot union feature branch") => {
+            Err(msg) if msg.starts_with("cannot union work branch") => {
                 // Only a conflict with what origin holds once fetched.
                 prop_assert!(t.fetched);
                 let Some(Query::Merge { name, sha }) = asked.iter().rev().find(|q| matches!(q, Query::Merge { .. })) else { panic!() };
@@ -344,9 +344,9 @@ proptest! {
                 prop_assert!(msg.contains(&format!("\n  {}\n", unsolved.join(", "))), "{}", msg);
                 if t.first.is_some() {
                     // A lane's: of a commit a cut names, or a tip merged after another branch was left out.
-                    prop_assert!(msg.contains(&format!("cannot union feature branch {name} as ")), "{}", msg);
+                    prop_assert!(msg.contains(&format!("cannot union work branch {name} as ")), "{}", msg);
                 } else {
-                    prop_assert!(msg.contains(&format!("cannot union feature branch {name};")), "{}", msg);
+                    prop_assert!(msg.contains(&format!("cannot union work branch {name};")), "{}", msg);
                     prop_assert!(select_of(&end, &p).contains(&(name.clone(), sha.clone())));
                 }
             }
@@ -487,7 +487,7 @@ fn targets_take_the_commits_deployed_there() {
     let (_, _, _, _, out) = run(&o, &params(false));
     assert_eq!(
         out.unwrap_err().lines().next().unwrap(),
-        format!("cannot union feature branch {} as side1 runs it (c1); mergiraf could not resolve:", LISTED[2])
+        format!("cannot union work branch {} as side1 runs it (c1); mergiraf could not resolve:", LISTED[2])
     );
 }
 
@@ -516,7 +516,7 @@ fn a_main_checkout_leaves_an_unmerged_lane_behind() {
     );
     let warned: Vec<&Effect> = fx.iter().filter(|e| matches!(e, Effect::Warn(_))).collect();
     assert!(
-        matches!(warned[..], [Effect::Warn(w)] if w.starts_with(&format!("warning: not deploying to side1: cannot union feature branch {} as side1 runs it (c1);", LISTED[1]))),
+        matches!(warned[..], [Effect::Warn(w)] if w.starts_with(&format!("warning: not deploying to side1: cannot union work branch {} as side1 runs it (c1);", LISTED[1]))),
         "{warned:?}"
     );
 }

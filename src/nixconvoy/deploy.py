@@ -30,22 +30,22 @@ from .checkout import (
     current_branch,
     deployed_commit,
     drop_worktree,
-    ensure_on_feature_branch,
+    ensure_on_work_branch,
     ensure_rebased,
     ensure_sole_writer,
-    feature_branch_name,
     fetch_origin,
     note_pushed,
     origin_tips,
     pending_announcements,
     pop_tmp_commits,
     push_deployed,
-    push_feature_branch,
+    push_work_branch,
     record_commit,
     staged_differs,
     staged_snapshot,
     this_prefix,
     with_main,
+    work_branch_name,
 )
 from .config import SwitchPolicy, cfg, main_ref, remote_ref, repo_names
 from .guard import binary, decide
@@ -179,7 +179,7 @@ def commit_unreached(fb: str, msg: str, snap: str) -> None:
             die(strings.PROC_WITH_NOTHING_DONE(problem=err))
     PERF.mark("commit-push")
     commit_deployed(fb, snap, f"{msg}\n\nReaches: none\nDeployed: none")
-    push_feature_branch(fb)
+    push_work_branch(fb)
     print(strings.DEPLOY_REACHES_NONE(fb=fb))
 
 
@@ -188,14 +188,14 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     """`msg` describes the staged increment (default: the checkout's name
     and the increment's number on its branch); with nothing staged the
     deploy converges the targets on the union as it is.
-    `evict`: this checkout's view alone - no other feature branch in the
+    `evict`: this checkout's view alone - no other work branch in the
     union, no wait for a deploy under way, and a target running another
     checkout's refused work switched over when this work reaches it or
     `filter_targets` names it.
     `dry`: stop after the dry activation of every target that would be
     switched, printing the units it would stop, restart or reload; nothing
     is switched, committed or pushed.
-    `as_if` (an undeploy's dry activation, so `dry`): the feature branches
+    `as_if` (an undeploy's dry activation, so `dry`): the work branches
     taken to be at these commits - this checkout's own as the state the
     union builds on, another's as origin's tip of it - and the checkout
     left where it is, origin/main merged in aside (with_main) rather than
@@ -221,7 +221,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     pool.shutdown(wait=False)
 
     pop_tmp_commits()
-    fb = feature_branch_name()
+    fb = work_branch_name()
     cur = current_branch()
     if fb is not None and cur not in (fb, cfg().main_branch, None):
         # A subagent worktree's fresh branch: the provenance must name fb.
@@ -233,11 +233,11 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
             # this name (a machine sharing the prefix).
             die(strings.DEPLOY_FOREIGN_INCREMENTS(remote=cfg().remote, fb=fb, main_ref=main_ref(),
                                                   remote_fb=remote_ref(fb)))
-        ensure_on_feature_branch(fb)
+        ensure_on_work_branch(fb)
         if not had and (made := rev(f"refs/heads/{fb}")) is not None:
             note_pushed(fb, made)  # the branch as taken from origin's empty copy, or fresh
     elif fb is None and cur not in (cfg().main_branch, None):
-        die(strings.DEPLOY_NOT_FEATURE_BRANCH(branch=cur, prefix=this_prefix(), main_branch=cfg().main_branch))
+        die(strings.DEPLOY_NOT_WORK_BRANCH(branch=cur, prefix=this_prefix(), main_branch=cfg().main_branch))
 
     def increment_name() -> str:
         n = int(out(["git", "rev-list", "--count", f"{main_ref()}..HEAD"])) + 1
@@ -260,7 +260,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     if staged_differs():
         if fb is None:
             die(strings.DEPLOY_STAGED_ON_MAIN)
-        ensure_on_feature_branch(fb)  # the increment must land (and union) on fb
+        ensure_on_work_branch(fb)  # the increment must land (and union) on fb
         # A snapshot's tree is HEAD + staged, so one taken on a stale HEAD
         # would commit main's changes away.
         fetch.result()
@@ -505,7 +505,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
     def stage(wt: str, union: str, listed: list[str], branches: list[tuple[str, str]],
               laned: list[tuple[str, Lane]]) -> bool:
         """Eval, precheck, build and copy for `union`, checked out in `wt`,
-        the feature branches shaped like `listed` (nixconvoy.toml's branch_prefix), `branches`
+        the work branches shaped like `listed` (nixconvoy.toml's branch_prefix), `branches`
         the ones it merged - the targets of each of `laned` from that
         lane's union and worktree instead: whether the deploy ends here."""
         nonlocal plan, affected, left_alone, unmerged, tops, committed, records, attested, provenances, ann, policies
@@ -516,7 +516,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             if fb is not None:
                 if snap:
                     commit_deployed(fb, snap, msg or "")
-                push_feature_branch(fb)
+                push_work_branch(fb)
             print(strings.DEPLOY_SKIP(union=union))
             return True
 
@@ -624,7 +624,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         committed = ""
         fmt = ", ".join
         if snap and not dry:
-            assert fb is not None  # a snapshot needs the feature branch (deploy)
+            assert fb is not None  # a snapshot needs the work branch (deploy)
             reaches = sorted(memo.reached_between(wt, union, all_targets,
                                                   "HEAD", snap))
             deployed = sorted(h for h in tops if h in plan or h not in affected)
@@ -706,7 +706,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             if err:
                 die(strings.PROC_WITH_NOTHING_DONE(problem=err))
 
-        # Another machine may have pushed a feature branch while we built;
+        # Another machine may have pushed a work branch while we built;
         # switching without it would revert its deployed changes (the union
         # core compares once this returns).
         PERF.mark("copy")

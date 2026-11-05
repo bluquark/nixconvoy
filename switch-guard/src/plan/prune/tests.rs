@@ -68,9 +68,9 @@ fn keeps_and_says_why() {
             "the claude session that spawned its agent still runs",
         ),
         (Query::OpInProgress, Reply::Text(Some("rebase".into())), "a rebase is in progress"),
-        (Query::PushInFlight, Reply::Flag(true), "a push of its feature branch is in flight"),
+        (Query::PushInFlight, Reply::Flag(true), "a push of its work branch is in flight"),
         (Query::Nested, Reply::Flag(true), "another worktree lives inside it"),
-        (Query::OwnBranch, Reply::Text(None), "it owns no feature branch"),
+        (Query::OwnBranch, Reply::Text(None), "it owns no work branch"),
         (Query::Fetch, Reply::Ran { ok: false, detail: "offline".into() }, "origin could not be fetched"),
         (Query::Dirty, Reply::Flag(true), "it has uncommitted or untracked changes"),
         (Query::OnOrigin, Reply::Flag(false), "it carries commits not on origin"),
@@ -88,15 +88,15 @@ fn keeps_and_says_why() {
         let deployed = named && q != Query::TakeDeployLock;
         assert_eq!(asked.contains(&Query::ReleaseDeployLock), deployed, "{q:?}: {asked:?}");
     }
-    // Another checkout's feature branch checked out: kept, and said so.
+    // Another checkout's work branch checked out: kept, and said so.
     let foreign = |q: &Query| match q {
         Query::CurrentBranch => Some(Reply::Text(Some("h-deploys3".into()))),
         Query::OwnBranch => Some(Reply::Text(Some("h-deploys3".into()))),
         _ => None,
     };
     let (_, o) = run(params(false), foreign);
-    assert_eq!(kept(&o), "it has h-deploys3, another checkout's feature branch, checked out");
-    // On its own feature branch: kept while that carries pushed increments,
+    assert_eq!(kept(&o), "it has h-deploys3, another checkout's work branch, checked out");
+    // On its own work branch: kept while that carries pushed increments,
     // removed once it is reset onto main (a land, or an undeploy back to it), pushed so.
     let on_fb = |increments: bool| {
         move |q: &Query| match q {
@@ -107,13 +107,13 @@ fn keeps_and_says_why() {
         }
     };
     let (_, o) = run(params(false), on_fb(true));
-    assert_eq!(kept(&o), "its feature branch h-deploys3-agent-x carries pushed increments: land or undeploy decides it");
+    assert_eq!(kept(&o), "its work branch h-deploys3-agent-x carries pushed increments: land or undeploy decides it");
     let (asked, o) = run(params(false), on_fb(false));
     assert_eq!(o, Outcome::Removed, "{asked:?}");
 }
 
 #[test]
-fn origin_and_the_local_feature_branch() {
+fn origin_and_the_local_work_branch() {
     let fb = "h-deploys3-agent-x";
     let tip = |q: &Query| match q {
         Query::Rev { name } if name == &format!("refs/remotes/origin/{fb}") => Some(Reply::Text(Some("t".into()))),

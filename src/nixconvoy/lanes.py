@@ -1,4 +1,4 @@
-"""What each target runs of each feature branch, read off its deploy
+"""What each target runs of each work branch, read off its deploy
 records, and so what a deploy's union for it may hold of the branches of
 other checkouts.
 
@@ -17,7 +17,7 @@ counts as deployed there."""
 from __future__ import annotations
 
 from . import memo
-from .checkout import DEPLOYED_PREFIX, read_lineage
+from .checkout import DEPLOYED_PREFIX, read_provenance
 from .config import main_ref, remote_ref
 from .proc import is_ancestor, load_json, out, rev, run
 from .targets import flake_target_names
@@ -25,7 +25,7 @@ from .targets import flake_target_names
 # How far up a target's history its attested records are looked for.
 ATTESTED_DEPTH = 50
 # How far up a commit's first parents a rebase's rewrite of one is looked for.
-LINEAGE_DEPTH = 200
+PROVENANCE_DEPTH = 200
 
 
 def record_doc(sha: str) -> dict[str, object] | None:
@@ -81,7 +81,7 @@ def carried_commit(branch: str, commit: str, tip: str, *, local: bool = False) -
     it; the tip when the record is ahead of it (an increment whose push is
     on its way, or one the branch was reset below); else the rewrite of
     its nearest first-parent ancestor a rebase replayed, itself first (the
-    branch's lineage; `local`: this repository's own copy) - one a rebase
+    branch's provenance; `local`: this repository's own copy) - one a rebase
     dropped, its change upstream already, is in the one before it; where
     the two part, when that lies within the branch's increments (reset
     below it, then grown again); None when the branch dropped it - reset
@@ -91,10 +91,10 @@ def carried_commit(branch: str, commit: str, tip: str, *, local: bool = False) -
         return commit
     if here and is_ancestor(tip, commit):
         return tip
-    known = read_lineage(branch, local=local)
+    known = read_provenance(branch, local=local)
     line = [commit]
     if here and known:
-        line = run(["git", "rev-list", "--first-parent", f"--max-count={LINEAGE_DEPTH}", commit],
+        line = run(["git", "rev-list", "--first-parent", f"--max-count={PROVENANCE_DEPTH}", commit],
                    check=False).stdout.split()
     rewrite = next((known[c] for c in line if c in known), None)
     if rewrite is not None and rev(f"{rewrite}^{{commit}}") is not None:

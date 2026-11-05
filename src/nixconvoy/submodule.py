@@ -11,8 +11,8 @@ as `git submodule update --init` in the primary worktree clones it
 the main checkout's working tree of the submodule kept on the default
 branch at the rev main pins (catch_up_repos); a checkout that is a clone
 of its own has its own.  A submodule worked on is a git worktree of that
-repository in a checkout on a feature branch, on a branch named after the
-feature branch - or, in a clone, the repository's own working tree checked
+repository in a checkout on a work branch, on a branch named after the
+work branch - or, in a clone, the repository's own working tree checked
 out on that branch.  A deploy commits the worktree's staged
 state onto that branch, pushes it and stages the gitlink on the pushed
 rev, so the increment carries the submodule as a tree change, which the
@@ -76,9 +76,9 @@ from .wire import Ok, Onto, RebaseParams, RepoNames
 
 # On a submodule's origin: every tip a branch left behind (a reset, a
 # rebase, its removal) as refs/nixconvoy/past/<branch>/<sha>, since nix
-# fetches a rev only while a ref holds it and a feature branch pushed goes
+# fetches a rev only while a ref holds it and a work branch pushed goes
 # on pinning the old tip until its next deploy's push; a landing deletes
-# those no ref of this repository's origin (a feature branch, a deploy
+# those no ref of this repository's origin (a work branch, a deploy
 # record, an announcement) pins any more.
 PAST_REFS = "refs/nixconvoy/past"
 # On a submodule's origin: the merges of its branches the deploys' unions
@@ -118,7 +118,7 @@ def primary(top: Path) -> Path | None:
 
 
 def is_main(top: Path) -> bool:
-    """Whether `top` is a main checkout, with no feature branch of its own."""
+    """Whether `top` is a main checkout, with no work branch of its own."""
     return identity_of(top.resolve(), branch_of(top)).kind == "main"
 
 
@@ -185,7 +185,7 @@ def planted(top: Path) -> list[Sub]:
 
 def present(top: Path) -> list[Sub]:
     """The submodules with a worktree planted under `top`, a checkout on a
-    feature branch: the main checkout's are the repositories themselves."""
+    work branch: the main checkout's are the repositories themselves."""
     return [] if is_main(top) else planted(top)
 
 
@@ -372,7 +372,7 @@ def heal_pins(top: Path, fb: str | None, dry: bool) -> list[str]:
     not the index's gitlink's (pin_stale: moved by hand, or no file yet),
     removed when the gitlink is gone, as is a pin file no submodule
     claims (one removed, renamed or moved), one line each; only warned
-    about, with no feature branch to carry it or for a dry activation."""
+    about, with no work branch to carry it or for a dry activation."""
     told = []
     claimed = {pin_file_of(n, e.path) for n, e in entries(top).items()}
     for f in out(["git", "ls-files", "--", ".nixconvoy_submodule_*.json", "*/.nixconvoy_submodule_*.json"],
@@ -413,7 +413,7 @@ def gitlink_stages(wt: Path, path: str) -> dict[int, str]:
 
 def off_default(sub: Sub, top: Path) -> bool:
     """Whether the pin names a rev the repository's origin default branch
-    lacks (or none it holds): a feature branch's.  Not knowable without the
+    lacks (or none it holds): a work branch's.  Not knowable without the
     repository on this machine, or when its origin cannot be fetched
     (said): then False."""
     rev = pin(sub, top)
@@ -431,7 +431,7 @@ def off_default(sub: Sub, top: Path) -> bool:
 
 
 class Pending(NamedTuple):
-    """A submodule branch solve_rebase rebased for a feature branch's rebase
+    """A submodule branch solve_rebase rebased for a work branch's rebase
     onto main: pushed once that rebase succeeds, put back if it aborts."""
     sub: Sub
     fb: str
@@ -488,7 +488,7 @@ def prefetch(top: Path, pool: ThreadPoolExecutor) -> None:
 
 def pinned_revs(sub: Sub) -> set[str]:
     """Every rev of the submodule pinned by a ref this repository's origin
-    holds, as fetched: its branches (main, the feature branches, the deploy
+    holds, as fetched: its branches (main, the work branches, the deploy
     records') and the deploys' announcements under way with the records
     they carry (their parents)."""
     commits = set(out(["git", "for-each-ref", "--format=%(objectname)", "refs/remotes/origin/"]).split())
@@ -592,7 +592,7 @@ def repository(sub: Sub, top: Path) -> Path:
         if is_main(main):
             git("checkout", "--quiet", "-B", default_branch(repo), "HEAD", cwd=str(wt))
         else:
-            # A checkout on a feature branch (a clone, or the gitlink's own
+            # A checkout on a work branch (a clone, or the gitlink's own
             # branch): the pinned rev on that branch, as `open --submodule`
             # plants it, rather than a detached HEAD no deploy can carry.
             fb = identity_of(main, branch_of(main)).fb
@@ -658,7 +658,7 @@ def solve_union(wt: Path, path: str) -> bool:
 
 
 def solve_rebase(wt: Path, checkout: Path, upstream: str) -> str | None:
-    """A rebase of `checkout`'s feature branch onto `upstream` stopped on
+    """A rebase of `checkout`'s work branch onto `upstream` stopped on
     gitlinks alone (in `wt`: the checkout itself, or the throwaway
     worktree a branch not checked out is rebased in) because `upstream`
     pins a submodule elsewhere (its landing) that a replayed commit pinned
@@ -1152,7 +1152,7 @@ class Landing(NamedTuple):
     sub: Sub
     fb: str
     default: str
-    landed: str  # the rev the feature branch now pins
+    landed: str  # the rev the work branch now pins
     pending: str | None  # `landed` as a commit for the default branch, once main is pushed
     settle: bool  # the worktree and the branch still to move onto `landed`
     was: str  # the worktree's HEAD as the landing read it
@@ -1356,7 +1356,7 @@ def finish_one(landing: Landing) -> bool:
 def push_branch(sub: Sub, fb: str) -> None:
     """The submodule branch's tip onto its origin, leased on the tip
     fetched; a tip it leaves behind (a reset, a rebase) stays under
-    PAST_REFS, pinned by the feature branch as pushed until its next push."""
+    PAST_REFS, pinned by the work branch as pushed until its next push."""
     head = rev_in(sub.dir, "HEAD")
     old = rev_in(sub.dir, f"refs/remotes/origin/{fb}")
     if head is None or old == head:
@@ -1486,7 +1486,7 @@ def remove_one(sub: Sub) -> None:
         git("branch", "--quiet", "-D", cur, cwd=str(repo), check=False)
         old = rev_in(repo, f"refs/remotes/origin/{cur}")
         if old:
-            # The tip stays under PAST_REFS: the feature branch as pushed pins it.
+            # The tip stays under PAST_REFS: the work branch as pushed pins it.
             p = git_remote("push", "--quiet", "--atomic", "origin", f"+{old}:{PAST_REFS}/{cur}/{old}", f":refs/heads/{cur}",
                            f"--force-with-lease=refs/heads/{cur}:{old}", cwd=str(repo), check=False)
             if p.returncode != 0:
@@ -1521,7 +1521,7 @@ def restore(sub: Sub, top: Path) -> bool:
 
 def orphaned(top: Path) -> list[str]:
     """The submodules whose pin in `top` names a rev off the
-    default branch (a feature branch's) while no worktree of theirs is under
+    default branch (a work branch's) while no worktree of theirs is under
     `top`: a landing must not take that to main."""
     here = {s.name for s in present(top)}
     return [name for name, e in entries(top).items() if name not in here

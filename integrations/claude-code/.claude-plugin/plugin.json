@@ -1,6 +1,6 @@
 {
   "name": "nixconvoy",
-  "description": "Subagent worktrees under the spawning checkout, each owning a nixconvoy feature branch; every subagent spawned in a repository given one (isolation: worktree) unless the option says not to",
+  "description": "Subagent worktrees under the spawning checkout, each owning a nixconvoy work branch; every subagent spawned in a repository given one (isolation: worktree) unless the option says not to",
   "version": "0.2.3",
   "author": {
     "name": "bluquark"
