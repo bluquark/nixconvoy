@@ -13,12 +13,15 @@
 
   outputs = { self, nixpkgs }:
   let
-    systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
+    systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
     forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+    # The commit the version line names.  As a path input inside another
+    # repository's flake, self carries that repository's revision: none then.
+    rev = if self.outPath == self.sourceInfo.outPath then self.shortRev or self.dirtyShortRev or null else null;
   in {
     packages = forAll (pkgs: rec {
       switch-guard = import ./nix/switch-guard.nix { inherit pkgs; };
-      nixconvoy = import ./nix/package.nix { inherit pkgs switch-guard; };
+      nixconvoy = import ./nix/package.nix { inherit pkgs switch-guard rev; };
       default = nixconvoy;
     });
 

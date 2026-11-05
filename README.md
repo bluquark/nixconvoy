@@ -55,7 +55,6 @@ alias nixconvoy='nix run github:bluquark/nixconvoy -- '
      extra-trusted-public-keys = [ "nixconvoy.cachix.org-1:8HCQ3qVkg+lUbouy8s7aWzWoDoGDrm0lkg07VvD8RwQ=" ];
    };
    inputs.nixconvoy.url = "github:bluquark/nixconvoy";
-   inputs.nixconvoy.inputs.nixpkgs.follows = "nixpkgs";
    ```
 2. In outputs:
    ```nix
@@ -73,11 +72,11 @@ alias nixconvoy='nix run github:bluquark/nixconvoy -- '
 <summary><b>3. NixOS system package</b></summary>
 
 ```nix
-nix.settings = {
-  substituters = [ "https://nixconvoy.cachix.org" ];
-  trusted-public-keys = [ "nixconvoy.cachix.org-1:8HCQ3qVkg+lUbouy8s7aWzWoDoGDrm0lkg07VvD8RwQ=" ];
-};
 { nixconvoy, pkgs, ... }: {
+  nix.settings = {
+    substituters = [ "https://nixconvoy.cachix.org" ];
+    trusted-public-keys = [ "nixconvoy.cachix.org-1:8HCQ3qVkg+lUbouy8s7aWzWoDoGDrm0lkg07VvD8RwQ=" ];
+  };
   environment.systemPackages = [ nixconvoy.packages.${pkgs.stdenv.hostPlatform.system}.nixconvoy ];
   environment.pathsToLink = [ "/share/nixconvoy" ];
 }

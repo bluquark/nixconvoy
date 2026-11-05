@@ -65,6 +65,7 @@ USAGE_NOTES = """<!--Remove this-->"""
 
 # --- cli.py: usage and dispatch
 USAGE_HEADING = "usage:"
+CLI_VERSION = M("{TOOL} {version}{rev}\n")
 CLI_SECTION = M("== {name}")
 CLI_RUNNING_IN_WORKTREE = M("{holder} is running in {name}'s worktree")
 CLI_RUNNING_HERE = M("{holder} is running in this checkout")

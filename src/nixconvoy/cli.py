@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 import os
 import re
 import sys
+from importlib import metadata
 from pathlib import Path
 from typing import IO, NoReturn
 
@@ -89,6 +91,10 @@ def main() -> None:
 def dispatch() -> None:
     args = sys.argv[1:]
     if not args:
+        with contextlib.suppress(metadata.PackageNotFoundError):  # run from the source tree
+            rev = Path(__file__).with_name("rev")  # written by nix/package.nix
+            print(strings.CLI_VERSION(version=metadata.version(TOOL),
+                                      rev=f" ({rev.read_text().strip()})" if rev.exists() else ""))
         print(usage())
         return
     if args[0] in ("-h", "--help"):

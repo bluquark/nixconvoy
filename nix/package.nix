@@ -9,7 +9,7 @@
 # runs and the cache carries is tested.  passthru.unchecked is the build
 # itself, for a system that runs the suite through system.checks instead,
 # its closure built meanwhile; passthru.tests is the suite.
-{ pkgs, switch-guard }:
+{ pkgs, switch-guard, rev ? null }:
 let
   inherit (pkgs) lib;
   python = pkgs.python3;
@@ -22,7 +22,7 @@ let
   };
   unchecked = python.pkgs.buildPythonApplication {
     pname = "nixconvoy";
-    version = "0.1.0";
+    inherit ((lib.importTOML ../pyproject.toml).project) version;
     pyproject = true;
     src = lib.fileset.toSource {
       root = ../.;
@@ -45,6 +45,8 @@ let
       mkdir $out/${python.sitePackages}/nixconvoy/bin
       ln -s ${switch-guard}/bin/nixconvoy-plan ${switch-guard}/bin/nixconvoy-switch $out/${python.sitePackages}/nixconvoy/bin/
       ln -s ${kitSrc} $out/${python.sitePackages}/nixconvoy/kit
+    '' + lib.optionalString (rev != null) ''
+      echo ${rev} > $out/${python.sitePackages}/nixconvoy/rev
     '';
     passthru = { inherit switch-guard kitSrc; unchecked = unchecked; };
     meta.mainProgram = "nixconvoy";
