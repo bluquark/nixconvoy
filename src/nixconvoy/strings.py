@@ -95,6 +95,15 @@ LAND_SUBMODULE_ORPHANED = M("the tree pins {fb}'s rev of submodule {gone}, whose
                             "`{TOOL} open --submodule <input>` recreates it from origin's branch to land it, or "
                             "`{TOOL} close <input> --force` after it drops it")
 LAND_PUSH_MAIN_FAILED = M("pushing {main_branch} failed (moved since fetch?); re-run:\n{stderr}")
+LAND_PUSH_MAIN_UNSURE = M("pushing {main_branch} failed, and {remote} may yet take it; re-run, which finishes "
+                          "the landing if it did:\n{stderr}")
+LAND_FINISHING = M("note: {remote} took {commit}, a landing from here that was not finished ({file}): "
+                   "finishing it")
+LAND_LEFT_EDITED = M("note: {name} has an edit in the way of the landing: left where it is, for its next "
+                     "catch-up (`{TOOL} pull`)")
+LAND_SAID_ABOVE = "see above"
+LAND_NOT_FINISHED = M("warning: the landing was not finished ({error}); the next `{TOOL} land`, `deploy` or "
+                      "`pull` here tries again")
 LAND_DONE = M("landed on {main_branch}: {summary}")
 LAND_CATCH_UP_FAILED = M("some checkouts could not be brought onto the new main (see above); "
                          "fix them and `{TOOL} pull`")
@@ -722,6 +731,9 @@ SUBMODULE_PIN_COMMIT = M("submodule {name}: pinned on {default}")
 SUBMODULE_PUSH_DEFAULT_FAILED = M("warning: submodule {name}: pushing {default} failed (moved since fetch?); "
                                   "main pins {rev}, kept on its origin as {ref} until a landing carries it: "
                                   "in {dir}, fetch and merge origin/{default}, deploy, then land again:\n{stderr}")
+SUBMODULE_PUSH_DEFAULT_LATER = M("warning: submodule {name}: pushing {default} failed; main pins {rev}, kept on "
+                                 "its origin as {ref}: the next `{TOOL} land`, `deploy` or `pull` here tries "
+                                 "again:\n{stderr}")
 SUBMODULE_LANDED = M("submodule {name}: landed on {default} ({rev})")
 SUBMODULE_PUSH_BRANCH_FAILED = M("pushing submodule {name}'s {fb} failed - it moved on its origin, but this "
                                  "worktree is its only writer.  Investigate:\n{stderr}")

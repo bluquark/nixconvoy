@@ -227,6 +227,8 @@ def dispatch() -> None:
             if subcmd == "land":
                 commands.land(msg, not_yet_deployed)
             else:
+                if not dry:
+                    commands.resume_landings()
                 try:
                     due |= commands.undeploy(back_to or "HEAD^", as_if)
                 except Fail:
@@ -236,6 +238,8 @@ def dispatch() -> None:
             if subcmd == "undeploy":
                 os.chdir(deploys_from)
                 take_lock()
+                if not dry:
+                    commands.resume_landings()
                 if parent_too:
                     print(strings.CLI_SECTION(name=here.name))
                     try:
@@ -248,6 +252,8 @@ def dispatch() -> None:
                     die(strings.UNDEPLOY_FAILED_IN(names=', '.join(failed)))
             return
     take_lock()
+    if subcmd != "land" and not dry:
+        commands.resume_landings()
     if subcmd == "land":
         commands.land(msg, not_yet_deployed)
     elif subcmd == "undeploy":

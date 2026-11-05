@@ -46,7 +46,7 @@ import tempfile
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from . import proc, strings
 from .checkout import (
@@ -1155,23 +1155,52 @@ class Landing(NamedTuple):
     landed: str  # the rev the feature branch now pins
     pending: str | None  # `landed` as a commit for the default branch, once main is pushed
     settle: bool  # the worktree and the branch still to move onto `landed`
+    was: str  # the worktree's HEAD as the landing read it
+    msg: str  # its MSG_FILE then (message_on_file)
+
+    def record(self) -> dict[str, Any]:
+        """As JSON holds it (of reads it back)."""
+        return {**self._asdict(), "sub": {**self.sub._asdict(), "repo": str(self.sub.repo), "dir": str(self.sub.dir)}}
+
+    @classmethod
+    def of(cls, rec: dict[str, Any]) -> Landing:
+        s = rec["sub"]
+        return cls(Sub(s["name"], Path(s["repo"]), s["path"], Path(s["dir"]), s["pin_file"]),
+                   *(rec[k] for k in cls._fields[1:]))
 
 
 def prepare_all(fb: str, fallback_msg: str, earlier: list[Landing] | None = None) -> list[Landing]:
     """Each present submodule's landing prepared (prepare_one), for land to
-    finish (finish_all) once main is pushed, or abandon (abandon_all); one
-    that fails abandons the ones before it.  `earlier`: the landings of
+    finish (finish_all) once main is pushed.  `earlier`: the landings of
     the participants before this one in a land --with-children: a
     repository among them is landed on top of the end of its line
     (line_end), which the landing then extends."""
-    landings: list[Landing] = []
+    return [prepare_one(sub, fb, fallback_msg, line_end(earlier or [], sub.name)) for sub in present(Path.cwd())]
+
+
+def pinned_commit(tip: str, landings: list[Landing], top: Path) -> str:
+    """`tip`, the checkout `top`'s, with each of its landings' pins on the
+    landed rev (gitlink and pin file, as set_pin stages them): a commit
+    on top of it no ref holds, for main's commit to be built from - the
+    branch and the index stay as they are until main is pushed.  `tip`
+    itself when no pin moves."""
+    moved = [e for e in landings if pin_at(tip, e.sub.path, top) != e.landed]
+    if not moved:
+        return tip
+    fd, tmpidx = tempfile.mkstemp()
+    os.close(fd)
     try:
-        for sub in present(Path.cwd()):
-            landings.append(prepare_one(sub, fb, fallback_msg, line_end(earlier or [], sub.name)))
-    except Fail:
-        abandon_all(landings)
-        raise
-    return landings
+        idx = {"GIT_INDEX_FILE": tmpidx}
+        git("read-tree", tip, env=idx, cwd=str(top))
+        for e in moved:
+            blob = out(["git", "hash-object", "-w", "--stdin"], input=pin_content(e.sub, e.landed, top), cwd=str(top))
+            git("update-index", "--add", "--cacheinfo", f"{GITLINK},{e.landed},{e.sub.path}",
+                "--cacheinfo", f"100644,{blob},{e.sub.pin_file}", env=idx, cwd=str(top))
+        tree = out(["git", "write-tree"], env=idx, cwd=str(top))
+    finally:
+        Path(tmpidx).unlink()
+    subject = "; ".join(strings.SUBMODULE_PIN_COMMIT(name=e.sub.name, default=e.default) for e in moved)
+    return out(["git", "commit-tree", tree, "-p", tip, "-m", subject], env=MACHINE_ENV, cwd=str(top))
 
 
 def line_end(landings: list[Landing], name: str) -> str | None:
@@ -1196,28 +1225,17 @@ def check_pins(tree: str, landings: list[Landing], top: Path) -> None:
                                                   end=end[:12]))
 
 
-def finish_all(landings: list[Landing]) -> None:
-    """Main is pushed: each landing finished, a failure said and the rest
-    carried on (the pin is on main either way)."""
-    for landing in landings:
-        try:
-            finish_one(landing)
-        except Fail as e:
-            print(strings.SUBMODULE_FINISH_FAILED(name=landing.sub.name, error=e, landed=landing.landed[:12],
-                                                  fb=landing.fb, dir=landing.sub.dir), file=sys.stderr)
-
-
-def abandon_all(landings: list[Landing]) -> None:
-    """The landing commits' temporary refs dropped: nothing else moved on
-    any origin, and the caller resets the pin commits of its branch."""
-    for landing in landings:
-        if landing.pending is not None:
-            git_remote("push", "--quiet", "origin", f":{landing_ref(landing)}", cwd=str(landing.sub.dir), check=False)
+def finish_all(landings: list[Landing]) -> bool:
+    """Main holds the pins: each landing finished (finish_one).  Whether
+    none is left for another run to do."""
+    done = [finish_one(landing) for landing in landings]
+    return all(done)
 
 
 def landing_ref(landing: Landing) -> str:
     """Where the landing commit waits on its origin for main's push (a
-    PAST_REFS entry: pruned like any once nothing pins it)."""
+    PAST_REFS entry: pruned like any once nothing pins it, as the one of
+    a landing main refused is)."""
     return f"{PAST_REFS}/{landing.fb}/{landing.pending}"
 
 
@@ -1225,12 +1243,15 @@ def prepare_one(sub: Sub, fb: str, fallback_msg: str, base: str | None = None) -
     """The submodule's landing on its repository's default branch (`base`:
     on an earlier participant's landing of the same repository instead) as
     one commit (the MSG_FILE in its worktree - tracked or not, it is read
-    here alone - else `fallback_msg`), pinned as a commit on `fb`; the
-    commit itself waits under a temporary ref on its origin, so that the
-    push of main, which the pin makes depend on it, goes first and a
-    refused one leaves the default branch as it was.  A branch with
-    nothing of its own just follows the pin, worktree and branch moved
-    at once (nothing of that reaches the default branch)."""
+    here alone - else `fallback_msg`) for main's commit to pin
+    (pinned_commit); the commit itself waits under a temporary ref on its
+    origin, so that the push of main, which the pin makes depend on it,
+    goes first and a refused one leaves the default branch as it was.
+    A landing with work moves nothing else before main's push - not the
+    checkout, the worktree or the default branch - so one that stops
+    there has nothing to take back.  A branch with nothing of its own
+    just follows the pin, worktree and branch moved at once (nothing of
+    that reaches the default branch)."""
     top = Path.cwd()
     cur = branch_at(sub.dir)
     if cur != fb:
@@ -1238,8 +1259,7 @@ def prepare_one(sub: Sub, fb: str, fallback_msg: str, base: str | None = None) -
     if staged(sub.dir, less_msg=True):
         die(strings.SUBMODULE_LAND_STAGED(name=sub.name))
     # The rebase onto the default branch needs a clean tree.
-    loose = [ln for ln in out(["git", "status", "--porcelain", "-uno"], cwd=str(sub.dir)).splitlines()
-             if not ln.endswith(f" {MSG_FILE}")]
+    loose = loose_edits(sub.dir)
     if loose:
         die(strings.SUBMODULE_LAND_UNSTAGED(name=sub.name, n=len(loose)))
     if not fetch_refs(sub.name, sub.repo):
@@ -1283,35 +1303,54 @@ def prepare_one(sub: Sub, fb: str, fallback_msg: str, base: str | None = None) -
                            cwd=str(sub.dir), check=False)
             if p.returncode != 0:
                 die(strings.SUBMODULE_LAND_PUSH_FAILED(name=sub.name, stderr=(p.stderr or "").strip()))
-    if pin(sub, top) != landed:
-        set_pin(sub, landed, top)
-        git("commit", "--quiet", "-m", strings.SUBMODULE_PIN_COMMIT(name=sub.name, default=default))
-    return Landing(sub, fb, default, landed, pending, settle)
+    return Landing(sub, fb, default, landed, pending, settle, head, message_on_file(str(sub.dir)))
 
 
-def finish_one(landing: Landing) -> None:
-    """After main's push: the default branch onto the landing commit, the
-    worktree and the branch onto the landing.  A default branch that moved
-    meanwhile is left as it is, said with the repair: main pins the commit
-    all the same, which its temporary ref keeps fetchable."""
-    sub, fb, default, landed, pending, settle = landing
+def loose_edits(d: Path) -> list[str]:
+    """The tracked files staged or edited in the worktree `d`, MSG_FILE aside."""
+    return [ln for ln in out(["git", "status", "--porcelain", "-uno"], cwd=str(d)).splitlines()
+            if not ln.endswith(f" {MSG_FILE}")]
+
+
+def finish_one(landing: Landing) -> bool:
+    """Main pins the landing: the default branch onto the landing commit,
+    the worktree and the branch onto the landing.  Run again - by a later
+    run, for one cut short - it does what is left: a worktree worked in
+    since the landing read it is left to its next catch-up.  A default
+    branch that moved meanwhile is left as it is, said with the repair:
+    main pins the commit all the same, which its temporary ref keeps
+    fetchable.  False when the push of the default branch failed without
+    the origin refusing it, which another run may get through; a failure
+    past it is said, the rest left to be done by hand."""
+    sub, fb, default, landed, pending, settle, was, msg = landing
+    done = True
     if pending is not None:
-        p = git_remote("push", "--quiet", "origin", f"{pending}:refs/heads/{default}", cwd=str(sub.dir), check=False)
-        if p.returncode != 0:
-            print(strings.SUBMODULE_PUSH_DEFAULT_FAILED(name=sub.name, default=default, rev=pending[:12],
-                                                        ref=landing_ref(landing), dir=sub.dir,
-                                                        stderr=(p.stderr or "").strip()), file=sys.stderr)
-        else:
+        repo = str(sub.repo)  # not the worktree: one removed since still has its landing on main
+        p = git_remote("push", "--quiet", "origin", f"{pending}:refs/heads/{default}", cwd=repo, check=False)
+        if p.returncode == 0 or (fetch_refs(sub.name, sub.repo)
+                                 and is_ancestor(pending, f"refs/remotes/origin/{default}", cwd=repo)):
             print(strings.SUBMODULE_LANDED(name=sub.name, default=default, rev=pending[:12]))
-            git_remote("push", "--quiet", "origin", f":{landing_ref(landing)}", cwd=str(sub.dir), check=False)
-            git("update-ref", "-d", landing_ref(landing), cwd=str(sub.repo), check=False)
-    if settle:
-        # The worktree onto the landing; its tree is clean of edits.
-        if git("reset", "--quiet", "--keep", landed, cwd=str(sub.dir), check=False).returncode != 0:
-            git("reset", "--quiet", "--hard", landed, cwd=str(sub.dir))
-        (sub.dir / MSG_FILE).unlink(missing_ok=True)
-        push_branch(sub, fb)
-    prune_past_refs(sub)
+            git_remote("push", "--quiet", "origin", f":{landing_ref(landing)}", cwd=repo, check=False)
+            git("update-ref", "-d", landing_ref(landing), cwd=repo, check=False)
+        else:
+            done = proc.refused(p)
+            said = strings.SUBMODULE_PUSH_DEFAULT_FAILED if done else strings.SUBMODULE_PUSH_DEFAULT_LATER
+            print(said(name=sub.name, default=default, rev=pending[:12], ref=landing_ref(landing), dir=sub.dir,
+                       stderr=(p.stderr or "").strip()), file=sys.stderr)
+    try:
+        if settle and sub.dir.is_dir() and branch_at(sub.dir) == fb:
+            if (rev_in(sub.dir, "HEAD") == was and message_on_file(str(sub.dir)) == msg
+                    and not loose_edits(sub.dir)):
+                if git("reset", "--quiet", "--keep", landed, cwd=str(sub.dir), check=False).returncode != 0:
+                    git("reset", "--quiet", "--hard", landed, cwd=str(sub.dir))
+                (sub.dir / MSG_FILE).unlink(missing_ok=True)
+            if rev_in(sub.dir, "HEAD") == landed:
+                push_branch(sub, fb)
+        prune_past_refs(sub)
+    except Fail as e:
+        print(strings.SUBMODULE_FINISH_FAILED(name=sub.name, error=e, landed=landed[:12], fb=fb, dir=sub.dir),
+              file=sys.stderr)
+    return done
 
 
 def push_branch(sub: Sub, fb: str) -> None:

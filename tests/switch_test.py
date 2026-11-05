@@ -168,6 +168,10 @@ def warned(f: Callable[[], object]) -> str:
     return err.getvalue()
 
 
+def check(what: object) -> None:
+    assert what
+
+
 def load(path: Path) -> dict[str, object]:
     state = proc.load_json(path.read_text())
     assert isinstance(state, dict)
@@ -1299,6 +1303,7 @@ ERRORS = {{
     "http": "error: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502\n",
     "inband": "remote: Internal Server Error\n ! [remote rejected] x -> y (Internal Server Error)\n",
     "refused": " ! [rejected] x -> y (fetch first)\n",
+    "stall": "error: RPC failed; curl 28 Operation too slow. Less than 1000 bytes/sec transferred the last 30 seconds\n",
 }}
 args = sys.argv[1:]
 verb = next(a for i, a in enumerate(args) if not a.startswith("-") and (i == 0 or args[i - 1] != "-c"))
@@ -1364,6 +1369,18 @@ def remote_cases(d: Path) -> None:
                 proc.git_remote("push", "--quiet", "origin", f"{fb}:refs/heads/{fb}", f"{lease}{b}")
             assert calls() == ["push", "push"] and at(fb) == c
             assert sh(co, "rev-parse", f"refs/remotes/origin/{fb}") == c
+            # A push cut off as stalled is not asked again: the stall guard bounds it.
+            planned("before stall")
+            p = proc.git_remote("push", "--quiet", "origin", f"{fb}:refs/heads/{fb}", check=False)
+            assert p.returncode != 0 and not p.retried and calls() == ["push"]
+            # A refusal settles a push, unless it answers the retry of one that may be going through yet.
+            planned("before refused")
+            p = proc.git_remote("push", "--quiet", "origin", f"{fb}:refs/heads/{fb}", check=False)
+            assert p.returncode != 0 and proc.refused(p) and calls() == ["push"]
+            planned("before http", "before refused")
+            with contextlib.redirect_stderr(io.StringIO()):
+                p = proc.git_remote("push", "--quiet", "origin", f"{fb}:refs/heads/{fb}", check=False)
+            assert p.returncode != 0 and p.retried and not proc.refused(p) and calls() == ["push", "push"]
             # A fetch, and the failures a retry may follow: two.
             planned("before http", "before inband")
             with contextlib.redirect_stderr(io.StringIO()):
@@ -1427,10 +1444,25 @@ def remote_cases(d: Path) -> None:
                        "error: RPC failed; HTTP 500 curl 22 The requested URL returned error: 500",
                        " ! [remote rejected] a -> b (internal server error)",
                        "remote: fatal error in commit_refs\n ! [remote rejected] a -> b (failure)",
+                       "remote: fatal error in commit_refs_rules",
                        "remote: Unexpected system error after push was received.",
                        "fatal: remote error: \n  Storage server temporarily offline. See https://status.github.com"):
             assert proc.SERVER_ERROR.search(theirs), theirs
-        for other in ("error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly: INTERNAL_ERROR (err 2)",
+        stall = "error: RPC failed; curl 28 Operation too slow. Less than 1000 bytes/sec transferred the last 30 seconds"
+
+        def said(stderr: str) -> proc.Completed:
+            return proc.Completed([], 1, "", stderr)
+
+        # What the remote refused for good, and what another try may get through.
+        for final in (" ! [rejected] a -> b (fetch first)", " ! [remote rejected] a -> b (hook declined)",
+                      "fatal: unable to access 'https://o/r.git/': The requested URL returned error: 403",
+                      "remote: Repository not found.\nfatal: repository 'https://o/r.git/' not found"):
+            assert proc.refused(said(final)), final
+        for open_ in (stall, " ! [remote rejected] a -> b (Internal Server Error)",
+                      "fatal: unable to access 'https://o/r.git/': The requested URL returned error: 429",
+                      "fatal: unable to access 'https://o/r.git/': Could not resolve host: o"):
+            assert not proc.refused(said(open_)), open_
+        for other in ("error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly: INTERNAL_ERROR (err 2)", stall,
                       "error: RPC failed; curl 56 Recv failure: Connection reset by peer",
                       "fatal: the remote end hung up unexpectedly", " ! [remote rejected] a -> b (failure)",
                       " ! [remote rejected] a -> b (cannot lock ref 'refs/heads/b')",
@@ -2629,26 +2661,70 @@ def submodule_cases(d: Path) -> None:
         assert submodule.present(seed) == [] and [s.name for s in submodule.planted(seed)] == ["dep"]
         assert submodule.main_checkouts() == [seed]
         (main_wt / "scratch.txt").write_text("s\n")
-        # Prepared, then abandoned (main's push refused): the landing
-        # commit waited under a temporary ref, the default branch, the
-        # worktree and its message stayed, and the pin comes off again.
+        # Prepared, then main's push refused: the landing commit waits
+        # under a temporary ref, and nothing else has moved - the default
+        # branch, the worktree and its message, the checkout's branch and
+        # index - so there is nothing to take back; the ref goes with the
+        # prune of the next landing finished.
         before, main_before = sh(co, "rev-parse", "HEAD"), dep_ref("refs/heads/main")
         landings = submodule.prepare_all(fb, "dep v2 landed")
         assert len(landings) == 1 and landings[0].pending is not None and landings[0].settle
-        pending = landings[0].pending
-        assert dep_ref(f"{submodule.PAST_REFS}/{fb}/{pending}") == pending
+        refused = landings[0].pending
+        assert dep_ref(f"{submodule.PAST_REFS}/{fb}/{refused}") == refused
         assert dep_ref("refs/heads/main") == main_before and sh(ax, "rev-parse", "HEAD") == v2
-        assert (ax / "COMMIT_MSG.md").exists() and pinned() == pending
-        assert sh(co, "log", "-1", "--format=%s").startswith("submodule dep:")
-        submodule.abandon_all(landings)
-        sh(co, "reset", "--quiet", "--keep", before)
-        assert not dep_ref(f"{submodule.PAST_REFS}/{fb}/{pending}")
-        assert sh(co, "rev-parse", "HEAD") == before and pinned() == v2
-        # The landing itself: main pushed (not here), then finished.
-        submodule.finish_all(submodule.prepare_all(fb, "dep v2 landed"))
+        assert (ax / "COMMIT_MSG.md").exists() and pinned() == v2
+        assert sh(co, "rev-parse", "HEAD") == before and not sh(co, "diff", "--cached")
+        # What main's commit is built from: the tip with the pin on the landing, on no ref.
+        tip = submodule.pinned_commit(before, landings, co)
+        assert sh(co, "rev-parse", f"{tip}^") == before and sh(co, "rev-parse", f"{tip}:{path}") == refused
+        assert sh(co, "show", f"{tip}:{pin_file}") == submodule.pin_content(dep(), refused, co).strip()
+        assert submodule.pinned_commit(tip, landings, co) == tip and sh(co, "rev-parse", "HEAD") == before
+        assert submodule.Landing.of(json.loads(json.dumps(landings[0].record()))) == landings[0]
+        # The landing itself, from the start: main pushed (not here), then
+        # finished - by a run that finds the worktree worked in since, which
+        # leaves it where it is, then by another, which does what is left.
+        landings = submodule.prepare_all(fb, "dep v2 landed")
+        pending = landings[0].pending
+        assert pending is not None
+        sh(co, "reset", "--quiet", "--keep", submodule.pinned_commit(before, landings, co))  # as main's commit pins
+        # The default branch's push failing: asked again by a later run,
+        # unless the origin refused it.  The worktree removed since, it
+        # goes from the repository.
+        gone = landings[0]._replace(sub=landings[0].sub._replace(dir=d / "nowhere"))
+        push = submodule.git_remote
+
+        def failing(stderr: str) -> Callable[..., proc.Completed]:
+            def run(*args: str, **kw: Any) -> proc.Completed:
+                if args[0] == "push" and args[-1].endswith(":refs/heads/main"):
+                    return proc.Completed(list(args), 1, "", stderr)
+                return push(*args, **kw)
+            return run
+
+        with mock.patch.object(submodule, "git_remote", failing("fatal: unable to access 'o': Could not resolve host")):
+            assert "tries again" in warned(lambda: check(not submodule.finish_all([gone])))
+        with mock.patch.object(submodule, "git_remote", failing("fatal: unable to access 'o': Could not resolve host")), \
+                mock.patch.object(submodule, "prune_past_refs", side_effect=proc.Fail("no prune")):  # a failure past it
+            assert "finishing its landing failed: no prune" in warned(lambda: check(not submodule.finish_all([gone])))
+        with mock.patch.object(submodule, "git_remote", failing(" ! [remote rejected] x -> main (hook declined)")):
+            assert "moved since fetch?" in warned(lambda: check(submodule.finish_all([gone])))
+        assert dep_ref("refs/heads/main") == main_before
+        assert submodule.finish_all([gone])
+        assert dep_ref("refs/heads/main") == pending and sh(ax, "rev-parse", "HEAD") == v2
+        assert (ax / "COMMIT_MSG.md").exists()
+        put(ax, "later.txt", "l\n", "worked in since")
+        later = sh(ax, "rev-parse", "HEAD")
+        assert submodule.finish_all(landings)
+        assert dep_ref("refs/heads/main") == pending and sh(ax, "rev-parse", "HEAD") == later
+        assert (ax / "COMMIT_MSG.md").exists() and dep_ref(f"refs/heads/{fb}") == v2
+        sh(ax, "reset", "--quiet", "--hard", v2)
+        assert submodule.finish_all(landings)
         assert not dep_ref(f"{submodule.PAST_REFS}/gone/*")
         assert dep_ref(f"{submodule.PAST_REFS}/keep/{b1}") == b1
-        # The branch's deployed tip v2, pinned by nothing once the landing moved fb: not kept.
+        # The branch's deployed tip v2, pinned by nothing once the landing
+        # moved fb, goes with the next prune that has fetched it - here
+        # the finish run once more, with nothing else left to do.
+        assert dep_ref(f"{submodule.PAST_REFS}/{fb}/*") == v2
+        assert submodule.fetch_refs("dep", dep_repo) and submodule.finish_all(landings)
         assert not dep_ref(f"{submodule.PAST_REFS}/{fb}/*")
         dep_main = dep_ref("refs/heads/main")
         assert sh(ax, "rev-parse", "HEAD") == dep_main
@@ -2892,13 +2968,17 @@ def submodule_cases(d: Path) -> None:
         dep7 = co7 / ".git/modules/dep"  # co7's repository, which fetched the line's earlier landings
         assert sh(dep7, "rev-parse", f"{lb}^") == new_main and sh(dep7, "rev-parse", f"{ln}^") == lb
         assert sh(dep7, "show", f"{ln}:tool2.py") == "b" and sh(dep7, "show", f"{ln}:tool7.py") == "n"
-        assert pinned(co8) == lb and pinned() == new_main and pinned(co7) == ln
+        # Each participant's tip as main's commit is built from it: pinned on its landing.
+        tips = {top: submodule.pinned_commit(sh(top, "rev-parse", "HEAD"), [e], top)
+                for top, e in zip((co8, co, co7), chain, strict=True)}
+        assert [sh(top, "rev-parse", f"{tip}:{path}") for top, tip in tips.items()] == [lb, new_main, ln]
+        assert pinned(co8) == b3 and sh(co8, "rev-parse", f"{tips[co8]}^") == sh(co8, "rev-parse", "HEAD")  # not moved
         assert submodule.line_end(chain, "dep") == ln and submodule.line_end(chain[:2], "dep") == lb
-        submodule.check_pins(sh(co7, "rev-parse", "HEAD^{tree}"), chain, co7)  # the union's pick: the end
+        submodule.check_pins(sh(co7, "rev-parse", f"{tips[co7]}^{{tree}}"), chain, co7)  # the union's pick: the end
         for top in (co, co8):  # a tree pinning something else
-            behind = sh(top, "rev-parse", f"HEAD:{path}")
+            behind = sh(top, "rev-parse", f"{tips[top]}:{path}")
             assert behind != ln
-            err = dies(functools.partial(submodule.check_pins, sh(top, "rev-parse", "HEAD^{tree}"), chain, top))
+            err = dies(functools.partial(submodule.check_pins, sh(top, "rev-parse", f"{tips[top]}^{{tree}}"), chain, top))
             assert f"the landed tree pins {behind[:12]}, not the end of its landings {ln[:12]}" in err, err
         submodule.finish_all(chain)
         assert dep_ref("refs/heads/main") == ln
@@ -2968,6 +3048,37 @@ def submodule_cases(d: Path) -> None:
         sh(co, "update-index", "--add", "--cacheinfo", f"160000,{merge},{path}")
         assert submodule.heal_pins(co, fb, False) == [f"submodule dep: {pin_file} rewritten for {merge[:12]}"]
         assert json.loads(pins.read_text()) == {"committed": date(merge), "narHash": f"nar:{merge}"}
+        # A landing end to end, its run cut short past main's push: main
+        # pins the landing commit, which its temporary ref alone holds,
+        # and nothing else has moved.  The next run finishes it.
+        co5, fb5 = d / "homelab5", "work/tester/5"
+        sh(d, "clone", "--quiet", str(origin), str(co5))
+        os.chdir(co5)
+        checkout.ensure_on_feature_branch(fb5)
+        ax5 = submodule.create("dep", fb5)
+        submodule.sync(fb5, None)
+        put(ax5, "tool5.py", "five\n")
+        submodule.sync(fb5, "dep: five")
+        put(co5, "COMMIT_MSG.md", "five landed\n", "dep: five")
+        sh(co5, "push", "--quiet", "origin", fb5)
+        tip5, sub5, dep_was = sh(co5, "rev-parse", "HEAD"), sh(ax5, "rev-parse", "HEAD"), dep_ref("refs/heads/main")
+        on_file = checkout.state_path(commands.LANDINGS)
+        with mock.patch.object(lanes, "undeployed", lambda *_: []), mock.patch.object(commands, "catch_up_rest"):
+            with mock.patch.object(commands, "complete", side_effect=KeyboardInterrupt), \
+                    contextlib.suppress(KeyboardInterrupt):
+                commands.land()
+            main5 = sh(origin, "rev-parse", "main")
+            landed5 = sh(co5, "rev-parse", f"{main5}:{path}")
+            assert landed5 != sub5 and sh(co5, "log", "-1", "--format=%s", main5) == "five landed" and on_file.exists()
+            assert dep_ref(f"{submodule.PAST_REFS}/{fb5}/{landed5}") == landed5 and dep_ref("refs/heads/main") == dep_was
+            assert sh(co5, "rev-parse", "HEAD") == tip5 and sh(ax5, "rev-parse", "HEAD") == sub5 and pinned(co5) == sub5
+            commands.land()
+        assert dep_ref("refs/heads/main") == landed5 and not dep_ref(f"{submodule.PAST_REFS}/{fb5}/{landed5}")
+        assert sh(ax5, "rev-parse", "HEAD") == landed5 and dep_ref(f"refs/heads/{fb5}") == landed5
+        assert sh(co5, "rev-parse", "HEAD") == main5 and pinned(co5) == landed5 and not on_file.exists()
+        assert not sh(co5, "status", "--porcelain") and sh(origin, "rev-parse", fb5) == main5
+        assert json.loads((co5 / pin_file).read_text())["narHash"] == f"nar:{landed5}"
+        os.chdir(co)
     say("submodules: ok")
 
 
@@ -3278,10 +3389,12 @@ def open_cases(d: Path) -> None:
         sh(co, "reset", "--quiet", "--", config.MSG_FILE)
         sh(co, "add", config.MSG_FILE)
         assert sh(co, "rev-parse", "HEAD") == tip and sh(co, "status", "--porcelain") == "M  COMMIT_MSG.md"
+        on_file = checkout.state_path(commands.LANDINGS)
         with mock.patch.object(submodule, "prepare_all", main_moving):
-            assert "pushing main failed" in dies(commands.land)
+            assert "pushing main failed (moved since fetch?)" in dies(commands.land)
         assert sh(co, "rev-parse", "HEAD") == tip and sh(co, "status", "--porcelain") == "M  COMMIT_MSG.md"
         assert (co / "COMMIT_MSG.md").read_text() == "staged only\n- never deployed\n"
+        assert not on_file.exists()  # main moved away from it: nothing left to finish
         commands.land()
         main = sh(co, "rev-parse", "origin/main")
         assert sh(co, "log", "-1", "--format=%B", main).strip() == "staged only\n\n- never deployed"
@@ -3297,6 +3410,164 @@ def open_cases(d: Path) -> None:
         main = sh(co, "rev-parse", "origin/main")
         assert sh(co, "log", "-1", "--format=%B", main).strip() == "over the deleted"
         assert sh(co, "rev-parse", "HEAD") == main and not sh(co, "status", "--porcelain")
+        # A push of main that fails without saying whether origin took it:
+        # nothing is taken back, and the landing stays on file.  Origin
+        # took it after all: the re-run finishes that landing.
+        git_remote, sent = commands.git_remote, []
+
+        def unsure(*args: str, **kw: Any) -> proc.Completed:
+            if args[0] == "push" and args[-1].endswith(":refs/heads/main"):
+                sent.append(args[-1].split(":")[0])
+                return proc.Completed(list(args), 1, "", "error: RPC failed; curl 28 Operation too slow")
+            return git_remote(*args, **kw)
+
+        def lost(land: Callable[[], None]) -> str:
+            """A landing whose push of main fails so: the commit it sent."""
+            with mock.patch.object(commands, "git_remote", unsure):
+                assert "origin may yet take it" in dies(land)
+            return sent[-1]
+
+        put(co, "u1.txt", "u\n")
+        put(co, "COMMIT_MSG.md", "unsure\n", "u1 increment")
+        sh(co, "push", "--quiet", "origin", "work/tester/9")
+        put(co, "COMMIT_MSG.md", "unsure, redrafted\n")
+        tip = sh(co, "rev-parse", "HEAD")
+
+        def rejected(*args: str, **kw: Any) -> proc.Completed:
+            if args[0] == "push" and args[-1].endswith(":refs/heads/main"):
+                return proc.Completed(list(args), 1, "", " ! [remote rejected] x -> main (protected branch hook declined)")
+            return git_remote(*args, **kw)
+
+        # Origin refusing the push settles it: nothing is left on file.
+        with mock.patch.object(commands, "git_remote", rejected):
+            assert "pushing main failed (moved since fetch?)" in dies(commands.land)
+        assert not on_file.exists() and sh(co, "rev-parse", "HEAD") == tip
+        took = lost(commands.land)
+        assert on_file.exists() and sh(co, "rev-parse", "HEAD") == tip
+        assert sh(co, "status", "--porcelain") == "M  COMMIT_MSG.md" and sh(co, "rev-parse", "origin/main") == main
+        sh(co, "push", "--quiet", "origin", f"{took}:refs/heads/main")
+        told = printed(commands.land)
+        assert f"origin took {took[:12]}" in told and "landed on main" in told, told
+        assert sh(co, "rev-parse", "HEAD") == took and not sh(co, "status", "--porcelain") and not on_file.exists()
+        assert sh(origin, "rev-parse", "work/tester/9") == took and sh(w, "rev-parse", "HEAD") == took
+        assert sh(co, "log", "-1", "--format=%B", took).strip() == "unsure, redrafted"
+        # Finished by a deploy or a pull instead, the next work staged by
+        # then: that stays staged, its draft with it.
+        put(co, "u2.txt", "u\n")
+        put(co, "COMMIT_MSG.md", "the second\n", "u2 increment")
+        sh(co, "push", "--quiet", "origin", "work/tester/9")
+        took = lost(commands.land)
+        sh(co, "push", "--quiet", "origin", f"{took}:refs/heads/main")
+        put(co, "u3.txt", "u\n")
+        put(co, "COMMIT_MSG.md", "the next draft\n")
+        assert f"origin took {took[:12]}" in printed(commands.resume_landings)
+        assert sh(co, "rev-parse", "HEAD") == took and not on_file.exists()
+        assert sh(co, "status", "--porcelain").splitlines() == ["A  COMMIT_MSG.md", "A  u3.txt"]
+        assert (co / "COMMIT_MSG.md").read_text() == "the next draft\n"
+        assert sh(origin, "rev-parse", "work/tester/9") == took
+        sh(co, "commit", "--quiet", "-m", "u3 increment")
+        sh(co, "push", "--quiet", "origin", "work/tester/9")
+        # Origin never took it: the landing stays on file while main may
+        # yet, a failure to finish nothing a deploy stops for; the re-run
+        # lands anew, and its finish takes the one main can no longer take off file.
+        took = lost(commands.land)
+        commands.resume_landings()
+        assert on_file.exists() and sh(co, "rev-parse", "origin/main") != took
+        put(co, "COMMIT_MSG.md", "the next draft, redone\n")
+        commands.land()
+        main = sh(co, "rev-parse", "origin/main")
+        assert main != took and sh(co, "rev-parse", "HEAD") == main and not on_file.exists()
+        assert sh(co, "log", "-1", "--format=%B", main).strip() == "the next draft, redone"
+        # Main moving elsewhere is what ends the wait: origin can no longer take the push.
+        put(co, "u5.txt", "u\n")
+        put(co, "COMMIT_MSG.md", "the fifth\n", "u5 increment")
+        sh(co, "push", "--quiet", "origin", "work/tester/9")
+        took = lost(commands.land)
+        sh(seed, "fetch", "--quiet")
+        sh(seed, "reset", "--quiet", "--hard", "origin/main")
+        put(seed, "moved2.txt", "m\n", "landed elsewhere")
+        sh(seed, "push", "--quiet", "origin", "HEAD:main")
+        commands.resume_landings()
+        assert not on_file.exists() and sh(co, "rev-parse", "HEAD") != took
+        commands.land()
+        main = sh(co, "rev-parse", "origin/main")
+        assert sh(co, "rev-parse", "HEAD") == main and sh(co, "log", "-1", "--format=%B", main).strip() == "the fifth"
+        assert {"moved2.txt", "u5.txt"} <= set(sh(co, "ls-tree", "--name-only", main).split())
+        # A run cut short past main's push: the next one finishes it,
+        # each checkout of a land --with-children under its own lock.
+        put(co, "c1.txt", "c\n")
+        put(co, "COMMIT_MSG.md", "cut short\n", "c1 increment")
+        sh(co, "push", "--quiet", "origin", "work/tester/9")
+        put(w, "c2.txt", "c\n", "sub increment 3")
+        sh(w, "push", "--quiet", "origin", "work/tester/9-task")
+        tips = sh(co, "rev-parse", "HEAD"), sh(w, "rev-parse", "HEAD")
+        with mock.patch.object(commands, "complete", side_effect=KeyboardInterrupt), \
+                contextlib.suppress(KeyboardInterrupt):
+            commands.land_with_children()
+        took = sh(origin, "rev-parse", "main")
+        assert took != main and on_file.exists() and (sh(co, "rev-parse", "HEAD"), sh(w, "rev-parse", "HEAD")) == tips
+        # A child another run holds is left to the next: the landing stays on file.
+        os.chdir(w)
+        busy = checkout.lock_checkout()
+        os.chdir(co)
+        assert busy is not None and "is running there" in warned(commands.resume_landings)
+        assert on_file.exists() and sh(co, "rev-parse", "HEAD") == took and sh(w, "rev-parse", "HEAD") == tips[1]
+        busy.close()
+        told = printed(commands.land_with_children)
+        assert f"origin took {took[:12]}" in told, told
+        assert sh(co, "rev-parse", "HEAD") == took and sh(w, "rev-parse", "HEAD") == took and not on_file.exists()
+        assert sh(origin, "rev-parse", "work/tester/9") == took and sh(origin, "rev-parse", "work/tester/9-task") == took
+        assert not sh(co, "status", "--porcelain") and sh(w, "status", "--porcelain") == "?? n.txt"
+        assert sh(co, "log", "-1", "--format=%B", took).strip() == "cut short"
+        # Work done here since the landing that was cut short: `land`
+        # finishes that one, then lands the new work.
+        put(co, "d1.txt", "d\n")
+        put(co, "COMMIT_MSG.md", "first of two\n", "d1 increment")
+        sh(co, "push", "--quiet", "origin", "work/tester/9")
+        with mock.patch.object(commands, "complete", side_effect=KeyboardInterrupt), \
+                contextlib.suppress(KeyboardInterrupt):
+            commands.land()
+        took = sh(origin, "rev-parse", "main")
+        put(co, "d2.txt", "d\n", "d2 increment")
+        sh(co, "push", "--quiet", "origin", "work/tester/9")
+        told = printed(lambda: commands.land(message="second of two"))
+        main = sh(origin, "rev-parse", "main")
+        assert f"origin took {took[:12]}" in told and sh(co, "rev-parse", f"{main}^") == took, told
+        assert sh(co, "rev-parse", "HEAD") == main and not on_file.exists() and not sh(co, "status", "--porcelain")
+        assert sh(co, "log", "-1", "--format=%B", main).strip() == "second of two"
+        assert {"d1.txt", "d2.txt"} <= set(sh(co, "ls-tree", "--name-only", main).split())
+        # A checkout with an edit in the way of a landing finished by a
+        # later run is left where it is, the edit and all, for its catch-up.
+        put(co, "e1.txt", "e\n")
+        put(co, "COMMIT_MSG.md", "edited since\n", "e1 increment")
+        sh(co, "push", "--quiet", "origin", "work/tester/9")
+        put(w, "e2.txt", "e\n", "sub increment 4")
+        sh(w, "push", "--quiet", "origin", "work/tester/9-task")
+        left = sh(w, "rev-parse", "HEAD")
+        with mock.patch.object(commands, "complete", side_effect=KeyboardInterrupt), \
+                contextlib.suppress(KeyboardInterrupt):
+            commands.land_with_children()
+        took = sh(origin, "rev-parse", "main")
+        (w / "e1.txt").write_text("mine\n")  # untracked, where the landing has the parent's file
+        assert f"{w.name} has an edit in the way of the landing" in warned(commands.resume_landings)
+        assert sh(co, "rev-parse", "HEAD") == took and not on_file.exists()
+        assert sh(w, "rev-parse", "HEAD") == left and (w / "e1.txt").read_text() == "mine\n"
+        (w / "e1.txt").unlink()
+        good, status = checkout.update_checkout(w)
+        assert good and checkout.tree_less_msg("HEAD", str(w)) == sh(co, "rev-parse", f"{took}^{{tree}}"), status
+        # Cut short inside the finish, the branch moved here but not on origin: the next run pushes it.
+        put(co, "f1.txt", "f\n")
+        put(co, "COMMIT_MSG.md", "half finished\n", "f1 increment")
+        sh(co, "push", "--quiet", "origin", "work/tester/9")
+        with mock.patch.object(commands, "finish", side_effect=KeyboardInterrupt), \
+                contextlib.suppress(KeyboardInterrupt):
+            commands.land()
+        took = sh(origin, "rev-parse", "main")
+        assert sh(co, "rev-parse", "HEAD") == took and sh(origin, "rev-parse", "work/tester/9") != took and on_file.exists()
+        commands.land()
+        assert sh(origin, "rev-parse", "work/tester/9") == took and not on_file.exists()
+        assert sh(co, "rev-parse", "HEAD") == took and not sh(co, "status", "--porcelain")
+        main = took
         # Which message a landing commits under.
         assert checkout.landing_message(None, "s\n- b\n", "x") == "s\n\n- b"
         assert checkout.landing_message("m\n- b", "", "x") == "m\n\n- b"

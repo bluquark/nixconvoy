@@ -215,8 +215,10 @@ def failure(e: Exception) -> str:
 class Completed(subprocess.CompletedProcess[str]):
     """run's result: a CompletedProcess that also says whether `timeout`
     ended the command (its returncode then depends on what caught the
-    signal: nix exits 1 on SIGTERM)."""
+    signal: nix exits 1 on SIGTERM), and whether it is git_remote's
+    retry of a command that failed."""
     timed_out: bool = False
+    retried: bool = False
 
 
 def run(
@@ -325,6 +327,21 @@ def git(*args: str, cwd: str | None = None, env: dict[str, str] | None = None,
 SERVER_ERROR = re.compile(
     r"^.*(?:returned error: 5\d\d\b|HTTP 5\d\d\b|Internal Server Error|fatal error in commit_refs"
     r"|Unexpected system error|Storage server temporarily offline).*$", re.MULTILINE | re.IGNORECASE)
+# The remote answering a push with a refusal: ref by ref, or of the whole
+# request (an HTTP 4xx, but the two that ask for another try).
+REFUSED = re.compile(r"^\s*! \[(?:remote )?rejected\]|returned error: 4(?!08|29)\d\d\b"
+                     r"|^fatal: repository .* not found|^fatal: Authentication failed", re.MULTILINE)
+
+
+def refused(p: Completed) -> bool:
+    """Whether the remote refused the push `p` for good: it took nothing
+    of it, and will not when asked again.  Not so where its own failure
+    is the reason given (SERVER_ERROR), nor for a retry - the attempt
+    before may be what stood in its way, and go through yet."""
+    said = p.stderr or ""
+    return not p.retried and bool(REFUSED.search(said)) and not SERVER_ERROR.search(said)
+
+
 # Seconds waited before each retry of a command the remote failed so.
 RETRY_WAITS = (1, 3)
 
@@ -401,6 +418,7 @@ def git_remote(*args: str, cwd: str | None = None, env: dict[str, str] | None = 
         # The remote failing to say what is left of the push is this attempt failed.
         if asked:
             p, took, error = attempt(todo)
+            p.retried = True
     if check and p.returncode != 0:
         detail = (p.stderr or "").strip()
         die(strings.PROC_CMD_FAILED(cmd=" ".join(p.args), detail=strings.PROC_DETAIL(output=detail) if detail else ""))
