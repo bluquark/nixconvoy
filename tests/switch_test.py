@@ -19,11 +19,12 @@ skipped):
 Each section runs in a process of its own, as many at once as there are
 cores.  The suite's own progress goes to stderr, each line prefixed by
 its section; what nixconvoy prints is swallowed unless a case captures
-it."""
+it or its section fails (run_section)."""
 
 from __future__ import annotations
 
 import atexit
+import collections
 import contextlib
 import fcntl
 import functools
@@ -40,11 +41,12 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import types
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -110,19 +112,39 @@ PROVENANCE = provenance_line(NEW)
 
 
 def say(line: str) -> None:
-    print(line, file=PROGRESS, flush=True)
+    PROGRESS.write(line + "\n")  # one write: no splicing with another thread's lines
+    PROGRESS.flush()
 
 
-def remove_tree(d: Path) -> None:
-    """rmtree, a failure said with what is left in `d` and every process
-    still at work there (its cwd, an open file or an argument under `d`):
-    what a removal raced, shown only while it is there."""
+def cores() -> int:
+    """The cores this process may run on."""
+    return len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
+
+
+def machine_load() -> str:
+    """The machine's load averages against the cores this process may run
+    on: how starved a run that failed on a deadline was."""
+    try:
+        return "load {:.1f} {:.1f} {:.1f} on {} cores".format(*os.getloadavg(), cores())
+    except OSError:
+        return "load unknown"
+
+
+def at_work() -> str:
+    """This process's threads and its run() children in flight."""
+    return f"threads: {[x.name for x in threading.enumerate()]}; run() children: {len(proc.CHILDREN)}"
+
+
+def remove_tree(d: Path, tell: Callable[[str], None] = say) -> None:
+    """rmtree, a failure told (`tell`) with what is left in `d` and every
+    process still at work there (its cwd, an open file or an argument under
+    `d`): what a removal raced, shown only while it is there."""
     try:
         shutil.rmtree(d)
     except OSError as e:
-        say(f"removal of {d} failed: {e}")
+        tell(f"removal of {d} failed: {e}")
         for left in sorted(d.rglob("*")):
-            say(f"  left: {left}")
+            tell(f"  left: {left}")
         for pp in Path("/proc").iterdir():
             if not pp.name.isdigit() or int(pp.name) == os.getpid():
                 continue
@@ -135,9 +157,9 @@ def remove_tree(d: Path) -> None:
                 continue  # gone meanwhile, or not ours to read
             hits = [x for x in (cwd, *fds) if x.startswith(str(d))]
             if hits or str(d) in cmd:
-                say(f"  process {pp.name} (state {stat[0]}, parent {stat[1]}, session {stat[3]}): "
-                    f"{cmd.strip()[:200]} | cwd {cwd} | in {d}: {hits[:6]}")
-        say(f"  threads: {[x.name for x in threading.enumerate()]}; run() children: {len(proc.CHILDREN)}")
+                tell(f"  process {pp.name} (state {stat[0]}, parent {stat[1]}, session {stat[3]}): "
+                     f"{cmd.strip()[:200]} | cwd {cwd} | in {d}: {hits[:6]}")
+        tell(f"  {at_work()}")
         raise
 
 
@@ -2209,7 +2231,7 @@ def announce_cases(d: Path) -> None:
             f"pending increment of {wb} from tester:{co} (pid {os.getpid()})"
         (pend,) = checkout.pending_announcements()
         assert pend.key == pend.branch == wb and pend.sha == first and not pend.settled and \
-            t0 <= pend.since <= pend.at <= t0 + 2, pend
+            t0 <= pend.since <= pend.at <= t0 + 2, (pend, t0, time.time())
         assert checkout.announced(wb) == {}
         assert checkout.announced(None) == {wb: first}
         # Renewed while the deploy runs: a fresh commit of the same tree on
@@ -2225,7 +2247,7 @@ def announce_cases(d: Path) -> None:
         t1 = int(time.time())
         again = checkout.Announce(wb, snap)
         assert again.collect(), again.detail
-        assert t1 <= again.since <= t1 + 2 and again.records == (), again.since
+        assert t1 <= again.since <= t1 + 2 and again.records == (), (again.since, again.records, t1, time.time())
         # Withdrawn (the deploy ended without a switch): deleted, the
         # renewals over.
         again.withdraw()
@@ -4013,23 +4035,84 @@ def guard_bin() -> str:
     return f"{p.stdout.strip()}/bin"
 
 
+# How much of what nixconvoy printed a failed section shows, per stream.
+SWALLOWED_LINES = 40
+
+
+def raised_at(e: BaseException) -> str:
+    """Where in this file `e` was raised (its innermost frame here) and the
+    first line of what it says."""
+    here = [f for f in traceback.extract_tb(e.__traceback__) if Path(f.filename).name == Path(__file__).name]
+    where = f"line {here[-1].lineno} ({here[-1].name}: {here[-1].line})" if here else "no line of the suite"
+    said = str(e).splitlines()
+    return f"{where}: {type(e).__name__}: {said[0][:300] if said else ''}"
+
+
 def run_section(name: str) -> None:
+    """The section `name` in this process.  A failure - an exit with a
+    code too, die()'s under cli.main - says what a pass keeps quiet: how
+    long it ran and under what load, the threads left, the end of what
+    nixconvoy printed, then its traceback and, last, on one line (sure to
+    be among those main() repeats), where this file raised it and each
+    failure it was raised while handling: a removal's (scratch_dir) hides
+    the assertion before it otherwise."""
     proc.this_machine = lambda: "tester"
     if bin_dir := os.environ.get(GUARD_BIN):
         guard.BIN = Path(bin_dir)
     config.set_cfg(config.parse(toml()))
-    # No announcement renews on its timer: announce_cases drives the renewals.
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
-            mock.patch.object(checkout, "HEARTBEAT", 3600):
-        SECTIONS[name]()
+    swallowed = {"stdout": io.StringIO(), "stderr": io.StringIO()}
+    t0 = time.monotonic()
+    try:
+        # No announcement renews on its timer: announce_cases drives the renewals.
+        with contextlib.redirect_stdout(swallowed["stdout"]), contextlib.redirect_stderr(swallowed["stderr"]), \
+                mock.patch.object(checkout, "HEARTBEAT", 3600):
+            SECTIONS[name]()
+    except (Exception, SystemExit) as e:
+        if isinstance(e, SystemExit) and not e.code:
+            raise
+        say(f"failed after {time.monotonic() - t0:.1f}s; {machine_load()}; {at_work()}")
+        for stream, text in swallowed.items():
+            lines = text.getvalue().splitlines()
+            for line in lines[-SWALLOWED_LINES:]:
+                say(f"  nixconvoy's {stream}: {line}")
+            if len(lines) > SWALLOWED_LINES:
+                say(f"  ({len(lines) - SWALLOWED_LINES} earlier lines of its {stream} left out)")
+        traceback.print_exc(file=PROGRESS)
+        chain: list[BaseException] = []
+        at: BaseException | None = e
+        while at is not None and at not in chain:
+            chain.append(at)
+            at = at.__cause__ or (None if at.__suppress_context__ else at.__context__)
+        say("failed at " + "; while handling: ".join(raised_at(x) for x in chain))
+        sys.exit(e.code if isinstance(e, SystemExit) and isinstance(e.code, int) else 1)
 
 
-def relay(name: str) -> int:
+# The lines of a failed build's log nix's error shows (its log-lines
+# default): what the suite's last lines must say of a failure by
+# themselves, since a deploy's build prints no more of it.
+NIX_LOG_LINES = 25
+
+
+class SectionRun(NamedTuple):
+    code: int
+    secs: float
+    # Its last lines, as relayed.
+    tail: list[str]
+
+
+def relay(name: str) -> SectionRun:
     """A section's process, its lines relayed as they come, prefixed by
     its name, with a cache dir of its own: the sections' scratch repos
     share tree SHAs, so one's proofs and prunes would reach another's.
-    Its exit code; 1 when it could not run or left its cache dir busy."""
+    Its exit code (1 when it could not run or left its cache dir busy),
+    how long it took and its last lines."""
     cache = Path(tempfile.mkdtemp(prefix=f"{name}-cache-"))
+    tail: collections.deque[str] = collections.deque(maxlen=NIX_LOG_LINES)
+    t0 = time.monotonic()
+
+    def tell(line: str) -> None:
+        tail.append(f"[{name}] {line.rstrip()}")
+        say(tail[-1])
     try:
         with subprocess.Popen([sys.executable, __file__, "--section", name], stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
@@ -4037,21 +4120,21 @@ def relay(name: str) -> int:
             assert child.stdout
             try:
                 for line in child.stdout:
-                    PROGRESS.write(f"[{name}] {line}")  # one write: no splicing with the other sections' lines
-                    PROGRESS.flush()
+                    tell(line)
             except BaseException:
                 child.kill()
                 raise
         code = child.returncode
     except Exception as e:  # noqa: BLE001 - every failure is the section's
-        say(f"[{name}] {e!r}")
+        tell(repr(e))
         code = 1
+    secs = time.monotonic() - t0
     try:
-        remove_tree(cache)
+        remove_tree(cache, tell)
     except OSError:
-        say(f"[{name}] its cache dir could not be removed (above)")
+        tell("its cache dir could not be removed (above)")
         code = code or 1
-    return code
+    return SectionRun(code, secs, list(tail))
 
 
 def main() -> None:
@@ -4060,13 +4143,19 @@ def main() -> None:
         return
     os.environ[GUARD_BIN] = guard_bin()
     given = os.environ.get("NIX_BUILD_CORES", "")
-    cores = int(given) if given.isdigit() and int(given) else (
-        len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1)
-    with ThreadPoolExecutor(min(cores, len(SECTIONS))) as pool:
-        codes = dict(zip(SECTIONS, pool.map(relay, SECTIONS), strict=True))
-    failed = [f"{name} (exit {code})" for name, code in codes.items() if code]
+    with ThreadPoolExecutor(min(int(given) if given.isdigit() and int(given) else cores(), len(SECTIONS))) as pool:
+        ran = dict(zip(SECTIONS, pool.map(relay, SECTIONS), strict=True))
+    # A pass says them too: what a failed run's are measured against.
+    say("seconds: " + ", ".join(f"{name} {r.secs:.1f}" for name, r in ran.items()) + f"; {machine_load()}")
+    failed = {name: r for name, r in ran.items() if r.code}
     if failed:
-        say("failed: " + ", ".join(failed))
+        # Each failure's last lines again, the log's last (NIX_LOG_LINES):
+        # of as many failures as fit there.
+        share = max((NIX_LOG_LINES - 1) // len(failed), 2)
+        for r in list(failed.values())[:(NIX_LOG_LINES - 1) // share]:
+            for line in r.tail[-share:]:
+                say(line)
+        say("failed: " + ", ".join(f"{name} (exit {r.code}, {r.secs:.1f}s)" for name, r in failed.items()) + f"; {machine_load()}")
         sys.exit(1)
 
 
