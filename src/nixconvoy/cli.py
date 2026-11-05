@@ -10,8 +10,16 @@ from pathlib import Path
 from typing import IO, NoReturn
 
 from . import commands, config, hooks, init, names, orphans, proc, review, strings, submodule
-from .checkout import lock_checkout, lock_holder, note_prefix, require_work_branch, staged_differs, sub_parent
-from .deploy import deploy
+from .checkout import (
+    await_background_push,
+    lock_checkout,
+    lock_holder,
+    note_prefix,
+    pop_tmp_commits,
+    require_work_branch,
+    sub_parent,
+)
+from .deploy import deploy, refuse_staged
 from .proc import PERF, TOOL, Fail, die, ok, out, painter
 from .strings import BACK_TO_FLAG, DRY_FLAG, EVICT_FLAG
 
@@ -207,59 +215,76 @@ def dispatch() -> None:
         for n in given:
             each.setdefault(Path(n) if with_children else names.worktree(n, here, subcmd, subagent=False), n)
         given, named = list(each.values()), list(each.keys())
-        deploys_from = here
-        # What another checkout's undeploy makes due is deployed from this
-        # one, whatever its own undeploy comes to: its staged changes would
-        # be carried without a message.
-        if subcmd == "undeploy" and any(d != here for d in named) and staged_differs(str(deploys_from)):
-            die(strings.UNDEPLOY_DEPLOYER_STAGED(path=deploys_from))
-        # Several subagent worktrees, one after the other, each under its
-        # own checkout's lock.  An undeploy that fails in one stops none of
-        # the others, and what the rest undid is deployed all the same.
-        due, failed = False, []
-        for name, d in zip(given, named, strict=True):
-            if len(given) > 1 or parent_too:
-                print(strings.CLI_SECTION(name=d.name))
-            os.chdir(d)
-            lock = lock_checkout()
-            if lock is None:
-                die(strings.CLI_RUNNING_IN_WORKTREE(holder=lock_holder(), name=name))
-            if subcmd == "land":
+        if subcmd == "land":
+            # Several worktrees, one after the other, each under its own
+            # checkout's lock.
+            for name, d in zip(given, named, strict=True):
+                if len(given) > 1:
+                    print(strings.CLI_SECTION(name=d.name))
+                os.chdir(d)
+                lock = lock_checkout()
+                if lock is None:
+                    die(strings.CLI_RUNNING_IN_WORKTREE(holder=lock_holder(), name=name))
                 commands.land(msg, not_yet_deployed)
-            else:
-                if not dry:
-                    commands.resume_landings()
+                lock.close()
+            if given:
+                return
+        else:
+            undo = [*named, here] if parent_too or not named else named
+            # Another checkout's unfinished landing may take this one too:
+            # finished while this one's lock is free.
+            if not dry:
+                for d in [d for d in undo if d != here]:
+                    os.chdir(d)
+                    held = lock_checkout()
+                    if held is not None:
+                        commands.resume_landings()
+                        held.close()
+                os.chdir(here)
+            # What the undeploys make due is deployed from this checkout,
+            # without a message: its lock is held from before anything
+            # moves, and nothing is staged for that deploy to carry, a dead
+            # run's tmp commits unwound.
+            take_lock()
+            await_background_push()
+            pop_tmp_commits()
+            refuse_staged(here)
+            if not dry:
+                commands.resume_landings()
+            # One checkout after the other, another's under its own lock.
+            # An undeploy that fails in one stops none of the others, and
+            # what the rest undid is deployed all the same.
+            due, failed = False, []
+            for d in undo:
+                if len(undo) > 1:
+                    print(strings.CLI_SECTION(name=d.name))
+                os.chdir(d)
+                lock = None
                 try:
+                    if d != here:
+                        lock = lock_checkout()
+                        if lock is None:
+                            die(strings.CLI_RUNNING_IN_WORKTREE(holder=lock_holder(), name=each[d]))
                     due |= commands.undeploy(back_to or "HEAD^", as_if)
                 except Fail:
+                    if len(undo) == 1:
+                        raise
                     failed.append(d.name)
-            lock.close()
-        if given or with_children:
-            if subcmd == "undeploy":
-                os.chdir(deploys_from)
-                take_lock()
-                if not dry:
-                    commands.resume_landings()
-                if parent_too:
-                    print(strings.CLI_SECTION(name=here.name))
-                    try:
-                        due |= commands.undeploy(back_to or "HEAD^", as_if)
-                    except Fail:
-                        failed.append(here.name)
-                if due:
-                    deploy([], None, False, as_if=as_if)
-                if failed:
-                    die(strings.UNDEPLOY_FAILED_IN(names=', '.join(failed)))
+                finally:
+                    if lock is not None:
+                        lock.close()
+            os.chdir(here)
+            if due:
+                deploy([], None, False, as_if=as_if)
+            if failed:
+                die(strings.UNDEPLOY_FAILED_IN(names=", ".join(failed)))
             return
     take_lock()
-    if subcmd != "land" and not dry:
-        commands.resume_landings()
     if subcmd == "land":
         commands.land(msg, not_yet_deployed)
-    elif subcmd == "undeploy":
-        if commands.undeploy(back_to or "HEAD^", as_if):
-            deploy([], None, False, as_if=as_if)
     else:  # deploy
+        if not dry:
+            commands.resume_landings()
         if dry and msg is not None:
             # Accepted so a deploy's command line reruns with the flag added.
             print(strings.CLI_DRY_IGNORES_MSG(), file=sys.stderr)

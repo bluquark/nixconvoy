@@ -183,6 +183,17 @@ def commit_unreached(wb: str, msg: str, snap: str) -> None:
     print(strings.DEPLOY_REACHES_NONE(wb=wb))
 
 
+def refuse_staged(top: Path) -> None:
+    """Die when the checkout `top` or a submodule of it has staged changes,
+    which a deploy from it commits: the one an undeploy ends in has no
+    message for them."""
+    if staged_differs(str(top)):
+        die(strings.UNDEPLOY_DEPLOYER_STAGED(path=top))
+    for sub in submodule.present(top):
+        if submodule.staged(sub.dir):
+            die(strings.SUBMODULE_UNDEPLOY_STAGED(name=sub.name))
+
+
 def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = False,
            as_if: dict[str, str] | None = None) -> None:
     """`msg` describes the staged increment (default: the checkout's name
@@ -247,8 +258,8 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
             staged_differs() or any(submodule.staged(sub.dir, less_msg=True) for sub in submodule.present(Path.cwd()))):
         msg = increment_name()
     snap = ""
-    if as_if is not None and staged_differs():
-        die(strings.UNDEPLOY_DEPLOYER_STAGED(path=Path.cwd()))
+    if as_if is not None:
+        refuse_staged(Path.cwd())
     PERF.mark("submodules")
     for told in submodule.sync(wb, msg, dry=dry, at=(as_if or {}).get(wb or "")):
         print(told)

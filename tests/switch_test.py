@@ -2579,6 +2579,30 @@ def submodule_cases(d: Path) -> None:
         submodule.sync(wb, "again")
         assert pinned() == v2 and dep_ref(f"refs/heads/{wb}") == v2
 
+        # An undeploy's deploy has no message for what is staged in a
+        # submodule of the checkout it runs from, its MSG_FILE alone
+        # included: refused before anything moves.
+        deploy.refuse_staged(co)
+        put(co, "inc.txt", "x\n", "an increment\n\nReaches: a\nDeployed: a")
+        put(ax, "COMMIT_MSG.md", "a draft\n")
+        argv0, sys.argv = sys.argv, ["nixconvoy", "undeploy"]
+        try:
+            with mock.patch.object(cli, "deploy") as deploys:
+                err = dies(cli.main)
+        finally:
+            sys.argv = argv0
+            atexit.unregister(proc.PERF.write)
+            for held in proc.HELD:
+                held.close()
+            proc.HELD.clear()
+            os.chdir(co)
+        assert "submodule dep has staged changes, which the deploy would carry" in err, err
+        assert sh(co, "rev-parse", "HEAD^") == tip and sh(ax, "rev-parse", "HEAD") == v2
+        deploys.assert_not_called()
+        sh(co, "reset", "--quiet", "--hard", tip)
+        sh(ax, "rm", "--quiet", "--cached", "COMMIT_MSG.md")
+        (ax / "COMMIT_MSG.md").unlink()
+
         # Another checkout pins the submodule on its own branch: the union
         # merges the two branches, pushed as the submodule origin's
         # refs/nixconvoy/union/dep, and pins the gitlink there.
@@ -3296,27 +3320,65 @@ def open_cases(d: Path) -> None:
         sh(w, "push", "--quiet", "origin", "work/tester/9-task")
         put(w, "n.txt", "unstaged\n")
         sh(w, "reset", "--quiet", "n.txt")
-        # An undeploy reaching another checkout deploys from this one,
-        # without a message: changes staged here are refused before
-        # anything moves, this checkout among those undone or not.
-        put(co, "q.txt", "staged\n")
+        # An undeploy ends in one deploy from this checkout, without a
+        # message: whichever checkouts it names, changes staged here and a
+        # run holding this checkout's lock are refused before anything moves.
         tips = [sh(x, "rev-parse", "HEAD") for x in (co, w)]
         argv0 = sys.argv
+
+        def undeploys(*args: str) -> str:
+            sys.argv = ["nixconvoy", "undeploy", *args]
+            try:
+                return dies(cli.main)
+            finally:
+                for held in proc.HELD:
+                    held.close()
+                proc.HELD.clear()
+                os.chdir(co)
+
         try:
             with mock.patch.object(cli, "deploy") as deploys:
-                for argv in (["undeploy", "--with-children"], ["undeploy", "task"],
-                             ["undeploy", "work/tester/9", "task"], ["undeploy", "task", "--dry-activate"]):
-                    sys.argv = ["nixconvoy", *argv]
-                    err = dies(cli.main)
-                    assert f"{co} has staged changes, which the deploy after the undeploy would carry" in err, (argv, err)
-                    assert [sh(x, "rev-parse", "HEAD") for x in (co, w)] == tips and not proc.HELD, argv
+                put(co, "q.txt", "staged\n", "tmp: staged (ensure_rebased)")  # as a dead run left them
+                for args in (["task"], [], ["work/tester/9"], ["--with-children"], ["work/tester/9", "task"],
+                             ["task", "--dry-activate"]):
+                    err = undeploys(*args)
+                    assert err == f"nixconvoy: {co} has staged changes, which the deploy after the undeploy would carry: " \
+                                  "deploy or unstage them first\n", (args, err)
+                    assert [sh(x, "rev-parse", "HEAD") for x in (co, w)] == tips, args
+                sh(co, "rm", "--quiet", "--cached", "q.txt")
+                (co / "q.txt").unlink()
+                lock = checkout.lock_checkout()
+                assert lock is not None and "is running in this checkout" in undeploys("task")
+                lock.close()
+                assert [sh(x, "rev-parse", "HEAD") for x in (co, w)] == tips
                 deploys.assert_not_called()
+                # A worktree another run holds is that one's failure: the
+                # rest are undone, and deployed.
+                spare = commands.open_worktree("spare", None)
+                sh(spare, "switch", "--quiet", "-c", "work/tester/9-spare")
+                put(spare, "t.txt", "spare\n", "spare increment\n\nReaches: a\nDeployed: a")
+                sh(spare, "push", "--quiet", "origin", "work/tester/9-spare")
+                os.chdir(w)
+                lock = checkout.lock_checkout()
+                os.chdir(co)
+                # A landing left unfinished in another worktree is resumed
+                # with this checkout free for it to take.
+                resumed: list[tuple[str, bool]] = []
+                with mock.patch.object(commands, "resume_landings",
+                                       lambda: resumed.append((Path.cwd().name, checkout.deploy_running(co)))):
+                    err = undeploys("task", "spare")
+                assert lock is not None and "is running in task's worktree" in err and "undeploy failed in task" in err, err
+                assert resumed == [("spare", False), (co.name, True)], resumed
+                lock.close()
+                assert sh(w, "rev-parse", "HEAD") == tips[1]
+                assert sh(spare, "rev-parse", "HEAD") == sh(co, "rev-parse", "origin/work/tester/9-spare") \
+                    == sh(co, "rev-parse", "origin/main")
+                deploys.assert_called_once_with([], None, False, as_if=None)
+                commands.close_worktrees(["spare"], force=True)
+                assert not spare.exists()
         finally:
             sys.argv = argv0
             atexit.unregister(proc.PERF.write)
-            os.chdir(co)
-        sh(co, "rm", "--quiet", "--cached", "q.txt")
-        (co / "q.txt").unlink()
         # The sub's COMMIT_MSG.md edited and staged after its deploy: no
         # undeployed change (the landing reads the file itself); any
         # other is one.
