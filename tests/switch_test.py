@@ -950,10 +950,24 @@ def put(where: Path, name: str, text: str, msg: str = "") -> None:
         sh(where, "commit", "--quiet", "-m", msg)
 
 
+@functools.cache
+def git_config() -> str:
+    """The scratch repositories' global git config, this process's: no
+    maintenance after a commit, a fetch or a push received - detached, it
+    repacks once two loose objects hash into objects/17, under a scratch
+    repository's removal.  A receive-pack reads it, as it would not
+    GIT_CONFIG_COUNT's."""
+    fd, path = tempfile.mkstemp(prefix="gitconfig-")
+    with os.fdopen(fd, "w") as f:
+        f.write("[maintenance]\n\tauto = false\n[receive]\n\tautoGC = false\n")
+    atexit.register(Path(path).unlink)
+    return path
+
+
 def scratch_env() -> None:
     os.environ.update({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
                        "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_NOSYSTEM": "1",
-                       "GIT_CONFIG_GLOBAL": os.devnull})
+                       "GIT_CONFIG_GLOBAL": git_config()})
     # The scratch repos keep their flake under nixos/, with a repo lint as
     # the precheck.
     config.set_cfg(config.parse(toml(precheck="lint", flake_dir="nixos", targets_dir="nixos/hosts")))
