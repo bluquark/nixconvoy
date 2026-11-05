@@ -1,9 +1,10 @@
 # A release: once a commit setting pyproject.toml's version to X.Y.Z is on
 # main, tag it and push the tag:
 #   git tag vX.Y.Z <commit> && git push origin vX.Y.Z
-# Each system's package is built on a runner of its own kind, its closure
-# pushed to nixconvoy.cachix.org and pinned there (a pin is exempt from the
-# cache's eviction); the GitHub Release follows once every system is in.
+# Each system's package (on Linux the target's crate too, the boot-assessment
+# module's) is built on a runner of its own kind, its closure pushed to
+# nixconvoy.cachix.org and pinned there (a pin is exempt from the cache's
+# eviction); the GitHub Release follows once every system is in.
 #
 # Run by hand on a pushed branch (`gh workflow run release.yml --ref
 # <branch>`) it builds and pushes the same and stops there: whether a commit
@@ -45,26 +46,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { system: x86_64-linux, runner: ubuntu-24.04 }
-          - { system: aarch64-linux, runner: ubuntu-24.04-arm }
-          - { system: aarch64-darwin, runner: macos-15 }
+          - { system: x86_64-linux, runner: ubuntu-24.04, packages: default switch-guard-target }
+          - { system: aarch64-linux, runner: ubuntu-24.04-arm, packages: default switch-guard-target }
+          - { system: aarch64-darwin, runner: macos-latest, packages: default }
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
       - name: Build
         run: |
-          nix build --accept-flake-config --print-build-logs ".#packages.${{ matrix.system }}.default"
-          ./result/bin/nixconvoy --help > /dev/null
+          for p in ${{ matrix.packages }}; do
+            nix build --accept-flake-config --print-build-logs --out-link "result-$p" ".#packages.${{ matrix.system }}.$p"
+          done
+          ./result-default/bin/nixconvoy --help > /dev/null
       - name: Push to cachix
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
           PIN: ${{ github.ref_type == 'tag' && format('{0}-{1}', github.ref_name, matrix.system) || '' }}
         run: |
-          out=$(readlink -f result)
           cachix() { nix run --inputs-from . nixpkgs#cachix -- "$@"; }
-          cachix push nixconvoy "$out"
-          [ -z "$PIN" ] || cachix pin nixconvoy "$PIN" "$out"
+          for p in ${{ matrix.packages }}; do
+            out=$(readlink -f "result-$p")
+            cachix push nixconvoy "$out"
+            pin=$PIN
+            [ "$p" = default ] || pin=$PIN-$p
+            [ -z "$PIN" ] || cachix pin nixconvoy "$pin" "$out"
+          done
 
   release:
     if: github.ref_type == 'tag'

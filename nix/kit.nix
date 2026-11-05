@@ -8,7 +8,7 @@
 { pkgs, config, deadline, internetCheck, prelude, checks }:
 let
   inherit (pkgs) lib;
-  switchGuard = import ./switch-guard.nix { inherit pkgs; };
+  switchGuard = import ./switch-guard-target.nix { inherit pkgs; };
   # Where the helper keeps the armed switch's record (`previous` names the
   # system being replaced; boot-assessment.nix reads it by this same path).
   state = "/run/confirmed-switch";

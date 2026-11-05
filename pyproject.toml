@@ -1,5 +1,10 @@
 [project]
 name = "nixconvoy"
+# A release: land this at X.Y.Z, then from a nixconvoy worktree
+#   git fetch origin && git tag vX.Y.Z origin/main && git push origin vX.Y.Z
+# .github/workflows/release.yml refuses a tag that is not v + this version
+# on main, then builds each system, caches it and publishes the Release.
+# A dry run before tagging: gh workflow run release.yml --ref main
 version = "0.1.0"
 description = "Clobber-safe NixOS deploys for targets shared by several checkouts"
 requires-python = ">=3.12"

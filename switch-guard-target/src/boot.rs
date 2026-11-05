@@ -1,15 +1,15 @@
 //! boot-assessment's effects: the profile and the ESP for the planner,
 //! systemd, the watchdog and the notice command for the judge.
-use super::gate::{self, Bless, Gate, GateUnit, Watch};
-use super::plan::{self, Boot, Ctx, Esp, File, Gen, Generation, Policy, Profile, Stub};
 use crate::config::Config;
 use crate::proc::{self, say, warn};
-use crate::record::Record;
-use crate::text;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
+use switch_guard::boot::gate::{self, Bless, Gate, GateUnit, Watch};
+use switch_guard::boot::plan::{self, Boot, Ctx, Esp, File, Gen, Generation, Policy, Profile, Stub};
+use switch_guard::record::Record;
+use switch_guard::text;
 
 const BOOTED: &str = "/run/booted-system";
 const CURRENT: &str = "/run/current-system";
@@ -101,7 +101,7 @@ fn read_profile(s: &Settings) -> Profile<String> {
     if let Ok(dir) = std::fs::read_dir(&s.profile_dir) {
         for e in dir.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
-            let Some(num) = crate::switch::driver::link_generation(&name) else { continue };
+            let Some(num) = crate::switch::link_generation(&name) else { continue };
             let link = e.path();
             let Ok(meta) = std::fs::symlink_metadata(&link) else { continue };
             let path =
@@ -320,7 +320,7 @@ fn report(s: &Settings) -> i32 {
     }
     let ngen = std::fs::read_link(s.profile())
         .ok()
-        .and_then(|l| crate::switch::driver::link_generation(&l.to_string_lossy()))
+        .and_then(|l| crate::switch::link_generation(&l.to_string_lossy()))
         .map_or_else(|| text!(boot_unknown).to_string(), |g| g.to_string());
     let rejected: Vec<String> = stub_names(s).into_iter().filter(|n| Stub::parse(n).is_some_and(|st| st.tries_left == Some(0))).collect();
     let rejected = if rejected.is_empty() { text!(boot_none).to_string() } else { rejected.join("\n") };

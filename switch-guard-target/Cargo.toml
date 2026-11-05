@@ -1,0 +1,22 @@
+[package]
+name = "switch-guard-target"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[dependencies]
+libc = "0.2"
+switch-guard = { path = "../switch-guard" }
+
+[profile.release]
+panic = "abort"
+strip = true
+
+# The tests' profile (switch-guard-target.nix's checkType), as switch-guard's.
+[profile.checked]
+inherits = "release"
+overflow-checks = true
+
+[lib]
+doctest = false

@@ -212,7 +212,7 @@ pub struct Machine<S> {
     pc: Pc<S>,
 }
 
-pub(crate) const P: &str = "confirmed-switch";
+pub const P: &str = "confirmed-switch";
 
 fn opt<S: Display>(s: &Option<S>) -> String {
     s.as_ref().map_or_else(|| text!(switch_nothing).to_string(), |s| s.to_string())

@@ -1,15 +1,15 @@
 //! Performs a Machine's effects: `System` is the I/O boundary (systemd,
 //! nix-env, switch-to-configuration), and `drive` the loop that feeds
 //! replies back.
-use super::core::{Action, Effect, Machine, Next, Query, Reply, Verb, P};
 use crate::config::Config;
 use crate::proc;
-use crate::record::Record;
-use crate::text;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use switch_guard::record::Record;
+use switch_guard::switch::core::{Action, Effect, Machine, Next, Query, Reply, Verb, P};
+use switch_guard::text;
 
 pub const UNIT: &str = "confirmed-switch-rollback";
 pub const PROFILE: &str = "/nix/var/nix/profiles/system";
@@ -286,7 +286,7 @@ impl System<'_> {
     }
 
     fn state_file(&self) -> PathBuf {
-        self.s.state_dir.join(crate::record::FILE)
+        self.s.state_dir.join(switch_guard::record::FILE)
     }
 }
 

@@ -23,12 +23,14 @@
       switch-guard = import ./nix/switch-guard.nix { inherit pkgs; };
       nixconvoy = import ./nix/package.nix { inherit pkgs switch-guard rev; };
       default = nixconvoy;
+    } // nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+      switch-guard-target = import ./nix/switch-guard-target.nix { inherit pkgs; };
     });
 
     checks = forAll (pkgs: let p = self.packages.${pkgs.stdenv.hostPlatform.system}; in {
-      lint = import ./nix/lint.nix { inherit pkgs; inherit (p) switch-guard; };
+      lint = import ./nix/lint.nix { inherit pkgs; inherit (p) switch-guard; switch-guard-target = p.switch-guard-target or null; };
     } // (if pkgs.stdenv.hostPlatform.isLinux
-          then { inherit (p.nixconvoy) tests; }
+          then { inherit (p.nixconvoy) tests; inherit (p) switch-guard-target; }
           else { package = p.nixconvoy; }));
 
     # The target side is pushed by each deploy (nix/kit.nix); the one module
@@ -36,7 +38,7 @@
     nixosModules.boot-assessment = { pkgs, ... }: {
       imports = [ ./nix/modules/boot-assessment.nix ];
       nixconvoy.bootAssessment.package = nixpkgs.lib.mkDefault
-        self.packages.${pkgs.stdenv.hostPlatform.system}.switch-guard;
+        self.packages.${pkgs.stdenv.hostPlatform.system}.switch-guard-target;
     };
   };
 }

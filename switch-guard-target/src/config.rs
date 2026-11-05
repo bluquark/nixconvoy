@@ -1,8 +1,8 @@
 //! The `key = value` file a module renders, so per-target settings and tool
 //! paths reach the binary without a wrapper environment.
-use crate::text;
 use std::collections::BTreeMap;
 use std::path::Path;
+use switch_guard::text;
 
 #[derive(Debug, Default)]
 pub struct Config {

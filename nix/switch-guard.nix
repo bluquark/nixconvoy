@@ -1,7 +1,7 @@
-# The crate behind nixconvoy-confirmed-switch (the helper), nixconvoy-boot-assessment and
-# nixconvoy's nixconvoy-switch and nixconvoy-plan (switch-guard/, one crate: see
-# its src/lib.rs).  checkPhase's `cargo test` runs the stateright models and
-# the property tests.
+# The crate behind nixconvoy's nixconvoy-switch and nixconvoy-plan
+# (switch-guard/: the cores, see its src/lib.rs; the target's drivers on
+# them are switch-guard-target.nix's).  checkPhase's `cargo test` runs the
+# stateright models and the property tests.
 { pkgs }:
 let
   inherit (pkgs) lib stdenv;
@@ -30,10 +30,11 @@ let
     ${lib.optionalString stdenv.hostPlatform.isLinux "ulimit -v ${toString (4 * 1024 * 1024)}"}
     export NIX_BUILD_CORES=$(( NIX_BUILD_CORES < 2 ? NIX_BUILD_CORES : 2 ))
   '';
+  # The cores have no platform code: Linux's run of the tests stands for darwin's.
+  doCheck = stdenv.hostPlatform.isLinux;
   dontUseCargoParallelTests = true;
   # Cargo.toml's `checked` profile: overflow fails a test.
   checkType = "checked";
-  meta.mainProgram = "nixconvoy-confirmed-switch";
   };
 in
 drv

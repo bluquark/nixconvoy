@@ -5,20 +5,22 @@
 # `git review` beside it and the shell prompt segment under share/.
 #
 # The package is that build behind a symlink farm (nixconvoy-tested) whose
-# dependencies hold the test suite's pass (nix/tests.nix): what `nix run`
-# runs and the cache carries is tested.  passthru.unchecked is the build
+# dependencies hold the test suite's pass (nix/tests.nix) and the build of
+# the target's crate the kit carries the sources of (its drivers' tests):
+# what `nix run` runs and the cache carries is tested.  passthru.unchecked is the build
 # itself, for a system that runs the suite through system.checks instead,
 # its closure built meanwhile; passthru.tests is the suite.
 { pkgs, switch-guard, rev ? null }:
 let
   inherit (pkgs) lib;
   python = pkgs.python3;
-  # The switch kit's sources (nix/kit.nix and the crate), linked beside the
+  target = import ./switch-guard-target.nix { inherit pkgs; };
+  # The switch kit's sources (nix/kit.nix and the target's crate), linked beside the
   # package: a deploy evaluates them against each target's own nixpkgs
   # (memo.kit_src), so the helper a target runs is this very tree's.
   kitSrc = lib.fileset.toSource {
     root = ../.;
-    fileset = lib.fileset.unions [ ../nix/kit.nix ../nix/switch-guard.nix switch-guard.fileset ];
+    fileset = lib.fileset.unions [ ../nix/kit.nix ../nix/switch-guard-target.nix target.fileset ];
   };
   unchecked = python.pkgs.buildPythonApplication {
     pname = "nixconvoy";
@@ -58,8 +60,8 @@ if !pkgs.stdenv.hostPlatform.isLinux then unchecked else
 pkgs.symlinkJoin {
   name = "nixconvoy-tested-${unchecked.version}";
   paths = [ unchecked ];
-  inherit tests;
-  # A cache holds the farm without the suite's output: substituted, not rebuilt.
+  inherit tests target;
+  # A cache holds the farm without those two's outputs: substituted, not rebuilt.
   allowSubstitutes = true;
   passthru = { inherit unchecked tests switch-guard kitSrc; };
   inherit (unchecked) meta;

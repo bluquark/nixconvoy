@@ -131,7 +131,7 @@ in
     enable = lib.mkEnableOption "systemd-boot boot counting as a failover to the last proven generation (lanzaboote installs the counted stubs)";
     package = lib.mkOption {
       type = lib.types.package;
-      description = "The switch-guard build whose nixconvoy-boot-assessment binary this target runs; the flake's nixosModules.boot-assessment sets it to its own.";
+      description = "The switch-guard-target build whose nixconvoy-boot-assessment binary this target runs; the flake's nixosModules.boot-assessment sets it to its own.";
     };
     requiredUnits = lib.mkOption {
       type = lib.types.listOf lib.types.str;

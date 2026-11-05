@@ -1,4 +1,4 @@
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    std::process::exit(switch_guard::switch::driver::main(&args));
+    std::process::exit(switch_guard_target::switch::main(&args));
 }

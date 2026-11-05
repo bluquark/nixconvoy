@@ -1,8 +1,9 @@
 # The repo's static checks, cheap enough to gate every deploy that moves
 # the pin: ruff and pyrefly over the Python, shellcheck over the plugins'
-# hook scripts, rustfmt and clippy over the crate.  The tests: cargo test
-# in the crate's build, the suite in nix/tests.nix.
-{ pkgs, switch-guard }:
+# hook scripts, rustfmt and clippy over the crates (the target's on Linux
+# alone).  The tests: cargo test in each crate's build, the suite in
+# nix/tests.nix.
+{ pkgs, switch-guard, switch-guard-target ? null }:
 let
   inherit (pkgs) lib;
   fs = lib.fileset;
@@ -23,13 +24,15 @@ let
       --python-interpreter-path ${pkgs.python3}/bin/python3
     touch $out
   '';
-  rustLint = pkgs.rustPlatform.buildRustPackage {
-    pname = "nixconvoy-lint-rust";
-    inherit (switch-guard) version cargoDeps preBuild;
+  rustLint = dir: crate: pkgs.rustPlatform.buildRustPackage {
+    pname = "nixconvoy-lint-${dir}";
+    inherit (crate) version cargoDeps;
+    preBuild = crate.preBuild or "";
     src = fs.toSource {
-      root = ../switch-guard;
-      fileset = fs.union switch-guard.fileset ../switch-guard/rustfmt.toml;
+      root = ../.;
+      fileset = fs.union crate.fileset ../rustfmt.toml;
     };
+    sourceRoot = "source/${dir}";
     nativeBuildInputs = [ pkgs.rustfmt pkgs.clippy ];
     buildPhase = ''
       runHook preBuild
@@ -41,6 +44,9 @@ let
     installPhase = "touch $out";
   };
 in
-pkgs.runCommandLocal "nixconvoy-lint" { parts = [ py sh rustLint ]; } ''
+pkgs.runCommandLocal "nixconvoy-lint" {
+  parts = [ py sh (rustLint "switch-guard" switch-guard) ]
+    ++ lib.optional (switch-guard-target != null) (rustLint "switch-guard-target" switch-guard-target);
+} ''
   touch $out
 ''

@@ -1,5 +1,6 @@
-//! Every sentence the crate says: the verdicts, refusals and notes of the
-//! plan cores, the switch protocol's messages, the kit's journal lines.
+//! Every sentence the crate and switch-guard-target say: the verdicts,
+//! refusals and notes of the plan cores, the switch protocol's messages,
+//! the kit's journal lines.
 //! nixconvoy's own are in src/nixconvoy/strings.py.
 //!
 //! `text!(name)` expands to the literal, so `format!(text!(name), field =
@@ -167,7 +168,7 @@ macro_rules! text {
     (switch_rolled_back_log) => { "rolled back to {previous}" };
     (switch_rolled_back) => { "{P}: rolled back to {previous}" };
 
-    // --- switch/driver.rs
+    // --- switch-guard-target: switch.rs
     (switch_cannot_record) => { "{P}: cannot record the state: {e}" };
     (switch_unparsable_state) => { "{P}: {e}; a state file it cannot parse refuses every verb: once no switch is in flight, remove it (sudo rm {path})" };
     (switch_lock_error) => { "lock {path}: {e}" };
@@ -181,7 +182,7 @@ macro_rules! text {
     (switch_check_cannot_run) => { "cannot run {checks}: {e}" };
     (switch_bad_config) => { "{P}: {e}" };
 
-    // --- boot/driver.rs
+    // --- switch-guard-target: boot.rs
     (boot_target_missing) => { "boot-assessment: {target} does not exist" };
     (boot_bad_record) => { "boot-assessment: {e}; not sparing a pending rollback's system - remove that file once no confirmed switch is in flight" };
     (boot_esp_full_notice) => { "{host}'s ESP lacks {mib} MiB for the generations its failover needs (target, booted, running, previous): every switch fails to install its boot entry until space is made on {esp}.\n" };
@@ -218,7 +219,7 @@ macro_rules! text {
     (boot_not_fit) => { "boot-assessment: generation {g} would not fit the ESP, leaving it out" };
     (boot_installing) => { "boot-assessment: installing generations {chosen} (anchors: {anchors})" };
 
-    // --- config.rs
+    // --- switch-guard-target: config.rs
     (config_no_equals) => { "config line {n}: no '='" };
     (config_cannot_read) => { "cannot read {path}: {e}" };
     (config_missing) => { "config lacks {key}" };

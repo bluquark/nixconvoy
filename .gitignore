@@ -1,6 +1,7 @@
 result
 result-*
 /switch-guard/target/
+/switch-guard-target/target/
 __pycache__/
 .claude/*
 !.claude/settings.json
