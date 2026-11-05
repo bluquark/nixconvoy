@@ -78,10 +78,10 @@ UNDEPLOY_DEPLOYER_STAGED = M("{path} has staged changes, which the deploy after 
 UNDEPLOY_FAILED_IN = M("undeploy failed in {names} (see above)")
 
 # --- commands.py: land
-LAND_HOLDS_BACK = M("{fb} holds back {them}: increments of it reach {it_them} "
-                    "but were deployed to other targets alone.  "
-                    "`{TOOL} deploy {targets}` from its checkout deploys them there first; "
-                    "`land --not-yet-deployed` lands them as they are, for the next deploy anywhere to roll out")
+LAND_HOLDS_BACK = M("{fb} is not yet deployed to {them}: work of it reaches {it_them} "
+                    "that no deploy from its checkout brought there.  "
+                    "`{TOOL} deploy {targets}` from its checkout deploys it there first; "
+                    "`land --not-yet-deployed` lands it as it is, for the next deploy anywhere to roll out")
 LAND_NOT_YET_DEPLOYED = M("landing with {them} not yet deployed: the next deploy anywhere rolls the landed work out there")
 LAND_NO_MSG_FILE = M("{fb} has no {MSG_FILE}; write one (it becomes the main commit message), or pass -m <msg>")
 LAND_MAIN_MOVED_DURING_EDIT = M("{main} moved while the message was being edited; re-run (the edit is kept)")
@@ -230,7 +230,7 @@ STATUS_STAGED = "staged"
 STATUS_UNSTAGED = "unstaged"
 STATUS_UNTRACKED = "untracked"
 STATUS_COUNT = M("{label} {n}")
-STATUS_HOLDS_BACK = M("holds back {targets}")
+STATUS_HOLDS_BACK = M("not yet deployed to {targets}")
 STATUS_EMPTY_SESSIONLESS = M("empty, its create found no claude session: {TOOL} close {name} removes it")
 STATUS_EMPTY_HAND_LOCKED = "empty, locked by hand: the sweep keeps it"
 STATUS_EMPTY_SESSION_LOCKED = ("empty, locked by its agent's claude session: closed when its agent "
@@ -294,6 +294,7 @@ CHECKOUT_NO_MSG_FILE_YET = M("note: {fb} carries work but no {MSG_FILE} yet - la
 CHECKOUT_INDEX_UNMERGED = M("cannot snapshot the index{of} (unmerged paths?)")
 CHECKOUT_INDEX_OF = M(" of {cwd}")
 CHECKOUT_SNAPSHOT_SUBJECT = "staged snapshot (not yet committed)"
+CHECKOUT_LINEAGE_SUBJECT = M("lineage of {branch}")
 CHECKOUT_WITH_MAIN_SUBJECT = M("{main} merged for a dry activation")
 CHECKOUT_WITH_MAIN_CONFLICT = M("{DRY_FLAG}: {main} does not merge cleanly into this checkout's work, which a dry "
                                 "activation does not rebase; `{TOOL} pull` first")
@@ -405,7 +406,6 @@ DEPLOY_ASSESSED_PLAIN = M("warning: {target} is switched plainly (auto_rollback_
 DEPLOY_REJECTED_GENERATION = M("{target}'s bootloader rejected the very generation this deploy would switch it to ({stub}): it failed its boot assessment and the target fell back.  Nothing was built, switched or committed.  See `journalctl -u boot-assessment-watch -u boot-assessment` on {target}; then change the configuration, or re-arm the stub to retry it as is (sudo mv of the +0-N stub to +2 under /boot/EFI/Linux).")
 # A deploy record's subject: the main branch, then each unioned branch.
 DEPLOY_SUBJECT_BRANCH = M(" + {branch}")
-DEPLOY_HOLD_ENDED_SUBJECT = M("deployed to {targets}, held back until now")
 DEPLOY_DRY_KIT_REFRESH = M("{DRY_FLAG}: the switch kit on {targets} would be refreshed")
 DEPLOY_BUILD_WHERE = M(" on {host}")
 DEPLOY_BUILD_KIT = M("{target}'s switch kit")

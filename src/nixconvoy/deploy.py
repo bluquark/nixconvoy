@@ -13,7 +13,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
-from . import checkout, memo, proc, strings, submodule, targets
+from . import checkout, lanes, memo, proc, strings, submodule, targets
 from .checkout import (
     DEPLOYED_PREFIX,
     PENDING_REFS,
@@ -35,7 +35,6 @@ from .checkout import (
     ensure_sole_writer,
     feature_branch_name,
     fetch_origin,
-    held_targets,
     note_pushed,
     origin_tips,
     pending_announcements,
@@ -43,6 +42,7 @@ from .checkout import (
     push_deployed,
     push_feature_branch,
     record_commit,
+    restart_lineage,
     staged_differs,
     staged_snapshot,
     this_prefix,
@@ -55,7 +55,7 @@ from .proc import PERF, Fail, die, dump_json, is_ancestor, load_json, out, rev
 from .switch import SwitchedMeanwhile, parse_checks, provenance_record, switch
 from .targets import Probe, expand_targets, flake_target_names
 from .union import UnionQueries
-from .wire import Context, DriftParams, UnionParams
+from .wire import Context, DriftParams, Lane, UnionParams
 
 # Seconds between the looks at origin while waiting for a deploy under way.
 WAIT_POLL = 5
@@ -209,7 +209,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     await_background_push()
     main0 = rev(main_ref())
     # Non-candidates are probed best-effort: the verdict reports their
-    # drift, and a hold on one is read off its provenance.
+    # drift.
     probe_names: list[str] = [] if skip else list(all_targets)
     pool = ThreadPoolExecutor(1 + len(probe_names) + len(submodule.present(Path.cwd())))
     fetch = pool.submit(fetch_origin, "--no-auto-gc")
@@ -264,6 +264,8 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
         fetch.result()
         ensure_sole_writer(fb)
         ensure_rebased()
+        if not dry and is_ancestor("HEAD", main_ref()):
+            restart_lineage(fb)
         snap = staged_snapshot()
         # An increment that changes nothing any target's evaluation reads
         # is committed without a deploy, the targets left to the next
@@ -289,11 +291,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     # for as long as this run lives.
     ann: Announce | None = None
     own = current_branch() or cfg().main_branch  # detached: at origin/main (ensure_rebased)
-    # A feature branch holding targets back may end a hold with an empty
-    # increment (the stage below): announced like any increment.
-    if not dry and not skip and (snap or rev("HEAD") != rev(remote_ref(own))
-                                 or (fb is not None and own == fb
-                                     and held_targets(f"{main_ref()}..HEAD"))):
+    if not dry and not skip and (snap or rev("HEAD") != rev(remote_ref(own))):
         ann = Announce(own, snap or "HEAD")
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, exit_on_signal)
@@ -342,11 +340,14 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
     head = own_head()
     running: dict[str, str | None] = {}
     probed: dict[str, Probe] = {}
+    # The record each probed target runs, read once per probe.
+    records_run: dict[str, tuple[dict[str, object], str] | None] = {}
 
     def collect_probes() -> None:
         nonlocal running, probed
         probed = {n: f.result() for n, f in probes.items()}
         running = {n: p.running for n, p in probed.items()}
+        records_run.clear()
         unreachable = [h for h in candidates if running.get(h) is None]
         if unreachable:
             die(strings.DEPLOY_UNREACHABLE(targets=", ".join(unreachable)))
@@ -370,7 +371,39 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
     tops: dict[str, Top] = {}
     committed = ""
     records: dict[str, str] = {}
+    # The records of targets found running their union's system already
+    # (lanes), each with the record it chains on.
+    attested: dict[str, tuple[str, str]] = {}
     provenances: dict[str, str] = {}
+
+    def running_records() -> dict[str, tuple[dict[str, object], str] | None]:
+        """The record each probed target runs (lanes.running_record)."""
+        if not records_run:
+            records_run.update({h: lanes.running_record(h, pr.provenance, pr.running) for h, pr in probed.items()})
+        return records_run
+
+    def own_runs(tip: str) -> dict[str, str | None]:
+        """The commit of this checkout's branch (as it is at `tip`) each
+        probed target runs, by its record: None for none, or one the
+        branch no longer holds."""
+        own = current_branch() or cfg().main_branch
+        found: dict[str, str | None] = {}
+        for h, r in running_records().items():
+            doc = r[0] if r is not None else {}
+            branches = doc.get("branches")
+            c = branches.get(own) if isinstance(branches, dict) else None
+            if c is None and own == cfg().main_branch:
+                c = doc.get("main")
+            if isinstance(c, str) and fb is not None:
+                c = lanes.carried_commit(own, c, tip, local=True, unknown_is_tip=False)
+            found[h] = c if isinstance(c, str) else None
+        return found
+
+    def cuts(wt: str, union: str, branches: list[tuple[str, str]]) -> list[tuple[str, str, str]]:
+        """The union core's Cuts: over the candidates, by the records they run."""
+        return lanes.cuts(wt, union, branches,
+                          {h: r[0] if r is not None else None for h, r in running_records().items()
+                           if h in candidates and running.get(h) is not None})
 
     def refresh() -> None:
         nonlocal snap, head
@@ -426,9 +459,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                 if not news_of(p, now, fetched, seen, dead) or (rank is not None and (p.since, p.branch) >= rank):
                     continue
                 if mine is None:
-                    mine = sorted(memo.reached_targets(
-                        wt, union, candidates, snap or head,
-                        {h: probed[h].provenance for h in candidates if h in probed}))
+                    mine = sorted(memo.reached_targets(wt, union, candidates, snap or head, own_runs(snap or head)))
                 # The announced state against what the union has of the
                 # branch: its parent (the announcer's HEAD) when origin has
                 # that, else origin's tip of the branch - a wider diff, so
@@ -467,11 +498,13 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             collect_probes()
         return waited
 
-    def stage(wt: str, union: str, listed: list[str], branches: list[tuple[str, str]]) -> bool:
+    def stage(wt: str, union: str, listed: list[str], branches: list[tuple[str, str]],
+              laned: list[tuple[str, Lane]]) -> bool:
         """Eval, precheck, build and copy for `union`, checked out in `wt`,
         the feature branches shaped like `listed` (nixconvoy.toml's branch_prefix), `branches`
-        the ones it merged: whether the deploy ends here."""
-        nonlocal plan, affected, left_alone, tops, committed, records, provenances, ann, policies
+        the ones it merged - the targets of each of `laned` from that
+        lane's union and worktree instead: whether the deploy ends here."""
+        nonlocal plan, affected, left_alone, tops, committed, records, attested, provenances, ann, policies
         if skip:
             if dry:
                 print(strings.DEPLOY_SKIP_DRY(union=union))
@@ -485,37 +518,50 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
 
         if ann is not None and not ann.collect():
             die(strings.DEPLOY_ANNOUNCE_FAILED(remote=cfg().remote, detail=ann.detail))
+        # Each target's union, its worktree and the branches it holds.
+        lane_of = {h: (lwt, lane.union, lane.branches) for lwt, lane in laned for h in lane.targets}
+
+        def lane(h: str) -> tuple[str, str, list[tuple[str, str]]]:
+            return lane_of.get(h, (wt, union, branches))
+
+        groups: dict[tuple[str, str], list[str]] = {}
+        for h in all_targets:
+            if running.get(h) is not None:
+                groups.setdefault(lane(h)[:2], []).append(h)
         PERF.mark("eval")
         with memo.memo_lock(memo.memo_dir()):
             memo.memo_prune(memo.memo_dir())
-        # The precheck gates the union, not the increment: a branch rebased
+        # The precheck gates each union, not the increment: a branch rebased
         # by pull/land, a skip-switch push or a merge of two passing
         # branches can each carry a violation no increment introduced.
+        unproven = [g for g in ({(wt, union): None} | dict.fromkeys(groups)) if memo.precheck_unproven(g[1])]
+
+        def prechecks() -> str | None:
+            return next((err for gwt, gunion in unproven if (err := memo.precheck_gate(gwt, gunion))), None)
+
         check: Future[str | None] | None = None
-        if memo.precheck_unproven(union):
+        if unproven:
             check_pool = ThreadPoolExecutor(1)
-            check = check_pool.submit(memo.precheck_gate, wt, union)
+            check = check_pool.submit(prechecks)
             check_pool.shutdown(wait=False)
         print(strings.DEPLOY_EVALUATING if check is None else strings.DEPLOY_EVALUATING_PRECHECK)
-        tops = memo.eval_toplevels(wt, union, [h for h in all_targets if running.get(h) is not None],
-                                   check)
+        tops = {}
+        if len(groups) == 1:
+            ((gwt, gunion), hs), = groups.items()
+            tops = memo.eval_toplevels(gwt, gunion, hs, check)
+        elif groups:
+            with ThreadPoolExecutor(len(groups)) as pool:
+                for part in pool.map(lambda g: memo.eval_toplevels(g[0][0], g[0][1], g[1], check), groups.items()):
+                    tops.update(part)
         if check is not None:
             err = check.result()
             if err:
                 die(strings.PROC_WITH_NOTHING_DONE(problem=err))
-        reached = memo.reached_targets(wt, union, sorted(tops), snap or head,
-                                     {h: probed[h].provenance for h in tops if h in probed})
-        # The targets the other unioned branches hold back (held_targets):
-        # each ran its increments to other targets alone - one already
-        # running the branch's tip (its provenance) is not held by it.
-        held: dict[str, list[str]] = {}
-        for name, tip in branches:
-            for h in held_targets(f"{main_ref()}..{tip}"):
-                if h in probed and memo.recorded_tip(probed[h].provenance, name) == tip:
-                    continue
-                held.setdefault(h, []).append(name)
-        policy = memo.union_config(wt).switch_policy
-        policies = {h: policy(h) for h in tops}
+        runs = own_runs(snap or head)
+        reached: set[str] = set()
+        for (gwt, gunion), hs in groups.items():
+            reached |= memo.reached_targets(gwt, gunion, sorted(hs), snap or head, runs)
+        policies = {h: memo.union_config(lane(h)[0]).switch_policy(h) for h in tops}
         for h in sorted(tops):
             if tops[h].assessed and not tops[h].kit:
                 print(strings.DEPLOY_ASSESSED_PLAIN(target=h), file=sys.stderr)
@@ -524,10 +570,10 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                      in_flight=announced(ann.key if ann is not None else None), dead=sorted(dead),
                      tz_offset=time.localtime().tm_gmtoff)
         verdict = decide(DriftParams(
-            cx=cx, union=union, targets=all_targets, candidates=candidates,
-            evict=evict, named=bool(filter_targets), feature_branch=fb is not None, reached=sorted(reached),
+            cx=cx, union=union, unions={h: lane_of[h][1] for h in tops if h in lane_of},
+            targets=all_targets, candidates=candidates,
+            evict=evict, named=bool(filter_targets), reached=sorted(reached),
             running=running, built={h: t.out for h, t in tops.items()},
-            held={h: sorted(bs) for h, bs in held.items()},
             provenances={h: p.provenance for h, p in probed.items()}),
             GitQueries(as_if=as_if) if as_if else None)
         plan, affected = verdict.plan, verdict.affected
@@ -553,42 +599,53 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         # switch: the provenance the targets get names the commit origin will
         # hold, and the records reach origin before anything runs them
         # (carried by the announcement).
-        # The commit's trailers: Reaches, the targets the increment reaches
-        # among those deployable from here; Deployed, the probed targets
-        # running the branch's tip once this deploy is over (switched now,
-        # or up to date with the union already, a non-candidate too: every
-        # reachable target was evaluated) - a target in the first and not
-        # the second is held back (held_targets) until a deploy here
-        # switches it.
+        # The commit's trailers, for a reader of the log (and undeploy,
+        # which takes a commit carrying them for an increment): Reaches, the
+        # targets the increment reaches among those deployable from here;
+        # Deployed, the probed targets running the branch's tip once this
+        # deploy is over (switched now, or up to date already).
         committed = ""
-        subject = cfg().main_branch + "".join(strings.DEPLOY_SUBJECT_BRANCH(branch=n) for n, _ in branches)
         fmt = ", ".join
-        deployed = sorted(h for h in tops if h in plan or h not in affected)
         if snap and not dry:
             assert fb is not None  # a snapshot needs the feature branch (deploy)
             reaches = sorted(memo.reached_between(wt, union, all_targets,
                                                   "HEAD", snap))
+            deployed = sorted(h for h in tops if h in plan or h not in affected)
             full = (f"{msg}\n\nReaches: {fmt(reaches) or 'none'}"
                     f"\nDeployed: {fmt(deployed) or 'none'}")
             committed = deployed_commit(snap, full)
-            subject = (msg or "").partition("\n")[0] or subject
-        elif fb is not None and not dry and current_branch() == fb:
-            # No increment, but a target this branch held back now runs its
-            # tip: an empty increment records the hold's end, as a hold is
-            # read from the branch's trailers alone.
-            ends = sorted(held_targets(f"{main_ref()}..HEAD") & set(deployed))
-            if ends:
-                subject = strings.DEPLOY_HOLD_ENDED_SUBJECT(targets=fmt(ends))
-                committed = deployed_commit("HEAD", f"{subject}\n\nReaches: none\nDeployed: {fmt(deployed)}")
-        doc = provenance_record(union, branches, committed, ann.sha if ann else "", ann.key if ann else "")
-        records, provenances = {}, {}
+        records, attested, provenances = {}, {}, {}
         if not dry:
+            docs: dict[str, dict[str, object]] = {}
+            runs_now = running_records()
+            main = rev(main_ref()) or ""
+
+            def record(h: str, parent: str, **more: object) -> str:
+                """`h`'s record of its lane's union, on `parent`, and the
+                provenance it carries."""
+                _, lunion, lbranches = lane(h)
+                if lunion not in docs:
+                    docs[lunion] = provenance_record(lunion, lbranches, committed, ann.sha if ann else "",
+                                                     ann.key if ann else "")
+                subject = ((msg or "").partition("\n")[0] if committed else "") or (
+                    cfg().main_branch + "".join(strings.DEPLOY_SUBJECT_BRANCH(branch=n) for n, _ in lbranches))
+                body = {**docs[lunion], "toplevel": tops[h].out, **more}
+                return record_commit(h, lunion, [parent, main, *(t for _, t in lbranches), committed], subject,
+                                     dump_json(body))
+
             for h in plan:
-                body = dump_json({**doc, "toplevel": tops[h].out})
-                parents = [previous_record(probed[h].provenance), rev(main_ref()) or "",
-                           *(t for _, t in branches), committed]
-                records[h] = record_commit(h, union, parents, subject, body)
-                provenances[h] = dump_json({**doc, "toplevel": tops[h].out, "record": records[h]})
+                r = runs_now.get(h)
+                records[h] = record(h, (r[1] if r is not None else "") or previous_record(probed[h].provenance))
+                provenances[h] = dump_json({**docs[lane(h)[1]], "toplevel": tops[h].out, "record": records[h]})
+            # A candidate this checkout's work reaches that evaluates to
+            # the system it runs: nothing to switch, and without a record
+            # the work would count as never deployed there (lanes.lagging).
+            # Attested on the record it runs, when that is its history's tip.
+            for h in sorted(tops):
+                r = runs_now.get(h)
+                if (h in candidates and h in reached and h not in plan and running.get(h) == tops[h].out
+                        and r is not None and r[1] and rev(remote_ref(f"{DEPLOYED_PREFIX}/{h}")) == r[1]):
+                    attested[h] = (record(h, r[1], attested=True), r[1])
             # A target an earlier run from this checkout switched without
             # its push landing (died, or its push failed) runs a record its
             # history branch lacks (not as an ancestor of its tip either:
@@ -704,7 +761,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             raise moved[0]
 
     for redo in range(SWITCH_REDOS + 1):
-        queries = UnionQueries(lambda: snap or head, fetch, refresh, stage, await_pending, as_if)
+        queries = UnionQueries(lambda: snap or head, fetch, refresh, stage, await_pending, cuts, as_if)
         try:
             done = decide(UnionParams(repo_names(), fb or "", evict, main0), queries)
             if skip or dry:
@@ -735,7 +792,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         adopt_commit(fb, committed)
     # A local main ahead of origin is pushed by its owner once every
     # target it affects has switched.
-    problem = push_deployed(fb, ann, records)
+    problem = push_deployed(fb, ann, records, attested)
 
     if plan:
         print(strings.DEPLOY_DONE(targets=", ".join(plan), union=union))

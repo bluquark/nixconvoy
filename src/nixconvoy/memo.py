@@ -589,22 +589,6 @@ def target_eval_key(wt: str, union: str, target: str) -> str:
     return hashlib.sha256("\n".join(sorted(parts)).encode()).hexdigest()
 
 
-def recorded_tip(provenance: str, branch: str) -> str | None:
-    """The tip of `branch` a target's provenance file says its union held (the
-    "main" field for main), or None."""
-    try:
-        doc = load_json(provenance)
-    except ValueError:
-        return None
-    if not isinstance(doc, dict):
-        return None
-    branches = doc.get("branches")
-    tip = branches.get(branch) if isinstance(branches, dict) else None
-    if tip is None and branch == cfg().main_branch:
-        tip = doc.get("main")
-    return tip if isinstance(tip, str) else None
-
-
 def policy_moved(targets: list[str], base: str, tip: str) -> set[str]:
     """The targets whose kit inputs (kit_inputs of their switch policy)
     differ between nixconvoy.toml at `base` and at `tip`; every target
@@ -664,19 +648,17 @@ def reached_between(wt: str, union: str, targets: list[str], base: str, tip: str
 
 
 def reached_targets(wt: str, union: str, targets: list[str], tip: str,
-                    provenances: dict[str, str]) -> set[str]:
+                    runs: dict[str, str | None]) -> set[str]:
     """The targets among `targets` whose evaluation reads something this
     checkout's own work changed (reached_between): differing between `tip`
     (the commit about to deploy) and what of this branch the target already
-    runs - the tip its provenance recorded, when that lies between origin/main's
+    runs - `runs`, the commit of it the target's record holds, when that
+    lies between origin/main's
     merge base and `tip`, else the merge base itself, so main's movement, a
     rebase or another branch's work never counts as this checkout's.  The
     drift core consults it for a target carrying another checkout's refused
     work alone: one this work does not reach is left running that work.  No
     merge base (nothing to measure from) reaches every target."""
-    from .checkout import current_branch  # noqa: PLC0415 - checkout imports guard, which imports checkout
-
-    own = current_branch() or cfg().main_branch
     p = run(["git", "merge-base", tip, main_ref()], check=False)
     mb = p.stdout.strip()
     if p.returncode != 0 or not mb:
@@ -684,7 +666,7 @@ def reached_targets(wt: str, union: str, targets: list[str], tip: str,
     by_base: dict[str, list[str]] = {}
     for h in targets:
         base = mb
-        rec = recorded_tip(provenances.get(h, ""), own)
+        rec = runs.get(h)
         if rec and rec != mb and is_ancestor(mb, rec) and is_ancestor(rec, tip):
             base = rec
         by_base.setdefault(base, []).append(h)

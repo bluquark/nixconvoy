@@ -212,6 +212,9 @@ pub enum Query {
     /// A fresh union worktree on the deploy's snapshot (or HEAD), any
     /// earlier one dropped -> Ran.
     Worktree,
+    /// A further union worktree on the same snapshot, for a lane's union,
+    /// the earlier ones kept -> Ran.
+    LaneWorktree,
     /// One line naming `sha` for a person -> Text.
     Summary {
         sha: String,
@@ -262,14 +265,25 @@ pub enum Query {
     AwaitPending {
         union: String,
     },
+    /// The deploy's targets not running a branch's tip in effect, each as
+    /// (target, branch, the commit of the branch its deploy record holds -
+    /// "" for none): for each of `branches` (their tips) whose work past
+    /// that commit the target's evaluation reads, by the scan over `union`
+    /// -> Cuts.
+    Cuts {
+        union: String,
+        branches: Vec<(String, String)>,
+    },
     /// Evaluate, build and copy `union` (the deploy's steps 5-7 up to the
     /// switch), `listed` the branches it may contain and `branches` the
-    /// ones it merged, re-fetching meanwhile -> Flag: true when the deploy
+    /// ones it merged - for the targets of each of `lanes`, that lane's
+    /// union instead - re-fetching meanwhile -> Flag: true when the deploy
     /// ends there.
     Stage {
         union: String,
         listed: Vec<String>,
         branches: Vec<(String, String)>,
+        lanes: Vec<union::Lane>,
     },
 
     /// The prune core's, in the subagent worktree it judges.  Take the
@@ -329,6 +343,7 @@ pub enum Reply {
     },
     Refs(Vec<(String, String)>),
     Names(Vec<String>),
+    Cuts(Vec<(String, String, String)>),
     /// A merge's success, its conflicted files and its stderr.
     Merged {
         ok: bool,
@@ -405,6 +420,13 @@ impl Script<'_> {
     pub fn names(&mut self, q: Query) -> Run<Vec<String>> {
         match self.ask(q.clone())? {
             Reply::Names(v) => Ok(v),
+            r => Err(mismatch(&q, &r)),
+        }
+    }
+
+    pub fn cuts(&mut self, q: Query) -> Run<Vec<(String, String, String)>> {
+        match self.ask(q.clone())? {
+            Reply::Cuts(v) => Ok(v),
             r => Err(mismatch(&q, &r)),
         }
     }

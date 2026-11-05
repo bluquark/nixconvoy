@@ -39,20 +39,10 @@
 //! tells a dropped branch (switched over, the increment named) from one
 //! whose first push is on its way (refused, as any in-flight increment).
 //!
-//! A branch holds a target back when an increment of it reached the target
-//! but was deployed to other targets alone (a deploy naming them): its
-//! Reaches: trailer names the target, its Deployed: one does not, and no
-//! later increment's deploy on that branch switched the target since
-//! (nixconvoy's held_targets).  The union carries that work, so switching
-//! the target would roll the increment out from a checkout that chose not
-//! to: a held target is left alone, or the deploy refused when this
-//! checkout's own work reaches it (Params::held), as for an in-flight
-//! increment - until the holding checkout deploys the target or lands with
-//! --not-yet-deployed.  A main checkout's own work is main's advance, which
-//! a hold must not stop fleet-wide (the nightly's lock): it is left behind on
-//! the held target instead (Params::feature_branch).  A --evict unions no
-//! other branch, so nothing is held under it: the target gets this
-//! checkout's view alone, the hold standing.
+//! Each target is judged against the union of its own lane (Params::unions;
+//! the union core's Lane): the other branches at the commits its deploy
+//! record holds of them, so a switch never rolls out what a branch's own
+//! checkout has not deployed there.
 use super::{listed, Halt, Names, Query, Run, Script, BRANCHES_KEY};
 use crate::text;
 use serde::{Deserialize, Serialize};
@@ -161,8 +151,6 @@ pub enum Kind {
     InFlight,
     /// Work of a branch not shaped like branch_prefix here - refused.
     Unlisted,
-    /// Held back by another branch whose work the union carries - refused.
-    Held,
     /// Would be refused, but this checkout's work does not reach the target:
     /// left running the other checkout's work, not switched.
     LeftAlone,
@@ -181,7 +169,6 @@ impl Kind {
             Kind::CatchUp => "catch-up",
             Kind::InFlight => "in-flight",
             Kind::Unlisted => "unlisted",
-            Kind::Held => "held",
             Kind::LeftAlone => "left-alone",
             Kind::Abandoned => "abandoned",
             Kind::Overridden => "overridden",
@@ -189,7 +176,7 @@ impl Kind {
     }
 
     pub fn refused(self) -> bool {
-        matches!(self, Kind::InFlight | Kind::Unlisted | Kind::Held)
+        matches!(self, Kind::InFlight | Kind::Unlisted)
     }
 }
 
@@ -275,20 +262,6 @@ pub fn demote(kind: Kind, why: String, take_over: bool, reached: bool) -> (Kind,
     (kind, why)
 }
 
-/// The verdict on a target the branches `by` hold back (Params::held):
-/// refused when `reached` by a feature branch's own work, left alone
-/// otherwise (a main checkout's own work being main's advance).
-pub fn held(by: &[String], reached: bool, feature_branch: bool) -> (Kind, String) {
-    let why = format!(text!(drift_held), by = by.join(", "));
-    if !reached {
-        return (Kind::LeftAlone, format!(text!(drift_not_reached), why = why));
-    }
-    if !feature_branch {
-        return (Kind::LeftAlone, format!(text!(drift_left_behind), why = why));
-    }
-    (Kind::Held, why)
-}
-
 /// The order targets are reported in.
 pub fn by_name(names: &[String]) -> Vec<String> {
     let mut v = names.to_vec();
@@ -301,6 +274,8 @@ pub struct Params {
     pub cx: Context,
     /// The union commit this deploy builds.
     pub union: String,
+    /// The targets of a lane of their own, each with that lane's union.
+    pub unions: BTreeMap<String, String>,
     pub targets: Vec<String>,
     pub candidates: Vec<String>,
     /// --evict: this checkout's view alone - refused work is taken over on
@@ -308,10 +283,6 @@ pub struct Params {
     pub evict: bool,
     /// The candidates were named on the command line.
     pub named: bool,
-    /// This checkout deploys a feature branch of its own: a hold refuses it
-    /// when its work reaches the target.  A main checkout is left behind
-    /// on the target instead.
-    pub feature_branch: bool,
     /// The targets this checkout's own work reaches: those whose
     /// configuration reads a file that work changed (nixconvoy's
     /// reached_targets, by the eval memo's scan).
@@ -320,8 +291,6 @@ pub struct Params {
     pub running: BTreeMap<String, Option<String>>,
     /// The union's toplevel of each reachable target.
     pub built: BTreeMap<String, String>,
-    /// Each target held back, by the other branches holding it (sorted).
-    pub held: BTreeMap<String, Vec<String>>,
     /// Each probed target's provenance file.
     pub provenances: BTreeMap<String, String>,
 }
@@ -338,20 +307,7 @@ pub struct Outcome {
 /// The die message of a deploy refusing `refused` (in report order), each
 /// with the announcement ref of its dead deploy when the refusal is one.
 pub fn refusal(refused: &[(String, Kind, Option<String>)], remote: &str) -> String {
-    let (held, refused): (Vec<_>, Vec<_>) = refused.iter().cloned().partition(|(_, k, _)| *k == Kind::Held);
-    let held: Vec<&str> = held.iter().map(|(h, _, _)| h.as_str()).collect();
     let targets: Vec<&str> = refused.iter().map(|(h, _, _)| h.as_str()).collect();
-    if targets.is_empty() {
-        let one = held.len() == 1;
-        return format!(
-            text!(drift_refused_held),
-            held = held.join(", "),
-            are = if one { "is" } else { "are" },
-            them = if one { "it" } else { "them" },
-            args = held.join(" "),
-            EVICT_FLAG = EVICT_FLAG
-        );
-    }
     let mut fixes = Vec::new();
     if refused.iter().any(|(_, k, d)| *k == Kind::InFlight && d.is_none()) {
         fixes.push(text!(drift_fix_in_flight).to_string());
@@ -363,9 +319,6 @@ pub fn refusal(refused: &[(String, Kind, Option<String>)], remote: &str) -> Stri
     }
     if refused.iter().any(|(_, k, _)| *k == Kind::Unlisted) {
         fixes.push(format!(text!(drift_fix_unlisted), BRANCHES_KEY = BRANCHES_KEY));
-    }
-    if !held.is_empty() {
-        fixes.push(format!(text!(drift_fix_held), held = held.join(", "), args = held.join(" ")));
     }
     let fix = fixes.join(text!(drift_fix_joiner));
     let mut c = fix.chars();
@@ -381,39 +334,35 @@ pub fn refusal(refused: &[(String, Kind, Option<String>)], remote: &str) -> Stri
     )
 }
 
+type Fates = BTreeMap<(String, String, String), String>;
+
 /// Query::Fate's answer for `branch`'s increment at `tip` of the provenance
-/// `lin`, asked once per tip (`fates` memoises it across targets): "kept"
-/// or "abandoned".  The query names the deploying checkout when
-/// it is on this machine: one still on the branch keeps the increment.
-fn fate(
-    s: &mut Script,
-    branch: &str,
-    tip: &str,
-    lin: &Provenance,
-    p: &Params,
-    fates: &mut BTreeMap<(String, String), String>,
-) -> Run<String> {
-    let key = (branch.to_string(), tip.to_string());
+/// `lin` in `union`, asked once per tip and union (`fates` memoises it
+/// across targets): "kept" or "abandoned".  The query names the deploying
+/// checkout when it is on this machine: one still on the branch keeps the
+/// increment.
+fn fate(s: &mut Script, branch: &str, tip: &str, union: &str, lin: &Provenance, p: &Params, fates: &mut Fates) -> Run<String> {
+    let key = (branch.to_string(), tip.to_string(), union.to_string());
     if let Some(f) = fates.get(&key) {
         return Ok(f.clone());
     }
     let checkout = (lin.machine == p.cx.me.0).then(|| lin.checkout.clone());
-    let f = s.text(Query::Fate { branch: branch.into(), tip: tip.into(), union: p.union.clone(), checkout })?.unwrap_or_default();
+    let f = s.text(Query::Fate { branch: branch.into(), tip: tip.into(), union: union.into(), checkout })?.unwrap_or_default();
     fates.insert(key, f.clone());
     Ok(f)
 }
 
-/// The increments a switch of a target reverts: each branch tip its provenance
-/// recorded that is not origin's tip now and that the union no longer
-/// holds, as "<branch>'s abandoned increment <sha>".
-fn reverted(s: &mut Script, lin: &Provenance, p: &Params, fates: &mut BTreeMap<(String, String), String>) -> Run<Vec<String>> {
+/// The increments a switch of a target onto `union` reverts: each branch tip
+/// its provenance recorded that is not origin's tip now and that the union
+/// no longer holds, as "<branch>'s abandoned increment <sha>".
+fn reverted(s: &mut Script, union: &str, lin: &Provenance, p: &Params, fates: &mut Fates) -> Run<Vec<String>> {
     let mut notes = Vec::new();
     for (b, tip) in &lin.tips {
         if p.cx.tips.get(b) == Some(tip) {
             continue;
         }
         let short: String = tip.chars().take(12).collect();
-        if fate(s, b, tip, lin, p, fates)? == "abandoned" {
+        if fate(s, b, tip, union, lin, p, fates)? == "abandoned" {
             notes.push(format!(text!(drift_abandoned_increment), branch = b, short = short));
         }
     }
@@ -434,8 +383,9 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     let mut drift = BTreeMap::new();
     let mut plan = Vec::new();
     let mut refused = Vec::new();
-    let mut fates = BTreeMap::new();
+    let mut fates = Fates::new();
     for h in affected.iter().filter(|h| p.candidates.contains(h)) {
+        let union = p.unions.get(h).unwrap_or(&p.union);
         let lin = p.provenances.get(h).and_then(|text| parse(text));
         let running = p.running.get(h).cloned().flatten().unwrap_or_default();
         let reached = p.reached.contains(h);
@@ -451,19 +401,13 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
             if let Some((b, None)) = &lin.pending {
                 if !p.cx.tips.contains_key(b) {
                     if let Some(tip) = lin.tips.get(b) {
-                        if fate(s, b, tip, lin, p, &mut fates)? != "kept" {
+                        if fate(s, b, tip, union, lin, p, &mut fates)? != "kept" {
                             let who = format!(text!(drift_who_untimed), machine = lin.machine, checkout = lin.checkout, pid = lin.pid);
                             (kind, why) = (Kind::CatchUp, format!(text!(drift_branch_gone), branch = b, who = who));
                         }
                     }
                 }
             }
-        }
-        // A hold (never under --evict: no other branch is unioned) over
-        // any verdict but a refusal of its own, which says more.
-        let hold = p.held.get(h).filter(|by| !by.is_empty() && !kind.refused() && !p.evict);
-        if let Some(by) = hold {
-            (kind, why) = held(by, reached, p.feature_branch);
         }
         if kind.refused() {
             let dead = lin
@@ -478,7 +422,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         // A catch-up to pushed work may be the revert of an abandoned
         // increment; the other kinds revert or refuse in so many words.
         if let (Kind::ThisBranch | Kind::CatchUp, Some(lin)) = (kind, lin.as_ref()) {
-            let notes = reverted(s, lin, p, &mut fates)?;
+            let notes = reverted(s, union, lin, p, &mut fates)?;
             if !notes.is_empty() {
                 why = format!(text!(drift_reverting), why = why, notes = notes.join(", "));
             }

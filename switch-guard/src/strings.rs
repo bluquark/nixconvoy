@@ -28,16 +28,12 @@ macro_rules! text {
     (drift_looks_dead) => { "{why}; that deploy looks dead, its announcement no longer renewed" };
     (drift_taken_over) => { "{why}; taken over by {EVICT_FLAG}" };
     (drift_not_reached) => { "{why}; this checkout's work does not reach it" };
-    (drift_held) => { "held back by {by}: the union carries its work, deployed from that checkout to other targets alone" };
-    (drift_left_behind) => { "{why}; left behind on main's advance" };
     (drift_abandoned_increment) => { "{branch}'s abandoned increment {short}" };
     (drift_reverting) => { "{why}; reverting {notes}" };
     (drift_no_toplevel) => { "nixconvoy-plan was given no evaluated toplevel for {target}" };
-    (drift_refused_held) => { "nothing switched or committed: {held} {are} held back by another branch (see above): the union carries work that checkout deployed to other targets alone, and this checkout's work reaches {them} too.  Deploy it there (nixconvoy deploy {args} from that checkout) or land it with --not-yet-deployed; or deploy with {EVICT_FLAG} {args} to switch {them} to this checkout's view alone, without the held work (and without every other branch's), the hold standing." };
     (drift_fix_in_flight) => { "re-run once that deploy ends, or push its branch from its checkout" };
     (drift_fix_dead) => { "the deploy of {branch} looks dead (its announcement is no longer renewed): clear it to have the next deploy revert its increment - git push {remote} :{PENDING_REFS}/{key} - or push {branch} from its checkout to keep it" };
     (drift_fix_unlisted) => { "redeploy its work from a branch shaped like {BRANCHES_KEY}, or --evict" };
-    (drift_fix_held) => { "{held} held back by another branch: deploy it there (nixconvoy deploy {args} from that checkout) or land it with --not-yet-deployed" };
     (drift_fix_joiner) => { "; or " };
     (drift_refused) => { "nothing switched or committed: {targets} {run} another checkout's work this union lacks, and this checkout's work reaches {them} too (see above).  {fix}; or deploy with {EVICT_FLAG} {first} to revert it deliberately - along with every other branch's work there, which {EVICT_FLAG} leaves out." };
     (drift_line_refused) => { "  {target}: refused: {why}" };
@@ -107,7 +103,9 @@ macro_rules! text {
     (union_tree_failed) => { "writing the union's tree failed" };
     (union_commit_failed) => { "committing the union failed" };
     (union_checking_out) => { "checking out the union" };
-    (union_conflict) => { "cannot union feature branch {name}; mergiraf could not resolve:\n  {files}\nits last deploy: {summary}\noptions:\n  - fix or rebase that branch in its own checkout, redeploy from there, re-run here\n  - if that work is abandoned: git push --force-with-lease {remote} {main_short}:{name}\n  - --evict deploys ignoring all other branches (one-off; they return next deploy), reverting their work on every target it switches" };
+    (union_conflict) => { "cannot union feature branch {name}; mergiraf could not resolve:\n  {files}\nits last deploy: {summary}\noptions:\n  - fix or rebase that branch in its own checkout, redeploy from there, re-run here\n  - if that work is abandoned: git push --force-with-lease {remote} {main_short}:{name}\n  - --evict deploys ignoring all other branches, reverting their work on every target it switches (each returns there with its own checkout's next deploy)" };
+    (union_lane) => { "union for {targets}, the other branches as deployed there:" };
+    (union_lane_conflict) => { "cannot union feature branch {name} as {targets} {run} it ({short}); mergiraf could not resolve:\n  {files}\noptions:\n  - deploy its tip there from its own checkout (nixconvoy deploy {args}) or land it, then re-run here\n  - --evict deploys ignoring all other branches, reverting their work on every target it switches (each returns there with its own checkout's next deploy)" };
     (union_fetching) => { "fetching {remote}" };
     (union_origin_moved) => { "{remote} moved since the last fetch; redoing the union" };
     (union_refreshing) => { "bringing the checkout onto {main_short}" };

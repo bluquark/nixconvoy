@@ -17,10 +17,19 @@
 //! the build is redone then too; ATTEMPTS such moves of origin end the
 //! run (a wait is another deploy's progress, not a move, and counts for
 //! nothing).
+//!
+//! That union holds every other branch at its tip.  A target of the deploy
+//! takes less of a branch when its deploy record holds an older commit of
+//! it (or none) and the work past that commit is something the target's
+//! evaluation reads (Query::Cuts): that branch's own checkout has not
+//! deployed it there, and no other checkout's deploy rolls it out.  The
+//! targets taking the same commits of the branches share a lane, a union
+//! of its own built the same way from those commits, staged beside the
+//! first; a lane that does not merge ends the run.
 use super::{failed, listed, Halt, Names, Query, Run, Script, BRANCHES_KEY, MSG_FILE};
 use crate::text;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const ATTEMPTS: usize = 3;
 /// Deploys waited for in one run before giving up: each wait ends with
@@ -42,6 +51,15 @@ pub struct Params {
 pub struct Outcome {
     pub union: String,
     /// The branches merged into it and their tips.
+    pub branches: Vec<(String, String)>,
+}
+
+/// A union of its own for `targets`: `branches`, each at the commit those
+/// targets take of it.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Lane {
+    pub targets: Vec<String>,
+    pub union: String,
     pub branches: Vec<(String, String)>,
 }
 
@@ -140,6 +158,47 @@ fn guidance(s: &mut Script, n: &Names, c: &Conflict) -> Run<String> {
     ))
 }
 
+/// Branches, each at a commit of it.
+type Taken = Vec<(String, String)>;
+
+/// The lanes `cuts` (Query::Cuts) call for among `branches` (their tips):
+/// each lane's targets and the branches at the commits they take, a branch
+/// they take nothing of left out; a cut of a branch not among `branches`
+/// counts for nothing, and a target taking every tip has no lane.
+pub fn lanes_of(branches: &[(String, String)], cuts: &[(String, String, String)]) -> Vec<(Vec<String>, Taken)> {
+    let mut by_target: BTreeMap<&str, BTreeMap<&str, &str>> = BTreeMap::new();
+    for (target, branch, commit) in cuts {
+        by_target.entry(target).or_default().insert(branch, commit);
+    }
+    let mut by_set: BTreeMap<Taken, Vec<String>> = BTreeMap::new();
+    for (target, cut) in by_target {
+        let set: Taken = branches
+            .iter()
+            .filter_map(|(name, tip)| match cut.get(name.as_str()) {
+                None => Some((name.clone(), tip.clone())),
+                Some(&"") => None,
+                Some(c) => Some((name.clone(), c.to_string())),
+            })
+            .collect();
+        if set != branches {
+            by_set.entry(set).or_default().push(target.to_string());
+        }
+    }
+    by_set.into_iter().map(|(set, targets)| (targets, set)).collect()
+}
+
+fn lane_guidance(targets: &[String], c: &Conflict) -> String {
+    format!(
+        text!(union_lane_conflict),
+        name = c.name,
+        targets = targets.join(", "),
+        run = if targets.len() == 1 { "runs" } else { "run" },
+        short = c.sha.chars().take(12).collect::<String>(),
+        files = c.files.join(", "),
+        args = targets.join(" ")
+    )
+}
+
 /// Collects this run's fetch, once: whether it moved origin/main or a feature
 /// branch, in which case the checkout is brought onto it first.
 fn origin_moved(s: &mut Script, p: &Params, branches: &[(String, String)], fetched: &mut bool, seen: &mut Seen) -> Run<bool> {
@@ -189,7 +248,19 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
             s.must(Query::Refresh, &format!(text!(union_refreshing), main_short = p.names.main_short()))?;
             continue;
         }
-        let stage = Query::Stage { union: union.clone(), listed: seen.listed.clone(), branches: branches.clone() };
+        let mut lanes = Vec::new();
+        if !branches.is_empty() {
+            let cuts = s.cuts(Query::Cuts { union: union.clone(), branches: branches.clone() })?;
+            for (targets, taken) in lanes_of(&branches, &cuts) {
+                s.print(format!(text!(union_lane), targets = targets.join(", ")));
+                s.must(Query::LaneWorktree, text!(union_creating_worktree))?;
+                match build(s, &taken)? {
+                    Ok(union) => lanes.push(Lane { targets, union, branches: taken }),
+                    Err(c) => return Err(Halt::Die(lane_guidance(&targets, &c))),
+                }
+            }
+        }
+        let stage = Query::Stage { union: union.clone(), listed: seen.listed.clone(), branches: branches.clone(), lanes };
         if s.flag(stage)? || select(s, p, &mut seen)? == branches {
             return Ok(Outcome { union, branches });
         }

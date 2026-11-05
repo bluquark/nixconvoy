@@ -253,15 +253,14 @@ class Context:
 class DriftParams:
     cx: Context
     union: str
+    unions: dict[str, str]
     targets: list[str]
     candidates: list[str]
     evict: bool
     named: bool
-    feature_branch: bool
     reached: list[str]
     running: dict[str, str | None]
     built: dict[str, str]
-    held: dict[str, list[str]]
     provenances: dict[str, str]
 
 
@@ -506,6 +505,11 @@ class Worktree(Variant):
 
 
 @dataclass(frozen=True)
+class LaneWorktree(Variant):
+    pass
+
+
+@dataclass(frozen=True)
 class Summary(Variant):
     sha: str
 
@@ -582,10 +586,26 @@ class AwaitPending(Variant):
 
 
 @dataclass(frozen=True)
+class Cuts(Variant):
+    union: str
+    branches: list[tuple[str, str]]
+
+
+@dataclass(frozen=True)
+class Lane:
+    """union.rs's Lane."""
+
+    targets: list[str]
+    union: str
+    branches: list[tuple[str, str]]
+
+
+@dataclass(frozen=True)
 class Stage(Variant):
     union: str
     listed: list[str]
     branches: list[tuple[str, str]]
+    lanes: list[Lane]
 
 
 @dataclass(frozen=True)
@@ -664,9 +684,9 @@ class DropBranches(Variant):
 PlanQuery = (
     Contains | OpInProgress | CurrentBranch | StagedDiffers | Commit | AddAll | Pop | HeadSubject | Rebase
     | RebaseAbort | Rev | Fetch | Push | AddWorktree | DropWorktree | Switch | Detach | Pushed | OnOrigin
-    | Upstream | Fate | SetUpstream | Listed | Branches | Unchanged | Worktree | Summary | Merge | DropFile
-    | Solve | Add | AbortMerge | CommitMerge | StripTree | Head | HeadTree | CommitUnion | Checkout
-    | CollectFetch | Refresh | AwaitPending | Stage | TakeNameLock | ReleaseNameLock | TakeDeployLock
+    | Upstream | Fate | SetUpstream | Listed | Branches | Unchanged | Worktree | LaneWorktree | Summary | Merge
+    | DropFile | Solve | Add | AbortMerge | CommitMerge | StripTree | Head | HeadTree | CommitUnion | Checkout
+    | CollectFetch | Refresh | AwaitPending | Cuts | Stage | TakeNameLock | ReleaseNameLock | TakeDeployLock
     | ReleaseDeployLock | Lock | Alive | PushInFlight | Nested | OwnBranch | Unpushed | Dirty | Occupied
     | RemoveWorktree | DropBranches
 )
@@ -711,7 +731,15 @@ class Merged(Variant):
     detail: str
 
 
-PlanReply = Flag | Text | Ran | Refs | Names | Merged
+@dataclass(frozen=True)
+class Cut(Newtype):
+    """The Cuts query's reply (plan.rs's Reply::Cuts): (target, branch, commit)."""
+
+    tag: ClassVar[str] = "cuts"
+    value: list[tuple[str, str, str]]
+
+
+PlanReply = Flag | Text | Ran | Refs | Names | Merged | Cut
 
 
 # nixconvoy-switch (switch-guard/src/control.rs): its parameters, queries

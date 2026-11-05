@@ -12,13 +12,15 @@ import time
 from pathlib import Path
 from typing import IO, NamedTuple
 
-from . import config, names, strings, submodule
+from . import config, lanes, names, strings, submodule
 from .checkout import (
     DEPLOYED_TRAILER,
     KEPT_EDIT,
+    LINEAGE_REFS,
     LOCK_FILE,
     MACHINE_ENV,
     PENDING_REFS,
+    REWRITTEN_REFS,
     SESSIONLESS,
     STALE_STAMP,
     GitQueries,
@@ -44,7 +46,6 @@ from .checkout import (
     forget_pushed,
     git_common,
     git_op_in_progress,
-    held_targets,
     holder_of,
     identity_of,
     landing_message,
@@ -112,11 +113,16 @@ from .wire import (
 )
 
 
-def holds(fb: str, tip: str, main: str, not_yet_deployed: bool = False) -> None:
-    """The targets `fb`'s increments (`main..tip`) hold back: a landing is
-    refused on them unless `not_yet_deployed` (the landed work then rolls out
-    there from the next deploy anywhere)."""
-    held = sorted(held_targets(f"{main}..{tip}"))
+def holds(fb: str, tip: str, not_yet_deployed: bool = False) -> None:
+    """The targets `fb` (at `tip`) has work not deployed to
+    (lanes.undeployed): a landing is refused on them unless
+    `not_yet_deployed` (the landed work then rolls out there from the next
+    deploy anywhere)."""
+    wt = add_worktree(tip)
+    try:
+        held = lanes.undeployed(fb, tip, wt)
+    finally:
+        drop_worktree(wt)
     if not held:
         return
     them = ", ".join(held)
@@ -198,7 +204,7 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
     gone = submodule.orphaned(Path.cwd())
     if gone:
         die(strings.LAND_SUBMODULE_ORPHANED(fb=fb, gone=", ".join(gone)))
-    holds(fb, "HEAD", main, not_yet_deployed)
+    holds(fb, "HEAD", not_yet_deployed)
     msg = main_message(fb, message, main)
     if rev(remote_ref(fb)) != lease:  # the edit's fetch brought a tip
         lease = ensure_sole_writer(fb)
@@ -780,9 +786,13 @@ def drop_branches(names: list[str]) -> list[str]:
             failed.append(strings.CLOSE_DELETE_FAILED(
                 branches=", ".join(pushed), remote=cfg().remote,
                 error=(p.stderr or "").strip() or strings.CLOSE_NO_ERROR_GIVEN))
-    # The gone branches' announcements, on their own: a stale lease (origin
-    # moved since the fetch) must not count as a branch deletion failed.
+    # The gone branches' announcements and lineages, on their own: a stale
+    # lease (origin moved since the fetch) must not count as a branch
+    # deletion failed.
+    for b in names:
+        git("update-ref", "-d", f"{REWRITTEN_REFS}/{b}", check=False)
     clears = [spec for b in names for spec in clear_refspec(b)]
+    clears += [f":{LINEAGE_REFS}/{b}" for b in names if rev(f"{LINEAGE_REFS}/{b}")]
     if clears:
         cmd = ["push", "--quiet", cfg().remote, *clears]
         p = git(*cmd, check=False)
@@ -891,8 +901,12 @@ def status() -> None:
         if ident.fb and cur != ident.fb and ident.kind != "main":
             notes.append(p(strings.STATUS_OWNS(fb=ident.fb), "dim"))
         notes += [p(strings.STATUS_COUNT(label=label, n=n), "cyan") for label, n in counts.items() if n]
-        if own and cur not in (None, cfg().main_branch):
-            held = sorted(held_targets(f"{main_short()}..HEAD", str(d)))
+        if own and cur is not None and cur != cfg().main_branch and git_common(d) == git_common(Path.cwd()):
+            # By the checkout's files as they are: a note, not a verdict.
+            try:
+                held = lanes.undeployed(cur, head, str(d))
+            except (Fail, OSError):
+                held = []
             if held:
                 notes.append(p(strings.STATUS_HOLDS_BACK(targets=", ".join(held)), "yellow"))
         notes += [p(a, "cyan") for a in submodule.notes(d)]
@@ -1261,7 +1275,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
             if gone:
                 die(strings.LAND_CHILDREN_SUBMODULE_ORPHANED(fb=b, gone=", ".join(gone), name=d.name))
         for d, b in [(here, fb), *parts]:
-            holds(b, "HEAD" if d == here else f"refs/heads/{b}", main, not_yet_deployed)
+            holds(b, "HEAD" if d == here else f"refs/heads/{b}", not_yet_deployed)
 
         def merged_tree() -> str:
             """The branches merged in a throwaway worktree on this branch's

@@ -231,80 +231,19 @@ fn params(targets: &[&str], candidates: &[&str], evict: (bool, bool), drifting: 
     Params {
         cx: cx(&[(BRANCH, &b)]),
         union: "u".repeat(40),
+        unions: BTreeMap::new(),
         targets: s(targets),
         candidates: s(candidates),
         evict: evict.0,
         named: evict.1,
-        feature_branch: true,
         reached: targets.iter().map(|h| h.to_string()).collect(),
         running: targets
             .iter()
             .map(|h| (h.to_string(), Some(if drifting.iter().any(|d| d.0 == *h) { OLD } else { NEW }.to_string())))
             .collect(),
         built: targets.iter().map(|h| (h.to_string(), NEW.to_string())).collect(),
-        held: BTreeMap::new(),
         provenances: drifting.iter().filter_map(|(h, l)| l.clone().map(|l| (h.to_string(), l))).collect(),
     }
-}
-
-/// A target another branch holds back is left alone, or refused when a
-/// feature branch's own work reaches it, as an in-flight increment is; a main
-/// checkout's own work (main's advance) leaves it behind instead.
-#[test]
-fn held_targets() {
-    let mut p = params(&["chikuwa", "choko", "side1"], &["chikuwa", "choko", "side1"], (false, false), &[("choko", None), ("side1", None)]);
-    p.held.insert("choko".into(), vec!["work/chikuwa/1".into()]);
-    let (fx, out) = run(p.clone());
-    let msg = out.unwrap_err();
-    assert_eq!(
-        msg,
-        "nothing switched or committed: choko is held back by another branch (see above): the union carries work that checkout deployed to other targets alone, and this checkout's work reaches it too.  Deploy it there (nixconvoy deploy choko from that checkout) or land it with --not-yet-deployed; or deploy with --evict choko to switch it to this checkout's view alone, without the held work (and without every other branch's), the hold standing."
-    );
-    assert_eq!(fx[2], Effect::Print("  side1: will switch".into()));
-    assert_eq!(
-        fx[1],
-        Effect::Print(
-            "  choko: refused: held back by work/chikuwa/1: the union carries its work, deployed from that checkout to other targets alone"
-                .into()
-        )
-    );
-    // Beside an in-flight refusal, the fixes name both; a held target's own
-    // refusal (here: in flight, and dead) says more than the hold.
-    let b = base();
-    let mut q = p.clone();
-    q.provenances.insert("side1".into(), doc(OLD, OTHER, Some((BRANCH, Some(&b))), &[], T0));
-    let msg = run(q.clone()).1.unwrap_err();
-    assert!(msg.starts_with("nothing switched or committed: side1 runs another checkout's work") && msg.contains("Re-run once that deploy ends, or push its branch from its checkout; or choko held back by another branch: deploy it there (nixconvoy deploy choko from that checkout) or land it with --not-yet-deployed; or deploy with"), "{msg}");
-    q.provenances.insert("choko".into(), doc_ann(OLD, OTHER, Some((BRANCH, Some(&b))), Some("p"), &[], T0));
-    q.cx.in_flight.insert(BRANCH.into(), "q".into());
-    q.cx.dead.insert(BRANCH.into());
-    let (fx, out) = run(q);
-    let msg = out.unwrap_err();
-    assert!(msg.contains(&format!("the deploy of {BRANCH} looks dead")), "{msg}");
-    assert!(
-        matches!(&fx[1], Effect::Print(l) if l.starts_with("  choko: refused: runs an increment") && l.ends_with("no longer renewed")),
-        "{fx:?}"
-    );
-
-    p.reached = ["chikuwa".to_string(), "side1".to_string()].into_iter().collect();
-    let (fx, out) = run(p.clone());
-    let out = out.unwrap();
-    assert_eq!(out.plan, ["side1"]);
-    assert_eq!(out.drift["choko"].0, Kind::LeftAlone);
-    assert_eq!(
-        fx[1],
-        Effect::Print("  choko: left alone: held back by work/chikuwa/1: the union carries its work, deployed from that checkout to other targets alone; this checkout's work does not reach it".into())
-    );
-    // A main checkout reaching it (main's advance) is left behind on it.
-    p.reached.insert("choko".into());
-    p.feature_branch = false;
-    let (fx, out) = run(p.clone());
-    assert_eq!(out.unwrap().drift["choko"].0, Kind::LeftAlone);
-    assert!(matches!(&fx[1], Effect::Print(l) if l.ends_with("left behind on main's advance")), "{fx:?}");
-    // An empty holder list is no hold.
-    p.feature_branch = true;
-    p.held.insert("choko".into(), vec![]);
-    assert_eq!(run(p).1.unwrap().plan, ["choko", "side1"]);
 }
 
 /// The core run with every increment that left origin's tips `fate`
@@ -336,6 +275,19 @@ fn names_the_abandoned_increments() {
     let (asked, fx, out) = run_with(p.clone(), "abandoned");
     assert_eq!(out.unwrap().plan, ["chikuwa", "choko"]);
     assert_eq!(asked, [Query::Fate { branch: BRANCH.into(), tip: "h".repeat(40), union: "u".repeat(40), checkout: Some(OTHER.1.into()) }]);
+    // A target of a lane of its own is judged against that lane's union.
+    let mut q = p.clone();
+    q.unions.insert("choko".into(), "v".repeat(40));
+    let (asked, _, out) = run_with(q, "abandoned");
+    assert_eq!(out.unwrap().plan, ["chikuwa", "choko"]);
+    let unions: Vec<&str> = asked
+        .iter()
+        .map(|a| match a {
+            Query::Fate { union, .. } => union.as_str(),
+            a => panic!("{a:?}"),
+        })
+        .collect();
+    assert_eq!(unions, ["u".repeat(40), "v".repeat(40)]);
     let line = format!("  chikuwa: will switch (catch-up: runs pushed work deployed by haswell-wsl:/home/blu/projects/homelab2 (pid 4242) at 13:46; reverting {BRANCH}'s abandoned increment hhhhhhhhhhhh)");
     assert_eq!(fx[0], Effect::Print(line));
     assert!(
@@ -532,23 +484,21 @@ fn arb_params() -> impl Strategy<Value = Params> {
         prop::collection::btree_map(arb_name(), prop::sample::select(vec!["a", "b"]).prop_map(str::to_string), 0..4),
         prop::collection::btree_map(arb_name(), prop::sample::select(vec!["p", "q"]).prop_map(str::to_string), 0..3),
         prop::collection::btree_set(arb_name(), 0..3),
-        prop::collection::btree_map(target(), prop::collection::vec(arb_name(), 0..2), 0..3),
-        any::<bool>(),
+        prop::collection::btree_map(target(), prop::sample::select(vec!["u", "v"]).prop_map(|u| u.repeat(40)), 0..3),
     )
-        .prop_map(|(targets, cands, (evict, named), reached, facts, tips, in_flight, dead, held, feature_branch)| {
+        .prop_map(|(targets, cands, (evict, named), reached, facts, tips, in_flight, dead, unions)| {
             let targets: Vec<String> = targets.into_iter().collect();
             let mut p = Params {
                 cx: Context { tips, in_flight, dead, ..cx(&[]) },
                 union: "u".repeat(40),
+                unions,
                 candidates: cands.into_iter().filter(|c| targets.contains(c)).collect(),
                 targets: targets.clone(),
                 evict,
                 named,
-                feature_branch,
                 reached,
                 running: BTreeMap::new(),
                 built: BTreeMap::new(),
-                held,
                 provenances: BTreeMap::new(),
             };
             for (h, (running, built, provenance)) in targets.iter().zip(facts) {

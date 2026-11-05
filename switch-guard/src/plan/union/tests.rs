@@ -35,6 +35,8 @@ struct Origin {
     waits: Vec<Refs>,
     tree_as_is: bool,
     final_stage: bool,
+    /// What Query::Cuts answers.
+    cuts: Vec<(String, String, String)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -51,6 +53,11 @@ struct Trace {
     checked_out: Option<String>,
     /// Each staged union, the refs and main when it was staged.
     stages: Vec<(String, Vec<String>)>,
+    /// The first union of this attempt once a lane's worktree replaced
+    /// its own as the one merged in: what it merged and checked out.
+    first: Option<(Vec<String>, Option<String>)>,
+    /// The last stage's lanes.
+    lanes: Vec<Lane>,
     /// What each select pass saw, and the shapes then.
     passes: Vec<(Refs, Vec<String>)>,
     listed_reads: usize,
@@ -90,7 +97,25 @@ fn answer(o: &mut Origin, t: &mut Trace, q: &Query) -> Reply {
             t.worktrees += 1;
             t.merged.clear();
             t.checked_out = None;
+            t.first = None;
             ran(true)
+        }
+        Query::LaneWorktree => {
+            assert!(t.pending.is_none(), "a lane's worktree over an unconcluded merge");
+            assert!(t.fetched && !t.stale, "a lane built before the fetch was collected and followed");
+            assert!(t.checked_out.is_some(), "a lane before the first union");
+            if t.first.is_none() {
+                t.first = Some((t.merged.clone(), t.checked_out.clone()));
+            }
+            t.merged.clear();
+            t.checked_out = None;
+            ran(true)
+        }
+        Query::Cuts { union, branches } => {
+            assert!(t.first.is_none(), "the cuts asked for once per union");
+            assert_eq!(t.checked_out.as_ref(), Some(union), "cuts scanned over a union not checked out");
+            assert_eq!(branches.iter().map(|b| b.0.clone()).collect::<Vec<_>>(), t.merged);
+            Reply::Cuts(o.cuts.clone())
         }
         Query::Summary { sha } => Reply::Text(Some(format!("summary of {sha}"))),
         Query::Merge { name, sha } => {
@@ -175,12 +200,15 @@ fn answer(o: &mut Origin, t: &mut Trace, q: &Query) -> Reply {
             t.stale = true;
             Reply::Flag(true)
         }
-        Query::Stage { union, listed, branches } => {
+        Query::Stage { union, listed, branches, lanes } => {
             assert_eq!(listed, &o.listed, "drift judged against other shapes than the checkout's");
-            assert_eq!(branches.iter().map(|b| b.0.clone()).collect::<Vec<_>>(), t.merged, "staging other branches than the union merged");
-            assert_eq!(t.checked_out.as_ref(), Some(union), "staging what is not checked out");
+            let (merged, checked_out) = t.first.clone().unwrap_or((t.merged.clone(), t.checked_out.clone()));
+            assert_eq!(branches.iter().map(|b| b.0.clone()).collect::<Vec<_>>(), merged, "staging other branches than the union merged");
+            assert_eq!(checked_out.as_ref(), Some(union), "staging what is not checked out");
             assert!(t.fetched && !t.stale, "staged before the fetch was collected and followed");
-            t.stages.push((union.clone(), t.merged.clone()));
+            assert_eq!(lanes.is_empty(), t.first.is_none(), "a lane's worktree per lane staged");
+            t.stages.push((union.clone(), merged));
+            t.lanes = lanes.clone();
             if !o.builds.is_empty() {
                 o.refs = o.builds.remove(0);
             }
@@ -220,8 +248,17 @@ fn arb_origin() -> impl Strategy<Value = Origin> {
         any::<bool>(),
         prop::bool::weighted(0.1),
         any::<bool>(),
+        prop::collection::vec(
+            (
+                prop::sample::select(vec!["a", "b", "c"]).prop_map(str::to_string),
+                prop::sample::select(vec![FB, LISTED[1], LISTED[2], NEW, UNLISTED]).prop_map(str::to_string),
+                prop::sample::select(vec!["", "s1", "s2", "c1"]).prop_map(str::to_string),
+            ),
+            0..4,
+        ),
     )
-        .prop_map(|(head_has, unchanged, conflicts, refs, fetch, builds, waits, tree_as_is, final_stage, lists_new)| Origin {
+        .prop_map(|(head_has, unchanged, conflicts, refs, fetch, builds, waits, tree_as_is, final_stage, lists_new, cuts)| Origin {
+            cuts,
             listed: LISTED.iter().map(|s| s.to_string()).collect(),
             refreshed_listed: lists_new.then(|| LISTED.iter().chain(&[NEW]).map(|s| s.to_string()).collect()),
             head_has,
@@ -255,13 +292,15 @@ proptest! {
         let waits = o.waits.len() - end.waits.len();
         prop_assert!(t.stages.len() <= ATTEMPTS && t.worktrees <= ATTEMPTS + waits);
         if evict {
-            let merged = asked.iter().any(|q| matches!(q, Query::Branches | Query::Merge { .. } | Query::AwaitPending { .. }));
+            let merged = asked.iter().any(|q| matches!(q, Query::Branches | Query::Merge { .. } | Query::AwaitPending { .. } | Query::Cuts { .. }));
             prop_assert!(!merged);
         }
         for q in &asked {
             if let Query::Merge { name, sha } = q {
                 prop_assert!(name != FB);
-                prop_assert!(!o.head_has.contains(sha) && !o.unchanged.contains(sha));
+                // A lane's commit of a branch is whatever its targets run.
+                let cut = o.cuts.iter().any(|c| c.1 == *name && c.2 == *sha);
+                prop_assert!(cut || !o.head_has.contains(sha) && !o.unchanged.contains(sha));
             }
         }
         // Each branch a pass saw unlisted (and HEAD lacks) is warned of once.
@@ -284,15 +323,32 @@ proptest! {
                 if done.branches.is_empty() && o.tree_as_is {
                     prop_assert_eq!(done.union, "head");
                 }
+                // The lanes are what the cuts call for of the branches merged.
+                let want = lanes_of(&done.branches, &o.cuts);
+                prop_assert_eq!(t.lanes.iter().map(|l| (l.targets.clone(), l.branches.clone())).collect::<Vec<_>>(), want);
+                let mut seen = BTreeSet::new();
+                for l in &t.lanes {
+                    prop_assert!(!l.targets.is_empty() && l.branches != done.branches);
+                    prop_assert!(l.targets.iter().all(|h| seen.insert(h.clone())), "a target in two lanes");
+                    for (name, sha) in &l.branches {
+                        let tip = &done.branches.iter().find(|b| b.0 == *name).expect("a lane merging a branch the union lacks").1;
+                        prop_assert!(sha == tip || o.cuts.iter().any(|c| c.1 == *name && c.2 == *sha));
+                    }
+                }
             }
             Err(msg) if msg.starts_with("cannot union feature branch") => {
                 // Only a conflict with what origin holds once fetched.
                 prop_assert!(t.fetched);
                 let Some(Query::Merge { name, sha }) = asked.iter().rev().find(|q| matches!(q, Query::Merge { .. })) else { panic!() };
-                prop_assert!(msg.contains(&format!("cannot union feature branch {name};")), "{}", msg);
                 let unsolved: Vec<String> = o.conflicts[sha].iter().filter(|f| f.0 != MSG_FILE && !f.1).map(|f| f.0.clone()).collect();
                 prop_assert!(msg.contains(&format!("\n  {}\n", unsolved.join(", "))), "{}", msg);
-                prop_assert!(select_of(&end, &p).contains(&(name.clone(), sha.clone())));
+                if t.first.is_some() {
+                    // A lane's: of a commit a cut names, or a tip merged after another branch was left out.
+                    prop_assert!(msg.contains(&format!("cannot union feature branch {name} as ")), "{}", msg);
+                } else {
+                    prop_assert!(msg.contains(&format!("cannot union feature branch {name};")), "{}", msg);
+                    prop_assert!(select_of(&end, &p).contains(&(name.clone(), sha.clone())));
+                }
             }
             Err(msg) => {
                 prop_assert_eq!(msg, format!("origin kept moving during {ATTEMPTS} attempts; re-run"));
@@ -374,4 +430,63 @@ fn a_merge_failing_without_conflicts_dies() {
     .into_iter();
     let (_, _, out) = drive(Replay::new(params(false), program), 20, |_| replies.next().unwrap());
     assert_eq!(out, Err(format!("merging {} into the union failed:\nfatal: refusing to merge unrelated histories", LISTED[1])));
+}
+
+#[test]
+fn targets_take_the_commits_deployed_there() {
+    let s = |v: &str| v.to_string();
+    let branches = vec![(s("x"), s("x2")), (s("y"), s("y2"))];
+    // a and b take x at x1; c takes nothing of x and y at y1; d's cut of a
+    // branch not merged counts for nothing, e's at the tip is no cut.
+    let cuts = vec![
+        (s("b"), s("x"), s("x1")),
+        (s("a"), s("x"), s("x1")),
+        (s("c"), s("x"), s("")),
+        (s("c"), s("y"), s("y1")),
+        (s("d"), s("z"), s("z1")),
+        (s("e"), s("y"), s("y2")),
+    ];
+    assert_eq!(
+        lanes_of(&branches, &cuts),
+        [(vec![s("a"), s("b")], vec![(s("x"), s("x1")), (s("y"), s("y2"))]), (vec![s("c")], vec![(s("y"), s("y1"))])]
+    );
+    assert!(lanes_of(&branches, &[]).is_empty() && lanes_of(&[], &cuts).is_empty());
+
+    let o = Origin {
+        refs: vec![(LISTED[1].into(), "s1".into()), (LISTED[2].into(), "s2".into())],
+        main: "m0".into(),
+        listed: LISTED.iter().map(|s| s.to_string()).collect(),
+        cuts: vec![(s("choko"), LISTED[1].into(), s("")), (s("side1"), LISTED[2].into(), s("c1"))],
+        ..Origin::default()
+    };
+    let (_, t, asked, fx, out) = run(&o, &params(false));
+    let done = out.unwrap();
+    assert_eq!(done.branches, [(LISTED[1].to_string(), s("s1")), (LISTED[2].to_string(), s("s2"))]);
+    assert_eq!(
+        t.lanes,
+        [
+            Lane {
+                targets: vec![s("choko")],
+                union: format!("union of tree {}", LISTED[2]),
+                branches: vec![(LISTED[2].to_string(), s("s2"))]
+            },
+            Lane {
+                targets: vec![s("side1")],
+                union: format!("union of tree {}+{}", LISTED[1], LISTED[2]),
+                branches: vec![(LISTED[1].to_string(), s("s1")), (LISTED[2].to_string(), s("c1"))]
+            },
+        ]
+    );
+    assert_eq!(asked.iter().filter(|q| **q == Query::LaneWorktree).count(), 2);
+    assert!(fx.contains(&Effect::Print("union for choko, the other branches as deployed there:".into())), "{fx:?}");
+    assert!(asked.contains(&Query::Merge { name: LISTED[2].into(), sha: s("c1") }));
+
+    // A lane that does not merge ends the run, naming its targets.
+    let mut o = o;
+    o.conflicts.insert(s("c1"), vec![(s("a.nix"), false)]);
+    let (_, _, _, _, out) = run(&o, &params(false));
+    assert_eq!(
+        out.unwrap_err().lines().next().unwrap(),
+        format!("cannot union feature branch {} as side1 runs it (c1); mergiraf could not resolve:", LISTED[2])
+    );
 }

@@ -18,7 +18,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import IO, NamedTuple
 
@@ -102,6 +102,13 @@ TMP_PREFIX = "nixconvoy-"
 # the same refs.
 PENDING_REFS = "refs/nixconvoy/deploying/branch"
 DEPLOYED_PREFIX = "nixconvoy-history"
+# A feature branch's lineage (Lineage): on origin, and here as fetched,
+# LINEAGE_REFS/<branch>, pushed with the branch (push_refspecs) from
+# REWRITTEN_REFS/<branch>, this repository's own copy, which a rebase here
+# moves before the push.
+LINEAGE_REFS = "refs/nixconvoy/lineage"
+REWRITTEN_REFS = "refs/nixconvoy/rewritten"
+LINEAGE_FILE = "lineage.json"
 # A deploy renews its announcement every HEARTBEAT seconds while it runs; a
 # deploy waiting for it (deploy.await_pending) takes it for dead and goes
 # on without it - to be refused by the drift core, which names the dead
@@ -142,7 +149,8 @@ def fetch_origin(*flags: str, check: bool = True) -> subprocess.CompletedProcess
 def fetch_args(*flags: str) -> list[str]:
     """`git fetch origin` of the branches and nixconvoy's own refs."""
     return ["fetch", "--quiet", "--prune", *flags, cfg().remote,
-            f"+refs/heads/*:refs/remotes/{cfg().remote}/*", f"+{PENDING_REFS}/*:{PENDING_REFS}/*"]
+            f"+refs/heads/*:refs/remotes/{cfg().remote}/*", f"+{PENDING_REFS}/*:{PENDING_REFS}/*",
+            f"+{LINEAGE_REFS}/*:{LINEAGE_REFS}/*"]
 
 
 def feature_shape() -> str:
@@ -513,6 +521,7 @@ class GitQueries:
         self.as_if = as_if or {}
         # The repository's names (a submodule's own, when the core runs there).
         self.names = names or cfg().names
+        self.submodule = names is not None
 
     def __call__(self, ask: PlanQuery) -> PlanReply:
         match ask:
@@ -579,10 +588,18 @@ class GitQueries:
                 raise ValueError(f"nixconvoy-plan asked {ask!r}")
 
     def rebase(self, keep_empty: bool, where: str | None, upstream: str) -> Ran:
+        empty = "--empty=keep" if keep_empty else "--empty=drop"
+        branch = None if self.submodule else self.aside_branch if where else current_branch()
+        with rewrite_log(Path(where) if where else None) as (hooked, rewritten):
+            done = self.rebase_logged(hooked, empty, keep_empty, where, upstream)
+            if done.ok and branch is not None and listed(branch):
+                note_rewritten(branch, rewritten())
+        return done
+
+    def rebase_logged(self, hooked: list[str], empty: str, keep_empty: bool, where: str | None, upstream: str) -> Ran:
         from . import submodule  # noqa: PLC0415 - submodule builds on this module
 
-        empty = "--empty=keep" if keep_empty else "--empty=drop"
-        p = git("rebase", "--quiet", empty, *rebase_range(upstream, where), cwd=where, check=False)
+        p = git(*hooked, "rebase", "--quiet", empty, *rebase_range(upstream, where), cwd=where, check=False)
         # Stopped: on text conflicts mergiraf solves, or on gitlinks,
         # where main pins a submodule this branch pinned too (its
         # landing elsewhere) - the submodule follows (solve_stop).
@@ -599,12 +616,12 @@ class GitQueries:
                 # dropped): kept as an empty commit where the core
                 # counts on its commits (its tmp commits), else skipped.
                 if not keep_empty:
-                    p = git("rebase", "--skip", cwd=where, env={"GIT_EDITOR": "true"}, check=False)
+                    p = git(*hooked, "rebase", "--skip", cwd=where, env={"GIT_EDITOR": "true"}, check=False)
                     continue
                 stopped = Path(out(["git", "rev-parse", "--path-format=absolute", "--git-path",
                                     "rebase-merge/stopped-sha"], cwd=where)).read_text().strip()
                 git("commit", "--quiet", "--allow-empty", "--no-verify", "-C", stopped, cwd=where)
-            p = git("rebase", "--continue", cwd=where, env={"GIT_EDITOR": "true"}, check=False)
+            p = git(*hooked, "rebase", "--continue", cwd=where, env={"GIT_EDITOR": "true"}, check=False)
         if p.returncode == 0:
             submodule.push_pending()
             return ran(p)
@@ -1041,12 +1058,15 @@ def ensure_sole_writer(fb: str) -> str:
 
 def push_refspecs(fb: str, lease: str) -> list[str]:
     """The feature branch's local tip, CAS against `lease`: origin's tip as
-    ensure_sole_writer proved it this checkout's ("" for no branch)."""
-    return [f"{fb}:refs/heads/{fb}", f"--force-with-lease=refs/heads/{fb}:{lease}"]
+    ensure_sole_writer proved it this checkout's ("" for no branch); its
+    lineage with it when origin's differs, so the two are pushed atomically."""
+    mine = rev(f"{REWRITTEN_REFS}/{fb}")
+    lineage = [f"+{REWRITTEN_REFS}/{fb}:{LINEAGE_REFS}/{fb}"] if mine and mine != rev(f"{LINEAGE_REFS}/{fb}") else []
+    return [f"{fb}:refs/heads/{fb}", f"--force-with-lease=refs/heads/{fb}:{lease}", *lineage]
 
 
 def push_cmd(fb: str, lease: str) -> list[str]:
-    return ["push", "--quiet", cfg().remote, *push_refspecs(fb, lease)]
+    return ["push", "--quiet", "--atomic", cfg().remote, *push_refspecs(fb, lease)]
 
 
 def push_feature_branch(fb: str) -> None:
@@ -1335,7 +1355,8 @@ PUSH_LOCK_WAIT = 10
 PUSH_WAIT = 60
 
 
-def push_deployed(fb: str | None, ann: Announce | None, records: dict[str, str]) -> str | None:
+def push_deployed(fb: str | None, ann: Announce | None, records: dict[str, str],
+                  attested: dict[str, tuple[str, str]] | None = None) -> str | None:
     """The push that ends a deploy, in the background, atomic - all of it
     lands or none, so a deploy waiting on the announcement finds the
     branch moved when it clears, and a settled announcement never outlives
@@ -1345,8 +1366,11 @@ def push_deployed(fb: str | None, ann: Announce | None, records: dict[str, str])
     (this run's, or an earlier run's whose push failed; unleased, a
     missing one being nothing) - or, under another key than the branch's
     (a main checkout's), settled.  Then,
-    once that landed, the cleared announcements as fetched are deleted
-    (not atomically), each leased on what it held, a refusal tolerated (a
+    once that landed, each of `attested` (a target's record made without a
+    switch, with the record it chains on) goes onto that target's history
+    branch, leased on that record, and the cleared announcements as fetched
+    are deleted (neither atomically), each leased on what it held, a
+    refusal tolerated (the target switched meanwhile; a
     hand clear or another deploy got there first; what stays is swept by
     the next deploy ending well).  A background push outlives this
     process, its outcome collected by the next run
@@ -1369,7 +1393,7 @@ def push_deployed(fb: str | None, ann: Announce | None, records: dict[str, str])
             pushed_note = ["git", "update-ref", f"{PUSHED_REFS}/{fb}", head]
             what.append(strings.CHECKOUT_PUSHING_BRANCH(fb=fb, sha=head[:12]))
     refspecs += [f"+{sha}:refs/heads/{DEPLOYED_PREFIX}/{h}" for h, sha in records.items()]
-    what += [f"{DEPLOYED_PREFIX}/{h}" for h in records]
+    what += [f"{DEPLOYED_PREFIX}/{h}" for h in [*records, *(attested or {})]]
     if ann is not None and ann.key == fb:
         if problem is None:
             ann.stop()
@@ -1381,7 +1405,9 @@ def push_deployed(fb: str | None, ann: Announce | None, records: dict[str, str])
     elif fb and rev(f"{PENDING_REFS}/{fb}"):
         refspecs.append(f":{PENDING_REFS}/{fb}")
     sweep = {f"{PENDING_REFS}/{k}": sha for k, sha in announcements()[1].items()}
-    if not refspecs and not sweep:
+    attest = [a for h, (sha, on) in (attested or {}).items()
+              for a in (f"{sha}:refs/heads/{DEPLOYED_PREFIX}/{h}", f"--force-with-lease=refs/heads/{DEPLOYED_PREFIX}/{h}:{on}")]
+    if not refspecs and not sweep and not attest:
         return problem
     f = push_files()
     hold = os.environ.get("NIXCONVOY_HOLD_PUSH", "")
@@ -1389,6 +1415,8 @@ def push_deployed(fb: str | None, ann: Announce | None, records: dict[str, str])
     body = (shlex.join([*push, "--atomic", *refspecs]) if refspecs else "true") + "; rc=$?"
     if pushed_note:
         body += f'; [ "$rc" = 0 ] && {shlex.join(pushed_note)}'
+    if attest:
+        body += f'; [ "$rc" = 0 ] && {shlex.join([*push, *attest])}'
     if sweep:
         body += f'; [ "$rc" = 0 ] && {shlex.join([*push, *delete_args(sweep)])}'
     body += '; exit "$rc"'
@@ -1462,20 +1490,6 @@ DEPLOYED_TRAILER = ("%(trailers:key=Deployed,valueonly,separator=%x2C)%x2C"
 def trailer_targets(value: str) -> set[str]:
     """The targets a Reaches:/Deployed: trailer value names."""
     return {h.strip() for h in value.split(",") if h.strip() and h.strip() != "none"}
-
-
-def held_targets(commits: str, cwd: str | None = None) -> set[str]:
-    """The targets the increments in the range `commits` hold back: reached
-    by one (its Reaches: trailer) that was deployed to other targets alone
-    (its Deployed: one), and not running the branch's tip after any later
-    increment's deploy (the Deployed: of each, oldest first)."""
-    fmt = f"%(trailers:key=Reaches,valueonly,separator=%x2C)%x09{DEPLOYED_TRAILER}"
-    held: set[str] = set()
-    log = run(["git", "log", f"--format={fmt}", commits], cwd=cwd).stdout  # unstripped: a tab may lead
-    for ln in reversed(log.splitlines()):
-        reaches, _, deployed = ln.partition("\t")
-        held = (held | trailer_targets(reaches)) - trailer_targets(deployed)
-    return held
 
 
 def summarize(ref: str) -> str:
@@ -1557,23 +1571,101 @@ def solve_stop(where: str | None, upstream: str) -> str | None:
     return submodule.solve_rebase(wt, Path.cwd().resolve(), upstream)
 
 
+@contextlib.contextmanager
+def rewrite_log(d: Path | None) -> Iterator[tuple[list[str], Callable[[], dict[str, str]]]]:
+    """For a rebase in the checkout `d` (None: the current one): the git
+    arguments that hook it, to pass to every step of it, and a read of each
+    replayed commit's rewrite so far, old -> new, as git's post-rewrite hook
+    reports them once the rebase ends - the one hook run, as no user hook
+    runs under git()."""
+    where = state_path("rewrite", d)
+    shutil.rmtree(where, ignore_errors=True)
+    where.mkdir(parents=True)
+    log = where / "rewritten"
+    hook = where / "post-rewrite"
+    # Builtins alone: the rebase's PATH may lack coreutils.
+    hook.write_text(f'#!/bin/sh\nwhile read -r old new _; do printf \'%s %s\\n\' "$old" "$new"; done >> "{log}"\n')
+    hook.chmod(0o755)
+
+    def read() -> dict[str, str]:
+        if not log.exists():
+            return {}
+        return dict(ln.split() for ln in log.read_text().splitlines())
+
+    try:
+        yield ["-c", f"core.hooksPath={where}"], read
+    finally:
+        shutil.rmtree(where, ignore_errors=True)
+
+
+class Lineage(NamedTuple):
+    """What became of a feature branch's commits as nixconvoy rebased it:
+    `rewritten`, each replayed commit by its rewrite on the branch as it is
+    now (a later rebase's composed in), kept until the branch next starts
+    from nothing of its own (restart_lineage).  A deploy record names the
+    commit of the branch its target runs; this is how that commit is found
+    on the branch after a rebase (lanes.carried_commit).  `legacy`: the
+    branch held increments before its lineage was first kept, so a commit
+    of it this does not know may be a rebase's that went unrecorded."""
+
+    legacy: bool
+    rewritten: dict[str, str]
+
+
+def read_lineage(branch: str, *, local: bool = False) -> Lineage | None:
+    """`branch`'s lineage as origin has it (as fetched) - or, `local`, as
+    this repository's own rebases left it, origin's when it made none."""
+    for ref in ([f"{REWRITTEN_REFS}/{branch}"] if local else []) + [f"{LINEAGE_REFS}/{branch}"]:
+        p = run(["git", "cat-file", "blob", f"{ref}:{LINEAGE_FILE}"], check=False)
+        if p.returncode != 0:
+            continue
+        try:
+            doc = proc.load_json(p.stdout)
+        except ValueError:
+            continue
+        if not isinstance(doc, dict):
+            continue
+        m = doc.get("rewritten")
+        if isinstance(m, dict) and all(isinstance(v, str) for v in m.values()):
+            return Lineage(doc.get("legacy") is not False, dict(m))
+    return None
+
+
+def write_lineage(branch: str, lineage: Lineage) -> None:
+    """`lineage` as this repository's own copy of `branch`'s: a commit of
+    LINEAGE_FILE alone, the same one for the same lineage."""
+    text = proc.dump_json({"legacy": lineage.legacy, "rewritten": dict(sorted(lineage.rewritten.items()))}) + "\n"
+    blob = out(["git", "hash-object", "-w", "--stdin"], input=text)
+    tree = out(["git", "mktree"], input=f"100644 blob {blob}\t{LINEAGE_FILE}\n")
+    commit = out(["git", "commit-tree", tree, "-m", strings.CHECKOUT_LINEAGE_SUBJECT(branch=branch)], env=MACHINE_ENV)
+    git("update-ref", f"{REWRITTEN_REFS}/{branch}", commit)
+
+
+def note_rewritten(branch: str, rewritten: dict[str, str]) -> None:
+    """A rebase of `branch` replayed `rewritten` (old -> new): composed
+    into its lineage.  One kept for the first time is legacy: whatever
+    rebased the branch before went unrecorded."""
+    if not rewritten:
+        return
+    prev = read_lineage(branch, local=True)
+    earlier = {a: rewritten.get(b, b) for a, b in prev.rewritten.items()} if prev is not None else {}
+    write_lineage(branch, Lineage(prev.legacy if prev is not None else True, {**earlier, **rewritten}))
+
+
+def restart_lineage(branch: str) -> None:
+    """`branch` holds nothing of its own and is about to get an increment:
+    every commit it will hold is this repository's from here on, so a
+    commit its lineage does not know is one it dropped."""
+    write_lineage(branch, Lineage(False, {}))
+
+
 def rebase_solving(d: Path, upstream: str, base: str | None, rewritten: dict[str, str]) -> bool:
     """`git rebase upstream` in `d` (a submodule worktree), past the landed
     prefix (`base`, landed_prefix's) and through the conflicts solve_stop
     solves, a replayed commit solved to nothing skipped; whether it went
     through - else aborted, `d` as it was.  `rewritten` gets each replayed
-    commit's rewrite, old -> new, as git's post-rewrite hook reports them:
-    the one hook run, as no user hook runs under git()."""
-    where = state_path("rewrite", d)
-    shutil.rmtree(where, ignore_errors=True)
-    where.mkdir(parents=True)
-    try:
-        log = where / "rewritten"
-        hook = where / "post-rewrite"
-        # Builtins alone: the rebase's PATH may lack coreutils.
-        hook.write_text(f'#!/bin/sh\nwhile read -r old new _; do printf \'%s %s\\n\' "$old" "$new"; done >> "{log}"\n')
-        hook.chmod(0o755)
-        hooked = ["-c", f"core.hooksPath={where}"]
+    commit's rewrite, old -> new (rewrite_log)."""
+    with rewrite_log(d) as (hooked, read):
         onto = ["--onto", upstream, base] if base else [upstream]
         p = git(*hooked, "rebase", "--quiet", *onto, cwd=str(d), check=False)
         while p.returncode != 0 and solve_stop(str(d), upstream) is None:
@@ -1582,12 +1674,7 @@ def rebase_solving(d: Path, upstream: str, base: str | None, rewritten: dict[str
         if p.returncode != 0:
             git("rebase", "--abort", cwd=str(d), check=False)
             return False
-        if log.exists():
-            for ln in log.read_text().splitlines():
-                old, new = ln.split()
-                rewritten[old] = new
-    finally:
-        shutil.rmtree(where, ignore_errors=True)
+        rewritten.update(read())
     return True
 
 

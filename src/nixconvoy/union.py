@@ -32,10 +32,14 @@ from .wire import (
     CommitMerge,
     CommitUnion,
     Contains,
+    Cut,
+    Cuts,
     DropFile,
     Flag,
     Head,
     HeadTree,
+    Lane,
+    LaneWorktree,
     Listed,
     Merge,
     Merged,
@@ -58,14 +62,17 @@ from .wire import (
 class UnionQueries(GitQueries):
     def __init__(self, base: Callable[[], str], fetch: Future[subprocess.CompletedProcess[str]],
                  refresh: Callable[[], None],
-                 stage: Callable[[str, str, list[str], list[tuple[str, str]]], bool],
+                 stage: Callable[[str, str, list[str], list[tuple[str, str]], list[tuple[str, Lane]]], bool],
                  await_pending: Callable[[str, str], bool] | None = None,
+                 cuts: Callable[[str, str, list[tuple[str, str]]], list[tuple[str, str, str]]] | None = None,
                  as_if: Mapping[str, str] | None = None) -> None:
         super().__init__(as_if=as_if)
         self.base, self.fetch, self.refresh, self.stage = base, fetch, refresh, stage
-        self.await_pending = await_pending
+        self.await_pending, self.cuts = await_pending, cuts
         self.wt = ""
         self.wts: list[str] = []
+        # The worktree each union of this attempt is checked out in.
+        self.at: dict[str, str] = {}
 
     def drop(self) -> None:
         while self.wts:
@@ -88,6 +95,11 @@ class UnionQueries(GitQueries):
                 return Flag(ok(["git", "diff", "--quiet", base, sha, "--", ".", f":(exclude){MSG_FILE}"]))
             case Worktree():
                 self.drop()
+                self.at = {}
+                self.wt = add_worktree(self.base())
+                self.wts.append(self.wt)
+                return Ran(True, "")
+            case LaneWorktree():
                 self.wt = add_worktree(self.base())
                 self.wts.append(self.wt)
                 return Ran(True, "")
@@ -124,6 +136,7 @@ class UnionQueries(GitQueries):
                          "-m", strings.UNION_COMMIT_SUBJECT], env=MACHINE_ENV, check=False)
                 return Text(p.stdout.strip() if p.returncode == 0 else None)
             case Checkout(union):
+                self.at.setdefault(union, wt)
                 return ran(git("reset", "--hard", "--quiet", union, cwd=wt, check=False))
             case CollectFetch():
                 self.fetch.result()
@@ -134,8 +147,11 @@ class UnionQueries(GitQueries):
             case AwaitPending(union):
                 if self.await_pending is None:
                     return Flag(False)
-                return Flag(self.await_pending(wt, union))
-            case Stage(union, names, branches):
-                return Flag(self.stage(wt, union, names, branches))
+                return Flag(self.await_pending(self.at[union], union))
+            case Cuts(union, branches):
+                return Cut(self.cuts(self.at[union], union, branches) if self.cuts is not None else [])
+            case Stage(union, names, branches, lanes):
+                return Flag(self.stage(self.at[union], union, names, branches,
+                                       [(self.at[lane.union], lane) for lane in lanes]))
             case _:
                 return super().__call__(ask)

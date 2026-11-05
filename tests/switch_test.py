@@ -59,6 +59,7 @@ from nixconvoy import (
     guard,
     hooks,
     init,
+    lanes,
     memo,
     names,
     proc,
@@ -67,7 +68,16 @@ from nixconvoy import (
     targets,
 )
 from nixconvoy.union import UnionQueries
-from nixconvoy.wire import Context, DriftParams, Ran, RemoveWorktree, RepoNames, UnionOutcome, UnionParams
+from nixconvoy.wire import (
+    Context,
+    DriftParams,
+    Lane,
+    Ran,
+    RemoveWorktree,
+    RepoNames,
+    UnionOutcome,
+    UnionParams,
+)
 
 PROGRESS = sys.stderr
 
@@ -328,8 +338,7 @@ def switch_scenarios(d: Path) -> None:
 
 def report(text: str, *, tips: dict[str, str] | None = None,
            evict: bool = False, named: bool = True, reached: bool = True, running: str = NEW,
-           in_flight: dict[str, str] | None = None, dead: list[str] | None = None,
-           held: dict[str, list[str]] | None = None) -> tuple[str, str]:
+           in_flight: dict[str, str] | None = None, dead: list[str] | None = None) -> tuple[str, str]:
     """nixconvoy-plan's drift verdict on one drifting target carrying `text` as
     its provenance file: its report line, and the deploy's die message."""
     died = ""
@@ -340,9 +349,9 @@ def report(text: str, *, tips: dict[str, str] | None = None,
             cx = Context(names=NAMES, me=ME, listed=sorted(LISTED), tips={BRANCH: BASE} if tips is None else tips,
                          in_flight=in_flight or {}, dead=dead or [], tz_offset=0)
             guard.decide(DriftParams(
-                cx=cx, union="u" * 40, targets=["side1"], candidates=["side1"],
-                evict=evict, named=named, feature_branch=True, reached=["side1"] if reached else [],
-                running={"side1": running}, built={"side1": "/nix/store/union-system"}, held=held or {},
+                cx=cx, union="u" * 40, unions={}, targets=["side1"], candidates=["side1"],
+                evict=evict, named=named, reached=["side1"] if reached else [],
+                running={"side1": running}, built={"side1": "/nix/store/union-system"},
                 provenances={"side1": text}))
         except proc.Fail as e:
             died = str(e).strip()
@@ -771,12 +780,6 @@ def provenance_cases() -> None:
     assert report(json.dumps({**json.loads(provenance_line(NEW)), "version": 1})) == ("side1: will switch", "")
     assert report(provenance_line(NEW), running=OLD)[0] == "side1: will switch"
     assert report(provenance_line(NEW), running="/nix/store/union-system")[0] == "side1: up to date"
-    # Held back by another branch: refused when reached, else left alone.
-    line, died = report("", held={"side1": ["work/chikuwa/1"]})
-    assert line.startswith("side1: refused: held back by work/chikuwa/1"), line
-    assert "side1 is held back" in died and "nixconvoy deploy side1" in died, died
-    line, died = report("", held={"side1": ["work/chikuwa/1"]}, reached=False)
-    assert line.startswith("side1: left alone: held back by") and not died, (line, died)
 
     text = provenance_line(NEW)
     p = targets.parse_probe(f"{NEW}\n{KIT}\n{text}")
@@ -1007,7 +1010,9 @@ def reach_cases(d: Path) -> None:
         def reached(provenances: dict[str, str] | None = None) -> set[str]:
             tip = sh(co, "rev-parse", "HEAD")
             clear_memo()
-            return memo.reached_targets(str(co), tip, targets, tip, provenances or {})
+            runs = {h: json.loads(text)["branches"].get(fb) for h, text in (provenances or {}).items()
+                    if text.startswith('{"')}
+            return memo.reached_targets(str(co), tip, targets, tip, runs)
 
         def provenance(**tips: str) -> str:
             return proc.dump_json({"version": 2, "main": sh(co, "rev-parse", "origin/main"),
@@ -1155,6 +1160,133 @@ def reach_cases(d: Path) -> None:
     say("reach: ok")
 
 
+def lanes_cases(d: Path) -> None:
+    """What a target runs of a branch, by its deploy records (lanes): the
+    commit standing for the one a record holds once the branch moved, the
+    targets a branch's later work is not deployed to, the record a target
+    runs, an attested one included, and what a landing finds undeployed."""
+    scratch_env()
+    fb, other = "work/tester/9", "work/other/1"
+    files = {
+        "nixos/flake.nix": "{\n  outputs = { self, nixpkgs }: {\n"
+        "    hosts = [ ./hosts/a/configuration.nix ./hosts/b/configuration.nix ];\n  };\n}\n",
+        "nixos/flake.lock": proc.dump_json({"version": 7, "root": "root", "nodes": {"root": {"inputs": {}}}}),
+        "nixos/hosts/a/configuration.nix": "{ ... }: { imports = [ ../../modules/x.nix ]; }\n",
+        "nixos/hosts/b/configuration.nix": "{ ... }: { imports = [ ../../modules/y.nix ]; }\n",
+        "nixos/modules/x.nix": "{ ... }: { }\n",
+        "nixos/modules/y.nix": "{ ... }: { }\n",
+        "README.md": "docs\n",
+    }
+    with scratch_origin(d, files, fb=fb) as (_origin, seed, co):
+        main0 = sh(co, "rev-parse", "origin/main")
+        sh(seed, "switch", "--quiet", "-c", other)
+        put(seed, "nixos/modules/x.nix", "{ ... }: { x = 1; }\n", "o1: a's")
+        put(seed, "nixos/modules/y.nix", "{ ... }: { y = 1; }\n", "o2: b's")
+        put(seed, "README.md", "docs, more\n", "o3: nobody's")
+        sh(seed, "push", "--quiet", "origin", other)
+        sh(co, "fetch", "--quiet")
+        tip = sh(co, "rev-parse", f"origin/{other}")
+        o1, o2 = sh(co, "rev-parse", f"{tip}~2"), sh(co, "rev-parse", f"{tip}~1")
+
+        # The commit of the branch standing for the one a record holds.
+        def lineage(legacy: bool, rewritten: dict[str, str]) -> None:
+            """The branch's lineage as fetched from origin."""
+            checkout.write_lineage(other, checkout.Lineage(legacy, rewritten))
+            sh(co, "update-ref", f"{checkout.LINEAGE_REFS}/{other}", proc.rev(f"{checkout.REWRITTEN_REFS}/{other}") or "")
+            sh(co, "update-ref", "-d", f"{checkout.REWRITTEN_REFS}/{other}")
+
+        ahead = out_at(co, tip, "pending")
+        was1 = sh(co, "commit-tree", f"{o1}^{{tree}}", "-p", main0, "-m", "o1 before a rebase")
+        assert lanes.carried_commit(other, o1, tip) == o1 and lanes.carried_commit(other, tip, tip) == tip
+        assert lanes.carried_commit(other, ahead, tip) == tip  # its push on its way
+        # Reset back within its increments: what is left of it.
+        assert lanes.carried_commit(other, tip, o2) == o2
+        # Unknown to a branch with no lineage (or a legacy one): as every union took it, the tip.
+        assert lanes.carried_commit(other, was1, tip) == tip and lanes.carried_commit(other, "f" * 40, tip) == tip
+        assert lanes.carried_commit(other, was1, tip, unknown_is_tip=False) is None
+        lineage(True, {})
+        assert lanes.carried_commit(other, was1, tip) == tip
+        # A rebase's rewrite; unknown to a lineage kept from the branch's start: dropped.
+        lineage(False, {was1: o1})
+        assert lanes.carried_commit(other, was1, tip) == o1
+        assert lanes.carried_commit(other, out_at(co, was1, "o2 before"), tip) is None
+        assert checkout.read_lineage(other) == checkout.Lineage(False, {was1: o1})
+        assert checkout.read_lineage(fb) is None and checkout.read_lineage(fb, local=True) is None
+
+        # The targets behind the branch: those reading what it changed past
+        # the commit their record holds.
+        head = sh(co, "rev-parse", "HEAD")
+
+        def behind(**held: str | None) -> dict[str, str]:
+            clear_memo()
+            docs: dict[str, dict[str, object] | None] = {
+                h: None if c is None else {"branches": {other: c} if c else {}} for h, c in held.items()}
+            return lanes.lagging(str(co), head, other, tip, docs)
+
+        assert behind(a=o1, b=o1) == {"b": o1}  # o2 is b's; o3 nobody's
+        assert behind(a=o2, b=o2) == {} and behind(a=tip, b=tip) == {}
+        assert behind(a=None, b="") == {"a": "", "b": ""}  # no record, or none of the branch
+        assert behind(a=was1, b=o2) == {}  # a runs o1 as it was before the rebase
+        assert behind(a="", b=o1) == {"a": "", "b": o1}
+        clear_memo()
+        assert lanes.cuts(str(co), head, [(other, tip)], {"a": None, "b": {"branches": {other: o1}}}) == [
+            ("a", other, ""), ("b", other, o1)]
+
+        # The record a target runs: its provenance's, or an attested one
+        # chained on that with the system it runs.
+        def history(target: str, sha: str) -> None:
+            sh(co, "update-ref", f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/{target}", sha)
+
+        def record(parent: str, **doc: object) -> str:
+            return checkout.record_commit("a", head, [parent, main0], "s", proc.dump_json(doc))
+
+        rec = record("", toplevel=NEW, branches={other: o1})
+        provenance = proc.dump_json({"toplevel": NEW, "record": rec, "branches": {other: o1}})
+        assert lanes.running_record("a", provenance, OLD) is None and lanes.running_record("a", "{not json", NEW) is None
+        assert lanes.running_record("a", proc.dump_json({"toplevel": NEW}), NEW) == ({"toplevel": NEW}, "")
+        ran = lanes.running_record("a", provenance, NEW)
+        assert ran is not None and ran[1] == rec and ran[0]["branches"] == {other: o1}
+        history("a", rec)
+        assert lanes.running_record("a", provenance, NEW) == ran and lanes.history_doc("a") == lanes.record_doc(rec)
+        attested = record(rec, toplevel=NEW, attested=True, branches={other: tip})
+        history("a", attested)
+        ran = lanes.running_record("a", provenance, NEW)
+        assert ran is not None and ran[1] == attested and ran[0]["branches"] == {other: tip}
+        # Not one of another system, a switch's record, or a history not chained on the provenance's.
+        history("a", record(attested, toplevel=OLD, attested=True, branches={}))
+        assert lanes.running_record("a", provenance, NEW) == ran
+        history("a", record(rec, toplevel=NEW, branches={other: tip}))
+        assert lanes.running_record("a", provenance, NEW) == (json.loads(provenance), rec)
+        history("a", record("", toplevel=NEW, attested=True, branches={other: tip}))
+        assert lanes.running_record("a", provenance, NEW) == (json.loads(provenance), rec)
+
+        # What a landing finds not deployed: by the history branches alone.
+        for h in ("a", "b"):
+            sh(co, "update-ref", "-d", f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/{h}")
+        put(co, "nixos/modules/x.nix", "{ ... }: { mine = 1; }\n", "c1: a's")
+        c1 = sh(co, "rev-parse", "HEAD")
+
+        def undeployed() -> list[str]:
+            clear_memo()
+            return lanes.undeployed(fb, "HEAD", str(co))
+
+        assert undeployed() == ["a"]
+        history("a", record("", toplevel=NEW, branches={fb: c1}))
+        assert undeployed() == []
+        put(co, "nixos/modules/y.nix", "{ ... }: { mine = 1; }\n", "c2: b's")
+        assert undeployed() == ["b"]
+        history("b", record("", toplevel=NEW, branches={fb: c1}))
+        assert undeployed() == ["b"]
+        history("b", record("", toplevel=NEW, branches={fb: sh(co, "rev-parse", "HEAD")}))
+        assert undeployed() == []
+        # The landing itself: refused on them unless --not-yet-deployed.
+        sh(co, "update-ref", "-d", f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/b")
+        assert f"{fb} is not yet deployed to b:" in dies(lambda: commands.holds(fb, "HEAD"))
+        assert "landing with b not yet deployed" in printed(lambda: commands.holds(fb, "HEAD", not_yet_deployed=True))
+        assert not sh(co, "worktree", "list").count("deploy-wt")
+    say("lanes: ok")
+
+
 def names_cases(d: Path) -> None:
     """nixconvoy.toml's `remote` and `main_branch`: a repository whose
     remote is `up` and whose main is `trunk`, through the rebase and union
@@ -1204,7 +1336,9 @@ def names_cases(d: Path) -> None:
         checkout.note_prefix(co)
         assert (co / ".git/nixconvoy/main-ref").read_text() == "up/trunk\n"
         assert f"{fb} +1" in printed(commands.status)
-        # A landing: trunk on up moves, the branch is reset onto it.
+        # A landing: trunk on up moves, the branch is reset onto it (no
+        # flake here to tell what it has not deployed).
+        mock.patch.object(lanes, "undeployed", lambda *_: []).start()
         put(co, "COMMIT_MSG.md", "mine\n", "msg")
         sh(co, "push", "--quiet", "up", fb)
         commands.land()
@@ -1393,15 +1527,23 @@ def git_cases(d: Path) -> None:
         staged: list[list[str]] = []
         refreshes: list[str] = []
 
-        def stage(wt: str, union: str, listed: list[str], branches: list[tuple[str, str]]) -> bool:
+        laned: list[tuple[list[str], list[tuple[str, str]], list[str]]] = []
+
+        def stage(wt: str, union: str, listed: list[str], branches: list[tuple[str, str]],
+                  lanes: list[tuple[str, Lane]]) -> bool:
             assert sh(Path(wt), "rev-parse", "HEAD") == union
             assert listed == ["work/{local_hostname}/"], listed
             assert [b for b, _ in branches] == ["work/other/1"], branches
             staged.append(sorted(p.name for p in Path(wt).iterdir()))
+            for lwt, lane in lanes:
+                assert sh(Path(lwt), "rev-parse", "HEAD") == lane.union and (lwt == wt) == (lane.union == union)
+                laned.append((lane.targets, lane.branches, sorted(p.name for p in Path(lwt).iterdir())))
             return False
 
-        def union(main0: str | None = None, as_if: dict[str, str] | None = None) -> tuple[UnionOutcome, str]:
-            q = UnionQueries(lambda: "HEAD", fetched, lambda: refreshes.append("r"), stage, as_if=as_if)
+        def union(main0: str | None = None, as_if: dict[str, str] | None = None,
+                  cuts: list[tuple[str, str, str]] | None = None) -> tuple[UnionOutcome, str]:
+            q = UnionQueries(lambda: "HEAD", fetched, lambda: refreshes.append("r"), stage,
+                             cuts=None if cuts is None else lambda _wt, _union, _branches: cuts, as_if=as_if)
             try:
                 with contextlib.redirect_stdout(io.StringIO()) as said:
                     done = guard.decide(UnionParams(NAMES, fb, False, main0 or proc.rev("refs/remotes/origin/main")), q)
@@ -1413,6 +1555,19 @@ def git_cases(d: Path) -> None:
         assert done.branches == [("work/other/1", proc.rev("refs/remotes/origin/work/other/1"))], done
         assert sh(co, "rev-parse", f"{done.union}^") == proc.rev("refs/remotes/origin/main")
         assert staged == [[".git", "a.txt", "b.txt", "nixconvoy.toml", "o.txt"]], staged
+        # Targets running less of the branch get a union of their own: x
+        # the branch's first commit alone (the same tree, so the same
+        # union: its worktree shared), y none of it, in a worktree of its
+        # own; z, at its tip, is in no lane.
+        tip = proc.rev("refs/remotes/origin/work/other/1") or ""
+        first = proc.rev(f"{tip}^") or ""
+        same, said = union(cuts=[("x", "work/other/1", first), ("y", "work/other/1", ""), ("z", "work/other/1", tip),
+                                 ("x", "work/gone/1", "")])
+        assert same.union == done.union and laned == [
+            (["y"], [], [".git", "a.txt", "b.txt", "nixconvoy.toml"]),
+            (["x"], [("work/other/1", first)], [".git", "a.txt", "b.txt", "nixconvoy.toml", "o.txt"])], laned
+        assert "union for y, the other branches as deployed there:" in said, said
+        assert not sh(co, "worktree", "list").count("deploy-wt")
         # A fetch that moved origin/main redoes the union on the refreshed
         # checkout.
         redo, said = union(main0="0" * 40)
@@ -1456,6 +1611,22 @@ def git_cases(d: Path) -> None:
         assert good and f"rebased {fb}" in status and status.endswith(f"pushed {fb}"), status
         assert proc.is_ancestor("refs/remotes/origin/main", f"refs/remotes/origin/{fb}")
         assert checkout.update_checkout(co) == (True, "up to date")
+        # The rebase's rewrites are the branch's lineage, pushed with it:
+        # legacy, as the branch held increments before one was kept.
+        kept = checkout.read_lineage(fb, local=True)
+        assert kept is not None and kept.legacy and kept.rewritten[tip] == sh(co, "rev-parse", fb), kept
+        assert sh(seed, "ls-remote", "origin", f"{checkout.LINEAGE_REFS}/{fb}").split()[0] == proc.rev(
+            f"{checkout.REWRITTEN_REFS}/{fb}")
+        sh(co, *checkout.fetch_args())
+        assert checkout.read_lineage(fb) == kept
+        # A later rebase's are composed in; a branch starting over starts it over.
+        checkout.note_rewritten(fb, {kept.rewritten[tip]: "c" * 40, "d" * 40: "e" * 40})
+        composed = checkout.read_lineage(fb, local=True)
+        assert composed is not None and composed.legacy and composed.rewritten[tip] == "c" * 40
+        assert composed.rewritten["d" * 40] == "e" * 40 and checkout.read_lineage(fb) == kept
+        checkout.restart_lineage(fb)
+        assert checkout.read_lineage(fb, local=True) == checkout.Lineage(False, {})
+        sh(co, "update-ref", f"{checkout.REWRITTEN_REFS}/{fb}", proc.rev(f"{checkout.LINEAGE_REFS}/{fb}") or "")
 
         # A review subagent's worktree: a detached HEAD at another feature
         # branch's tip.  Nothing of its own, so a pull leaves it alone...
@@ -1882,17 +2053,6 @@ def announce_cases(d: Path) -> None:
         committed = checkout.deployed_commit(snap, "two\n\nReaches: a\nDeployed: a")
         main = proc.rev("refs/remotes/origin/main")
         assert main is not None
-        # Holds replay oldest first: reached and not deployed holds, a later
-        # deploy of the target ends the hold, a commit without trailers is
-        # nothing.
-        chain = checkout.deployed_commit(snap, "h1\n\nReaches: a, b, c\nDeployed: a")
-        chain = out_at(co, chain, "plain")
-        chain = out_at(co, chain, "h2\n\nReaches: b\nApplied: b")  # the key before the rename
-        chain = out_at(co, chain, "h3\n\nReaches: none\nDeployed: none")
-        assert checkout.held_targets(f"{main}..{chain}") == {"c"}
-        assert checkout.held_targets(f"{main}..{chain}^") == {"c"}
-        assert checkout.held_targets(f"{main}..{chain}~2") == {"b", "c"}
-        assert checkout.held_targets(f"{main}..{chain}~3") == {"b", "c"}
         rec1 = checkout.record_commit("a", snap, ["", main, "f" * 40, committed], "two", '{"doc": 1}')
         assert sh(co, "log", "-1", "--format=%P", rec1).split() == [main, committed]
         assert sh(co, "log", "-1", "--format=%s%n%b", rec1) == 'deploy a: two\n{"doc": 1}'
@@ -2660,6 +2820,9 @@ def open_cases(d: Path) -> None:
     free listed feature branch.  `land --with-children`: the checkout and its
     subagent worktree landed as one commit."""
     scratch_env()
+    # No flake here to scan: what each branch has not deployed is given.
+    undeployed: dict[str, list[str]] = {}
+    mock.patch.object(lanes, "undeployed", lambda branch, *_: undeployed.get(branch, [])).start()
     with scratch_origin(d, {"a.txt": "one\n"}, fb="work/tester/9") as (origin, seed, co):
         w = commands.open_worktree("task", "claude agent task (pid 1 start 2) 3.4")
         assert w == co / ".claude/worktrees/task" and checkout.branch_at(w) == "worktree-task"
@@ -2871,14 +3034,15 @@ def open_cases(d: Path) -> None:
         assert "has staged but undeployed changes" in dies(commands.land_with_children)
         sh(w, "rm", "--quiet", "--cached", "x.txt")
         (w / "x.txt").unlink()
-        # The sub holds b back: its increment reached b, deployed to a alone.
-        assert checkout.held_targets("origin/main..HEAD", str(w)) == {"b"}
-        # A held target refuses the landing unless --not-yet-deployed; the
-        # draft stays staged for the deploy a refusal asks for.
-        assert "work/tester/9-task holds back b:" in dies(commands.land_with_children)
+        # The sub's work is not deployed to b: the landing is refused
+        # unless --not-yet-deployed; the draft stays staged for the deploy
+        # a refusal asks for.
+        undeployed["work/tester/9-task"] = ["b"]
+        assert "work/tester/9-task is not yet deployed to b:" in dies(commands.land_with_children)
         assert sh(w, "status", "--porcelain").splitlines() == ["M  COMMIT_MSG.md", "?? n.txt"]
         told = printed(lambda: commands.land_with_children(not_yet_deployed=True))
         assert "landing with b not yet deployed:" in told
+        undeployed.clear()
         assert not sh(co, "worktree", "list").count("deploy-wt")
         main = sh(co, "rev-parse", "origin/main")
         assert sh(co, "ls-tree", "--name-only", main).split() == ["a.txt", "m.txt", "nixconvoy.toml", "p.txt", "s.txt"]
@@ -3311,7 +3475,7 @@ def unit_cases() -> None:
 SECTIONS: dict[str, Callable[[], None]] = {
     **{cases.__name__.removesuffix("_cases"): in_scratch(cases)
        for cases in (submodule_cases, open_cases, git_cases, counterpart_cases, switch_cases, announce_cases,
-                     reach_cases, guard_cases, landing_rebase_cases, names_cases, init_cases)},
+                     reach_cases, lanes_cases, guard_cases, landing_rebase_cases, names_cases, init_cases)},
     "units": unit_cases,
 }
 
