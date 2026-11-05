@@ -1291,6 +1291,162 @@ def lanes_cases(d: Path) -> None:
     say("lanes: ok")
 
 
+FAKE_GIT = r"""#!{python}
+# Each network command takes the first line of the plan off it - `<before|after> <error>` -
+# and fails with that error, before or after git ran; with no line left, it is git's own.
+import pathlib, subprocess, sys
+ERRORS = {{
+    "http": "error: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502\n",
+    "inband": "remote: Internal Server Error\n ! [remote rejected] x -> y (Internal Server Error)\n",
+    "refused": " ! [rejected] x -> y (fetch first)\n",
+}}
+args = sys.argv[1:]
+verb = next(a for i, a in enumerate(args) if not a.startswith("-") and (i == 0 or args[i - 1] != "-c"))
+plan = pathlib.Path({plan!r})
+lines = plan.read_text().splitlines() if verb in ("push", "fetch", "ls-remote") else []
+if verb in ("push", "fetch", "ls-remote"):
+    with plan.with_suffix(".calls").open("a") as calls:
+        calls.write(verb + "\n")
+if not lines:
+    sys.exit(subprocess.run([{git!r}, *args]).returncode)
+plan.write_text("".join(ln + "\n" for ln in lines[1:]))
+when, error = lines[0].split()
+if when == "after":
+    subprocess.run([{git!r}, *args], capture_output=True)
+sys.stderr.write(ERRORS[error])
+sys.exit(1)
+"""
+
+
+def remote_cases(d: Path) -> None:
+    """git_remote against an origin that fails on its own side (a fake git
+    ahead on PATH): retried whether or not the command landed, a leased
+    deletion that landed not repeated, any other failure and a spent
+    budget left as they are; git() runs no network verb."""
+    scratch_env()
+    fb = "work/tester/9"
+    with scratch_origin(d, {"a.txt": "one\n"}) as (origin, _seed, co):
+        sh(co, "checkout", "--quiet", "-b", fb)
+        stub, plan = d / "stub", d / "plan"
+        stub.mkdir()
+        (stub / "git").write_text(FAKE_GIT.format(python=sys.executable, plan=str(plan), git=shutil.which("git")))
+        (stub / "git").chmod(0o755)
+
+        def planned(*failures: str) -> None:
+            plan.write_text("".join(f + "\n" for f in failures))
+            plan.with_suffix(".calls").write_text("")
+
+        def calls() -> list[str]:
+            return plan.with_suffix(".calls").read_text().split()
+
+        def at(ref: str) -> str:
+            return sh(origin, "rev-parse", "-q", "--verify", ref)
+
+        def gone(ref: str) -> bool:
+            return not sh(origin, "for-each-ref", ref)
+        base = sh(co, "rev-parse", "HEAD")
+        with mock.patch.dict(os.environ, {"PATH": f"{stub}{os.pathsep}{os.environ['PATH']}"}), \
+                mock.patch.object(proc, "RETRY_WAITS", (0.01, 0.01)):
+            # Refused in-band before anything landed: the retry lands it, said once.
+            planned("before inband")
+            put(co, "b.txt", "b\n", "b")
+            b = sh(co, "rev-parse", "HEAD")
+            lease = f"--force-with-lease=refs/heads/{fb}:"
+            note = warned(lambda: proc.git_remote("push", "--quiet", "origin", f"{fb}:refs/heads/{fb}", lease))
+            assert note == ("note: git push: the remote failed on its own side (remote: Internal Server Error); "
+                            "retrying in 0.01 s\n"), note
+            assert calls() == ["push", "push"] and at(fb) == b
+            # Landed, then an HTTP 5xx: the same push again finds it done, the lease as it was.
+            planned("after http")
+            put(co, "c.txt", "c\n", "c")
+            c = sh(co, "rev-parse", "HEAD")
+            with contextlib.redirect_stderr(io.StringIO()):
+                proc.git_remote("push", "--quiet", "origin", f"{fb}:refs/heads/{fb}", f"{lease}{b}")
+            assert calls() == ["push", "push"] and at(fb) == c
+            assert sh(co, "rev-parse", f"refs/remotes/origin/{fb}") == c
+            # A fetch, and the failures a retry may follow: two.
+            planned("before http", "before inband")
+            with contextlib.redirect_stderr(io.StringIO()):
+                assert checkout.fetch_origin().returncode == 0
+            assert calls() == ["fetch"] * 3
+            planned("before http", "before http", "before http")
+            with contextlib.redirect_stderr(io.StringIO()):
+                p = proc.git_remote("ls-remote", "origin", check=False)
+            assert p.returncode == 1 and "error: 502" in p.stderr and calls() == ["ls-remote"] * 3
+            # Any other failure is the command's answer, as is a server error past the time given.
+            planned("before refused")
+            assert warned(lambda: proc.git_remote("push", "--quiet", "origin", f"{fb}:refs/heads/{fb}", check=False)) == ""
+            assert calls() == ["push"]
+            planned("before http")
+            with mock.patch.object(proc, "RETRY_WAITS", (30, 30)):
+                p = proc.git_remote("fetch", "--quiet", "origin", check=False, timeout=20)
+            assert p.returncode == 1 and calls() == ["fetch"]
+            # A leased deletion that landed: its ref gone is all there was to do...
+            ref, other = "refs/nixconvoy/t/one", "refs/nixconvoy/t/two"
+            sh(co, "push", "--quiet", "origin", f"{c}:{ref}", f"{c}:{other}")
+            planned("after inband")
+            with contextlib.redirect_stderr(io.StringIO()):
+                p = proc.git_remote("push", "--quiet", "origin", *checkout.delete_args({ref: c}), check=False)
+            assert p.returncode == 0 and calls() == ["push", "ls-remote"] and gone(ref)
+            # ...asked again when the remote fails to say so, the server error the answer if it never does...
+            for failures, rc in ((["before http"], 0), (["before http", "before inband"], 1)):
+                sh(co, "push", "--quiet", "origin", f"{c}:{ref}")
+                planned("after inband", *failures)
+                with contextlib.redirect_stderr(io.StringIO()):
+                    p = proc.git_remote("push", "--quiet", "origin", *checkout.delete_args({ref: c}), check=False)
+                assert p.returncode == rc and calls() == ["push", "ls-remote", "ls-remote"] and gone(ref), p
+                assert rc == 0 or ("Internal Server Error" in p.stderr and "stale info" not in p.stderr), p
+            # ...one that did not is made again, with what the first left undone...
+            sh(co, "push", "--quiet", "origin", f"{c}:{ref}")
+            sh(co, "push", "--quiet", "origin", f":{other}")
+            planned("before inband")
+            with contextlib.redirect_stderr(io.StringIO()):
+                p = proc.git_remote("push", "--quiet", "origin", *checkout.delete_args({ref: c, other: c}), check=False)
+            assert p.returncode == 0 and calls() == ["push", "ls-remote", "push"] and gone(ref)
+            # ...and beside other refs in an atomic push, those are pushed again without it.
+            sh(co, "push", "--quiet", "origin", f"{c}:{ref}")
+            planned("after http")
+            with contextlib.redirect_stderr(io.StringIO()):
+                p = proc.git_remote("push", "--quiet", "--atomic", "origin", f"+{base}:{other}", f":{ref}",
+                                    f"--force-with-lease={ref}:{c}", check=False)
+            assert p.returncode == 0 and calls() == ["push", "ls-remote", "push"] and gone(ref) and at(other) == base
+            # A ref another writer put there since is still refused.
+            sh(co, "push", "--quiet", "origin", f"{base}:{ref}")
+            planned("before inband")
+            with contextlib.redirect_stderr(io.StringIO()):
+                p = proc.git_remote("push", "--quiet", "origin", *checkout.delete_args({ref: c}), check=False)
+            assert p.returncode != 0 and "stale info" in p.stderr and at(ref) == base
+            # The command a background script runs: the same, by its exit code, git's output as it comes.
+            planned("before inband")
+            p = subprocess.run([*proc.GIT_REMOTE_CMD, "push", "--quiet", "origin", f":{ref}"],
+                               capture_output=True, text=True, check=False)
+            assert p.returncode == 0 and "retrying" in p.stderr and calls() == ["push", "push"] and gone(ref), p
+            assert "[remote rejected]" in p.stdout, p
+        # What the remote alone can have caused, and what a network or another writer can too.
+        for theirs in ("fatal: unable to access 'https://o/r.git/': The requested URL returned error: 503",
+                       "error: RPC failed; HTTP 500 curl 22 The requested URL returned error: 500",
+                       " ! [remote rejected] a -> b (internal server error)",
+                       "remote: fatal error in commit_refs\n ! [remote rejected] a -> b (failure)",
+                       "remote: Unexpected system error after push was received.",
+                       "fatal: remote error: \n  Storage server temporarily offline. See https://status.github.com"):
+            assert proc.SERVER_ERROR.search(theirs), theirs
+        for other in ("error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly: INTERNAL_ERROR (err 2)",
+                      "error: RPC failed; curl 56 Recv failure: Connection reset by peer",
+                      "fatal: the remote end hung up unexpectedly", " ! [remote rejected] a -> b (failure)",
+                      " ! [remote rejected] a -> b (cannot lock ref 'refs/heads/b')",
+                      " ! [rejected] a -> b (stale info)", "The requested URL returned error: 429",
+                      "fatal: unable to access 'https://o/r.git/': The requested URL returned error: 403"):
+            assert not proc.SERVER_ERROR.search(other), other
+        for local in (("fetch", "--quiet", "origin"), ("submodule", "update", "--init")):
+            try:
+                proc.git(*local)
+            except AssertionError as e:
+                assert "git_remote" in str(e), e
+            else:
+                raise AssertionError(f"git() ran {local}")
+    say("remote: ok")
+
+
 def names_cases(d: Path) -> None:
     """nixconvoy.toml's `remote` and `main_branch`: a repository whose
     remote is `up` and whose main is `trunk`, through the rebase and union
@@ -3478,7 +3634,8 @@ def unit_cases() -> None:
 SECTIONS: dict[str, Callable[[], None]] = {
     **{cases.__name__.removesuffix("_cases"): in_scratch(cases)
        for cases in (submodule_cases, open_cases, git_cases, counterpart_cases, switch_cases, announce_cases,
-                     reach_cases, lanes_cases, guard_cases, landing_rebase_cases, names_cases, init_cases)},
+                     reach_cases, lanes_cases, guard_cases, landing_rebase_cases, names_cases, remote_cases,
+                     init_cases)},
     "units": unit_cases,
 }
 

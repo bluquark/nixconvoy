@@ -21,7 +21,7 @@ from .checkout import (
     worktree_lock,
 )
 from .config import MSG_FILE, cfg, remote_ref
-from .proc import git, run
+from .proc import git_remote, run
 
 
 def held(d: Path) -> bool:
@@ -43,7 +43,7 @@ def find() -> list[tuple[str, Path | None, str]]:
     (<prefix><branch-suffix>-<name>) on origin with commits beyond origin/main and
     every other listed branch, which no checkout here owns or whose owner
     is a subagent worktree no live session holds."""
-    fetched = git(*fetch_args("--no-auto-gc"), check=False)
+    fetched = git_remote(*fetch_args("--no-auto-gc"), check=False)
     if fetched.returncode != 0:
         print(strings.ORPHANS_FETCH_FAILED(stderr=(fetched.stderr or "").strip()), file=sys.stderr)
     prefix = this_prefix()

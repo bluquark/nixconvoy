@@ -375,6 +375,7 @@ PROC_PERF_PHASE = M("{phase} {secs}s")
 PROC_DIE = M("{TOOL}: {msg}")
 PROC_STILL_ARMED = M("{TOOL}: {targets} still armed: each finishes verifying and is then confirmed or rolled back")
 PROC_CMD_FAILED = M("`{cmd}` failed{detail}")
+PROC_REMOTE_RETRY = M("note: git {verb}: the remote failed on its own side ({error}); retrying in {secs} s")
 PROC_AGENIX_DECRYPTED = M("[agenix] decrypted {n} secrets (generation {generation})")
 
 # --- deploy.py

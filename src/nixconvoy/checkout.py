@@ -35,7 +35,7 @@ from .config import (
     remote_ref,
 )
 from .guard import decide
-from .proc import PERF, die, git, is_ancestor, ok, out, rev, run, solve_with_mergiraf
+from .proc import PERF, die, git, git_remote, is_ancestor, ok, out, rev, run, solve_with_mergiraf
 from .wire import (
     AddAll,
     AddWorktree,
@@ -140,7 +140,7 @@ def fetch_origin(*flags: str, check: bool = True) -> subprocess.CompletedProcess
     """`git fetch origin` (fetch_args), stamping FETCHED_AT on success."""
     global FETCHED_AT
     started = time.time()
-    p = git(*fetch_args(*flags), check=check)
+    p = git_remote(*fetch_args(*flags), check=check)
     if p.returncode == 0:
         FETCHED_AT = started
     return p
@@ -554,7 +554,7 @@ class GitQueries:
                 if problem is not None:
                     return Ran(False, problem)
                 head = rev(f"refs/heads/{branch}")
-                p = git(*push_cmd(branch, rev(remote_ref(branch)) or ""), check=False)
+                p = git_remote(*push_cmd(branch, rev(remote_ref(branch)) or ""), check=False)
                 if p.returncode == 0 and head:
                     note_pushed(branch, head)
                 return ran(p)
@@ -1076,13 +1076,13 @@ def push_feature_branch(fb: str) -> None:
     head = rev(f"refs/heads/{fb}")
     if head is None or rev(remote_ref(fb)) == head:
         return
-    p = git(*push_cmd(fb, ensure_sole_writer(fb)), check=False)
+    p = git_remote(*push_cmd(fb, ensure_sole_writer(fb)), check=False)
     if p.returncode != 0:
         die(strings.CHECKOUT_PUSH_FB_FAILED(fb=fb, remote=cfg().remote, stderr=p.stderr.strip()))
     note_pushed(fb, head)
     clear = clear_refspec(fb)
     if clear:
-        git("push", "--quiet", cfg().remote, *clear, check=False)
+        git_remote("push", "--quiet", cfg().remote, *clear, check=False)
     print(strings.CHECKOUT_PUSHED(fb=fb, sha=head[:12] if head else "?"))
 
 
@@ -1173,8 +1173,8 @@ class Announce:
             sha = self._commit(settled=False)
             if not sha:
                 return False
-            p = git("push", "--quiet", "--force", cfg().remote, f"{sha}:{PENDING_REFS}/{self.key}",
-                    check=False, timeout=PUSH_TIMEOUT)
+            p = git_remote("push", "--quiet", "--force", cfg().remote, f"{sha}:{PENDING_REFS}/{self.key}",
+                           check=False, timeout=PUSH_TIMEOUT)
             if p.returncode != 0:
                 self.detail = (p.stderr or "").strip() or strings.CHECKOUT_PUSH_FAILED
                 return False
@@ -1224,8 +1224,8 @@ class Announce:
         since a push that landed but timed out here must not strand it."""
         self.stop()
         with proc.finishing():
-            git("push", "--quiet", cfg().remote, *delete_args({f"{PENDING_REFS}/{self.key}": self.sha}),
-                check=False, timeout=PUSH_TIMEOUT)
+            git_remote("push", "--quiet", cfg().remote, *delete_args({f"{PENDING_REFS}/{self.key}": self.sha}),
+                       check=False, timeout=PUSH_TIMEOUT)
 
 
 def announce_key(branch: str) -> str:
@@ -1412,7 +1412,7 @@ def push_deployed(fb: str | None, ann: Announce | None, records: dict[str, str],
         return problem
     f = push_files()
     hold = os.environ.get("NIXCONVOY_HOLD_PUSH", "")
-    push = ["git", "-c", "core.hooksPath=/dev/null", *proc.PUSH_NET, "push", "--quiet", cfg().remote]
+    push = [*proc.GIT_REMOTE_CMD, "push", "--quiet", cfg().remote]
     body = (shlex.join([*push, "--atomic", *refspecs]) if refspecs else "true") + "; rc=$?"
     if pushed_note:
         body += f'; [ "$rc" = 0 ] && {shlex.join(pushed_note)}'
@@ -1437,7 +1437,7 @@ def push_deployed(fb: str | None, ann: Announce | None, records: dict[str, str],
         for path in (f.status, f.tmp):
             with contextlib.suppress(OSError):
                 path.unlink()
-        script = (f'export GIT_TERMINAL_PROMPT=0; ({body}) {lock.fileno()}>&-; rc=$?'
+        script = (f'({body}) {lock.fileno()}>&-; rc=$?'
                   '; echo "$rc" >"$0.tmp" && mv -f "$0.tmp" "$0"')
         if hold:
             script = f"sleep {shlex.quote(hold)}; {script}"

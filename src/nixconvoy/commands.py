@@ -85,7 +85,20 @@ from .checkout import (
 from .config import CONFIG_FILE, MSG_FILE, cfg, main_ref, main_short, remote_ref, repo_names
 from .guard import binary, decide
 from .names import label as sub_label
-from .proc import Fail, die, failure, git, is_ancestor, ok, out, painter, rev, run, solve_with_mergiraf
+from .proc import (
+    Fail,
+    die,
+    failure,
+    git,
+    git_remote,
+    is_ancestor,
+    ok,
+    out,
+    painter,
+    rev,
+    run,
+    solve_with_mergiraf,
+)
 from .wire import (
     Alive,
     Dirty,
@@ -169,7 +182,7 @@ def main_message(fb: str, given: str | None, main: str, appended: str = "",
         whole = kept.read_text(encoding="utf-8").strip()
     if given is None and (edited := edit_message(whole, fb, tips)) is not None:
         kept.write_text(edited + "\n", encoding="utf-8")
-        git(*fetch_args())
+        git_remote(*fetch_args())
         if rev(main_ref()) != main:
             die(strings.LAND_MAIN_MOVED_DURING_EDIT(main=main_short()))
         return edited
@@ -180,7 +193,7 @@ def main_message(fb: str, given: str | None, main: str, appended: str = "",
 
 def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
     await_background_push()
-    git(*fetch_args())
+    git_remote(*fetch_args())
     pop_tmp_commits()
     fb = require_feature_branch("land")
     if current_branch() != fb:
@@ -219,9 +232,9 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
         landings = submodule.prepare_all(fb, msg)
         tree = tree_less_msg("HEAD")
         commit = out(["git", "commit-tree", tree, "-p", main, "-m", msg])
-        p = git("push", "--quiet", cfg().remote, f"{commit}:refs/heads/{cfg().main_branch}", check=False)
+        p = git_remote("push", "--quiet", cfg().remote, f"{commit}:refs/heads/{cfg().main_branch}", check=False)
         # A push cut off while the server took it in has landed all the same.
-        if p.returncode != 0 and git("ls-remote", cfg().remote, f"refs/heads/{cfg().main_branch}", check=False).stdout.split()[:1] != [commit]:
+        if p.returncode != 0 and git_remote("ls-remote", cfg().remote, f"refs/heads/{cfg().main_branch}", check=False).stdout.split()[:1] != [commit]:
             die(strings.LAND_PUSH_MAIN_FAILED(main_branch=cfg().main_branch, stderr=p.stderr.strip()))
     except Fail:
         submodule.abandon_all(landings)
@@ -269,7 +282,7 @@ def undeploy(back_to: str = "HEAD^", as_if: dict[str, str] | None = None) -> boo
     commit the branch would be reset onto recorded there under its name,
     for that deploy to take the branch to be at."""
     await_background_push()
-    git(*fetch_args())
+    git_remote(*fetch_args())
     pop_tmp_commits()
     ident = checkout_identity()
     here = Path.cwd().resolve()
@@ -383,7 +396,7 @@ def close_submodules(names: list[str], *, force: bool = False) -> None:
     branch, unless that would lose work (`force`: removed anyway, the pin
     put back to origin/main's when it named the branch's work, staged).
     One kept or failing stops none of the others; the run then fails."""
-    git(*fetch_args("--no-auto-gc"), check=False)
+    git_remote(*fetch_args("--no-auto-gc"), check=False)
     top = Path.cwd()
     failed = []
     for name in names:
@@ -712,7 +725,7 @@ def finish(fb: str, lease: str, onto: str | None = None) -> None:
     worktree left with nothing stays, idle: `close` removes it (the
     session-exit sweep does so on its own)."""
     onto = onto or main_short()
-    git(*push_cmd(fb, lease))
+    git_remote(*push_cmd(fb, lease))
     note_pushed(fb, rev(f"refs/heads/{fb}") or "")
     print(strings.LAND_RESET_ONTO(fb=fb, onto=onto))
     here = Path.cwd().resolve()
@@ -774,14 +787,9 @@ def drop_branches(names: list[str]) -> list[str]:
     pushed = {b: old for b, old in gone.items() if old}
     if pushed:
         # One push (a stall ends it: prune holds the worktree's name lock
-        # meanwhile).  Retried once: origin has rejected a deletion out of
-        # the blue.
-        cmd = ["push", "--quiet", cfg().remote, *(f":refs/heads/{b}" for b in pushed),
-               *(f"--force-with-lease=refs/heads/{b}:{old}" for b, old in pushed.items())]
-        p = git(*cmd, check=False)
-        if p.returncode != 0:
-            time.sleep(2)
-            p = git(*cmd, check=False)
+        # meanwhile).
+        p = git_remote("push", "--quiet", cfg().remote, *(f":refs/heads/{b}" for b in pushed),
+                       *(f"--force-with-lease=refs/heads/{b}:{old}" for b, old in pushed.items()), check=False)
         if p.returncode != 0:
             failed.append(strings.CLOSE_DELETE_FAILED(
                 branches=", ".join(pushed), remote=cfg().remote,
@@ -796,11 +804,7 @@ def drop_branches(names: list[str]) -> list[str]:
     clears = [spec for b in names for spec in clear_refspec(b)]
     clears += [f":{LINEAGE_REFS}/{b}" for b in gone if rev(f"{LINEAGE_REFS}/{b}")]
     if clears:
-        cmd = ["push", "--quiet", cfg().remote, *clears]
-        p = git(*cmd, check=False)
-        if p.returncode != 0:
-            time.sleep(2)
-            p = git(*cmd, check=False)
+        p = git_remote("push", "--quiet", cfg().remote, *clears, check=False)
         if p.returncode != 0:
             failed.append(strings.CLOSE_DELETE_ANNOUNCEMENTS_FAILED(
                 branches=", ".join(names), remote=cfg().remote, refs=PENDING_REFS,
@@ -835,7 +839,7 @@ def status() -> None:
     """Every checkout on this machine as a tree, and the feature branches only
     origin holds (cli docstring: Status)."""
     paint = painter()
-    git(*fetch_args("--no-auto-gc"), check=False)
+    git_remote(*fetch_args("--no-auto-gc"), check=False)
     main = rev(main_ref())
     tips = origin_tips()
     here = Path.cwd().resolve()
@@ -1099,7 +1103,7 @@ def open_checkout(path: Path, branch: str | None) -> Path:
                 die(strings.OPEN_NESTED(path=d, up=up))
             break
         up = up.parent
-    git(*fetch_args("--no-auto-gc"), check=False)
+    git_remote(*fetch_args("--no-auto-gc"), check=False)
     tips = origin_tips()
     local = set(out(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/"]).split())
     prefix = this_prefix()
@@ -1139,7 +1143,7 @@ def open_checkout(path: Path, branch: str | None) -> Path:
         # against no branch at all loses to an open of the same name
         # elsewhere since the fetch.  One this repository held already
         # is pushed by its next deploy.
-        p = git(*push_cmd(branch, ""), check=False)
+        p = git_remote(*push_cmd(branch, ""), check=False)
         if p.returncode != 0:
             git("worktree", "remove", "--force", str(d), check=False)
             git("branch", "--quiet", "-D", branch, check=False)
@@ -1169,7 +1173,7 @@ def close_checkout(path: Path, *, force: bool = False) -> None:
         die(strings.CLOSE_PRIMARY(path=d))
     if sub_parent(d) is not None:
         die(strings.CLOSE_IS_SUB(path=d, name=d.name))
-    git(*fetch_args("--no-auto-gc"), check=False)
+    git_remote(*fetch_args("--no-auto-gc"), check=False)
     nested = subs_of(d)
     if nested:
         die(strings.CLOSE_HOLDS_SUBS(path=d, names=", ".join(w.name for w in nested)))
@@ -1216,7 +1220,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
     appended - every branch reset onto the new main, here and on origin,
     each worktree staying."""
     await_background_push()
-    git(*fetch_args())
+    git_remote(*fetch_args())
     pop_tmp_commits()
     here = Path.cwd().resolve()
     if sub_parent(here) is not None:
@@ -1346,7 +1350,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
             clashes(tree, pinned=True)
             submodule.check_pins(tree, landings, here)
             commit = out(["git", "commit-tree", tree, "-p", main, "-m", msg])
-            p = git("push", "--quiet", cfg().remote, f"{commit}:refs/heads/{cfg().main_branch}", check=False)
+            p = git_remote("push", "--quiet", cfg().remote, f"{commit}:refs/heads/{cfg().main_branch}", check=False)
             if p.returncode != 0:
                 die(strings.LAND_PUSH_MAIN_FAILED(main_branch=cfg().main_branch, stderr=p.stderr.strip()))
         except Fail:

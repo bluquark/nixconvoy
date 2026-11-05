@@ -304,13 +304,119 @@ GIT_ENV = {"GIT_TERMINAL_PROMPT": "0"}
 
 
 # git with user hooks disabled: machinery pushes/commits must never trigger
-# a global post-commit auto-push or pre-push hook.  A network verb gets GIT_NET.
+# a global post-commit auto-push or pre-push hook.
+GIT = ("git", "-c", "core.hooksPath=/dev/null")
+
+
 def git(*args: str, cwd: str | None = None, env: dict[str, str] | None = None,
         check: bool = True, capture: bool = True, timeout: float | None = None,
         pass_fds: tuple[int, ...] = ()) -> subprocess.CompletedProcess[str]:
-    net = PUSH_NET if args and args[0] == "push" else GIT_NET if args and args[0] in NET_VERBS else ()
-    return run(["git", "-c", "core.hooksPath=/dev/null", *net, *args], cwd=cwd, env={**GIT_ENV, **(env or {})},
+    """A git command that stays on this machine (git_remote runs the rest)."""
+    assert not args or (args[0] not in NET_VERBS and args[:2] != ("submodule", "update")), \
+        f"git {args[0]} talks to a remote: git_remote"
+    return run([*GIT, *args], cwd=cwd, env={**GIT_ENV, **(env or {})},
                check=check, capture=capture, timeout=timeout, pass_fds=pass_fds)
+
+
+# The remote failing on its own side: an HTTP 5xx, or what GitHub says
+# in-band under a 200 when its own machinery fails (commit_refs is its
+# ref update's last-ditch error).  Nothing a client, a network or another
+# writer of the ref can cause is among them.
+SERVER_ERROR = re.compile(
+    r"^.*(?:returned error: 5\d\d\b|HTTP 5\d\d\b|Internal Server Error|fatal error in commit_refs"
+    r"|Unexpected system error|Storage server temporarily offline).*$", re.MULTILINE | re.IGNORECASE)
+# Seconds waited before each retry of a command the remote failed so.
+RETRY_WAITS = (1, 3)
+
+
+def undone(args: list[str], cwd: str | None, env: dict[str, str],
+           timeout: float | None) -> tuple[list[str], bool]:
+    """The push `args` less its leased deletions of refs the remote no
+    longer holds - nothing when that leaves no ref to push - and whether
+    the remote said so: asked for those refs, it may fail again.  `args`
+    itself for anything else.  A leased deletion is the one push made
+    here that fails when repeated after it landed (the ref gone is not at
+    its lease)."""
+    if args[0] != "push":
+        return args, True
+    leases = {a.split("=", 1)[1].split(":", 1)[0]: a for a in args if a.startswith("--force-with-lease=")}
+    deletes = [a[1:] for a in args if a.startswith(":") and a[1:] in leases]
+    if not deletes:
+        return args, True
+    remote = next(a for a in args[1:] if not a.startswith("-"))
+    p = run([*GIT, *GIT_NET, "ls-remote", remote, *deletes], cwd=cwd, env=env, check=False, timeout=timeout)
+    if p.returncode != 0:
+        return args, False
+    held = {ln.split("\t", 1)[1] for ln in p.stdout.splitlines() if "\t" in ln}
+    gone = {x for ref in deletes if ref not in held for x in (f":{ref}", leases[ref])}
+    left = [a for a in args if a not in gone]
+    return (left if any(not a.startswith("-") for a in left[left.index(remote) + 1:]) else []), True
+
+
+def git_remote(*args: str, cwd: str | None = None, env: dict[str, str] | None = None,
+               check: bool = True, timeout: float | None = None, streamed: bool = False) -> Completed:
+    """A git command that talks to a remote (NET_VERBS, `submodule
+    update`), under GIT_NET and retried (RETRY_WAITS) while the remote
+    fails on its own side (SERVER_ERROR): whether such a command landed
+    is unknown, so each must leave the remote the same when repeated after
+    landing, which undone sees to for the one that does not.  `timeout`
+    covers the retries too, each given at least the time the attempt
+    before took.  `streamed` prints the command's output as it comes
+    (stream; the environment and directory this process's own), all of it
+    then the result's stderr."""
+    assert not streamed or (cwd, env, timeout) == (None, None, None)
+    net = PUSH_NET if args[0] == "push" else GIT_NET
+    full_env = {**GIT_ENV, **(env or {})}
+    deadline = None if timeout is None else time.monotonic() + timeout
+
+    def left() -> float | None:
+        return None if deadline is None else max(deadline - time.monotonic(), 0.0)
+
+    def attempt(todo: list[str]) -> tuple[Completed, float, re.Match[str] | None]:
+        """`todo` run: its result, the seconds it took, its server error."""
+        cmd, t0 = [*GIT, *net, *todo], time.monotonic()
+        if streamed:
+            lines: list[str] = []
+            p = Completed(cmd, stream(cmd, sink=lines), "", "\n".join(lines))
+        else:
+            p = run(cmd, cwd=cwd, env=full_env, check=False, timeout=left())
+        failed = p.returncode != 0 and not p.timed_out
+        return p, time.monotonic() - t0, SERVER_ERROR.search(p.stderr or "") if failed else None
+    todo = list(args)
+    p, took, error = attempt(todo)
+    for wait in RETRY_WAITS:
+        if error is None or (deadline is not None and time.monotonic() + wait + took > deadline):
+            break
+        print(strings.PROC_REMOTE_RETRY(verb=args[0], error=error.group().strip(), secs=wait), file=sys.stderr, flush=True)
+        until = time.monotonic() + wait
+        while time.monotonic() < until:
+            gate()
+            time.sleep(0.05)
+        todo, asked = undone(todo, cwd, full_env, left())
+        if not todo:
+            p = Completed(p.args, 0, "", "")
+            break
+        if deadline is not None and time.monotonic() + took > deadline:
+            break
+        # The remote failing to say what is left of the push is this attempt failed.
+        if asked:
+            p, took, error = attempt(todo)
+    if check and p.returncode != 0:
+        detail = (p.stderr or "").strip()
+        die(strings.PROC_CMD_FAILED(cmd=" ".join(p.args), detail=strings.PROC_DETAIL(output=detail) if detail else ""))
+    return p
+
+
+# git_remote as a command of its own (its arguments git's), for a script
+# that outlives this process: this package's directory is its first argument.
+GIT_REMOTE_CMD = (sys.executable, "-I", "-c",
+                  "import sys; sys.path.insert(0, sys.argv.pop(1)); from nixconvoy import proc; proc.git_remote_main()",
+                  str(Path(__file__).resolve().parents[1]))
+
+
+def git_remote_main() -> None:
+    os.environ.update(GIT_ENV)
+    sys.exit(git_remote(*sys.argv[1:], check=False, streamed=True).returncode)
 
 
 def rev(ref: str) -> str | None:
