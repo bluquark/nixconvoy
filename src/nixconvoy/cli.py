@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import IO, NoReturn
 
 from . import commands, config, hooks, init, names, orphans, proc, review, strings, submodule
-from .checkout import lock_checkout, lock_holder, note_prefix, require_work_branch, sub_parent
+from .checkout import lock_checkout, lock_holder, note_prefix, require_work_branch, staged_differs, sub_parent
 from .deploy import deploy
 from .proc import PERF, TOOL, Fail, die, ok, out, painter
 from .strings import BACK_TO_FLAG, DRY_FLAG, EVICT_FLAG
@@ -208,10 +208,10 @@ def dispatch() -> None:
             each.setdefault(Path(n) if with_children else names.worktree(n, here, subcmd, subagent=False), n)
         given, named = list(each.values()), list(each.keys())
         deploys_from = here
-        # The deploy runs from a checkout the undeploy does not reset, whose
-        # staged changes it would have to carry without a message.
-        if (subcmd == "undeploy" and given and here not in named and not parent_too
-                and not ok(["git", "diff", "--cached", "--quiet"], cwd=str(deploys_from))):
+        # What another checkout's undeploy makes due is deployed from this
+        # one, whatever its own undeploy comes to: its staged changes would
+        # be carried without a message.
+        if subcmd == "undeploy" and any(d != here for d in named) and staged_differs(str(deploys_from)):
             die(strings.UNDEPLOY_DEPLOYER_STAGED(path=deploys_from))
         # Several subagent worktrees, one after the other, each under its
         # own checkout's lock.  An undeploy that fails in one stops none of

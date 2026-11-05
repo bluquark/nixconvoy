@@ -3296,6 +3296,27 @@ def open_cases(d: Path) -> None:
         sh(w, "push", "--quiet", "origin", "work/tester/9-task")
         put(w, "n.txt", "unstaged\n")
         sh(w, "reset", "--quiet", "n.txt")
+        # An undeploy reaching another checkout deploys from this one,
+        # without a message: changes staged here are refused before
+        # anything moves, this checkout among those undone or not.
+        put(co, "q.txt", "staged\n")
+        tips = [sh(x, "rev-parse", "HEAD") for x in (co, w)]
+        argv0 = sys.argv
+        try:
+            with mock.patch.object(cli, "deploy") as deploys:
+                for argv in (["undeploy", "--with-children"], ["undeploy", "task"],
+                             ["undeploy", "work/tester/9", "task"], ["undeploy", "task", "--dry-activate"]):
+                    sys.argv = ["nixconvoy", *argv]
+                    err = dies(cli.main)
+                    assert f"{co} has staged changes, which the deploy after the undeploy would carry" in err, (argv, err)
+                    assert [sh(x, "rev-parse", "HEAD") for x in (co, w)] == tips and not proc.HELD, argv
+                deploys.assert_not_called()
+        finally:
+            sys.argv = argv0
+            atexit.unregister(proc.PERF.write)
+            os.chdir(co)
+        sh(co, "rm", "--quiet", "--cached", "q.txt")
+        (co / "q.txt").unlink()
         # The sub's COMMIT_MSG.md edited and staged after its deploy: no
         # undeployed change (the landing reads the file itself); any
         # other is one.
