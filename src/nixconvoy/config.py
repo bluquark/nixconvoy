@@ -91,7 +91,7 @@ class SwitchPolicy:
 
     def statements(self, kind: str) -> tuple[str, ...]:
         """The shell checks of `kind`, in order: the kit carries the
-        target's, this machine runs the controller's (shell_script each)."""
+        target's, the control machine runs its own (shell_script each)."""
         return tuple(c.script for c in self.checks if c.kind == kind)
 
 
@@ -122,10 +122,10 @@ class Config:
     # A target's ssh address (user@name): nixconvoy.toml's
     # ssh_address_template, over {target}; the builder is addressed through it too.
     ssh_template: str
-    # A checkout owns "<prefix><leaf>", its subagent worktrees "<prefix><leaf>-<name>"
+    # A checkout owns "<prefix><branch-suffix>", its subagent worktrees "<prefix><branch-suffix>-<name>"
     # (the main checkout's "<prefix>main-<name>"); {local_hostname}, when the
     # template has it, is this machine's hostname.  Also the shape of every
-    # work branch nixconvoy unions, {local_hostname} standing for any hostname
+    # feature branch nixconvoy unions, {local_hostname} standing for any hostname
     # (checkout.listed, the plan cores' `listed`): a pushed branch not
     # shaped so is ignored.
     branch_prefix: str
@@ -143,7 +143,7 @@ class Config:
     # builders), and the closures are copied to the targets from it.
     # Addressed as a target (ssh_address).
     builders: tuple[str, ...]
-    # The remote origin/main and the work branches live on, and main's name
+    # The remote origin/main and the feature branches live on, and main's name
     # there: `remote` and `main_branch` (origin and main unless set).
     remote: str = "origin"
     main_branch: str = "main"

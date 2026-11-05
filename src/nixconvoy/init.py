@@ -2,7 +2,7 @@
 the flake's nixosConfigurations as nix evaluates them, one
 [targets.<name>] table each (so nix is needed); every other key is
 detected from the repository - the flake directory, the targets' system,
-this machine's work-branch prefix, the remote and its main branch - or
+this machine's feature-branch prefix, the remote and its main branch - or
 starts from this machine (the ssh address template, as this user); the
 optional sections are written as commented examples filled with what was
 found (the flake's checks).  git is only read: nothing is staged or

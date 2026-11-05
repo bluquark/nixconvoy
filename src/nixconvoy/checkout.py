@@ -1,4 +1,4 @@
-"""The checkouts of the repo on this machine and their work branches:
+"""The checkouts of the repo on this machine and their feature branches:
 identity, locks, the staged snapshot, pushes, and the git queries
 nixconvoy-plan's rebase core asks."""
 
@@ -50,8 +50,8 @@ from .wire import (
     Flag,
     HeadSubject,
     Ok,
+    OnFeatureBranch,
     OnOrigin,
-    OnWorkBranch,
     OpInProgress,
     PlanQuery,
     PlanReply,
@@ -74,7 +74,7 @@ from .wire import (
 )
 
 # Identity for machinery commits (snapshots, union merges); the fixed date
-# makes an unchanged union re-create the same commit hash.  Work-branch and
+# makes an unchanged union re-create the same commit hash.  Feature-branch and
 # landing commits use the user's identity.
 MACHINE_ENV = {
     "GIT_AUTHOR_NAME": "nixconvoy",
@@ -145,8 +145,8 @@ def fetch_args(*flags: str) -> list[str]:
             f"+refs/heads/*:refs/remotes/{cfg().remote}/*", f"+{PENDING_REFS}/*:{PENDING_REFS}/*"]
 
 
-def work_shape() -> str:
-    """The shape of the work branches nixconvoy may union or own: the
+def feature_shape() -> str:
+    """The shape of the feature branches nixconvoy may union or own: the
     invoking checkout's working-tree copy of nixconvoy.toml's
     branch_prefix (config.root(), wherever the run has moved to), read
     afresh each time (a rebase may have changed it)."""
@@ -163,8 +163,8 @@ def shape_re(shape: str) -> re.Pattern[str]:
 
 
 def listed(name: str, shape: str | None = None) -> bool:
-    """Whether `name` is a work branch: shaped like `shape` (the work shape)."""
-    return shape_re(work_shape() if shape is None else shape).match(name) is not None
+    """Whether `name` is a feature branch: shaped like `shape` (the feature shape)."""
+    return shape_re(feature_shape() if shape is None else shape).match(name) is not None
 
 
 def this_prefix() -> str:
@@ -172,16 +172,16 @@ def this_prefix() -> str:
 
 
 def owned(name: str) -> bool:
-    """A work branch this machine may write: named with its prefix (another
+    """A feature branch this machine may write: named with its prefix (another
     machine's is only ever unioned)."""
     return name.startswith(this_prefix())
 
 
 class Checkout(NamedTuple):
-    # "main" (no work branch of its own), "agent" (a work branch) or "sub"
+    # "main" (no feature branch of its own), "agent" (a feature branch) or "sub"
     # (a subagent worktree nested in another checkout).
     kind: str
-    wb: str | None
+    fb: str | None
 
 
 def sub_dir() -> Path:
@@ -281,8 +281,8 @@ def state_dir(d: Path) -> Path:
 def note_prefix(top: Path) -> None:
     """This machine's expanded branch_prefix, and origin/main by its
     configured names, written into the repository's common git dir for the
-    shell prompt (integrations/shell/prompt.bash), which shows a work
-    branch by its leaf and its lead over main: bash reads a line there
+    shell prompt (integrations/shell/prompt.bash), which shows a feature
+    branch by its suffix and its lead over main: bash reads a line there
     where it could not read nixconvoy.toml at every prompt.  Written by
     `init` and refreshed by every later command; a repository without a
     readable nixconvoy.toml (a submodule's, `review` works there) gets
@@ -304,11 +304,11 @@ def note_prefix(top: Path) -> None:
 
 def identity_of(here: Path, cur: str | None) -> Checkout:
     """What the checkout at `here` with `cur` checked out is: on one of
-    this machine's work branches it owns that branch (a subagent's
+    this machine's feature branches it owns that branch (a subagent's
     when it is nested in another checkout); a subagent worktree on
-    any other branch owns <parent's work branch>-<name> (<branch_prefix>main-<name>
+    any other branch owns <parent's feature branch>-<name> (<branch_prefix>main-<name>
     under the main checkout); anything else is the main checkout, with no
-    work branch of its own."""
+    feature branch of its own."""
     parent = sub_parent(here)
     if cur and owned(cur):
         return Checkout("sub" if parent is not None else "agent", cur)
@@ -323,16 +323,16 @@ def checkout_identity() -> Checkout:
     return identity_of(Path.cwd().resolve(), current_branch())
 
 
-def work_branch_name() -> str | None:
-    """The work branch of the current checkout; None for the main checkout."""
-    return checkout_identity().wb
+def feature_branch_name() -> str | None:
+    """The feature branch of the current checkout; None for the main checkout."""
+    return checkout_identity().fb
 
 
-def require_work_branch(what: str) -> str:
-    wb = work_branch_name()
-    if wb is None:
-        die(strings.CHECKOUT_NEEDS_WB(what=what, prefix=this_prefix()))
-    return wb
+def require_feature_branch(what: str) -> str:
+    fb = feature_branch_name()
+    if fb is None:
+        die(strings.CHECKOUT_NEEDS_FB(what=what, prefix=this_prefix()))
+    return fb
 
 
 def current_branch() -> str | None:
@@ -508,7 +508,7 @@ class GitQueries:
     def __init__(self, names: RepoNames | None = None, as_if: Mapping[str, str] | None = None) -> None:
         self.aside = ""
         self.aside_branch = ""
-        # The work branches taken to be at these commits, not at origin's
+        # The feature branches taken to be at these commits, not at origin's
         # tips of them (an undeploy's dry activation).
         self.as_if = as_if or {}
         # The repository's names (a submodule's own, when the core runs there).
@@ -692,7 +692,7 @@ def sibling_checkouts(here: Path | None = None) -> list[Path]:
 
 def update_checkout(path: Path) -> tuple[bool, str]:
     """Fetch and bring the checkout at `path` onto origin/main under its
-    deploy lock, pushing its work branch (origin's copy is what every other
+    deploy lock, pushing its feature branch (origin's copy is what every other
     deploy unions), then its submodule worktrees onto their default
     branches (submodule.catch_up): (ok, what happened).  A checkout that
     cannot be is left exactly as it was; a submodule that cannot be is
@@ -706,11 +706,11 @@ def update_checkout(path: Path) -> tuple[bool, str]:
         if lock is None:
             return False, strings.CHECKOUT_SKIPPED_LOCKED(holder=lock_holder())
         try:
-            wb = work_branch_name()
-            done = decide(RebaseParams(cfg().names, Sync(wb)))
+            fb = feature_branch_name()
+            done = decide(RebaseParams(cfg().names, Sync(fb)))
             good, status = isinstance(done, Ok), done.value
-            if good and wb is not None:
-                problems = submodule.catch_up(path, wb)
+            if good and fb is not None:
+                problems = submodule.catch_up(path, fb)
                 if problems:
                     good, status = False, "; ".join([status, *problems])
         finally:
@@ -739,10 +739,10 @@ def catch_up(paths: list[Path]) -> bool:
     return good
 
 
-def ensure_on_work_branch(wb: str) -> None:
+def ensure_on_feature_branch(fb: str) -> None:
     prev = current_branch()
-    decide(RebaseParams(cfg().names, OnWorkBranch(wb)))
-    if (prev is not None and prev not in (wb, cfg().main_branch) and current_branch() == wb
+    decide(RebaseParams(cfg().names, OnFeatureBranch(fb)))
+    if (prev is not None and prev not in (fb, cfg().main_branch) and current_branch() == fb
             and checkout_identity().kind == "sub"):
         # The fresh branch a subagent's worktree was created on, replaced.
         git("branch", "--quiet", "-D", prev, check=False)
@@ -782,7 +782,7 @@ def editor() -> str | None:
     return cmd if cmd and cmd != ":" else None
 
 
-def edit_message(draft: str, wb: str, tips: list[tuple[str, str]] | None = None) -> str | None:
+def edit_message(draft: str, fb: str, tips: list[tuple[str, str]] | None = None) -> str | None:
     """`draft` (the landing's message so far, "" for none) as the user leaves
     it in git's editor (editor()), on a terminal: a landing run by hand gets
     to adjust what an agent wrote; None when no editor runs, the draft
@@ -798,7 +798,7 @@ def edit_message(draft: str, wb: str, tips: list[tuple[str, str]] | None = None)
     if cmd is None:
         return None
     main = main_ref()
-    notes = [strings.CHECKOUT_NOTE_LANDING(wb=wb, main_branch=cfg().main_branch)]
+    notes = [strings.CHECKOUT_NOTE_LANDING(fb=fb, main_branch=cfg().main_branch)]
     for label, tip in tips or [("", "HEAD")]:
         of = strings.CHECKOUT_NOTE_OF(label=label) if label else ""
         notes += [strings.CHECKOUT_NOTE_INCREMENTS(of=of),
@@ -834,9 +834,9 @@ def edit_message(draft: str, wb: str, tips: list[tuple[str, str]] | None = None)
     return fold_subject("\n".join(lines))
 
 
-def warn_no_msgfile(wb: str) -> None:
+def warn_no_msgfile(fb: str) -> None:
     if not message_on_file().strip():
-        print(strings.CHECKOUT_NO_MSG_FILE_YET(wb=wb), file=sys.stderr)
+        print(strings.CHECKOUT_NO_MSG_FILE_YET(fb=fb), file=sys.stderr)
 
 
 def index_tree(cwd: str | None = None) -> str:
@@ -862,7 +862,7 @@ def staged_snapshot() -> str:
 
 
 def deployed_commit(snap: str, msg: str) -> str:
-    """The work-branch commit of the increment `snap` deploys: exactly the
+    """The feature-branch commit of the increment `snap` deploys: exactly the
     snapshot's tree on HEAD, with the user's identity.  Made before the
     switch, so the provenance the targets get names the commit origin will hold
     (a later deploy anywhere can then tell what became of it); dangling if
@@ -871,16 +871,16 @@ def deployed_commit(snap: str, msg: str) -> str:
     return out(["git", "commit-tree", tree, "-p", "HEAD", "-m", msg])
 
 
-def adopt_commit(wb: str, c: str) -> None:
-    """`c` (deployed_commit) onto the work branch once its increment runs.
+def adopt_commit(fb: str, c: str) -> None:
+    """`c` (deployed_commit) onto the feature branch once its increment runs.
     The soft reset leaves the index alone, so anything staged mid-deploy
     stays staged on top."""
     git("reset", "--quiet", "--soft", c)
-    warn_no_msgfile(wb)
+    warn_no_msgfile(fb)
 
 
-def commit_deployed(wb: str, snap: str, msg: str) -> None:
-    adopt_commit(wb, deployed_commit(snap, msg))
+def commit_deployed(fb: str, snap: str, msg: str) -> None:
+    adopt_commit(fb, deployed_commit(snap, msg))
 
 
 def push_state(kind: str) -> Path:
@@ -980,33 +980,33 @@ def await_background_push(*, wait: bool = True) -> bool:
     return False
 
 
-# The tip this repository last pushed onto a work branch (or took from
+# The tip this repository last pushed onto a feature branch (or took from
 # origin's copy at open): the proof that origin's copy is ours to push over.
 PUSHED_REFS = "refs/nixconvoy/pushed"
 
 
-def pushed_tip(wb: str) -> str | None:
-    return rev(f"{PUSHED_REFS}/{wb}")
+def pushed_tip(fb: str) -> str | None:
+    return rev(f"{PUSHED_REFS}/{fb}")
 
 
-def note_pushed(wb: str, sha: str) -> None:
-    git("update-ref", f"{PUSHED_REFS}/{wb}", sha, check=False)
+def note_pushed(fb: str, sha: str) -> None:
+    git("update-ref", f"{PUSHED_REFS}/{fb}", sha, check=False)
 
 
-def forget_pushed(wb: str) -> None:
-    git("update-ref", "-d", f"{PUSHED_REFS}/{wb}", check=False)
+def forget_pushed(fb: str) -> None:
+    git("update-ref", "-d", f"{PUSHED_REFS}/{fb}", check=False)
 
 
-def adopt_origin_tip(wb: str) -> None:
-    """Origin's copy of the work branch, taken as this checkout's (open by
+def adopt_origin_tip(fb: str) -> None:
+    """Origin's copy of the feature branch, taken as this checkout's (open by
     name), noted as pushed."""
-    up = rev(remote_ref(wb))
+    up = rev(remote_ref(fb))
     if up is not None:
-        note_pushed(wb, up)
+        note_pushed(fb, up)
 
 
-def sole_writer_problem(wb: str) -> str | None:
-    """Why origin's tip of the work branch is not this checkout's to push
+def sole_writer_problem(fb: str) -> str | None:
+    """Why origin's tip of the feature branch is not this checkout's to push
     over, or None: it is, when it is on origin/main (reset, landed or
     undone from elsewhere), in the local branch, the tip this repository
     last pushed or took from origin (PUSHED_REFS), or a tip the local
@@ -1015,54 +1015,54 @@ def sole_writer_problem(wb: str) -> str | None:
     onto it.  The deploy decides before its rebase moves the local
     branch, so the message's remedy, which brings origin's commits into
     it, is seen; after a rebase the note or the reflog decides."""
-    up = rev(remote_ref(wb))
-    local = rev(f"refs/heads/{wb}")
+    up = rev(remote_ref(fb))
+    local = rev(f"refs/heads/{fb}")
     if up is None or local is None or is_ancestor(up, main_ref()) or is_ancestor(up, local) \
-            or pushed_tip(wb) == up:
+            or pushed_tip(fb) == up:
         return None
-    held = run(["git", "reflog", "show", "--format=%H", f"refs/heads/{wb}"], check=False).stdout.split()
+    held = run(["git", "reflog", "show", "--format=%H", f"refs/heads/{fb}"], check=False).stdout.split()
     if not held or up in held:
         return None
-    return strings.CHECKOUT_SOLE_WRITER(wb=wb, remote=cfg().remote, sha=up[:12], up_ref=remote_ref(wb),
+    return strings.CHECKOUT_SOLE_WRITER(fb=fb, remote=cfg().remote, sha=up[:12], up_ref=remote_ref(fb),
                                         prefix=this_prefix())
 
 
-def ensure_sole_writer(wb: str) -> str:
-    """Die unless origin's tip of the work branch is this checkout's
+def ensure_sole_writer(fb: str) -> str:
+    """Die unless origin's tip of the feature branch is this checkout's
     (sole_writer_problem): before a deploy rebases or switches, a land
     pushes main or an undeploy resets anything, and before every push of
     the branch.  Returns that tip ("" for none), the lease the push takes
     (push_cmd), so a fetch between the check and the push changes nothing."""
-    problem = sole_writer_problem(wb)
+    problem = sole_writer_problem(fb)
     if problem is not None:
         die(problem)
-    return rev(remote_ref(wb)) or ""
+    return rev(remote_ref(fb)) or ""
 
 
-def push_refspecs(wb: str, lease: str) -> list[str]:
-    """The work branch's local tip, CAS against `lease`: origin's tip as
+def push_refspecs(fb: str, lease: str) -> list[str]:
+    """The feature branch's local tip, CAS against `lease`: origin's tip as
     ensure_sole_writer proved it this checkout's ("" for no branch)."""
-    return [f"{wb}:refs/heads/{wb}", f"--force-with-lease=refs/heads/{wb}:{lease}"]
+    return [f"{fb}:refs/heads/{fb}", f"--force-with-lease=refs/heads/{fb}:{lease}"]
 
 
-def push_cmd(wb: str, lease: str) -> list[str]:
-    return ["push", "--quiet", cfg().remote, *push_refspecs(wb, lease)]
+def push_cmd(fb: str, lease: str) -> list[str]:
+    return ["push", "--quiet", cfg().remote, *push_refspecs(fb, lease)]
 
 
-def push_work_branch(wb: str) -> None:
-    """Push the work branch (a deploy's end pushes in the background instead:
+def push_feature_branch(fb: str) -> None:
+    """Push the feature branch (a deploy's end pushes in the background instead:
     push_deployed)."""
-    head = rev(f"refs/heads/{wb}")
-    if head is None or rev(remote_ref(wb)) == head:
+    head = rev(f"refs/heads/{fb}")
+    if head is None or rev(remote_ref(fb)) == head:
         return
-    p = git(*push_cmd(wb, ensure_sole_writer(wb)), check=False)
+    p = git(*push_cmd(fb, ensure_sole_writer(fb)), check=False)
     if p.returncode != 0:
-        die(strings.CHECKOUT_PUSH_WB_FAILED(wb=wb, remote=cfg().remote, stderr=p.stderr.strip()))
-    note_pushed(wb, head)
-    clear = clear_refspec(wb)
+        die(strings.CHECKOUT_PUSH_FB_FAILED(fb=fb, remote=cfg().remote, stderr=p.stderr.strip()))
+    note_pushed(fb, head)
+    clear = clear_refspec(fb)
     if clear:
         git("push", "--quiet", cfg().remote, *clear, check=False)
-    print(strings.CHECKOUT_PUSHED(wb=wb, sha=head[:12] if head else "?"))
+    print(strings.CHECKOUT_PUSHED(fb=fb, sha=head[:12] if head else "?"))
 
 
 DATELESS_ENV = {k: v for k, v in MACHINE_ENV.items() if not k.endswith("_DATE")}
@@ -1246,7 +1246,7 @@ def announcements() -> tuple[list[Pending], dict[str, str]]:
     """Origin's announcements as fetched: the pending ones, and the cleared
     ones (key -> commit) a deploy's ending push sweeps away: main's whose
     announced HEAD origin/main holds (a main checkout's push, outside
-    nixconvoy, is what ends its pending state; a work branch's is deleted
+    nixconvoy, is what ends its pending state; a feature branch's is deleted
     by its own deploy's end), once settled or carrying no record - a main
     checkout's deploy with nothing pending announces a HEAD main holds
     already, for its records alone, and is under way until settled; one
@@ -1303,11 +1303,11 @@ def delete_args(refs: dict[str, str]) -> list[str]:
             *(f":{ref}" for ref in refs)]
 
 
-def clear_refspec(wb: str) -> list[str]:
-    """The push arguments deleting `wb`'s announcement, when one is here
+def clear_refspec(fb: str) -> list[str]:
+    """The push arguments deleting `fb`'s announcement, when one is here
     as fetched (a retry of a failed push clears it too)."""
-    sha = rev(f"{PENDING_REFS}/{wb}")
-    return delete_args({f"{PENDING_REFS}/{wb}": sha}) if sha else []
+    sha = rev(f"{PENDING_REFS}/{fb}")
+    return delete_args({f"{PENDING_REFS}/{fb}": sha}) if sha else []
 
 
 def record_commit(target: str, union: str, parents: list[str], subject: str, doc: str) -> str:
@@ -1335,11 +1335,11 @@ PUSH_LOCK_WAIT = 10
 PUSH_WAIT = 60
 
 
-def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str]) -> str | None:
+def push_deployed(fb: str | None, ann: Announce | None, records: dict[str, str]) -> str | None:
     """The push that ends a deploy, in the background, atomic - all of it
     lands or none, so a deploy waiting on the announcement finds the
     branch moved when it clears, and a settled announcement never outlives
-    records its history refs lack: the work branch, leased on origin's tip
+    records its history refs lack: the feature branch, leased on origin's tip
     as fetched; each switched target's record onto
     refs/heads/DEPLOYED_PREFIX/<target>; the branch's announcement deleted
     (this run's, or an earlier run's whose push failed; unleased, a
@@ -1361,25 +1361,25 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str])
     what: list[str] = []
     problem: str | None = None
     pushed_note: list[str] = []
-    head = rev(f"refs/heads/{wb}") if wb else None
-    if wb and head and current_branch() == wb and rev(remote_ref(wb)) != head:
-        problem = sole_writer_problem(wb)
+    head = rev(f"refs/heads/{fb}") if fb else None
+    if fb and head and current_branch() == fb and rev(remote_ref(fb)) != head:
+        problem = sole_writer_problem(fb)
         if problem is None:
-            refspecs += push_refspecs(wb, rev(remote_ref(wb)) or "")
-            pushed_note = ["git", "update-ref", f"{PUSHED_REFS}/{wb}", head]
-            what.append(strings.CHECKOUT_PUSHING_BRANCH(wb=wb, sha=head[:12]))
+            refspecs += push_refspecs(fb, rev(remote_ref(fb)) or "")
+            pushed_note = ["git", "update-ref", f"{PUSHED_REFS}/{fb}", head]
+            what.append(strings.CHECKOUT_PUSHING_BRANCH(fb=fb, sha=head[:12]))
     refspecs += [f"+{sha}:refs/heads/{DEPLOYED_PREFIX}/{h}" for h, sha in records.items()]
     what += [f"{DEPLOYED_PREFIX}/{h}" for h in records]
-    if ann is not None and ann.key == wb:
+    if ann is not None and ann.key == fb:
         if problem is None:
             ann.stop()
-            refspecs.append(f":{PENDING_REFS}/{wb}")
+            refspecs.append(f":{PENDING_REFS}/{fb}")
     elif ann is not None:
         settled = ann.settled_commit()
         if settled:
             refspecs.append(f"+{settled}:{PENDING_REFS}/{ann.key}")
-    elif wb and rev(f"{PENDING_REFS}/{wb}"):
-        refspecs.append(f":{PENDING_REFS}/{wb}")
+    elif fb and rev(f"{PENDING_REFS}/{fb}"):
+        refspecs.append(f":{PENDING_REFS}/{fb}")
     sweep = {f"{PENDING_REFS}/{k}": sha for k, sha in announcements()[1].items()}
     if not refspecs and not sweep:
         return problem
@@ -1447,7 +1447,7 @@ def origin_tips(cwd: str | None = None, names: RepoNames | None = None) -> dict[
 
 
 def listed_tips(cwd: str | None = None, names: RepoNames | None = None) -> dict[str, str]:
-    """origin_tips narrowed to main and the work branches."""
+    """origin_tips narrowed to main and the feature branches."""
     names = names or cfg().names
     return {b: t for b, t in origin_tips(cwd, names).items() if b == names.main or listed(b)}
 
@@ -1607,7 +1607,7 @@ def tree_less_msg(ref: str, cwd: str | None = None) -> str:
 
 def on_origin(cwd: str | None = None, names: RepoNames | None = None) -> bool:
     """Whether HEAD holds nothing of its own beyond origin: it is an
-    ancestor of origin/main or of origin's tip of a listed work branch, or
+    ancestor of origin/main or of origin's tip of a listed feature branch, or
     its tree less MSG_FILE is that of an origin/main commit past their
     merge base (a review checkout of a tip since landed).  `names`: the
     repository's, a submodule's own where the core runs there."""

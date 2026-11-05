@@ -30,9 +30,10 @@ from .checkout import (
     current_branch,
     deployed_commit,
     drop_worktree,
-    ensure_on_work_branch,
+    ensure_on_feature_branch,
     ensure_rebased,
     ensure_sole_writer,
+    feature_branch_name,
     fetch_origin,
     held_targets,
     note_pushed,
@@ -40,13 +41,12 @@ from .checkout import (
     pending_announcements,
     pop_tmp_commits,
     push_deployed,
-    push_work_branch,
+    push_feature_branch,
     record_commit,
     staged_differs,
     staged_snapshot,
     this_prefix,
     with_main,
-    work_branch_name,
 )
 from .config import SwitchPolicy, cfg, main_ref, remote_ref, repo_names
 from .guard import binary, decide
@@ -159,8 +159,8 @@ def increment_reaches(snap: str, all_targets: list[str]) -> bool:
         drop_worktree(wt)
 
 
-def commit_unreached(wb: str, msg: str, snap: str) -> None:
-    """The increment `snap`, reaching no target: committed onto `wb` and
+def commit_unreached(fb: str, msg: str, snap: str) -> None:
+    """The increment `snap`, reaching no target: committed onto `fb` and
     pushed, after the precheck unless its tree has a proven pass (no build
     gates it), with nothing evaluated, built or switched - the probes
     started are dropped unread: the targets have nothing to catch up on
@@ -176,9 +176,9 @@ def commit_unreached(wb: str, msg: str, snap: str) -> None:
         if err:
             die(strings.PROC_WITH_NOTHING_DONE(problem=err))
     PERF.mark("commit-push")
-    commit_deployed(wb, snap, f"{msg}\n\nReaches: none\nDeployed: none")
-    push_work_branch(wb)
-    print(strings.DEPLOY_REACHES_NONE(wb=wb))
+    commit_deployed(fb, snap, f"{msg}\n\nReaches: none\nDeployed: none")
+    push_feature_branch(fb)
+    print(strings.DEPLOY_REACHES_NONE(fb=fb))
 
 
 def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = False,
@@ -186,14 +186,14 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     """`msg` describes the staged increment (default: the checkout's name
     and the increment's number on its branch); with nothing staged the
     deploy converges the targets on the union as it is.
-    `evict`: this checkout's view alone - no other work branch in the
+    `evict`: this checkout's view alone - no other feature branch in the
     union, no wait for a deploy under way, and a target running another
     checkout's refused work switched over when this work reaches it or
     `filter_targets` names it.
     `dry`: stop after the dry activation of every target that would be
     switched, printing the units it would stop, restart or reload; nothing
     is switched, committed or pushed.
-    `as_if` (an undeploy's dry activation, so `dry`): the work branches
+    `as_if` (an undeploy's dry activation, so `dry`): the feature branches
     taken to be at these commits - this checkout's own as the state the
     union builds on, another's as origin's tip of it - and the checkout
     left where it is, origin/main merged in aside (with_main) rather than
@@ -219,50 +219,50 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     pool.shutdown(wait=False)
 
     pop_tmp_commits()
-    wb = work_branch_name()
+    fb = feature_branch_name()
     cur = current_branch()
-    if wb is not None and cur not in (wb, cfg().main_branch, None):
-        # A subagent worktree's fresh branch: the provenance must name wb.
-        had = rev(f"refs/heads/{wb}") is not None
-        up = rev(remote_ref(wb))
+    if fb is not None and cur not in (fb, cfg().main_branch, None):
+        # A subagent worktree's fresh branch: the provenance must name fb.
+        had = rev(f"refs/heads/{fb}") is not None
+        up = rev(remote_ref(fb))
         if not had and up is not None and not is_ancestor(up, main_ref()):
             # Recovered from origin only while empty there (a removed
             # worktree's): increments there are another worktree's of
             # this name (a machine sharing the prefix).
-            die(strings.DEPLOY_FOREIGN_INCREMENTS(remote=cfg().remote, wb=wb, main_ref=main_ref(),
-                                                  remote_wb=remote_ref(wb)))
-        ensure_on_work_branch(wb)
-        if not had and (made := rev(f"refs/heads/{wb}")) is not None:
-            note_pushed(wb, made)  # the branch as taken from origin's empty copy, or fresh
-    elif wb is None and cur not in (cfg().main_branch, None):
-        die(strings.DEPLOY_NOT_WORK_BRANCH(branch=cur, prefix=this_prefix(), main_branch=cfg().main_branch))
+            die(strings.DEPLOY_FOREIGN_INCREMENTS(remote=cfg().remote, fb=fb, main_ref=main_ref(),
+                                                  remote_fb=remote_ref(fb)))
+        ensure_on_feature_branch(fb)
+        if not had and (made := rev(f"refs/heads/{fb}")) is not None:
+            note_pushed(fb, made)  # the branch as taken from origin's empty copy, or fresh
+    elif fb is None and cur not in (cfg().main_branch, None):
+        die(strings.DEPLOY_NOT_FEATURE_BRANCH(branch=cur, prefix=this_prefix(), main_branch=cfg().main_branch))
 
     def increment_name() -> str:
         n = int(out(["git", "rev-list", "--count", f"{main_ref()}..HEAD"])) + 1
         return strings.DEPLOY_INCREMENT_NAME(checkout=Path.cwd().name, n=n)
 
-    if msg is None and wb is not None and not dry and (
+    if msg is None and fb is not None and not dry and (
             staged_differs() or any(submodule.staged(sub.dir, less_msg=True) for sub in submodule.present(Path.cwd()))):
         msg = increment_name()
     snap = ""
     if as_if is not None and staged_differs():
         die(strings.UNDEPLOY_DEPLOYER_STAGED(path=Path.cwd()))
     PERF.mark("submodules")
-    for told in submodule.sync(wb, msg, dry=dry, at=(as_if or {}).get(wb or "")):
+    for told in submodule.sync(fb, msg, dry=dry, at=(as_if or {}).get(fb or "")):
         print(told)
-    if msg is None and wb is not None and not dry and staged_differs():
+    if msg is None and fb is not None and not dry and staged_differs():
         # A pin the submodule step staged on its own (a catch-up) is an
         # increment too.
         msg = increment_name()
     PERF.mark("snapshot")
     if staged_differs():
-        if wb is None:
+        if fb is None:
             die(strings.DEPLOY_STAGED_ON_MAIN)
-        ensure_on_work_branch(wb)  # the increment must land (and union) on wb
+        ensure_on_feature_branch(fb)  # the increment must land (and union) on fb
         # A snapshot's tree is HEAD + staged, so one taken on a stale HEAD
         # would commit main's changes away.
         fetch.result()
-        ensure_sole_writer(wb)
+        ensure_sole_writer(fb)
         ensure_rebased()
         snap = staged_snapshot()
         # An increment that changes nothing any target's evaluation reads
@@ -273,14 +273,14 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
             # The probes are never collected: an ssh to a dark target must
             # not hold the exit.
             proc.kill_children(strings.DEPLOY_REACHES_NO_TARGET)
-            commit_unreached(wb, msg, snap)
+            commit_unreached(fb, msg, snap)
             return
     elif msg:
         die(strings.DEPLOY_NOTHING_STAGED)
     else:
-        if wb is not None and current_branch() == wb:  # a detached subagent worktree commits nothing onto it
+        if fb is not None and current_branch() == fb:  # a detached subagent worktree commits nothing onto it
             fetch.result()
-            ensure_sole_writer(wb)
+            ensure_sole_writer(fb)
         if as_if is None:
             ensure_rebased()
 
@@ -289,10 +289,10 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     # for as long as this run lives.
     ann: Announce | None = None
     own = current_branch() or cfg().main_branch  # detached: at origin/main (ensure_rebased)
-    # A work branch holding targets back may end a hold with an empty
+    # A feature branch holding targets back may end a hold with an empty
     # increment (the stage below): announced like any increment.
     if not dry and not skip and (snap or rev("HEAD") != rev(remote_ref(own))
-                                 or (wb is not None and own == wb
+                                 or (fb is not None and own == fb
                                      and held_targets(f"{main_ref()}..HEAD"))):
         ann = Announce(own, snap or "HEAD")
     for sig in (signal.SIGTERM, signal.SIGHUP):
@@ -301,7 +301,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     run = Run(ann)
     try:
         pushed = run_deploy(filter_targets, candidates, all_targets, msg, evict, dry, skip,
-                             me, main0, wb, snap, run, fetch, probes, as_if)
+                             me, main0, fb, snap, run, fetch, probes, as_if)
     finally:
         lazy = run.ann is not ann
         ann = run.ann
@@ -328,7 +328,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
 
 def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: list[str],
                msg: str | None, evict: bool, dry: bool, skip: bool, me: str,
-               main0: str | None, wb: str | None, snap: str, run: Run,
+               main0: str | None, fb: str | None, snap: str, run: Run,
                fetch: Future[subprocess.CompletedProcess[str]], probes: dict[str, Future[Probe]],
                as_if: dict[str, str] | None = None) -> bool:
     """The deploy from its union on: whether its announcement is left to
@@ -337,7 +337,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
 
     def own_head() -> str:
         """The commit this checkout's committed state is taken to be."""
-        return "HEAD" if as_if is None else with_main(as_if.get(wb or "", "HEAD"))
+        return "HEAD" if as_if is None else with_main(as_if.get(fb or "", "HEAD"))
 
     head = own_head()
     running: dict[str, str | None] = {}
@@ -469,17 +469,17 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
 
     def stage(wt: str, union: str, listed: list[str], branches: list[tuple[str, str]]) -> bool:
         """Eval, precheck, build and copy for `union`, checked out in `wt`,
-        the work branches shaped like `listed` (nixconvoy.toml's branch_prefix), `branches`
+        the feature branches shaped like `listed` (nixconvoy.toml's branch_prefix), `branches`
         the ones it merged: whether the deploy ends here."""
         nonlocal plan, affected, left_alone, tops, committed, records, provenances, ann, policies
         if skip:
             if dry:
                 print(strings.DEPLOY_SKIP_DRY(union=union))
                 return True
-            if wb is not None:
+            if fb is not None:
                 if snap:
-                    commit_deployed(wb, snap, msg or "")
-                push_work_branch(wb)
+                    commit_deployed(fb, snap, msg or "")
+                push_feature_branch(fb)
             print(strings.DEPLOY_SKIP(union=union))
             return True
 
@@ -525,7 +525,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                      tz_offset=time.localtime().tm_gmtoff)
         verdict = decide(DriftParams(
             cx=cx, union=union, targets=all_targets, candidates=candidates,
-            evict=evict, named=bool(filter_targets), work_branch=wb is not None, reached=sorted(reached),
+            evict=evict, named=bool(filter_targets), feature_branch=fb is not None, reached=sorted(reached),
             running=running, built={h: t.out for h, t in tops.items()},
             held={h: sorted(bs) for h, bs in held.items()},
             provenances={h: p.provenance for h, p in probed.items()}),
@@ -565,14 +565,14 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         fmt = ", ".join
         deployed = sorted(h for h in tops if h in plan or h not in affected)
         if snap and not dry:
-            assert wb is not None  # a snapshot needs the work branch (deploy)
+            assert fb is not None  # a snapshot needs the feature branch (deploy)
             reaches = sorted(memo.reached_between(wt, union, all_targets,
                                                   "HEAD", snap))
             full = (f"{msg}\n\nReaches: {fmt(reaches) or 'none'}"
                     f"\nDeployed: {fmt(deployed) or 'none'}")
             committed = deployed_commit(snap, full)
             subject = (msg or "").partition("\n")[0] or subject
-        elif wb is not None and not dry and current_branch() == wb:
+        elif fb is not None and not dry and current_branch() == fb:
             # No increment, but a target this branch held back now runs its
             # tip: an empty increment records the hold's end, as a hold is
             # read from the branch's trailers alone.
@@ -624,7 +624,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             if err:
                 die(strings.PROC_WITH_NOTHING_DONE(problem=err))
 
-        # Another machine may have pushed a work branch while we built;
+        # Another machine may have pushed a feature branch while we built;
         # switching without it would revert its deployed changes (the union
         # core compares once this returns).
         PERF.mark("copy")
@@ -706,7 +706,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
     for redo in range(SWITCH_REDOS + 1):
         queries = UnionQueries(lambda: snap or head, fetch, refresh, stage, await_pending, as_if)
         try:
-            done = decide(UnionParams(repo_names(), wb or "", evict, main0), queries)
+            done = decide(UnionParams(repo_names(), fb or "", evict, main0), queries)
             if skip or dry:
                 return False
             union = done.union
@@ -731,11 +731,11 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
 
     PERF.mark("commit-push")
     if committed:
-        assert wb is not None
-        adopt_commit(wb, committed)
+        assert fb is not None
+        adopt_commit(fb, committed)
     # A local main ahead of origin is pushed by its owner once every
     # target it affects has switched.
-    problem = push_deployed(wb, ann, records)
+    problem = push_deployed(fb, ann, records)
 
     if plan:
         print(strings.DEPLOY_DONE(targets=", ".join(plan), union=union))
@@ -744,5 +744,5 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
     else:
         print(strings.DEPLOY_NO_DRIFT(union=union))
     if problem is not None:
-        die(strings.DEPLOY_UNPUSHED(wb=wb, problem=problem))
+        die(strings.DEPLOY_UNPUSHED(fb=fb, problem=problem))
     return True

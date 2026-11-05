@@ -15,10 +15,10 @@ from .checkout import (
     GitQueries,
     add_worktree,
     drop_worktree,
+    feature_shape,
     listed,
     ran,
     summarize,
-    work_shape,
 )
 from .config import MSG_FILE, cfg, main_ref, main_short
 from .proc import git, is_ancestor, ok, out, rev, run, solve_with_mergiraf
@@ -75,7 +75,7 @@ class UnionQueries(GitQueries):
         wt = self.wt
         match ask:
             case Listed():
-                return Names([work_shape()])
+                return Names([feature_shape()])
             case Branches():
                 listing = out(["git", "for-each-ref", "--format=%(refname:strip=3)%09%(objectname)",
                                f"refs/remotes/{cfg().remote}/"])

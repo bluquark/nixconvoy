@@ -2,7 +2,7 @@
 //! control `Machine`s drive the real helper `Machine`s through ssh calls
 //! that may be delayed or lost (before or after reaching the target), against a
 //! one-second clock, the dead-man timer due exactly at the activation's end
-//! plus the deadline, probe timeouts, a crash of the deploying machine and a crash
+//! plus the deadline, probe timeouts, a crash of the control machine and a crash
 //! (reboot) of the target.  A probe of the target answers at once or at its
 //! timeout.  Two deploys in turn, the second taking the guard
 //! once the first finished or died, each its own toplevel.

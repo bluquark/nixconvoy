@@ -50,7 +50,7 @@
 //! increment - until the holding checkout deploys the target or lands with
 //! --not-yet-deployed.  A main checkout's own work is main's advance, which
 //! a hold must not stop fleet-wide (the nightly's lock): it is left behind on
-//! the held target instead (Params::work_branch).  A --evict unions no
+//! the held target instead (Params::feature_branch).  A --evict unions no
 //! other branch, so nothing is held under it: the target gets this
 //! checkout's view alone, the hold standing.
 use super::{listed, Halt, Names, Query, Run, Script, BRANCHES_KEY};
@@ -71,7 +71,7 @@ pub struct Provenance {
     /// sorted.
     pub branches: Vec<String>,
     /// The tip of each of those the union held (the deploying checkout's own: the
-    /// work-branch commit its pending increment became).
+    /// feature-branch commit its pending increment became).
     pub tips: BTreeMap<String, String>,
     /// The deploying checkout's own branch when what it unioned of it was not on
     /// origin yet, with the origin tip that push moves.
@@ -199,7 +199,7 @@ pub struct Context {
     pub names: Names,
     /// This checkout: (machine, checkout directory).
     pub me: (String, String),
-    /// The branches its union may contain besides main: the work
+    /// The branches its union may contain besides main: the feature
     /// branches' shapes (branch_prefix).
     pub listed: BTreeSet<String>,
     /// This run's fetched origin tip of each branch.
@@ -276,14 +276,14 @@ pub fn demote(kind: Kind, why: String, take_over: bool, reached: bool) -> (Kind,
 }
 
 /// The verdict on a target the branches `by` hold back (Params::held):
-/// refused when `reached` by a work branch's own work, left alone
+/// refused when `reached` by a feature branch's own work, left alone
 /// otherwise (a main checkout's own work being main's advance).
-pub fn held(by: &[String], reached: bool, work_branch: bool) -> (Kind, String) {
+pub fn held(by: &[String], reached: bool, feature_branch: bool) -> (Kind, String) {
     let why = format!(text!(drift_held), by = by.join(", "));
     if !reached {
         return (Kind::LeftAlone, format!(text!(drift_not_reached), why = why));
     }
-    if !work_branch {
+    if !feature_branch {
         return (Kind::LeftAlone, format!(text!(drift_left_behind), why = why));
     }
     (Kind::Held, why)
@@ -308,10 +308,10 @@ pub struct Params {
     pub evict: bool,
     /// The candidates were named on the command line.
     pub named: bool,
-    /// This checkout deploys a work branch of its own: a hold refuses it
+    /// This checkout deploys a feature branch of its own: a hold refuses it
     /// when its work reaches the target.  A main checkout is left behind
     /// on the target instead.
-    pub work_branch: bool,
+    pub feature_branch: bool,
     /// The targets this checkout's own work reaches: those whose
     /// configuration reads a file that work changed (nixconvoy's
     /// reached_targets, by the eval memo's scan).
@@ -463,7 +463,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         // any verdict but a refusal of its own, which says more.
         let hold = p.held.get(h).filter(|by| !by.is_empty() && !kind.refused() && !p.evict);
         if let Some(by) = hold {
-            (kind, why) = held(by, reached, p.work_branch);
+            (kind, why) = held(by, reached, p.feature_branch);
         }
         if kind.refused() {
             let dead = lin

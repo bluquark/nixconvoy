@@ -1,4 +1,4 @@
-"""`nixconvoy orphans`: this machine's subagent work branches on origin
+"""`nixconvoy orphans`: this machine's subagent feature branches on origin
 that nobody holds (cli docstring: Orphans)."""
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ def held(d: Path) -> bool:
 def find() -> list[tuple[str, Path | None, str]]:
     """(branch, worktree owning it or None, COMMIT_MSG.md's subject) for
     each orphan: one of this machine's listed subagent branches
-    (<prefix><leaf>-<name>) on origin with commits beyond origin/main and
+    (<prefix><branch-suffix>-<name>) on origin with commits beyond origin/main and
     every other listed branch, which no checkout here owns or whose owner
     is a subagent worktree no live session holds."""
     fetched = git(*fetch_args("--no-auto-gc"), check=False)
@@ -48,24 +48,24 @@ def find() -> list[tuple[str, Path | None, str]]:
         print(strings.ORPHANS_FETCH_FAILED(stderr=(fetched.stderr or "").strip()), file=sys.stderr)
     prefix = this_prefix()
     tips = origin_tips()
-    work = [b for b in tips if listed(b)]
+    feature = [b for b in tips if listed(b)]
     here = Path.cwd().resolve()
     owners: dict[str, Path] = {}
     for d in [here, *sibling_checkouts(here)]:
         try:
-            wb = identity_of(d, branch_at(d)).wb
+            fb = identity_of(d, branch_at(d)).fb
         except FileNotFoundError:  # removed since it was listed
             continue
-        if wb is not None:
-            owners.setdefault(wb, d)
+        if fb is not None:
+            owners.setdefault(fb, d)
     found = []
-    for b in sorted(work):
+    for b in sorted(feature):
         if not b.startswith(prefix) or "-" not in b[len(prefix):]:
             continue
         d = owners.get(b)
         if d is not None and held(d):
             continue
-        others = [remote_ref(o) for o in [cfg().main_branch, *work] if o != b and o in tips]
+        others = [remote_ref(o) for o in [cfg().main_branch, *feature] if o != b and o in tips]
         own = run(["git", "rev-list", "-n", "1", remote_ref(b), "--not", *others],
                   check=False).stdout.strip()
         if not own:

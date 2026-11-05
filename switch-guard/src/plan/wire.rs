@@ -69,10 +69,10 @@ mod tests {
         assert_eq!(line, r#"{"effects":[],"next":{"done":{"Ok":""}}}"#);
         assert!(!more);
         let p: Params = serde_json::from_value(
-            serde_json::json!({"rebase": {"names": {"remote": "origin", "main": "main"}, "op": {"sync": {"wb": null}}}}),
+            serde_json::json!({"rebase": {"names": {"remote": "origin", "main": "main"}, "op": {"sync": {"fb": null}}}}),
         )
         .unwrap();
-        assert!(matches!(p, Params::Rebase(rebase::Params { op: rebase::Op::Sync { wb: None }, .. })));
+        assert!(matches!(p, Params::Rebase(rebase::Params { op: rebase::Op::Sync { fb: None }, .. })));
         let p: Params =
             serde_json::from_value(serde_json::json!({"rebase": {"names": {"remote": "origin", "main": "main"}, "op": {"onto": {"upstream": "refs/remotes/origin/dev"}}}})).unwrap();
         assert!(
@@ -91,7 +91,7 @@ mod tests {
         assert!(reply(r#"{"flag":"yes"}"#).is_err());
         assert_eq!(enc(&Query::Switch { branch: "b".into(), start: None }), r#"{"switch":{"branch":"b","start":null}}"#);
         let mut d = start(
-            r#"{"drift":{"cx":{"names":{"remote":"origin","main":"main"},"me":["h","/c"],"listed":["main"],"tips":{},"in_flight":{},"dead":[],"tz_offset":0},"union":"u","targets":["a"],"candidates":["a"],"evict":false,"named":false,"work_branch":true,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"provenances":{"a":""},"held":{}}}"#,
+            r#"{"drift":{"cx":{"names":{"remote":"origin","main":"main"},"me":["h","/c"],"listed":["main"],"tips":{},"in_flight":{},"dead":[],"tz_offset":0},"union":"u","targets":["a"],"candidates":["a"],"evict":false,"named":false,"feature_branch":true,"reached":[],"running":{"a":"/old"},"built":{"a":"/new"},"provenances":{"a":""},"held":{}}}"#,
         )
         .unwrap();
         let (line, _) = d.decide(None);
@@ -99,7 +99,7 @@ mod tests {
             line,
             r#"{"effects":[{"print":"  a: will switch"}],"next":{"done":{"affected":["a"],"plan":["a"],"drift":{"a":["untracked",""]}}}}"#
         );
-        let mut u = start(r#"{"union":{"names":{"remote":"origin","main":"main"},"wb":"w","evict":true,"main0":null}}"#).unwrap();
+        let mut u = start(r#"{"union":{"names":{"remote":"origin","main":"main"},"fb":"w","evict":true,"main0":null}}"#).unwrap();
         assert_eq!(u.decide(None).0, r#"{"effects":[{"mark":"union"}],"next":{"ask":"listed"}}"#);
         let mut p = start(r#"{"prune":{"names":{"remote":"origin","main":"main"},"name":"agent-x","named":false,"own_session_ends":false,"stopped":null}}"#).unwrap();
         assert_eq!(p.decide(None).0, r#"{"effects":[],"next":{"ask":"lock"}}"#);

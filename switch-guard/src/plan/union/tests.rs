@@ -8,8 +8,8 @@ use crate::plan::{drive, Effect, Replay, Reply};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
-const WB: &str = "haswell-wsl-deploys4";
-const LISTED: [&str; 3] = [WB, "chikuwa-deploys1", "M3-Air-deploys2"];
+const FB: &str = "haswell-wsl-deploys4";
+const LISTED: [&str; 3] = [FB, "chikuwa-deploys1", "M3-Air-deploys2"];
 /// Unlisted at first; a refresh may bring a branch_prefix shaped to it.
 const NEW: &str = "chikuwa-deploys2";
 const UNLISTED: &str = "M3-Air-deploys9";
@@ -25,7 +25,7 @@ struct Origin {
     conflicts: BTreeMap<String, Vec<(String, bool)>>,
     refs: Refs,
     main: String,
-    /// The work branches' shapes in the checkout, and after a refresh.
+    /// The feature branches' shapes in the checkout, and after a refresh.
     listed: Vec<String>,
     refreshed_listed: Option<Vec<String>>,
     /// What the fetch finds, and each build after it.
@@ -62,7 +62,7 @@ fn select_of(o: &Origin, p: &Params) -> Refs {
     }
     o.refs
         .iter()
-        .filter(|(n, s)| *n != p.wb && !o.head_has.contains(s) && o.listed.contains(n) && !o.unchanged.contains(s))
+        .filter(|(n, s)| *n != p.fb && !o.head_has.contains(s) && o.listed.contains(n) && !o.unchanged.contains(s))
         .cloned()
         .collect()
 }
@@ -95,7 +95,7 @@ fn answer(o: &mut Origin, t: &mut Trace, q: &Query) -> Reply {
         Query::Summary { sha } => Reply::Text(Some(format!("summary of {sha}"))),
         Query::Merge { name, sha } => {
             assert!(t.pending.is_none(), "merging over an unresolved merge");
-            assert!(o.listed.contains(name), "merging {name}, not a work branch by the shapes now");
+            assert!(o.listed.contains(name), "merging {name}, not a feature branch by the shapes now");
             let files = o.conflicts.get(sha).cloned().unwrap_or_default();
             if files.is_empty() {
                 t.merged.push(name.clone());
@@ -191,11 +191,11 @@ fn answer(o: &mut Origin, t: &mut Trace, q: &Query) -> Reply {
 }
 
 fn params(evict: bool) -> Params {
-    Params { names: Names::default(), wb: WB.into(), evict, main0: Some("m0".into()) }
+    Params { names: Names::default(), fb: FB.into(), evict, main0: Some("m0".into()) }
 }
 
 fn arb_refs() -> impl Strategy<Value = Refs> {
-    let names = [WB, LISTED[1], LISTED[2], NEW, UNLISTED];
+    let names = [FB, LISTED[1], LISTED[2], NEW, UNLISTED];
     prop::collection::vec(prop::sample::select(vec!["s1", "s2", "s3", "s4"]), 5).prop_flat_map(move |shas| {
         let all: Refs = names.iter().zip(shas).map(|(n, s)| (n.to_string(), s.to_string())).collect();
         prop::sample::subsequence(all, 0..=5)
@@ -260,14 +260,14 @@ proptest! {
         }
         for q in &asked {
             if let Query::Merge { name, sha } = q {
-                prop_assert!(name != WB);
+                prop_assert!(name != FB);
                 prop_assert!(!o.head_has.contains(sha) && !o.unchanged.contains(sha));
             }
         }
         // Each branch a pass saw unlisted (and HEAD lacks) is warned of once.
         let head_has = &o.head_has;
         let want: BTreeSet<String> = t.passes.iter()
-            .flat_map(|(refs, listed)| refs.iter().filter(move |(n, s)| n != WB && !listed.contains(n) && !head_has.contains(s)))
+            .flat_map(|(refs, listed)| refs.iter().filter(move |(n, s)| n != FB && !listed.contains(n) && !head_has.contains(s)))
             .map(|(n, _)| format!("warning: ignoring origin/{n}: not shaped like nixconvoy.toml's branch_prefix"))
             .collect();
         let warned: Vec<String> = fx.iter().filter_map(|e| match e { Effect::Warn(w) => Some(w.clone()), _ => None }).collect();
@@ -285,11 +285,11 @@ proptest! {
                     prop_assert_eq!(done.union, "head");
                 }
             }
-            Err(msg) if msg.starts_with("cannot union work branch") => {
+            Err(msg) if msg.starts_with("cannot union feature branch") => {
                 // Only a conflict with what origin holds once fetched.
                 prop_assert!(t.fetched);
                 let Some(Query::Merge { name, sha }) = asked.iter().rev().find(|q| matches!(q, Query::Merge { .. })) else { panic!() };
-                prop_assert!(msg.contains(&format!("cannot union work branch {name};")), "{}", msg);
+                prop_assert!(msg.contains(&format!("cannot union feature branch {name};")), "{}", msg);
                 let unsolved: Vec<String> = o.conflicts[sha].iter().filter(|f| f.0 != MSG_FILE && !f.1).map(|f| f.0.clone()).collect();
                 prop_assert!(msg.contains(&format!("\n  {}\n", unsolved.join(", "))), "{}", msg);
                 prop_assert!(select_of(&end, &p).contains(&(name.clone(), sha.clone())));

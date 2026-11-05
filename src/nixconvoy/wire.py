@@ -257,7 +257,7 @@ class DriftParams:
     candidates: list[str]
     evict: bool
     named: bool
-    work_branch: bool
+    feature_branch: bool
     reached: list[str]
     running: dict[str, str | None]
     built: dict[str, str]
@@ -289,15 +289,15 @@ class Onto(Variant):
 
 @dataclass(frozen=True)
 class Sync(Variant):
-    wb: str | None
+    fb: str | None
 
 
 @dataclass(frozen=True)
-class OnWorkBranch(Variant):
-    wb: str
+class OnFeatureBranch(Variant):
+    fb: str
 
 
-RebaseOp = PopTmp | EnsureRebased | Onto | Sync | OnWorkBranch
+RebaseOp = PopTmp | EnsureRebased | Onto | Sync | OnFeatureBranch
 
 
 @dataclass(frozen=True)
@@ -326,7 +326,7 @@ RebaseOutcome = Ok | Err
 @dataclass(frozen=True)
 class UnionParams:
     names: RepoNames
-    wb: str
+    fb: str
     evict: bool
     main0: str | None
 
@@ -657,7 +657,7 @@ class RemoveWorktree(Variant):
 
 @dataclass(frozen=True)
 class DropBranches(Variant):
-    wb: str
+    fb: str
     cur: str | None
 
 

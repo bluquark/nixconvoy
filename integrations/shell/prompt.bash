@@ -1,5 +1,5 @@
-# A prompt segment for a checkout nixconvoy manages: the ref (a work
-# branch of this machine's by its leaf, <branch_prefix>3 -> 3, a
+# A prompt segment for a checkout nixconvoy manages: the ref (a feature
+# branch of this machine's by its suffix, <branch_prefix>3 -> 3, a
 # subagent's 3-<name>, with COMMIT_MSG.md's subject - the readable name
 # of its work), +N commits beyond origin/main, ", unstaged edits" and
 # ", staged edits", ", N agents" for the subagent worktrees nested in the
@@ -7,7 +7,7 @@
 # a fresh one does not count), ", submodule X" for each submodule
 # worktree planted in the checkout (nixconvoy open --submodule) holding
 # edits or commits beyond its upstream.  One git status call carries most
-# of it (nixconvoy points every work branch's upstream at main as fetched, so
+# of it (nixconvoy points every feature branch's upstream at main as fetched, so
 # branch.ab is the count beyond main); only a detached HEAD, having no
 # upstream, costs a count of its own.  The prefix comes from the
 # nixconvoy/branch-prefix note `nixconvoy init` and every later command
@@ -16,7 +16,7 @@
 #   source prompt.bash; PS1='\h:$(__nixconvoy_ps1)\w\$ '
 # The package installs it as share/nixconvoy/prompt.bash.
 __nixconvoy_ps1() {
-  local top common prefix='' main w n=0 agents='' submodules='' out line head='' oid='' ahead='' xy unstaged='' staged='' leaf subject
+  local top common prefix='' main w n=0 agents='' submodules='' out line head='' oid='' ahead='' xy unstaged='' staged='' suffix subject
   { read -r top && read -r common; } < <(git rev-parse --path-format=absolute --show-toplevel --git-common-dir 2>/dev/null) \
     && [ -f "$top/nixconvoy.toml" ] \
     || { command -v __git_ps1 >/dev/null 2>&1 && __git_ps1 "(%s)"; return; }
@@ -61,14 +61,14 @@ __nixconvoy_ps1() {
     ahead=$(git rev-list --count "$main"..HEAD 2>/dev/null)
   fi
   [ "${ahead:-0}" = 0 ] && ahead='' || ahead=" +$ahead"
-  leaf=$head
-  [ -n "$prefix" ] && leaf=${head#"$prefix"}
-  if [ "$leaf" != "$head" ] && IFS= read -r subject 2>/dev/null < "$top/COMMIT_MSG.md" \
+  suffix=$head
+  [ -n "$prefix" ] && suffix=${head#"$prefix"}
+  if [ "$suffix" != "$head" ] && IFS= read -r subject 2>/dev/null < "$top/COMMIT_MSG.md" \
      && [ -n "$subject" ]; then
     [ ${#subject} -gt 40 ] && subject="${subject:0:39}…"
-    head="$leaf: $subject"
+    head="$suffix: $subject"
   else
-    head=$leaf
+    head=$suffix
   fi
   printf '(%s%s%s%s%s%s)' "$head" "$ahead" "$unstaged" "$staged" "$agents" "$submodules"
 }

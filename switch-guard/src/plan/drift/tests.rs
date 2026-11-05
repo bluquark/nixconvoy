@@ -235,7 +235,7 @@ fn params(targets: &[&str], candidates: &[&str], evict: (bool, bool), drifting: 
         candidates: s(candidates),
         evict: evict.0,
         named: evict.1,
-        work_branch: true,
+        feature_branch: true,
         reached: targets.iter().map(|h| h.to_string()).collect(),
         running: targets
             .iter()
@@ -248,7 +248,7 @@ fn params(targets: &[&str], candidates: &[&str], evict: (bool, bool), drifting: 
 }
 
 /// A target another branch holds back is left alone, or refused when a
-/// work branch's own work reaches it, as an in-flight increment is; a main
+/// feature branch's own work reaches it, as an in-flight increment is; a main
 /// checkout's own work (main's advance) leaves it behind instead.
 #[test]
 fn held_targets() {
@@ -297,12 +297,12 @@ fn held_targets() {
     );
     // A main checkout reaching it (main's advance) is left behind on it.
     p.reached.insert("choko".into());
-    p.work_branch = false;
+    p.feature_branch = false;
     let (fx, out) = run(p.clone());
     assert_eq!(out.unwrap().drift["choko"].0, Kind::LeftAlone);
     assert!(matches!(&fx[1], Effect::Print(l) if l.ends_with("left behind on main's advance")), "{fx:?}");
     // An empty holder list is no hold.
-    p.work_branch = true;
+    p.feature_branch = true;
     p.held.insert("choko".into(), vec![]);
     assert_eq!(run(p).1.unwrap().plan, ["choko", "side1"]);
 }
@@ -535,7 +535,7 @@ fn arb_params() -> impl Strategy<Value = Params> {
         prop::collection::btree_map(target(), prop::collection::vec(arb_name(), 0..2), 0..3),
         any::<bool>(),
     )
-        .prop_map(|(targets, cands, (evict, named), reached, facts, tips, in_flight, dead, held, work_branch)| {
+        .prop_map(|(targets, cands, (evict, named), reached, facts, tips, in_flight, dead, held, feature_branch)| {
             let targets: Vec<String> = targets.into_iter().collect();
             let mut p = Params {
                 cx: Context { tips, in_flight, dead, ..cx(&[]) },
@@ -544,7 +544,7 @@ fn arb_params() -> impl Strategy<Value = Params> {
                 targets: targets.clone(),
                 evict,
                 named,
-                work_branch,
+                feature_branch,
                 reached,
                 running: BTreeMap::new(),
                 built: BTreeMap::new(),

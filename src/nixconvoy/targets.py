@@ -435,7 +435,7 @@ def copy_closure(target: str, paths: list[str], quiet: bool = False, fatal: bool
 def builder_problem(host: str) -> str | None:
     """Why `host` ("" for this machine) cannot realise the closures, or
     None: unreachable, its nix not building targets_arch (platforms, asked
-    first: the reason a Darwin controller never builds, before any sudo),
+    first: the reason a Darwin control machine never builds, before any sudo),
     or its daemon neither trusting the user nor running nix as root
     (builder_prefix)."""
     via = ("ssh", *ssh_opts(), ssh_address(host)) if host else ()
