@@ -3698,7 +3698,8 @@ def open_cases(d: Path) -> None:
                          ["undeploy", "--back-to"], ["undeploy", "--back-to", "--with-children"], ["land", "--back-to", "x"],
                          ["land", "--dry-activate"],
                          ["land", "-m", ""], ["land", "-m", " ", "--with-children"], ["land", "-m", "--with-children"],
-                         ["land", "-m", "x", "a", "b"], ["land", "-m"]):
+                         ["land", "-m", "x", "a", "b"], ["land", "-m"],
+                         ["--help"], ["-h"], ["deploy", "--help"], ["open", "-h"], ["init", "--help"]):
                 sys.argv = ["nixconvoy", *argv]
                 err = dies(cli.main)
                 assert err.startswith("usage:"), (argv, err)
@@ -3884,7 +3885,7 @@ def init_cases(d: Path) -> None:
     try:
         assert "usage:" in dies(lambda: run_cli(["init", "--ssh-domain", "lan"]))
         assert not (repo / "nixconvoy.toml").exists()
-        assert "usage:" in printed(lambda: run_cli(["orphans", "-h"]))  # a command without the toml still runs
+        assert "usage:" in dies(lambda: run_cli(["orphans", "x"]))  # a command without the toml still reaches its arguments
         assert not (repo / ".git/nixconvoy/branch-prefix").exists()
         run_cli(["init"])
         c = config.load(repo)
@@ -3902,7 +3903,7 @@ def init_cases(d: Path) -> None:
         assert (repo / ".git/nixconvoy/branch-prefix").read_text() == "nixconvoy/\n"  # init notes the prefix (the repo's, not the suite's)
         assert (repo / ".git/nixconvoy/main-ref").read_text() == "origin/main\n"
         (repo / ".git/nixconvoy/branch-prefix").unlink()
-        assert "usage:" in printed(lambda: run_cli(["orphans", "-h"]))  # as does any later command
+        assert "usage:" in dies(lambda: run_cli(["orphans", "x"]))  # as does any later command
         assert (repo / ".git/nixconvoy/branch-prefix").read_text() == "nixconvoy/\n"
         (repo / "nixconvoy.toml").unlink()
         # The flake named, relative to where init runs; the one remote and

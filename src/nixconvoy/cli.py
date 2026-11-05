@@ -1,4 +1,4 @@
-"""The nixconvoy command line; its help text (HELP, SYNOPSIS, USAGE_NOTES) is in strings.py."""
+"""The nixconvoy command line; its synopsis (SYNOPSIS) is in strings.py."""
 
 from __future__ import annotations
 
@@ -97,11 +97,6 @@ def dispatch() -> None:
                                       rev=f" ({rev.read_text().strip()})" if rev.exists() else ""))
         print(usage())
         return
-    if args[0] in ("-h", "--help"):
-        print(strings.HELP)
-        print(usage())
-        print(strings.USAGE_NOTES)
-        return
     if args[0] not in ("deploy", "land", "undeploy", "close", "pull", "status", "review", "open", "hook", "init",
                        "orphans"):
         bad_usage()
@@ -125,9 +120,6 @@ def dispatch() -> None:
         os.chdir(start)  # its paths are the caller's
         sys.exit(review.main(args))
     if subcmd == "orphans":
-        if args == ["-h"] or args == ["--help"]:
-            print(usage())
-            return
         if args:
             bad_usage()
         orphans.main()
@@ -139,10 +131,6 @@ def dispatch() -> None:
     given: list[str] = []
     while args:
         a = args.pop(0)
-        if a in ("-h", "--help"):
-            print(usage())
-            print(strings.USAGE_NOTES)
-            return
         if a in takes:
             values = flags.setdefault(a, [])
             if takes[a]:
@@ -303,10 +291,6 @@ def init_args(args: list[str], start: Path) -> None:
     flake: str | None = None
     while args:
         a = args.pop(0)
-        if a in ("-h", "--help"):
-            print(usage())
-            print(strings.USAGE_NOTES)
-            return
         if a.startswith("-") or flake is not None:
             bad_usage()
         flake = a

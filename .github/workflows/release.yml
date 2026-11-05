@@ -61,7 +61,7 @@ jobs:
           for p in ${{ matrix.packages }}; do
             nix build --accept-flake-config --print-build-logs --out-link "result-$p" ".#packages.${{ matrix.system }}.$p"
           done
-          ./result-default/bin/nixconvoy --help > /dev/null
+          ./result-default/bin/nixconvoy > /dev/null
       - name: Push to cachix
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}

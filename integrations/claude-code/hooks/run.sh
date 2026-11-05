@@ -1,7 +1,7 @@
 #!/bin/bash
 # The plugin's hooks, as hooks.json wires them: `nixconvoy hook <event>`
-# (nixconvoy --help: Hook) with the hook's input on stdin, nixconvoy on
-# PATH - in a nixconvoy repository alone (nixconvoy.toml at the root of
+# with the hook's input on stdin, nixconvoy on PATH - in a nixconvoy
+# repository alone (nixconvoy.toml at the root of
 # the session's project directory, else of the input's cwd; of the
 # worktree's own repository for a remove).  Anywhere else (the plugin
 # enabled at user scope, say) nixconvoy never runs and the repository is

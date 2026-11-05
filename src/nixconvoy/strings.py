@@ -1,5 +1,5 @@
 """Every sentence nixconvoy says: what die() and the notes print, the
-verdicts, the help, and the prose in what it writes for people (the
+verdicts, the usage, and the prose in what it writes for people (the
 commit messages it composes, the nixconvoy.toml init writes).  The
 switch-guard crate's are in switch-guard/src/strings.rs.
 
@@ -34,15 +34,9 @@ class M(str):
         return self.format(**VOCAB, **fields)
 
 
-
-# --- cli.py: help and usage (--help prints HELP, the usage, then USAGE_NOTES)
-HELP = """
-<!-- Load in "Nixconvoy basic concepts" from the README, with markdown converted to terminal formatting -->
-"""
-
+# --- cli.py: usage and dispatch
 # The synopsis: one line per form under its section's heading (= ...).
-# <x> a value, [x] optional, (a | b) one of, ... repeated.  USAGE_NOTES
-# follows it under --help only.
+# <x> a value, [x] optional, (a | b) one of, ... repeated.
 SYNOPSIS = """\
 = Setting up a repository
 init [<flake-dir>]
@@ -61,9 +55,6 @@ undeploy [<worktree> ... | --with-children] [--back-to <rev>] [--dry-activate]
 review [<worktree> | <submodule> | <branch> ... | --with-children] [<diff-arg> ...]
 land [<worktree> ... | --with-children] [-m <msg>] [--not-yet-deployed]
 """
-USAGE_NOTES = """<!--Remove this-->"""
-
-# --- cli.py: usage and dispatch
 USAGE_HEADING = "usage:"
 CLI_VERSION = M("{TOOL} {version}{rev}\n")
 CLI_SECTION = M("== {name}")

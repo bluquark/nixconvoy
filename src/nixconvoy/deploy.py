@@ -1,7 +1,6 @@
 """A deploy: probe, snapshot and its announcement, union (waiting for a
 deploy under way that reaches the same targets), eval, precheck, build,
-copy and the records' push, switch, then commit and push - in the order the
-help (strings.HELP) gives."""
+copy and the records' push, switch, then commit and push."""
 
 from __future__ import annotations
 
