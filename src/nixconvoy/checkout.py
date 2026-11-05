@@ -102,13 +102,13 @@ TMP_PREFIX = "nixconvoy-"
 # the same refs.
 PENDING_REFS = "refs/nixconvoy/deploying/branch"
 DEPLOYED_PREFIX = "nixconvoy-history"
-# A work branch's provenance (read_provenance): on origin, and here as fetched,
-# PROVENANCE_REFS/<branch>, pushed with the branch (push_refspecs) from
+# A work branch's rebase map (read_rebase_map): on origin, and here as fetched,
+# REBASE_MAP_REFS/<branch>, pushed with the branch (push_refspecs) from
 # REWRITTEN_REFS/<branch>, this repository's own copy, which a rebase here
 # moves before the push.
-PROVENANCE_REFS = "refs/nixconvoy/provenance"
+REBASE_MAP_REFS = "refs/nixconvoy/rebase-map"
 REWRITTEN_REFS = "refs/nixconvoy/rewritten"
-PROVENANCE_FILE = "provenance.json"
+REBASE_MAP_FILE = "rebase-map.json"
 # A deploy renews its announcement every HEARTBEAT seconds while it runs; a
 # deploy waiting for it (deploy.await_pending) takes it for dead and goes
 # on without it - to be refused by the drift core, which names the dead
@@ -150,7 +150,7 @@ def fetch_args(*flags: str) -> list[str]:
     """`git fetch origin` of the branches and nixconvoy's own refs."""
     return ["fetch", "--quiet", "--prune", *flags, cfg().remote,
             f"+refs/heads/*:refs/remotes/{cfg().remote}/*", f"+{PENDING_REFS}/*:{PENDING_REFS}/*",
-            f"+{PROVENANCE_REFS}/*:{PROVENANCE_REFS}/*"]
+            f"+{REBASE_MAP_REFS}/*:{REBASE_MAP_REFS}/*"]
 
 
 def work_shape() -> str:
@@ -189,7 +189,7 @@ class Checkout(NamedTuple):
     # "main" (no work branch of its own), "agent" (a work branch) or "sub"
     # (a subagent worktree nested in another checkout).
     kind: str
-    fb: str | None
+    wb: str | None
 
 
 def sub_dir() -> Path:
@@ -333,14 +333,14 @@ def checkout_identity() -> Checkout:
 
 def work_branch_name() -> str | None:
     """The work branch of the current checkout; None for the main checkout."""
-    return checkout_identity().fb
+    return checkout_identity().wb
 
 
 def require_work_branch(what: str) -> str:
-    fb = work_branch_name()
-    if fb is None:
-        die(strings.CHECKOUT_NEEDS_FB(what=what, prefix=this_prefix()))
-    return fb
+    wb = work_branch_name()
+    if wb is None:
+        die(strings.CHECKOUT_NEEDS_WB(what=what, prefix=this_prefix()))
+    return wb
 
 
 def current_branch() -> str | None:
@@ -724,11 +724,11 @@ def update_checkout(path: Path) -> tuple[bool, str]:
         if lock is None:
             return False, strings.CHECKOUT_SKIPPED_LOCKED(holder=lock_holder())
         try:
-            fb = work_branch_name()
-            done = decide(RebaseParams(cfg().names, Sync(fb)))
+            wb = work_branch_name()
+            done = decide(RebaseParams(cfg().names, Sync(wb)))
             good, status = isinstance(done, Ok), done.value
-            if good and fb is not None:
-                problems = submodule.catch_up(path, fb)
+            if good and wb is not None:
+                problems = submodule.catch_up(path, wb)
                 if problems:
                     good, status = False, "; ".join([status, *problems])
         finally:
@@ -757,10 +757,10 @@ def catch_up(paths: list[Path]) -> bool:
     return good
 
 
-def ensure_on_work_branch(fb: str) -> None:
+def ensure_on_work_branch(wb: str) -> None:
     prev = current_branch()
-    decide(RebaseParams(cfg().names, OnWorkBranch(fb)))
-    if (prev is not None and prev not in (fb, cfg().main_branch) and current_branch() == fb
+    decide(RebaseParams(cfg().names, OnWorkBranch(wb)))
+    if (prev is not None and prev not in (wb, cfg().main_branch) and current_branch() == wb
             and checkout_identity().kind == "sub"):
         # The fresh branch a subagent's worktree was created on, replaced.
         git("branch", "--quiet", "-D", prev, check=False)
@@ -800,7 +800,7 @@ def editor() -> str | None:
     return cmd if cmd and cmd != ":" else None
 
 
-def edit_message(draft: str, fb: str, tips: list[tuple[str, str]] | None = None) -> str | None:
+def edit_message(draft: str, wb: str, tips: list[tuple[str, str]] | None = None) -> str | None:
     """`draft` (the landing's message so far, "" for none) as the user leaves
     it in git's editor (editor()), on a terminal: a landing run by hand gets
     to adjust what an agent wrote; None when no editor runs, the draft
@@ -816,7 +816,7 @@ def edit_message(draft: str, fb: str, tips: list[tuple[str, str]] | None = None)
     if cmd is None:
         return None
     main = main_ref()
-    notes = [strings.CHECKOUT_NOTE_LANDING(fb=fb, main_branch=cfg().main_branch)]
+    notes = [strings.CHECKOUT_NOTE_LANDING(wb=wb, main_branch=cfg().main_branch)]
     for label, tip in tips or [("", "HEAD")]:
         of = strings.CHECKOUT_NOTE_OF(label=label) if label else ""
         notes += [strings.CHECKOUT_NOTE_INCREMENTS(of=of),
@@ -852,9 +852,9 @@ def edit_message(draft: str, fb: str, tips: list[tuple[str, str]] | None = None)
     return fold_subject("\n".join(lines))
 
 
-def warn_no_msgfile(fb: str) -> None:
+def warn_no_msgfile(wb: str) -> None:
     if not message_on_file().strip():
-        print(strings.CHECKOUT_NO_MSG_FILE_YET(fb=fb), file=sys.stderr)
+        print(strings.CHECKOUT_NO_MSG_FILE_YET(wb=wb), file=sys.stderr)
 
 
 def index_tree(cwd: str | None = None) -> str:
@@ -889,16 +889,16 @@ def deployed_commit(snap: str, msg: str) -> str:
     return out(["git", "commit-tree", tree, "-p", "HEAD", "-m", msg])
 
 
-def adopt_commit(fb: str, c: str) -> None:
+def adopt_commit(wb: str, c: str) -> None:
     """`c` (deployed_commit) onto the work branch once its increment runs.
     The soft reset leaves the index alone, so anything staged mid-deploy
     stays staged on top."""
     git("reset", "--quiet", "--soft", c)
-    warn_no_msgfile(fb)
+    warn_no_msgfile(wb)
 
 
-def commit_deployed(fb: str, snap: str, msg: str) -> None:
-    adopt_commit(fb, deployed_commit(snap, msg))
+def commit_deployed(wb: str, snap: str, msg: str) -> None:
+    adopt_commit(wb, deployed_commit(snap, msg))
 
 
 def push_state(kind: str) -> Path:
@@ -1003,27 +1003,27 @@ def await_background_push(*, wait: bool = True) -> bool:
 PUSHED_REFS = "refs/nixconvoy/pushed"
 
 
-def pushed_tip(fb: str) -> str | None:
-    return rev(f"{PUSHED_REFS}/{fb}")
+def pushed_tip(wb: str) -> str | None:
+    return rev(f"{PUSHED_REFS}/{wb}")
 
 
-def note_pushed(fb: str, sha: str) -> None:
-    git("update-ref", f"{PUSHED_REFS}/{fb}", sha, check=False)
+def note_pushed(wb: str, sha: str) -> None:
+    git("update-ref", f"{PUSHED_REFS}/{wb}", sha, check=False)
 
 
-def forget_pushed(fb: str) -> None:
-    git("update-ref", "-d", f"{PUSHED_REFS}/{fb}", check=False)
+def forget_pushed(wb: str) -> None:
+    git("update-ref", "-d", f"{PUSHED_REFS}/{wb}", check=False)
 
 
-def adopt_origin_tip(fb: str) -> None:
+def adopt_origin_tip(wb: str) -> None:
     """Origin's copy of the work branch, taken as this checkout's (open by
     name), noted as pushed."""
-    up = rev(remote_ref(fb))
+    up = rev(remote_ref(wb))
     if up is not None:
-        note_pushed(fb, up)
+        note_pushed(wb, up)
 
 
-def sole_writer_problem(fb: str) -> str | None:
+def sole_writer_problem(wb: str) -> str | None:
     """Why origin's tip of the work branch is not this checkout's to push
     over, or None: it is, when it is on origin/main (reset, landed or
     undone from elsewhere), in the local branch, the tip this repository
@@ -1033,57 +1033,57 @@ def sole_writer_problem(fb: str) -> str | None:
     onto it.  The deploy decides before its rebase moves the local
     branch, so the message's remedy, which brings origin's commits into
     it, is seen; after a rebase the note or the reflog decides."""
-    up = rev(remote_ref(fb))
-    local = rev(f"refs/heads/{fb}")
+    up = rev(remote_ref(wb))
+    local = rev(f"refs/heads/{wb}")
     if up is None or local is None or is_ancestor(up, main_ref()) or is_ancestor(up, local) \
-            or pushed_tip(fb) == up:
+            or pushed_tip(wb) == up:
         return None
-    held = run(["git", "reflog", "show", "--format=%H", f"refs/heads/{fb}"], check=False).stdout.split()
+    held = run(["git", "reflog", "show", "--format=%H", f"refs/heads/{wb}"], check=False).stdout.split()
     if not held or up in held:
         return None
-    return strings.CHECKOUT_SOLE_WRITER(fb=fb, remote=cfg().remote, sha=up[:12], up_ref=remote_ref(fb),
+    return strings.CHECKOUT_SOLE_WRITER(wb=wb, remote=cfg().remote, sha=up[:12], up_ref=remote_ref(wb),
                                         prefix=this_prefix())
 
 
-def ensure_sole_writer(fb: str) -> str:
+def ensure_sole_writer(wb: str) -> str:
     """Die unless origin's tip of the work branch is this checkout's
     (sole_writer_problem): before a deploy rebases or switches, a land
     pushes main or an undeploy resets anything, and before every push of
     the branch.  Returns that tip ("" for none), the lease the push takes
     (push_cmd), so a fetch between the check and the push changes nothing."""
-    problem = sole_writer_problem(fb)
+    problem = sole_writer_problem(wb)
     if problem is not None:
         die(problem)
-    return rev(remote_ref(fb)) or ""
+    return rev(remote_ref(wb)) or ""
 
 
-def push_refspecs(fb: str, lease: str) -> list[str]:
+def push_refspecs(wb: str, lease: str) -> list[str]:
     """The work branch's local tip, CAS against `lease`: origin's tip as
     ensure_sole_writer proved it this checkout's ("" for no branch); its
-    provenance with it when origin's differs, so the two are pushed atomically."""
-    mine = rev(f"{REWRITTEN_REFS}/{fb}")
-    provenance = [f"+{REWRITTEN_REFS}/{fb}:{PROVENANCE_REFS}/{fb}"] if mine and mine != rev(f"{PROVENANCE_REFS}/{fb}") else []
-    return [f"{fb}:refs/heads/{fb}", f"--force-with-lease=refs/heads/{fb}:{lease}", *provenance]
+    rebase map with it when origin's differs, so the two are pushed atomically."""
+    mine = rev(f"{REWRITTEN_REFS}/{wb}")
+    rebase_map = [f"+{REWRITTEN_REFS}/{wb}:{REBASE_MAP_REFS}/{wb}"] if mine and mine != rev(f"{REBASE_MAP_REFS}/{wb}") else []
+    return [f"{wb}:refs/heads/{wb}", f"--force-with-lease=refs/heads/{wb}:{lease}", *rebase_map]
 
 
-def push_cmd(fb: str, lease: str) -> list[str]:
-    return ["push", "--quiet", "--atomic", cfg().remote, *push_refspecs(fb, lease)]
+def push_cmd(wb: str, lease: str) -> list[str]:
+    return ["push", "--quiet", "--atomic", cfg().remote, *push_refspecs(wb, lease)]
 
 
-def push_work_branch(fb: str) -> None:
+def push_work_branch(wb: str) -> None:
     """Push the work branch (a deploy's end pushes in the background instead:
     push_deployed)."""
-    head = rev(f"refs/heads/{fb}")
-    if head is None or rev(remote_ref(fb)) == head:
+    head = rev(f"refs/heads/{wb}")
+    if head is None or rev(remote_ref(wb)) == head:
         return
-    p = git_remote(*push_cmd(fb, ensure_sole_writer(fb)), check=False)
+    p = git_remote(*push_cmd(wb, ensure_sole_writer(wb)), check=False)
     if p.returncode != 0:
-        die(strings.CHECKOUT_PUSH_FB_FAILED(fb=fb, remote=cfg().remote, stderr=p.stderr.strip()))
-    note_pushed(fb, head)
-    clear = clear_refspec(fb)
+        die(strings.CHECKOUT_PUSH_WB_FAILED(wb=wb, remote=cfg().remote, stderr=p.stderr.strip()))
+    note_pushed(wb, head)
+    clear = clear_refspec(wb)
     if clear:
         git_remote("push", "--quiet", cfg().remote, *clear, check=False)
-    print(strings.CHECKOUT_PUSHED(fb=fb, sha=head[:12] if head else "?"))
+    print(strings.CHECKOUT_PUSHED(wb=wb, sha=head[:12] if head else "?"))
 
 
 DATELESS_ENV = {k: v for k, v in MACHINE_ENV.items() if not k.endswith("_DATE")}
@@ -1324,11 +1324,11 @@ def delete_args(refs: dict[str, str]) -> list[str]:
             *(f":{ref}" for ref in refs)]
 
 
-def clear_refspec(fb: str) -> list[str]:
-    """The push arguments deleting `fb`'s announcement, when one is here
+def clear_refspec(wb: str) -> list[str]:
+    """The push arguments deleting `wb`'s announcement, when one is here
     as fetched (a retry of a failed push clears it too)."""
-    sha = rev(f"{PENDING_REFS}/{fb}")
-    return delete_args({f"{PENDING_REFS}/{fb}": sha}) if sha else []
+    sha = rev(f"{PENDING_REFS}/{wb}")
+    return delete_args({f"{PENDING_REFS}/{wb}": sha}) if sha else []
 
 
 def record_commit(target: str, union: str, parents: list[str], subject: str, doc: str) -> str:
@@ -1356,7 +1356,7 @@ PUSH_LOCK_WAIT = 10
 PUSH_WAIT = 60
 
 
-def push_deployed(fb: str | None, ann: Announce | None, records: dict[str, str],
+def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str],
                   attested: dict[str, tuple[str, str]] | None = None) -> str | None:
     """The push that ends a deploy, in the background, atomic - all of it
     lands or none, so a deploy waiting on the announcement finds the
@@ -1386,25 +1386,25 @@ def push_deployed(fb: str | None, ann: Announce | None, records: dict[str, str],
     what: list[str] = []
     problem: str | None = None
     pushed_note: list[str] = []
-    head = rev(f"refs/heads/{fb}") if fb else None
-    if fb and head and current_branch() == fb and rev(remote_ref(fb)) != head:
-        problem = sole_writer_problem(fb)
+    head = rev(f"refs/heads/{wb}") if wb else None
+    if wb and head and current_branch() == wb and rev(remote_ref(wb)) != head:
+        problem = sole_writer_problem(wb)
         if problem is None:
-            refspecs += push_refspecs(fb, rev(remote_ref(fb)) or "")
-            pushed_note = ["git", "update-ref", f"{PUSHED_REFS}/{fb}", head]
-            what.append(strings.CHECKOUT_PUSHING_BRANCH(fb=fb, sha=head[:12]))
+            refspecs += push_refspecs(wb, rev(remote_ref(wb)) or "")
+            pushed_note = ["git", "update-ref", f"{PUSHED_REFS}/{wb}", head]
+            what.append(strings.CHECKOUT_PUSHING_BRANCH(wb=wb, sha=head[:12]))
     refspecs += [f"+{sha}:refs/heads/{DEPLOYED_PREFIX}/{h}" for h, sha in records.items()]
     what += [f"{DEPLOYED_PREFIX}/{h}" for h in [*records, *(attested or {})]]
-    if ann is not None and ann.key == fb:
+    if ann is not None and ann.key == wb:
         if problem is None:
             ann.stop()
-            refspecs.append(f":{PENDING_REFS}/{fb}")
+            refspecs.append(f":{PENDING_REFS}/{wb}")
     elif ann is not None:
         settled = ann.settled_commit()
         if settled:
             refspecs.append(f"+{settled}:{PENDING_REFS}/{ann.key}")
-    elif fb and rev(f"{PENDING_REFS}/{fb}"):
-        refspecs.append(f":{PENDING_REFS}/{fb}")
+    elif wb and rev(f"{PENDING_REFS}/{wb}"):
+        refspecs.append(f":{PENDING_REFS}/{wb}")
     sweep = {f"{PENDING_REFS}/{k}": sha for k, sha in announcements()[1].items()}
     attest = [a for h, (sha, on) in (attested or {}).items()
               for a in (f"{sha}:refs/heads/{DEPLOYED_PREFIX}/{h}", f"--force-with-lease=refs/heads/{DEPLOYED_PREFIX}/{h}:{on}")]
@@ -1599,15 +1599,15 @@ def rewrite_log(d: Path | None) -> Iterator[tuple[list[str], Callable[[], dict[s
         shutil.rmtree(where, ignore_errors=True)
 
 
-def read_provenance(branch: str, *, local: bool = False) -> dict[str, str]:
-    """`branch`'s provenance as origin has it (as fetched) - or, `local`, as
+def read_rebase_map(branch: str, *, local: bool = False) -> dict[str, str]:
+    """`branch`'s rebase map as origin has it (as fetched) - or, `local`, as
     this repository's own rebases left it, origin's when it made none:
     each commit a rebase of the branch replayed, by its rewrite on the
     branch.  A deploy record names the commit of the branch its target
     runs; this is how that commit is found on the branch after a rebase
     (lanes.carried_commit)."""
-    for ref in ([f"{REWRITTEN_REFS}/{branch}"] if local else []) + [f"{PROVENANCE_REFS}/{branch}"]:
-        p = run(["git", "cat-file", "blob", f"{ref}:{PROVENANCE_FILE}"], check=False)
+    for ref in ([f"{REWRITTEN_REFS}/{branch}"] if local else []) + [f"{REBASE_MAP_REFS}/{branch}"]:
+        p = run(["git", "cat-file", "blob", f"{ref}:{REBASE_MAP_FILE}"], check=False)
         if p.returncode != 0:
             continue
         try:
@@ -1620,24 +1620,24 @@ def read_provenance(branch: str, *, local: bool = False) -> dict[str, str]:
     return {}
 
 
-def write_provenance(branch: str, rewritten: dict[str, str]) -> None:
-    """`rewritten` as this repository's own copy of `branch`'s provenance: a
-    commit of PROVENANCE_FILE alone, the same one for the same provenance."""
+def write_rebase_map(branch: str, rewritten: dict[str, str]) -> None:
+    """`rewritten` as this repository's own copy of `branch`'s rebase map: a
+    commit of REBASE_MAP_FILE alone, the same one for the same rebase map."""
     text = proc.dump_json({"rewritten": dict(sorted(rewritten.items()))}) + "\n"
     blob = out(["git", "hash-object", "-w", "--stdin"], input=text)
-    tree = out(["git", "mktree"], input=f"100644 blob {blob}\t{PROVENANCE_FILE}\n")
-    commit = out(["git", "commit-tree", tree, "-m", strings.CHECKOUT_PROVENANCE_SUBJECT(branch=branch)], env=MACHINE_ENV)
+    tree = out(["git", "mktree"], input=f"100644 blob {blob}\t{REBASE_MAP_FILE}\n")
+    commit = out(["git", "commit-tree", tree, "-m", strings.CHECKOUT_REBASE_MAP_SUBJECT(branch=branch)], env=MACHINE_ENV)
     git("update-ref", f"{REWRITTEN_REFS}/{branch}", commit)
 
 
 def note_rewritten(branch: str, rewritten: dict[str, str], held: set[str]) -> None:
     """A rebase of `branch` replayed `rewritten` (old -> new), leaving it
-    with the commits `held` of its own: composed into its provenance, of
+    with the commits `held` of its own: composed into its rebase map, of
     which only the rewrites the branch still holds are kept."""
     if not rewritten:
         return
-    earlier = {a: rewritten.get(b, b) for a, b in read_provenance(branch, local=True).items()}
-    write_provenance(branch, {old: new for old, new in {**earlier, **rewritten}.items() if new in held})
+    earlier = {a: rewritten.get(b, b) for a, b in read_rebase_map(branch, local=True).items()}
+    write_rebase_map(branch, {old: new for old, new in {**earlier, **rewritten}.items() if new in held})
 
 
 def rebase_solving(d: Path, upstream: str, base: str | None, rewritten: dict[str, str]) -> bool:

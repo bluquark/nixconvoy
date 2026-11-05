@@ -95,7 +95,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     let outcome = if s.flag(Query::TakeDeployLock)? {
         let o = match judge(s, p)? {
             Err(o) => o,
-            Ok((fb, cur)) => remove(s, &fb, cur)?,
+            Ok((wb, cur)) => remove(s, &wb, cur)?,
         };
         s.tolerate(Query::ReleaseDeployLock)?;
         o
@@ -149,27 +149,27 @@ fn judge(s: &mut Script, p: &Params) -> Run<Result<(String, Option<String>), Out
         return kept(text!(prune_nested));
     }
     let cur = s.text(Query::CurrentBranch)?;
-    let Some(fb) = s.text(Query::OwnBranch)? else {
+    let Some(wb) = s.text(Query::OwnBranch)? else {
         return kept(text!(prune_no_work_branch));
     };
     // On its own work branch it is judged like any checkout: idle once the
     // branch is reset onto main (a land, or an undeploy back to it), holding work before.
-    let on_fb = cur.as_deref() == Some(fb.as_str());
-    if on_fb && !fb.ends_with(&format!("-{}", p.name)) {
-        return kept(format!(text!(prune_foreign_branch), fb = fb));
+    let on_wb = cur.as_deref() == Some(wb.as_str());
+    if on_wb && !wb.ends_with(&format!("-{}", p.name)) {
+        return kept(format!(text!(prune_foreign_branch), wb = wb));
     }
-    if let Some(tip) = s.text(Query::Rev { name: p.names.remote_ref(&fb) })? {
+    if let Some(tip) = s.text(Query::Rev { name: p.names.remote_ref(&wb) })? {
         if !s.flag(Query::Contains { a: tip, b: p.names.main_ref() })? {
-            return kept(if on_fb {
-                format!(text!(prune_pushed_increments), fb = fb)
+            return kept(if on_wb {
+                format!(text!(prune_pushed_increments), wb = wb)
             } else {
-                format!(text!(prune_off_pushed_branch), fb = fb)
+                format!(text!(prune_off_pushed_branch), wb = wb)
             });
         }
     }
-    if let Some(local) = s.text(Query::Rev { name: format!("refs/heads/{fb}") })? {
+    if let Some(local) = s.text(Query::Rev { name: format!("refs/heads/{wb}") })? {
         if s.flag(Query::Unpushed { sha: local })? {
-            return kept(format!(text!(prune_unpushed), fb = fb, remote = p.names.remote, main_short = p.names.main_short()));
+            return kept(format!(text!(prune_unpushed), wb = wb, remote = p.names.remote, main_short = p.names.main_short()));
         }
     }
     if s.flag(Query::Dirty)? {
@@ -178,17 +178,17 @@ fn judge(s: &mut Script, p: &Params) -> Run<Result<(String, Option<String>), Out
     if !s.flag(Query::OnOrigin)? {
         return kept(format!(text!(prune_not_on_origin), remote = p.names.remote, main = p.names.main));
     }
-    Ok(Ok((fb, cur)))
+    Ok(Ok((wb, cur)))
 }
 
-fn remove(s: &mut Script, fb: &str, cur: Option<String>) -> Run<Outcome> {
+fn remove(s: &mut Script, wb: &str, cur: Option<String>) -> Run<Outcome> {
     if s.flag(Query::Occupied)? {
         return Ok(Outcome::Kept(text!(prune_occupied).into()));
     }
     if let Err(detail) = s.ran(Query::RemoveWorktree)? {
         return Ok(Outcome::Kept(format!(text!(prune_remove_refused), detail = detail.trim())));
     }
-    if let Err(detail) = s.ran(Query::DropBranches { fb: fb.into(), cur })? {
+    if let Err(detail) = s.ran(Query::DropBranches { wb: wb.into(), cur })? {
         s.warn(detail);
     }
     Ok(Outcome::Removed)

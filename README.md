@@ -510,7 +510,7 @@ Also, there are two special cases: a change touching only documentation skips ev
 
 - **`refs/nixconvoy/deploying/branch/<branch>`.** An "announcement" mechanism registering the fact that a nixconvoy deploy is in progress, renewed every 10s.  This is used to inform other invocations of nixconvoy that they should wait instead of running in parallel.
 	- Normally, this is removed after a deploy completes, but I can't rule out the possibility (e.g. due to a power outage or a bug in nixconvoy) that one of these may accidentally persist and block all deploys indefinitely.  In that case, the failure message will suggest to you a `git push` command to clear it by hand.
-- **`refs/nixconvoy/provenance/<branch>`.** Which commit replaced each commit of a work branch when nixconvoy rebased it, so that the commits named in `nixconvoy-history/<target>` can still be found on the branch.
+- **`refs/nixconvoy/rebase-map/<branch>`.** Which commit replaced each commit of a work branch when nixconvoy rebased it, so that the commits named in `nixconvoy-history/<target>` can still be found on the branch.
 
 </details>
 

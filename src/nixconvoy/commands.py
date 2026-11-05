@@ -19,7 +19,7 @@ from .checkout import (
     LOCK_FILE,
     MACHINE_ENV,
     PENDING_REFS,
-    PROVENANCE_REFS,
+    REBASE_MAP_REFS,
     REWRITTEN_REFS,
     SESSIONLESS,
     STALE_STAMP,
@@ -127,21 +127,21 @@ from .wire import (
 )
 
 
-def holds(fb: str, tip: str, not_yet_deployed: bool = False) -> None:
-    """The targets `fb` (at `tip`) has work not deployed to
+def holds(wb: str, tip: str, not_yet_deployed: bool = False) -> None:
+    """The targets `wb` (at `tip`) has work not deployed to
     (lanes.undeployed): a landing is refused on them unless
     `not_yet_deployed` (the landed work then rolls out there from the next
     deploy anywhere)."""
     wt = add_worktree(tip)
     try:
-        held = lanes.undeployed(fb, tip, wt)
+        held = lanes.undeployed(wb, tip, wt)
     finally:
         drop_worktree(wt)
     if not held:
         return
     them = ", ".join(held)
     if not not_yet_deployed:
-        die(strings.LAND_HOLDS_BACK(fb=fb, them=them, it_them="it" if len(held) == 1 else "them",
+        die(strings.LAND_HOLDS_BACK(wb=wb, them=them, it_them="it" if len(held) == 1 else "them",
                                     targets=" ".join(held)))
     print(strings.LAND_NOT_YET_DEPLOYED(them=them))
 
@@ -151,20 +151,20 @@ def kept_edit() -> Path:
     return state_path(KEPT_EDIT)
 
 
-def file_message(fb: str, given: str | None) -> str:
+def file_message(wb: str, given: str | None) -> str:
     """checkout.landing_message over this checkout's MSG_FILE (message_on_file)."""
-    return landing_message(given, message_on_file(), fb)
+    return landing_message(given, message_on_file(), wb)
 
 
-def refuse_no_message(fb: str, given: str | None) -> None:
+def refuse_no_message(wb: str, given: str | None) -> None:
     """The refusal main_message ends in, up front when no editor could
     supply the message - before the checks that cost (holds' evaluation,
     the merge of --with-children)."""
-    if not file_message(fb, given) and not kept_edit().exists() and editor() is None:
-        die(strings.LAND_NO_MSG_FILE(fb=fb))
+    if not file_message(wb, given) and not kept_edit().exists() and editor() is None:
+        die(strings.LAND_NO_MSG_FILE(wb=wb))
 
 
-def main_message(fb: str, given: str | None, main: str, appended: str = "",
+def main_message(wb: str, given: str | None, main: str, appended: str = "",
                  tips: list[tuple[str, str]] | None = None) -> str:
     """The main commit's message: file_message, `appended` (the subs'
     MSG_FILEs, land --with-children) below it, the whole offered in the
@@ -176,19 +176,19 @@ def main_message(fb: str, given: str | None, main: str, appended: str = "",
     it off a terminal; the landing removes it.  `main`, origin/main as the
     landing read it, is checked again after the edit, the landing refused
     rather than retried on a main that moved meanwhile."""
-    msg = file_message(fb, given)
+    msg = file_message(wb, given)
     kept = kept_edit()
     whole = "\n\n".join(x for x in (msg, appended) if x)
     if given is None and kept.exists():
         whole = kept.read_text(encoding="utf-8").strip()
-    if given is None and (edited := edit_message(whole, fb, tips)) is not None:
+    if given is None and (edited := edit_message(whole, wb, tips)) is not None:
         kept.write_text(edited + "\n", encoding="utf-8")
         git_remote(*fetch_args())
         if rev(main_ref()) != main:
             die(strings.LAND_MAIN_MOVED_DURING_EDIT(main=main_short()))
         return edited
     if not whole:
-        die(strings.LAND_NO_MSG_FILE(fb=fb))
+        die(strings.LAND_NO_MSG_FILE(wb=wb))
     return whole
 
 
@@ -197,7 +197,7 @@ LANDINGS = "landings.json"  # in the git dir (state_path): the landings not know
 
 class Part(NamedTuple):
     dir: str  # a checkout the landing takes
-    fb: str
+    wb: str
     tip: str  # its HEAD as landed
     msg: str  # its MSG_FILE then (message_on_file)
 
@@ -263,17 +263,17 @@ def take_landing(part: Part, commit: str, fresh: bool) -> None:
     is the commit's message now, and goes; one written since is the next
     landing's draft, kept (staged, when it was)."""
     head = rev("HEAD")
-    if (current_branch() != part.fb or head not in (part.tip, commit)
-            or (head == commit and rev(remote_ref(part.fb)) == commit)):
+    if (current_branch() != part.wb or head not in (part.tip, commit)
+            or (head == commit and rev(remote_ref(part.wb)) == commit)):
         return
-    problem = sole_writer_problem(part.fb)
-    lease = rev(remote_ref(part.fb)) or ""
+    problem = sole_writer_problem(part.wb)
+    lease = rev(remote_ref(part.wb)) or ""
     if head == part.tip:
         draft = message_on_file()
         staged = unstage_msg()
         git("checkout", "--quiet", "--", MSG_FILE, check=False)
         # What is staged or edited rides along.
-        took = git("checkout", "--quiet", "-B", part.fb, commit, check=False).returncode == 0
+        took = git("checkout", "--quiet", "-B", part.wb, commit, check=False).returncode == 0
         if not took and fresh:
             # Landed all the same: the branch moves, the working tree
             # showing the landing's changes until `git checkout -- .`.
@@ -291,7 +291,7 @@ def take_landing(part: Part, commit: str, fresh: bool) -> None:
     if problem is not None:
         print(problem, file=sys.stderr)
     else:
-        finish(part.fb, lease)
+        finish(part.wb, lease)
 
 
 def complete(r: Landed, locked: bool = False, fresh: bool = True) -> bool:
@@ -424,39 +424,39 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
         if not catch_up_rest(held):
             die(strings.LAND_CATCH_UP_FAILED())
         return
-    fb = require_work_branch("land")
-    if current_branch() != fb:
-        die(strings.LAND_NOT_ON_WORK_BRANCH(fb=fb, cur=current_branch() or strings.LAND_DETACHED_HEAD))
+    wb = require_work_branch("land")
+    if current_branch() != wb:
+        die(strings.LAND_NOT_ON_WORK_BRANCH(wb=wb, cur=current_branch() or strings.LAND_DETACHED_HEAD))
     if staged_differs(less_msg=True):
         die(strings.LAND_STAGED)
-    ensure_sole_writer(fb)  # origin's copy is reset at the end: it must be ours
+    ensure_sole_writer(wb)  # origin's copy is reset at the end: it must be ours
     ensure_rebased()
     main = rev(main_ref())
     if main is None or tree_less_msg("HEAD") == out(["git", "rev-parse", f"{main_short()}^{{tree}}"]):
         die(strings.LAND_NO_CHANGES(main=main_short()))
-    refuse_no_message(fb, message)
+    refuse_no_message(wb, message)
     # A branch forked from another's tip (a subagent worktree made by hand at
     # its parent's) would land that branch's increments under this message.
     carried = [b for b, tip in listed_tips().items()
-               if b != fb and is_ancestor(tip, "HEAD")
+               if b != wb and is_ancestor(tip, "HEAD")
                and not is_ancestor(tip, main_ref())]
     if carried:
-        die(strings.LAND_CARRIES_UNLANDED(fb=fb, carried=", ".join(carried)))
+        die(strings.LAND_CARRIES_UNLANDED(wb=wb, carried=", ".join(carried)))
     # The submodules first: main must never pin a branch about to go.
     gone = submodule.orphaned(Path.cwd())
     if gone:
-        die(strings.LAND_SUBMODULE_ORPHANED(fb=fb, gone=", ".join(gone)))
-    holds(fb, "HEAD", not_yet_deployed)
+        die(strings.LAND_SUBMODULE_ORPHANED(wb=wb, gone=", ".join(gone)))
+    holds(wb, "HEAD", not_yet_deployed)
     draft = message_on_file()
-    msg = main_message(fb, message, main)
-    ensure_sole_writer(fb)  # the edit's fetch may have brought a tip
+    msg = main_message(wb, message, main)
+    ensure_sole_writer(wb)  # the edit's fetch may have brought a tip
     here, tip = Path.cwd().resolve(), out(["git", "rev-parse", "HEAD"])
     # Until main's push nothing moves, here or on any origin, but the
     # landing commits' temporary refs: a landing refused has nothing to undo.
-    landings = submodule.prepare_all(fb, msg)
+    landings = submodule.prepare_all(wb, msg)
     tree = tree_less_msg(submodule.pinned_commit(tip, landings, here))
     landed = Landed(out(["git", "commit-tree", tree, "-p", main, "-m", msg]), main,
-                    [Part(str(here), fb, tip, draft)], landings)
+                    [Part(str(here), wb, tip, draft)], landings)
     push_main(landed)
     finish_landing(landed)
     if not catch_up_rest([landed]):
@@ -494,11 +494,11 @@ def undeploy(back_to: str = "HEAD^", as_if: dict[str, str] | None = None) -> boo
     pop_tmp_commits()
     ident = checkout_identity()
     here = Path.cwd().resolve()
-    if ident.kind == "sub" and ident.fb and current_branch() != ident.fb and sub_parent(here):
-        die(strings.UNDEPLOY_SUB_NOT_ON_WORK_BRANCH(label=sub_label(here), fb=ident.fb, name=here.name))
-    fb = require_work_branch("undeploy")
-    if current_branch() != fb:
-        die(strings.UNDEPLOY_NOT_ON_WORK_BRANCH(fb=fb, cur=current_branch() or strings.LAND_DETACHED_HEAD))
+    if ident.kind == "sub" and ident.wb and current_branch() != ident.wb and sub_parent(here):
+        die(strings.UNDEPLOY_SUB_NOT_ON_WORK_BRANCH(label=sub_label(here), wb=ident.wb, name=here.name))
+    wb = require_work_branch("undeploy")
+    if current_branch() != wb:
+        die(strings.UNDEPLOY_NOT_ON_WORK_BRANCH(wb=wb, cur=current_branch() or strings.LAND_DETACHED_HEAD))
     main = rev(main_ref())
     if main is None:
         die(strings.LAND_MAIN_NOT_FOUND(main=main_short()))
@@ -510,7 +510,7 @@ def undeploy(back_to: str = "HEAD^", as_if: dict[str, str] | None = None) -> boo
     if is_ancestor(target, base):
         target = base  # origin/main, or older: the whole branch
     elif not is_ancestor(target, "HEAD"):
-        die(strings.UNDEPLOY_NOT_ON_BRANCH(back_to=back_to, sha=target[:12], fb=fb))
+        die(strings.UNDEPLOY_NOT_ON_BRANCH(back_to=back_to, sha=target[:12], wb=wb))
     if target == prev:
         die(strings.UNDEPLOY_NOTHING_BEYOND_MAIN(main=main_short()) if target == base
             else strings.UNDEPLOY_NOTHING_HEAD_IS(back_to=back_to))
@@ -529,27 +529,27 @@ def undeploy(back_to: str = "HEAD^", as_if: dict[str, str] | None = None) -> boo
     # an unstaged edit to a file the increments changed (git reset --keep
     # refuses it), and so would a submodule's; origin's copy, reset at the
     # end, must be ours.
-    lease = ensure_sole_writer(fb)
+    lease = ensure_sole_writer(wb)
     edited = lost_edits(target, prev)
     if edited:
         die(strings.UNDEPLOY_LOST_EDITS(files=", ".join(edited)))
-    moved = submodule.moved_pins(here, fb, prev, target)
+    moved = submodule.moved_pins(here, wb, prev, target)
     summaries = "\n  ".join(summarize(ln.partition("\t")[0]) for ln in undone)
     if as_if is not None:
-        as_if[fb] = target
-        print(strings.UNDEPLOY_DRY(fb=fb, n=len(undone), summaries=summaries))
+        as_if[wb] = target
+        print(strings.UNDEPLOY_DRY(wb=wb, n=len(undone), summaries=summaries))
         print(strings.UNDEPLOY_DRY_REVERTING(targets=", ".join(deployed)) if deployed else strings.UNDEPLOY_REACHED_NONE)
         return bool(deployed)
     p = git("reset", "--quiet", "--keep", target, check=False)
     if p.returncode != 0:
         die(strings.UNDEPLOY_RESET_FAILED(sha=target[:12], stderr=(p.stderr or "").strip()))
-    submodule.undeploy_pins(moved, fb)
-    print(strings.UNDEPLOY_DONE(fb=fb, n=len(undone), summaries=summaries))
+    submodule.undeploy_pins(moved, wb)
+    print(strings.UNDEPLOY_DONE(wb=wb, n=len(undone), summaries=summaries))
     if deployed:
         print(strings.UNDEPLOY_REVERTING(targets=", ".join(deployed)))
     else:
         print(strings.UNDEPLOY_REACHED_NONE)
-    finish(fb, lease, main_short() if target == main else target[:12])
+    finish(wb, lease, main_short() if target == main else target[:12])
     return bool(deployed)
 
 
@@ -587,7 +587,7 @@ def close_worktrees(names: list[str], *, force: bool = False) -> None:
                 if force:
                     if deploy_running(d):
                         die(strings.CLOSE_TOOL_RUNNING(label=sub_label(d)))
-                    remove_sub(d, [identity_of(d, branch_at(d)).fb or ""])
+                    remove_sub(d, [identity_of(d, branch_at(d)).wb or ""])
                     verdict = strings.CLOSE_REMOVED_FORCE
                 else:
                     why = prune_one(d, named=bool(names), own_session_ends=bool(names), fetched=fetched)
@@ -845,7 +845,7 @@ class PruneQueries(GitQueries):
                     ["git", "worktree", "list", "--porcelain"]).splitlines() if ln.startswith("worktree ")]
                 return Flag(any(w != self.d and self.d in w.parents for w in inside))
             case OwnBranch():
-                return Text(identity_of(self.d, current_branch()).fb)
+                return Text(identity_of(self.d, current_branch()).wb)
             case Unpushed(sha):
                 return Flag(bool(out(["git", "rev-list", "-n", "1", sha, "--not", f"--remotes={cfg().remote}"])))
             case Dirty():
@@ -888,8 +888,8 @@ class PruneQueries(GitQueries):
                     # The tree went but not its registration.
                     git("worktree", "prune", check=False)
                 return done
-            case DropBranches(fb, cur):
-                failed = drop_branches(sub_branches(self.d, cur, [fb]))
+            case DropBranches(wb, cur):
+                failed = drop_branches(sub_branches(self.d, cur, [wb]))
                 self.dropped_failed = failed
                 return Ran(not failed, "\n".join(failed))
             case _:
@@ -926,16 +926,16 @@ def transcript_cwd(path: Path, *, last: bool = False) -> Path | None:
     return Path(found).resolve() if found else None
 
 
-def finish(fb: str, lease: str, onto: str | None = None) -> None:
+def finish(wb: str, lease: str, onto: str | None = None) -> None:
     """The checked-out work branch after a land or undeploy, now at `onto`
     (origin/main's commit, the default, or an earlier increment), moved
     there on origin too, over `lease` (ensure_sole_writer's).  A subagent
     worktree left with nothing stays, idle: `close` removes it (the
     session-exit sweep does so on its own)."""
     onto = onto or main_short()
-    git_remote(*push_cmd(fb, lease))
-    note_pushed(fb, rev(f"refs/heads/{fb}") or "")
-    print(strings.LAND_RESET_ONTO(fb=fb, onto=onto))
+    git_remote(*push_cmd(wb, lease))
+    note_pushed(wb, rev(f"refs/heads/{wb}") or "")
+    print(strings.LAND_RESET_ONTO(wb=wb, onto=onto))
     here = Path.cwd().resolve()
     if sub_parent(here) is not None and rev("HEAD") == rev(main_ref()):
         print(strings.LAND_WORKTREE_STAYS(name=here.name))
@@ -1005,12 +1005,12 @@ def drop_branches(names: list[str]) -> list[str]:
             for b in pushed:
                 del gone[b]
     # The gone branches' announcements and, of those gone from origin
-    # too, provenances, on their own: a stale lease (origin moved since the
+    # too, rebase maps, on their own: a stale lease (origin moved since the
     # fetch) must not count as a branch deletion failed.
     for b in gone:
         git("update-ref", "-d", f"{REWRITTEN_REFS}/{b}", check=False)
     clears = [spec for b in names for spec in clear_refspec(b)]
-    clears += [f":{PROVENANCE_REFS}/{b}" for b in gone if rev(f"{PROVENANCE_REFS}/{b}")]
+    clears += [f":{REBASE_MAP_REFS}/{b}" for b in gone if rev(f"{REBASE_MAP_REFS}/{b}")]
     if clears:
         p = git_remote("push", "--quiet", cfg().remote, *clears, check=False)
         if p.returncode != 0:
@@ -1112,8 +1112,8 @@ def status() -> None:
         if behind:
             where += p(strings.STATUS_BEHIND(n=behind, main_branch=cfg().main_branch), "magenta")
         notes: list[str] = []
-        if ident.fb and cur != ident.fb and ident.kind != "main":
-            notes.append(p(strings.STATUS_OWNS(fb=ident.fb), "dim"))
+        if ident.wb and cur != ident.wb and ident.kind != "main":
+            notes.append(p(strings.STATUS_OWNS(wb=ident.wb), "dim"))
         notes += [p(strings.STATUS_COUNT(label=label, n=n), "cyan") for label, n in counts.items() if n]
         if own and cur is not None and cur != cfg().main_branch and git_common(d) == git_common(Path.cwd()):
             # By the checkout's files as they are: a note, not a verdict.
@@ -1124,7 +1124,7 @@ def status() -> None:
             if held:
                 notes.append(p(strings.STATUS_HOLDS_BACK(targets=", ".join(held)), "yellow"))
         notes += [p(a, "cyan") for a in submodule.notes(d)]
-        if ident.kind == "sub" and not own and not any(counts.values()) and cur != ident.fb:
+        if ident.kind == "sub" and not own and not any(counts.values()) and cur != ident.wb:
             if sessionless:
                 notes.append(p(strings.STATUS_EMPTY_SESSIONLESS(name=d.name), "dim"))
             elif alive is None:
@@ -1391,18 +1391,18 @@ def close_checkout(path: Path, *, force: bool = False) -> None:
     if lock is None:
         die(strings.CLOSE_RUNNING_IN(holder=lock_holder(d), where=d))
     cur = branch_at(d)
-    fb = identity_of(d, cur).fb
-    if fb is None:
+    wb = identity_of(d, cur).wb
+    if wb is None:
         die(strings.CLOSE_MAIN_CHECKOUT_ON(path=d, branch=cur) if cur
             else strings.CLOSE_MAIN_CHECKOUT_DETACHED(path=d))
     head = out(["git", "rev-parse", "HEAD"], cwd=str(d))
     # Its submodule worktrees are its own (removed with it): a pin they moved is not an edit.
     edits = [ln for ln in run(["git", "status", "--porcelain"], cwd=str(d), check=False).stdout.splitlines()
              if ln[3:] not in submodule.paths(d)]
-    tip = rev(f"refs/heads/{fb}") if fb else None
+    tip = rev(f"refs/heads/{wb}") if wb else None
     kept = (strings.CLOSE_KEPT_EDITS if edits
             else strings.CLOSE_KEPT_COMMITS(main=main_short()) if not is_ancestor(head, main_ref())
-            else strings.CLOSE_KEPT_BRANCH(fb=fb, main=main_short())
+            else strings.CLOSE_KEPT_BRANCH(wb=wb, main=main_short())
             if tip and not is_ancestor(tip, main_ref())
             else strings.CLOSE_KEPT_SUBMODULE if submodule.own(d) else None)
     if kept and not force:
@@ -1412,7 +1412,7 @@ def close_checkout(path: Path, *, force: bool = False) -> None:
     submodule.remove_all(d)
     lock.close()
     git("worktree", "remove", "--force", str(d))
-    names = [b for b in {cur, fb} if b and owned(b)]
+    names = [b for b in {cur, wb} if b and owned(b)]
     failed = drop_branches(names)
     if failed:
         die("\n".join(failed))
@@ -1438,17 +1438,17 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
         return
     if sub_parent(here) is not None:
         die(strings.LAND_CHILDREN_FROM_SUB)
-    fb = require_work_branch("land --with-children")
-    if current_branch() != fb:
-        die(strings.LAND_NOT_ON_WORK_BRANCH(fb=fb, cur=current_branch() or strings.LAND_DETACHED_HEAD))
-    ensure_sole_writer(fb)  # every branch is reset on origin at the end: all must be ours
+    wb = require_work_branch("land --with-children")
+    if current_branch() != wb:
+        die(strings.LAND_NOT_ON_WORK_BRANCH(wb=wb, cur=current_branch() or strings.LAND_DETACHED_HEAD))
+    ensure_sole_writer(wb)  # every branch is reset on origin at the end: all must be ours
     if staged_differs(less_msg=True):
         die(strings.LAND_STAGED)
     ensure_rebased()
     main = rev(main_ref())
     if main is None:
         die(strings.LAND_MAIN_NOT_FOUND(main=main_short()))
-    refuse_no_message(fb, message)
+    refuse_no_message(wb, message)
     main_tree = out(["git", "rev-parse", f"{main}^{{tree}}"])
     # The participants: each sub on its work branch with work beyond main.
     parts: list[tuple[Path, str]] = []
@@ -1463,7 +1463,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
                 die(strings.LAND_CHILD_STAGED(label=label))
             if is_ancestor(head, main) or tree_less_msg("HEAD", str(d)) == main_tree:
                 continue
-            if cur != ident.fb or not ident.fb:
+            if cur != ident.wb or not ident.wb:
                 die(strings.LAND_CHILD_UNDEPLOYED(label=label, where=cur or strings.LAND_A_DETACHED_HEAD))
             if git_op_in_progress(d):
                 die(strings.LAND_CHILD_GIT_OP(label=label, op=git_op_in_progress(d)))
@@ -1473,7 +1473,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
             if lock is None:
                 die(strings.CLOSE_RUNNING_IN(holder=lock_holder(d), where=label))
             locks.append(lock)
-            parts.append((d, ident.fb))
+            parts.append((d, ident.wb))
         if not parts:
             die(strings.LAND_NO_CHILD_WORK(name=here.name))
         for d, b in parts:
@@ -1481,22 +1481,22 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
             if problem is not None:
                 die(strings.LAND_CHILD_PROBLEM(name=d.name, problem=problem))
         # Each sub's MSG_FILE (message_on_file) appended in turn.
-        drafts = {d: message_on_file(str(d)) for d, _ in [(here, fb), *parts]}
+        drafts = {d: message_on_file(str(d)) for d, _ in [(here, wb), *parts]}
         sub_msgs = [m for d, _ in parts if (m := drafts[d].strip())]
-        own = {fb, *(b for _, b in parts)}
-        for d, b in [(here, fb), *parts]:
+        own = {wb, *(b for _, b in parts)}
+        for d, b in [(here, wb), *parts]:
             carried = [x for x, tip in listed_tips().items()
                        if x not in own and is_ancestor(tip, "HEAD" if d == here else f"refs/heads/{b}")
                        and not is_ancestor(tip, main)]
             if carried:
-                die(strings.LAND_CARRIES_UNLANDED(fb=b, carried=", ".join(carried)))
+                die(strings.LAND_CARRIES_UNLANDED(wb=b, carried=", ".join(carried)))
             gone = submodule.orphaned(d)
             if gone:
-                die(strings.LAND_CHILDREN_SUBMODULE_ORPHANED(fb=b, gone=", ".join(gone), name=d.name))
-        for d, b in [(here, fb), *parts]:
+                die(strings.LAND_CHILDREN_SUBMODULE_ORPHANED(wb=b, gone=", ".join(gone), name=d.name))
+        for d, b in [(here, wb), *parts]:
             holds(b, "HEAD" if d == here else f"refs/heads/{b}", not_yet_deployed)
 
-        tips = {d: out(["git", "rev-parse", "HEAD"], cwd=str(d)) for d, _ in [(here, fb), *parts]}
+        tips = {d: out(["git", "rev-parse", "HEAD"], cwd=str(d)) for d, _ in [(here, wb), *parts]}
 
         def merged_tree(tips: dict[Path, str]) -> str:
             """The branches, each at its commit of `tips`, merged in a
@@ -1517,7 +1517,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
                             git("add", "--", f, cwd=wt, check=False)
                         else:
                             git("merge", "--abort", cwd=wt, check=False)
-                            die(strings.LAND_CHILD_CONFLICT(branch=b, file=f, fb=fb, label=sub_label(d), name=d.name))
+                            die(strings.LAND_CHILD_CONFLICT(branch=b, file=f, wb=wb, label=sub_label(d), name=d.name))
                     git("commit", "--quiet", "--no-edit", "--no-verify", cwd=wt, env=MACHINE_ENV)
                 return tree_less_msg("HEAD", wt)
             finally:
@@ -1540,16 +1540,16 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
 
         # Proven to merge before any submodule's landing commit is pushed.
         clashes(merged_tree(tips))
-        msg = main_message(fb, message, main, "\n\n".join(sub_msgs),
+        msg = main_message(wb, message, main, "\n\n".join(sub_msgs),
                            [(here.name, "HEAD"), *((sub_label(d), f"refs/heads/{b}") for d, b in parts)])
-        for d, b in [(here, fb), *parts]:  # the edit's fetch may have brought a tip
+        for d, b in [(here, wb), *parts]:  # the edit's fetch may have brought a tip
             problem = sole_writer_problem(b)
             if problem is not None:
                 die(strings.LAND_CHILD_PROBLEM(name=d.name, problem=problem))
         # As in land: nothing moves before main's push.
         landings: list[submodule.Landing] = []
         pinned: dict[Path, str] = {}
-        for d, b in [(here, fb), *parts]:
+        for d, b in [(here, wb), *parts]:
             os.chdir(d)
             own = submodule.prepare_all(b, msg, landings)
             os.chdir(here)
@@ -1561,7 +1561,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
         clashes(tree, pinned=True)
         submodule.check_pins(tree, landings, here)
         landed = Landed(out(["git", "commit-tree", tree, "-p", main, "-m", msg]), main,
-                        [Part(str(d), b, tips[d], drafts[d]) for d, b in [(here, fb), *parts]], landings)
+                        [Part(str(d), b, tips[d], drafts[d]) for d, b in [(here, wb), *parts]], landings)
         push_main(landed)
         finish_landing(landed, locked=True)
     finally:

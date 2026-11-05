@@ -288,12 +288,12 @@ class Onto(Variant):
 
 @dataclass(frozen=True)
 class Sync(Variant):
-    fb: str | None
+    wb: str | None
 
 
 @dataclass(frozen=True)
 class OnWorkBranch(Variant):
-    fb: str
+    wb: str
 
 
 RebaseOp = PopTmp | EnsureRebased | Onto | Sync | OnWorkBranch
@@ -325,7 +325,7 @@ RebaseOutcome = Ok | Err
 @dataclass(frozen=True)
 class UnionParams:
     names: RepoNames
-    fb: str
+    wb: str
     evict: bool
     main0: str | None
 
@@ -677,7 +677,7 @@ class RemoveWorktree(Variant):
 
 @dataclass(frozen=True)
 class DropBranches(Variant):
-    fb: str
+    wb: str
     cur: str | None
 
 

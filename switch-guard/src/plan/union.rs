@@ -42,7 +42,7 @@ pub const WAITS: usize = 10;
 pub struct Params {
     pub names: Names,
     /// This checkout's work branch.
-    pub fb: String,
+    pub wb: String,
     /// --evict: no other branch.
     pub evict: bool,
     /// origin/main before this run's fetch.
@@ -92,7 +92,7 @@ fn select(s: &mut Script, p: &Params, seen: &mut Seen) -> Run<Vec<(String, Strin
     }
     let mut out = Vec::new();
     for (name, sha) in s.refs(Query::Branches)? {
-        if name == p.fb || s.flag(Query::Contains { a: sha.clone(), b: "HEAD".into() })? {
+        if name == p.wb || s.flag(Query::Contains { a: sha.clone(), b: "HEAD".into() })? {
             continue;
         }
         if !listed(seen.listed.iter().map(String::as_str), &name) {
@@ -259,7 +259,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
                 s.must(Query::LaneWorktree, text!(union_creating_worktree))?;
                 match build(s, &taken)? {
                     Ok(union) => lanes.push(Lane { targets, union, branches: taken }),
-                    Err(c) if p.fb.is_empty() => {
+                    Err(c) if p.wb.is_empty() => {
                         s.warn(format!(text!(union_lane_left), targets = targets.join(", "), why = lane_guidance(&targets, &c)));
                         lanes.push(Lane { targets, union: String::new(), branches: taken });
                     }

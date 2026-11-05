@@ -64,7 +64,7 @@ fn cx(tips: &[(&str, &str)]) -> Context {
     }
 }
 
-fn lin_ann(
+fn prov_ann(
     top: &str,
     by: (&str, &str),
     pending: Option<(&str, Option<&str>)>,
@@ -78,13 +78,13 @@ fn lin_ann(
     l
 }
 
-fn lin(top: &str, by: (&str, &str), pending: Option<(&str, Option<&str>)>, others: &[&str], at: f64) -> Provenance {
-    lin_ann(top, by, pending, None, others, at)
+fn prov(top: &str, by: (&str, &str), pending: Option<(&str, Option<&str>)>, others: &[&str], at: f64) -> Provenance {
+    prov_ann(top, by, pending, None, others, at)
 }
 
-fn std_lin() -> Provenance {
+fn std_prov() -> Provenance {
     let b = base();
-    lin(NEW, OTHER, Some((BRANCH, Some(&b))), &["work/chikuwa/1"], T0)
+    prov(NEW, OTHER, Some((BRANCH, Some(&b))), &["work/chikuwa/1"], T0)
 }
 
 fn verdict(l: Option<&Provenance>, c: &Context, take_over: bool, reached: bool) -> (Kind, String) {
@@ -98,23 +98,23 @@ fn classifies_provenances() {
     let at_base = cx(&[(BRANCH, &b)]);
     let k = |l: Option<&Provenance>, c: &Context, over: bool| verdict(l, c, over, true);
 
-    let (kind, why) = k(Some(&std_lin()), &at_base, false);
+    let (kind, why) = k(Some(&std_prov()), &at_base, false);
     assert_eq!(kind, Kind::InFlight);
     assert!(kind.refused());
     assert!(why.contains(&format!("{BRANCH} deployed by haswell-wsl:/home/blu/projects/homelab2 (pid 4242)")), "{why}");
     assert!(why.contains(&format!("origin/{BRANCH} is still at {}", &b[..12])), "{why}");
-    assert_eq!(k(Some(&std_lin()), &cx(&[(BRANCH, &landed())]), false).0, Kind::CatchUp);
+    assert_eq!(k(Some(&std_prov()), &cx(&[(BRANCH, &landed())]), false).0, Kind::CatchUp);
 
     // A provenance without an announcement (nothing tells its deploy's end)
     // stays in flight however old; the writer's `at` is display only.
-    let old = lin(NEW, OTHER, Some((BRANCH, Some(&b))), &["work/chikuwa/1"], T0 - 7200.0);
+    let old = prov(NEW, OTHER, Some((BRANCH, Some(&b))), &["work/chikuwa/1"], T0 - 7200.0);
     assert_eq!(k(Some(&old), &at_base, false).0, Kind::InFlight);
 
     // An announced increment is in flight while origin's pending ref of
     // its branch is uncleared - whatever commit the renewals left there,
     // dead or not (then said so) - and abandoned the moment it is cleared:
     // its deploy ended without the push.
-    let announced = lin_ann(NEW, OTHER, Some((BRANCH, Some(&b))), Some("p"), &["work/chikuwa/1"], T0);
+    let announced = prov_ann(NEW, OTHER, Some((BRANCH, Some(&b))), Some("p"), &["work/chikuwa/1"], T0);
     let mut live = at_base.clone();
     live.in_flight.insert(BRANCH.into(), "p".into());
     let (kind, why) = k(Some(&announced), &live, false);
@@ -132,26 +132,26 @@ fn classifies_provenances() {
     // A dead deploy's provenance without an announcement: nothing to go by.
     let mut dead = at_base.clone();
     dead.dead.insert(BRANCH.into());
-    let (kind, why) = k(Some(&std_lin()), &dead, false);
+    let (kind, why) = k(Some(&std_prov()), &dead, false);
     assert!(kind == Kind::InFlight && !why.contains("dead"), "{why}");
 
-    let (kind, why) = k(Some(&std_lin()), &at_base, true);
+    let (kind, why) = k(Some(&std_prov()), &at_base, true);
     assert!(kind == Kind::Overridden && why.contains(EVICT_FLAG), "{why}");
 
     // Refused work on a target this checkout's work does not reach is left
     // there; --evict still reverts it.
-    let (kind, why) = verdict(Some(&std_lin()), &at_base, false, false);
+    let (kind, why) = verdict(Some(&std_prov()), &at_base, false, false);
     assert!(kind == Kind::LeftAlone && !kind.refused() && why.contains("does not reach it"), "{why}");
     assert_eq!(verdict(Some(&old), &at_base, false, false).0, Kind::LeftAlone);
-    assert_eq!(verdict(Some(&std_lin()), &at_base, true, false).0, Kind::Overridden);
-    assert_eq!(verdict(Some(&std_lin()), &cx(&[(BRANCH, &landed())]), false, false).0, Kind::CatchUp);
+    assert_eq!(verdict(Some(&std_prov()), &at_base, true, false).0, Kind::Overridden);
+    assert_eq!(verdict(Some(&std_prov()), &cx(&[(BRANCH, &landed())]), false, false).0, Kind::CatchUp);
 
-    let unl = lin(NEW, OTHER, Some(("work/M3-Air/9", Some(&b))), &["work/chikuwa/1"], T0);
+    let unl = prov(NEW, OTHER, Some(("work/M3-Air/9", Some(&b))), &["work/chikuwa/1"], T0);
     let (kind, why) = k(Some(&unl), &cx(&[("work/M3-Air/9", &b)]), false);
     assert!(kind == Kind::Unlisted && why.contains("work/M3-Air/9"), "{why}");
     assert_eq!(k(Some(&unl), &cx(&[("work/M3-Air/9", &landed())]), false).0, Kind::Unlisted);
     // Pushed work of a branch not listed here is refused too.
-    let pushed_unl = lin(NEW, OTHER, None, &["work/M3-Air/9"], T0);
+    let pushed_unl = prov(NEW, OTHER, None, &["work/M3-Air/9"], T0);
     assert_eq!(k(Some(&pushed_unl), &at_base, false).0, Kind::Unlisted);
 
     assert_eq!(k(None, &at_base, false), (Kind::Untracked, String::new()));
@@ -162,17 +162,17 @@ fn classifies_provenances() {
     assert_eq!(parse(&doc(NEW, OTHER, None, &[], T0).replace(r#""version":2"#, r#""version":1"#)), None);
     let malformed = json!({"branch": BRANCH, "base": 7});
     assert_eq!(parse(&doc(NEW, OTHER, None, &[], T0).replace(r#""pending":null"#, &format!(r#""pending":{malformed}"#))), None);
-    assert_eq!(k(Some(&lin(OLD, OTHER, None, &[], T0)), &at_base, false).0, Kind::Untracked);
-    assert_eq!(k(Some(&lin(NEW, ME, Some((BRANCH, Some(&b))), &[], T0)), &at_base, false).0, Kind::ThisBranch);
-    assert_eq!(k(Some(&lin(NEW, OTHER, None, &["work/chikuwa/1"], T0)), &at_base, false).0, Kind::CatchUp);
+    assert_eq!(k(Some(&prov(OLD, OTHER, None, &[], T0)), &at_base, false).0, Kind::Untracked);
+    assert_eq!(k(Some(&prov(NEW, ME, Some((BRANCH, Some(&b))), &[], T0)), &at_base, false).0, Kind::ThisBranch);
+    assert_eq!(k(Some(&prov(NEW, OTHER, None, &["work/chikuwa/1"], T0)), &at_base, false).0, Kind::CatchUp);
 
     // The nightly's unpushed lock commit on main.
-    let nightly = lin(NEW, ("chikuwa", "/var/lib/homelab"), Some(("main", Some(&b))), &[], T0);
+    let nightly = prov(NEW, ("chikuwa", "/var/lib/homelab"), Some(("main", Some(&b))), &[], T0);
     assert_eq!(k(Some(&nightly), &cx(&[("main", &b)]), false).0, Kind::InFlight);
     assert_eq!(k(Some(&nightly), &cx(&[("main", &landed())]), false).0, Kind::CatchUp);
     // Announced under its own ref (main@<machine>): judged by that ref,
     // not by another main checkout's.
-    let nightly = lin_ann(NEW, ("chikuwa", "/var/lib/homelab"), Some(("main", Some(&b))), Some("p"), &[], T0);
+    let nightly = prov_ann(NEW, ("chikuwa", "/var/lib/homelab"), Some(("main", Some(&b))), Some("p"), &[], T0);
     assert_eq!(nightly.key.as_deref(), Some("main@chikuwa"));
     let mut live = cx(&[("main", &b)]);
     live.in_flight.insert("main@chikuwa".into(), "q".into());
@@ -181,7 +181,7 @@ fn classifies_provenances() {
     other.in_flight.insert("main@haswell-wsl".into(), "q".into());
     assert_eq!(k(Some(&nightly), &other, false).0, Kind::Abandoned);
     // A branch whose very first push has not landed.
-    let first = lin(NEW, OTHER, Some((BRANCH, None)), &[], T0);
+    let first = prov(NEW, OTHER, Some((BRANCH, None)), &[], T0);
     assert_eq!(k(Some(&first), &cx(&[]), false).0, Kind::InFlight);
 }
 
@@ -526,8 +526,8 @@ proptest! {
     /// demoted by a cleared announcement or --evict.
     #[test]
     fn verdicts(text in arb_provenance(), running in arb_top(), p in arb_params()) {
-        let lin = text.as_deref().and_then(parse);
-        let (kind, why) = classify(lin.as_ref(), &running, &p.cx);
+        let prov = text.as_deref().and_then(parse);
+        let (kind, why) = classify(prov.as_ref(), &running, &p.cx);
         prop_assert_eq!(demote(kind, why.clone(), false, true), (kind, why.clone()));
         let (over, _) = demote(kind, why.clone(), true, true);
         let (alone, _) = demote(kind, why.clone(), false, false);
@@ -539,7 +539,7 @@ proptest! {
             prop_assert_eq!(alone, kind);
         }
         prop_assert_ne!(kind, Kind::LeftAlone);
-        let tracked = lin.as_ref().filter(|l| l.toplevel == running);
+        let tracked = prov.as_ref().filter(|l| l.toplevel == running);
         prop_assert_eq!(kind == Kind::Untracked, tracked.is_none());
         if let Some(l) = tracked {
             let mine = (l.machine.as_str(), l.checkout.as_str()) == ME;

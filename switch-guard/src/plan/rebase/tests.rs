@@ -343,14 +343,14 @@ fn shape() -> impl Strategy<Value = Shape> {
         })
 }
 
-const FB: &str = "haswell-wsl-deploys4";
+const WB: &str = "haswell-wsl-deploys4";
 
 fn commit(next_id: &mut u32, subject: &str, tree: Tree) -> Commit {
     *next_id += 1;
     Commit { id: *next_id, subject: subject.into(), tree }
 }
 
-/// The checkout on FB (forked from origin/main at `fork`), its staged and
+/// The checkout on WB (forked from origin/main at `fork`), its staged and
 /// unstaged changes, and the local main at origin's.
 fn build(s: &Shape) -> Repo {
     let mut id = 0;
@@ -368,8 +368,8 @@ fn build(s: &Shape) -> Repo {
     let work = apply(&index, &s.unstaged);
     let origin: BTreeMap<String, Vec<Commit>> = [("main".to_string(), main.clone())].into();
     Repo {
-        branches: [("main".to_string(), main.clone()), (FB.to_string(), mine.clone())].into(),
-        head: if s.detached { Head::Detached(mine) } else { Head::On(FB.into()) },
+        branches: [("main".to_string(), main.clone()), (WB.to_string(), mine.clone())].into(),
+        head: if s.detached { Head::Detached(mine) } else { Head::On(WB.into()) },
         index,
         work,
         op: s.op.then(|| "merge".to_string()),
@@ -454,7 +454,7 @@ proptest! {
         match ideal(&before) {
             None => {
                 let msg = out.unwrap_err();
-                prop_assert!(msg.starts_with(&format!("rebasing {FB} onto origin/main is not clean, left as it was")), "{}", msg);
+                prop_assert!(msg.starts_with(&format!("rebasing {WB} onto origin/main is not clean, left as it was")), "{}", msg);
                 prop_assert!(!msg.contains("hint:"), "{}", msg);
                 prop_assert_eq!(&r.branches, &before.branches);
                 prop_assert_eq!(&r.head, &before.head);
@@ -464,7 +464,7 @@ proptest! {
             }
             Some((commits, index, work)) => {
                 let ff = prefix(before.commits(), main);
-                let status = format!("{} {FB} onto origin/main", if ff { "fast-forwarded" } else { "rebased" });
+                let status = format!("{} {WB} onto origin/main", if ff { "fast-forwarded" } else { "rebased" });
                 prop_assert_eq!(out, Ok(Ok(status.clone())));
                 prop_assert_eq!(fx, vec![Effect::Print(status)]);
                 prop_assert!(prefix(main, r.commits()));
@@ -521,46 +521,46 @@ proptest! {
         r.index = tree_of(&r.branches["main"]);
         r.work = r.index.clone();
         if pushed {
-            r.origin.insert(FB.into(), r.branches[FB].clone());
-            r.remote.insert(FB.into(), r.branches[FB].clone());
+            r.origin.insert(WB.into(), r.branches[WB].clone());
+            r.remote.insert(WB.into(), r.branches[WB].clone());
         }
         let mut upstream = r.remote["main"].clone();
         let t = apply(&tree_of(&upstream), &moved);
         upstream.push(commit(&mut r.next_id, "upstream", t));
         r.remote.insert("main".into(), upstream.clone());
         let before = r.clone();
-        let (asked, _, out) = run(&mut r, Op::Sync { fb: Some(FB.into()) }, 100);
+        let (asked, _, out) = run(&mut r, Op::Sync { wb: Some(WB.into()) }, 100);
         prop_assert_eq!(r.open_worktrees, 0);
         let out = out.unwrap().unwrap();
         prop_assert!(prefix(&upstream, &r.branches["main"]));
         let mut fetched = before.clone();
         fetched.origin = fetched.remote.clone();
-        let mine = &before.branches[FB];
+        let mine = &before.branches[WB];
         let fork = upstream.iter().zip(mine).take_while(|(a, b)| a.id == b.id).count();
         let mut id = 0;
         match replay(&upstream, &tree_of(&mine[..fork]), &mine[fork..], false, &mut id) {
             _ if prefix(&upstream, mine) => {
-                prop_assert_eq!(&r.branches[FB], mine);
+                prop_assert_eq!(&r.branches[WB], mine);
                 let added = asked.iter().any(|q| matches!(q, Query::AddWorktree { .. }));
                 prop_assert!(!added);
             }
             None => {
                 let e = out.unwrap_err();
-                prop_assert!(e.starts_with(&format!("rebasing {FB} onto origin/main is not clean, left as it was: ")), "{}", e);
-                prop_assert_eq!(&r.branches[FB], mine);
-                prop_assert_eq!(&r.origin.get(FB), &before.origin.get(FB));
+                prop_assert!(e.starts_with(&format!("rebasing {WB} onto origin/main is not clean, left as it was: ")), "{}", e);
+                prop_assert_eq!(&r.branches[WB], mine);
+                prop_assert_eq!(&r.origin.get(WB), &before.origin.get(WB));
                 return Ok(());
             }
             Some(want) => {
-                prop_assert_eq!(subjects(&r.branches[FB]), subjects(&want));
+                prop_assert_eq!(subjects(&r.branches[WB]), subjects(&want));
             }
         }
         let pushes = asked.iter().filter(|q| matches!(q, Query::Push { .. })).count();
-        let differed = before.origin.get(FB).map(|c| c.last().unwrap().id) != r.branches[FB].last().map(|c| c.id);
+        let differed = before.origin.get(WB).map(|c| c.last().unwrap().id) != r.branches[WB].last().map(|c| c.id);
         prop_assert_eq!(pushes, differed as usize);
-        prop_assert_eq!(r.origin.get(FB), Some(&r.branches[FB]));
+        prop_assert_eq!(r.origin.get(WB), Some(&r.branches[WB]));
         let status = out.unwrap();
-        prop_assert_eq!(status.contains(&format!("pushed {FB}")), pushes == 1);
+        prop_assert_eq!(status.contains(&format!("pushed {WB}")), pushes == 1);
     }
 }
 
@@ -614,24 +614,24 @@ fn moves_onto_the_work_branch() {
         detached: false,
     };
     let mut r = build(&s);
-    r.branches.remove(FB);
+    r.branches.remove(WB);
     r.head = Head::On("main".into());
-    let (asked, fx, out) = run(&mut r.clone(), Op::OnWorkBranch { fb: FB.into() }, 100);
+    let (asked, fx, out) = run(&mut r.clone(), Op::OnWorkBranch { wb: WB.into() }, 100);
     assert_eq!(out, Some(Ok(Ok(String::new()))));
-    assert!(asked.contains(&Query::Switch { branch: FB.into(), start: Some("HEAD".into()) }), "{asked:?}");
-    assert_eq!(fx, [Effect::Print(format!("switched to work branch {FB}"))]);
-    r.origin.insert(FB.into(), r.branches["main"].clone());
-    let (asked, _, _) = run(&mut r.clone(), Op::OnWorkBranch { fb: FB.into() }, 100);
-    assert!(asked.contains(&Query::Switch { branch: FB.into(), start: Some(format!("refs/remotes/origin/{FB}")) }), "{asked:?}");
+    assert!(asked.contains(&Query::Switch { branch: WB.into(), start: Some("HEAD".into()) }), "{asked:?}");
+    assert_eq!(fx, [Effect::Print(format!("switched to work branch {WB}"))]);
+    r.origin.insert(WB.into(), r.branches["main"].clone());
+    let (asked, _, _) = run(&mut r.clone(), Op::OnWorkBranch { wb: WB.into() }, 100);
+    assert!(asked.contains(&Query::Switch { branch: WB.into(), start: Some(format!("refs/remotes/origin/{WB}")) }), "{asked:?}");
     // From a HEAD detached at origin/main.
     r.head = Head::Detached(r.branches["main"].clone());
-    let (asked, _, out) = run(&mut r.clone(), Op::OnWorkBranch { fb: FB.into() }, 100);
+    let (asked, _, out) = run(&mut r.clone(), Op::OnWorkBranch { wb: WB.into() }, 100);
     assert_eq!(out, Some(Ok(Ok(String::new()))));
-    assert!(asked.contains(&Query::Switch { branch: FB.into(), start: Some(format!("refs/remotes/origin/{FB}")) }), "{asked:?}");
+    assert!(asked.contains(&Query::Switch { branch: WB.into(), start: Some(format!("refs/remotes/origin/{WB}")) }), "{asked:?}");
     // A detached HEAD with a commit of its own would be stranded by the switch.
     r.index.insert(3, 3);
     r.answer(&Query::Commit { msg: "by hand".into() });
-    let (_, _, out) = run(&mut r.clone(), Op::OnWorkBranch { fb: FB.into() }, 100);
+    let (_, _, out) = run(&mut r.clone(), Op::OnWorkBranch { wb: WB.into() }, 100);
     assert_eq!(
         out,
         Some(Err("the detached HEAD carries commits not on origin/main; push them (git push origin HEAD:main) or put them on a branch, then re-run".into()))
@@ -639,17 +639,17 @@ fn moves_onto_the_work_branch() {
     // A fresh branch with nothing of its own (a subagent worktree's) is fine too.
     r.head = Head::On("feature".into());
     r.branches.insert("feature".into(), r.branches["main"].clone());
-    let (asked, _, out) = run(&mut r.clone(), Op::OnWorkBranch { fb: FB.into() }, 100);
+    let (asked, _, out) = run(&mut r.clone(), Op::OnWorkBranch { wb: WB.into() }, 100);
     assert_eq!(out, Some(Ok(Ok(String::new()))));
-    assert!(asked.iter().any(|q| matches!(q, Query::Switch { branch, .. } if branch == FB)), "{asked:?}");
+    assert!(asked.iter().any(|q| matches!(q, Query::Switch { branch, .. } if branch == WB)), "{asked:?}");
     r.index.insert(3, 3);
     r.work = r.index.clone();
     r.answer(&Query::Commit { msg: "feature work".into() });
-    let (_, _, out) = run(&mut r.clone(), Op::OnWorkBranch { fb: FB.into() }, 100);
-    assert_eq!(out, Some(Err(format!("on branch feature, which carries commits not on origin/main; deploys run from {FB} or from main"))));
+    let (_, _, out) = run(&mut r.clone(), Op::OnWorkBranch { wb: WB.into() }, 100);
+    assert_eq!(out, Some(Err(format!("on branch feature, which carries commits not on origin/main; deploys run from {WB} or from main"))));
     // ...unless those commits are pushed on a work branch (its parent's).
     r.origin.insert("haswell-wsl-deploys2".into(), r.branches["feature"].clone());
-    let (asked, _, out) = run(&mut r, Op::OnWorkBranch { fb: FB.into() }, 100);
+    let (asked, _, out) = run(&mut r, Op::OnWorkBranch { wb: WB.into() }, 100);
     assert_eq!(out, Some(Ok(Ok(String::new()))));
     assert!(asked.contains(&Query::Pushed), "{asked:?}");
 }
@@ -670,13 +670,13 @@ fn leaves_a_review_checkout_alone() {
         detached: true,
     };
     let mut r = build(&s);
-    let (_, _, out) = run(&mut r.clone(), Op::Sync { fb: Some(FB.into()) }, 100);
+    let (_, _, out) = run(&mut r.clone(), Op::Sync { wb: Some(WB.into()) }, 100);
     assert_eq!(out, Some(Ok(Err(stranded(&Names::default(), MAIN)))));
     // On origin, as fetched and as the fetch will find it.
     r.origin.insert("haswell-wsl-deploys2".into(), r.commits().clone());
     r.remote.insert("haswell-wsl-deploys2".into(), r.commits().clone());
     let before = r.clone();
-    let (asked, _, out) = run(&mut r, Op::Sync { fb: Some("tester-deploys9-review".into()) }, 100);
+    let (asked, _, out) = run(&mut r, Op::Sync { wb: Some("tester-deploys9-review".into()) }, 100);
     assert!(asked.contains(&Query::OnOrigin), "{asked:?}");
     assert_eq!(out, Some(Ok(Ok(LEFT.into()))));
     assert_eq!(r, before);
@@ -688,7 +688,7 @@ fn leaves_a_review_checkout_alone() {
 fn reports_what_blocks_a_rebase() {
     let ask = |replies: Vec<Reply>| {
         let mut it = replies.into_iter();
-        drive(Replay::new(with(Op::Sync { fb: Some(FB.into()) }), program), 20, move |_| it.next().unwrap()).2
+        drive(Replay::new(with(Op::Sync { wb: Some(WB.into()) }), program), 20, move |_| it.next().unwrap()).2
     };
     let ran = |ok| Reply::Ran { ok, detail: "boom".into() };
     assert_eq!(ask(vec![ran(false)]), Ok(Err("fetch failed:\nboom".into())));
@@ -706,7 +706,7 @@ fn reports_what_blocks_a_rebase() {
     );
     // The main checkout syncs without a work branch.
     let mut it = vec![ran(true), some("x"), Reply::Flag(true)].into_iter();
-    let out = drive(Replay::new(with(Op::Sync { fb: None }), program), 20, move |_| it.next().unwrap()).2;
+    let out = drive(Replay::new(with(Op::Sync { wb: None }), program), 20, move |_| it.next().unwrap()).2;
     assert_eq!(out, Ok(Ok("up to date".into())));
 }
 
@@ -731,7 +731,7 @@ fn onto_brings_a_submodule_onto_its_default_branch() {
     let dev = "refs/remotes/origin/dev";
     let before = r.clone();
     let (asked, _, out) = run(&mut r, Op::Onto { upstream: dev.into() }, 100);
-    assert_eq!(out, Some(Ok(Ok(format!("fast-forwarded {FB} onto origin/dev")))));
+    assert_eq!(out, Some(Ok(Ok(format!("fast-forwarded {WB} onto origin/dev")))));
     assert!(asked.iter().any(|q| matches!(q, Query::Rebase { upstream, .. } if upstream == dev)), "{asked:?}");
     assert_eq!(r.commits(), &r.origin["dev"]);
     assert_eq!(r.index, tree_of(r.commits()));
@@ -742,7 +742,7 @@ fn onto_brings_a_submodule_onto_its_default_branch() {
     let before = r.clone();
     let (_, _, out) = run(&mut r, Op::Onto { upstream: dev.into() }, 100);
     let msg = out.unwrap().unwrap().unwrap_err();
-    assert!(msg.starts_with(&format!("rebasing {FB} onto origin/dev is not clean, left as it was: ")), "{msg}");
+    assert!(msg.starts_with(&format!("rebasing {WB} onto origin/dev is not clean, left as it was: ")), "{msg}");
     r.next_id = before.next_id; // the tmp commit's id, spent
     assert_eq!(r, before);
 }

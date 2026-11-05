@@ -121,8 +121,8 @@ def switch_guard_script(expected: str, toplevel: str, digest: str) -> str:
         "flock -w 900 9 || { echo TIMEOUT; exit 1; }; "
         f"cur=$(readlink {cur_sys}); "
         f'[ "$cur" = "{expected}" ] || {{ echo "MOVED $cur"; exit 1; }}; '
-        f"lin=$(cat {f} 2>/dev/null | sha256sum); "
-        f'[ "${{lin%% *}}" = "{digest}" ] || '
+        f"prov=$(cat {f} 2>/dev/null | sha256sum); "
+        f'[ "${{prov%% *}}" = "{digest}" ] || '
         f'{{ echo "MOVED $cur"{shlex.quote(strings.SWITCH_PROVENANCE_REWRITTEN)}; exit 1; }}; '
         "echo LOCKED; IFS= read -r rec || exit 0; claimed=; "
         'if [ -z "$rec" ]; then echo SKIPPED; '

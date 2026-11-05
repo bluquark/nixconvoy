@@ -208,16 +208,16 @@ fn clock(at: f64, tz_offset: i64) -> String {
 
 /// Whose work a drifting target runs, relative to this deploy's union, and
 /// why, before `demote`.
-pub fn classify(lin: Option<&Provenance>, running: &str, cx: &Context) -> (Kind, String) {
-    let Some(lin) = lin.filter(|l| l.toplevel == running) else {
+pub fn classify(prov: Option<&Provenance>, running: &str, cx: &Context) -> (Kind, String) {
+    let Some(prov) = prov.filter(|l| l.toplevel == running) else {
         return (Kind::Untracked, String::new());
     };
-    let when = clock(lin.at, cx.tz_offset);
-    if (&lin.machine, &lin.checkout) == (&cx.me.0, &cx.me.1) {
+    let when = clock(prov.at, cx.tz_offset);
+    if (&prov.machine, &prov.checkout) == (&cx.me.0, &cx.me.1) {
         return (Kind::ThisBranch, format!(text!(drift_this_branch), when = when));
     }
-    let who = format!(text!(drift_who), machine = lin.machine, checkout = lin.checkout, pid = lin.pid, when = when);
-    let unknown: Vec<&str> = lin
+    let who = format!(text!(drift_who), machine = prov.machine, checkout = prov.checkout, pid = prov.pid, when = when);
+    let unknown: Vec<&str> = prov
         .branches
         .iter()
         .filter(|b| **b != cx.names.main && !listed(cx.listed.iter().map(String::as_str), b))
@@ -226,7 +226,7 @@ pub fn classify(lin: Option<&Provenance>, running: &str, cx: &Context) -> (Kind,
     if !unknown.is_empty() {
         return (Kind::Unlisted, format!(text!(drift_unlisted), branches = unknown.join(", "), who = who, BRANCHES_KEY = BRANCHES_KEY));
     }
-    let Some((branch, base)) = &lin.pending else {
+    let Some((branch, base)) = &prov.pending else {
         return (Kind::CatchUp, format!(text!(drift_catch_up), who = who));
     };
     if cx.tips.get(branch) != base.as_ref() {
@@ -234,7 +234,7 @@ pub fn classify(lin: Option<&Provenance>, running: &str, cx: &Context) -> (Kind,
     }
     let at: String = base.as_deref().unwrap_or(text!(drift_no_base)).chars().take(12).collect();
     let mut why = format!(text!(drift_in_flight), branch = branch, who = who, remote = cx.names.remote, at = at);
-    if let Some(key) = lin.announce_key() {
+    if let Some(key) = prov.announce_key() {
         if !cx.in_flight.contains_key(key) {
             return (Kind::Abandoned, format!(text!(drift_abandoned), why = why));
         }
@@ -337,16 +337,16 @@ pub fn refusal(refused: &[(String, Kind, Option<String>)], remote: &str) -> Stri
 type Fates = BTreeMap<(String, String, String), String>;
 
 /// Query::Fate's answer for `branch`'s increment at `tip` of the provenance
-/// `lin` in `union`, asked once per tip and union (`fates` memoises it
+/// `prov` in `union`, asked once per tip and union (`fates` memoises it
 /// across targets): "kept" or "abandoned".  The query names the deploying
 /// checkout when it is on this machine: one still on the branch keeps the
 /// increment.
-fn fate(s: &mut Script, branch: &str, tip: &str, union: &str, lin: &Provenance, p: &Params, fates: &mut Fates) -> Run<String> {
+fn fate(s: &mut Script, branch: &str, tip: &str, union: &str, prov: &Provenance, p: &Params, fates: &mut Fates) -> Run<String> {
     let key = (branch.to_string(), tip.to_string(), union.to_string());
     if let Some(f) = fates.get(&key) {
         return Ok(f.clone());
     }
-    let checkout = (lin.machine == p.cx.me.0).then(|| lin.checkout.clone());
+    let checkout = (prov.machine == p.cx.me.0).then(|| prov.checkout.clone());
     let f = s.text(Query::Fate { branch: branch.into(), tip: tip.into(), union: union.into(), checkout })?.unwrap_or_default();
     fates.insert(key, f.clone());
     Ok(f)
@@ -355,14 +355,14 @@ fn fate(s: &mut Script, branch: &str, tip: &str, union: &str, lin: &Provenance, 
 /// The increments a switch of a target onto `union` reverts: each branch tip
 /// its provenance recorded that is not origin's tip now and that the union
 /// no longer holds, as "<branch>'s abandoned increment <sha>".
-fn reverted(s: &mut Script, union: &str, lin: &Provenance, p: &Params, fates: &mut Fates) -> Run<Vec<String>> {
+fn reverted(s: &mut Script, union: &str, prov: &Provenance, p: &Params, fates: &mut Fates) -> Run<Vec<String>> {
     let mut notes = Vec::new();
-    for (b, tip) in &lin.tips {
+    for (b, tip) in &prov.tips {
         if p.cx.tips.get(b) == Some(tip) {
             continue;
         }
         let short: String = tip.chars().take(12).collect();
-        if fate(s, b, tip, union, lin, p, fates)? == "abandoned" {
+        if fate(s, b, tip, union, prov, p, fates)? == "abandoned" {
             notes.push(format!(text!(drift_abandoned_increment), branch = b, short = short));
         }
     }
@@ -386,23 +386,23 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     let mut fates = Fates::new();
     for h in affected.iter().filter(|h| p.candidates.contains(h)) {
         let union = p.unions.get(h).unwrap_or(&p.union);
-        let lin = p.provenances.get(h).and_then(|text| parse(text));
+        let prov = p.provenances.get(h).and_then(|text| parse(text));
         let running = p.running.get(h).cloned().flatten().unwrap_or_default();
         let reached = p.reached.contains(h);
         let take_over = p.evict && (p.named || reached);
-        let (base, why) = classify(lin.as_ref(), &running, &p.cx);
+        let (base, why) = classify(prov.as_ref(), &running, &p.cx);
         let (mut kind, mut why) = demote(base, why, take_over, reached);
         // The pending increment of a branch origin has no tip of: its
         // first push on its way (in flight), or the branch deleted since
         // with its subagent worktree - then whatever the union lacks of
         // it is abandoned, and the target catches up.
         let in_flight = base == Kind::InFlight;
-        if let Some(lin) = lin.as_ref().filter(|_| in_flight) {
-            if let Some((b, None)) = &lin.pending {
+        if let Some(prov) = prov.as_ref().filter(|_| in_flight) {
+            if let Some((b, None)) = &prov.pending {
                 if !p.cx.tips.contains_key(b) {
-                    if let Some(tip) = lin.tips.get(b) {
-                        if fate(s, b, tip, union, lin, p, &mut fates)? != "kept" {
-                            let who = format!(text!(drift_who_untimed), machine = lin.machine, checkout = lin.checkout, pid = lin.pid);
+                    if let Some(tip) = prov.tips.get(b) {
+                        if fate(s, b, tip, union, prov, p, &mut fates)? != "kept" {
+                            let who = format!(text!(drift_who_untimed), machine = prov.machine, checkout = prov.checkout, pid = prov.pid);
                             (kind, why) = (Kind::CatchUp, format!(text!(drift_branch_gone), branch = b, who = who));
                         }
                     }
@@ -410,7 +410,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
             }
         }
         if kind.refused() {
-            let dead = lin
+            let dead = prov
                 .as_ref()
                 .and_then(Provenance::announce_key)
                 .filter(|k| kind == Kind::InFlight && p.cx.dead.contains(*k))
@@ -421,8 +421,8 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         }
         // A catch-up to pushed work may be the revert of an abandoned
         // increment; the other kinds revert or refuse in so many words.
-        if let (Kind::ThisBranch | Kind::CatchUp, Some(lin)) = (kind, lin.as_ref()) {
-            let notes = reverted(s, union, lin, p, &mut fates)?;
+        if let (Kind::ThisBranch | Kind::CatchUp, Some(prov)) = (kind, prov.as_ref()) {
+            let notes = reverted(s, union, prov, p, &mut fates)?;
             if !notes.is_empty() {
                 why = format!(text!(drift_reverting), why = why, notes = notes.join(", "));
             }

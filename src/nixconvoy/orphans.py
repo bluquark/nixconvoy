@@ -53,11 +53,11 @@ def find() -> list[tuple[str, Path | None, str]]:
     owners: dict[str, Path] = {}
     for d in [here, *sibling_checkouts(here)]:
         try:
-            fb = identity_of(d, branch_at(d)).fb
+            wb = identity_of(d, branch_at(d)).wb
         except FileNotFoundError:  # removed since it was listed
             continue
-        if fb is not None:
-            owners.setdefault(fb, d)
+        if wb is not None:
+            owners.setdefault(wb, d)
     found = []
     for b in sorted(work):
         if not b.startswith(prefix) or "-" not in b[len(prefix):]:

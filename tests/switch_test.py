@@ -944,12 +944,12 @@ def clear_memo() -> None:
 
 
 @contextlib.contextmanager
-def scratch_origin(d: Path, files: dict[str, str], *, fb: str | None = None,
+def scratch_origin(d: Path, files: dict[str, str], *, wb: str | None = None,
                    seeded: Callable[[Path], object] = lambda _seed: None,
                    names: RepoNames = NAMES) -> Iterator[tuple[Path, Path, Path]]:
     """(origin, seed, co): a bare origin whose main holds a nixconvoy.toml
     (its work branches work/<machine>/...), `files` and what `seeded`
-    adds in the seed clone, and the checkout co cloned from it, on `fb`
+    adds in the seed clone, and the checkout co cloned from it, on `wb`
     when given and the cwd throughout.  `names` other than origin/main
     name the remote and main in both clones and in the toml (the suite's
     configuration too, for the run)."""
@@ -971,8 +971,8 @@ def scratch_origin(d: Path, files: dict[str, str], *, fb: str | None = None,
     os.chdir(co)
     config.set_root(co)
     try:
-        if fb is not None:
-            checkout.ensure_on_work_branch(fb)
+        if wb is not None:
+            checkout.ensure_on_work_branch(wb)
         yield origin, seed, co
     finally:
         os.chdir(prev)
@@ -984,7 +984,7 @@ def reach_cases(d: Path) -> None:
     checkout's work changes a read file or lock entry of, measured from
     what each target's provenance recorded of the branch."""
     scratch_env()
-    fb = "work/tester/9"
+    wb = "work/tester/9"
     lock = {"version": 7, "root": "root", "nodes": {
         "root": {"inputs": {"nixpkgs": "nixpkgs", "p": "p", "q": "q", "r": "r"}},
         "nixpkgs": {"locked": {"rev": "n1"}}, "p": {"locked": {"rev": "p1"}}, "q": {"locked": {"rev": "q1"}},
@@ -1008,13 +1008,13 @@ def reach_cases(d: Path) -> None:
         "nixos/modules/y.nix": "{ ... }: { }\n",
         "README.md": "docs\n",
     }
-    with scratch_origin(d, files, fb=fb) as (_origin, _seed, co):
+    with scratch_origin(d, files, wb=wb) as (_origin, _seed, co):
         targets = ["a", "b"]
 
         def reached(provenances: dict[str, str] | None = None) -> set[str]:
             tip = sh(co, "rev-parse", "HEAD")
             clear_memo()
-            runs = {h: json.loads(text)["branches"].get(fb) for h, text in (provenances or {}).items()
+            runs = {h: json.loads(text)["branches"].get(wb) for h, text in (provenances or {}).items()
                     if text.startswith('{"')}
             return memo.reached_targets(str(co), tip, targets, tip, runs)
 
@@ -1059,7 +1059,7 @@ def reach_cases(d: Path) -> None:
             "./hosts/b/configuration.nix ];", "./hosts/b/configuration.nix ./profiles/a ./profiles/b ];"), "profiles")
         c_prof = sh(co, "rev-parse", "HEAD")
         put(co, "nixos/profiles/b/p.nix", "{ p = 1; }\n", "profile b")
-        assert reached({"a": provenance(**{fb: c_prof}), "b": provenance(**{fb: c_prof})}) == {"a", "b"}
+        assert reached({"a": provenance(**{wb: c_prof}), "b": provenance(**{wb: c_prof})}) == {"a", "b"}
         sh(co, "reset", "--quiet", "--hard", "HEAD~2")
         with_b = tables.replace("[targets.b]\n", '[targets.b]\ndir = "nixos/hosts/b"\n')
         config.set_cfg(config.parse(with_b))
@@ -1076,32 +1076,32 @@ def reach_cases(d: Path) -> None:
         # whole directory.
         put(co, "nixos/pkgs/tool.nix", "2\n", "tool")
         put(co, "nixos/pkgs/other.nix", "2\n", "other")
-        assert reached({"a": provenance(**{fb: c_x})}) == {"a"}
+        assert reached({"a": provenance(**{wb: c_x})}) == {"a"}
         c_tool = sh(co, "rev-parse", "HEAD")
         put(co, "nixos/pkgs/other.nix", "3\n", "other again")
-        assert reached({"a": provenance(**{fb: c_tool}), "b": provenance(**{fb: c_tool})}) == set()
+        assert reached({"a": provenance(**{wb: c_tool}), "b": provenance(**{wb: c_tool})}) == set()
         c_tool = sh(co, "rev-parse", "HEAD")
         put(co, "nixos/lib/lint.nix", "2\n", "lib lint")
-        assert reached({"a": provenance(**{fb: c_tool}), "b": provenance(**{fb: c_tool})}) == {"a", "b"}
+        assert reached({"a": provenance(**{wb: c_tool}), "b": provenance(**{wb: c_tool})}) == {"a", "b"}
         c_tool = sh(co, "rev-parse", "HEAD")
         # A module naming a directory that holds the flake keys its target
         # on the whole tree, and the scan says so.
         put(co, "nixos/modules/y.nix", "{ ... }: { all = ../.; }\n", "y whole")
         c_whole = sh(co, "rev-parse", "HEAD")
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            assert reached({"a": provenance(**{fb: c_tool}), "b": provenance(**{fb: c_tool})}) == {"b"}
+            assert reached({"a": provenance(**{wb: c_tool}), "b": provenance(**{wb: c_tool})}) == {"b"}
         assert "b keys on the whole nixos/ tree: nixos/modules/y.nix" in err.getvalue(), err.getvalue()
         # ...so an edit nothing imports reaches it from then on.
         put(co, "nixos/pkgs/other.nix", "4\n", "other under whole")
-        assert reached({"a": provenance(**{fb: c_whole}), "b": provenance(**{fb: c_whole})}) == {"b"}
+        assert reached({"a": provenance(**{wb: c_whole}), "b": provenance(**{wb: c_whole})}) == {"b"}
         # The repository root likewise: the flake's source is the whole repo.
         put(co, "nixos/modules/y.nix", "{ ... }: { all = ../..; }\n", "y root")
         c_root = sh(co, "rev-parse", "HEAD")
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            assert reached({"a": provenance(**{fb: c_whole}), "b": provenance(**{fb: c_whole})}) == {"b"}
+            assert reached({"a": provenance(**{wb: c_whole}), "b": provenance(**{wb: c_whole})}) == {"b"}
         assert "b keys on the whole repository: nixos/modules/y.nix" in err.getvalue(), err.getvalue()
         put(co, "README.md", "docs, under root\n", "docs under root")
-        assert reached({"a": provenance(**{fb: c_root}), "b": provenance(**{fb: c_root})}) == {"b"}
+        assert reached({"a": provenance(**{wb: c_root}), "b": provenance(**{wb: c_root})}) == {"b"}
         put(co, "nixos/modules/y.nix", "{ ... }: { }\n", "y plain")
         c_tool = sh(co, "rev-parse", "HEAD")
         # A lock bump reaches the targets whose files name the input.
@@ -1109,18 +1109,18 @@ def reach_cases(d: Path) -> None:
         put(co, "nixos/flake.lock", proc.dump_json(lock), "bump q")
         c_q = sh(co, "rev-parse", "HEAD")
         assert reached() == {"a", "b"}
-        assert reached({"a": provenance(**{fb: c_tool})}) == {"b"}
+        assert reached({"a": provenance(**{wb: c_tool})}) == {"b"}
         # An input only the precheck's stanza names reaches no target.
         lock["nodes"]["r"]["locked"]["rev"] = "r2"
         put(co, "nixos/flake.lock", proc.dump_json(lock), "bump r")
-        assert reached({"a": provenance(**{fb: c_q}), "b": provenance(**{fb: c_q})}) == set()
+        assert reached({"a": provenance(**{wb: c_q}), "b": provenance(**{wb: c_q})}) == set()
         c_q = sh(co, "rev-parse", "HEAD")
         # What a target already runs of this branch is not new work for it:
         # a recorded tip between the merge base and HEAD narrows the delta,
         # one at HEAD empties it, an unknown or foreign one is ignored.
-        assert reached({"a": provenance(**{fb: c_x}), "b": provenance(**{fb: c_q})}) == {"a"}
-        assert reached({"a": provenance(**{fb: c_q}), "b": provenance(**{fb: c_q})}) == set()
-        assert reached({"a": provenance(**{fb: "f" * 40}), "b": provenance(**{"work/other/1": c_q})}) == {"a", "b"}
+        assert reached({"a": provenance(**{wb: c_x}), "b": provenance(**{wb: c_q})}) == {"a"}
+        assert reached({"a": provenance(**{wb: c_q}), "b": provenance(**{wb: c_q})}) == set()
+        assert reached({"a": provenance(**{wb: "f" * 40}), "b": provenance(**{"work/other/1": c_q})}) == {"a", "b"}
         assert reached({"a": "", "b": "{not json"}) == {"a", "b"}
         # A file moved out of a directory a target reads whole changes that
         # target, though the move lists no path it reads any more.
@@ -1128,7 +1128,7 @@ def reach_cases(d: Path) -> None:
         c_extra = sh(co, "rev-parse", "HEAD")
         sh(co, "mv", "nixos/hosts/a/extra.nix", "nixos/modules/extra.nix")
         sh(co, "commit", "--quiet", "-m", "moved")
-        assert reached({"a": provenance(**{fb: c_extra}), "b": provenance(**{fb: c_extra})}) == {"a"}
+        assert reached({"a": provenance(**{wb: c_extra}), "b": provenance(**{wb: c_extra})}) == {"a"}
         # An input taken as a relative path (a submodule's gitlink) is read
         # from the tree: moving it reaches the targets naming the input.
         lock["nodes"]["p"] = {"locked": {"path": "./vendor/p", "type": "path"}}
@@ -1137,14 +1137,14 @@ def reach_cases(d: Path) -> None:
         c_p = sh(co, "rev-parse", "HEAD")
         sh(co, "update-index", "--add", "--cacheinfo", f"160000,{'2' * 40},nixos/vendor/p")
         sh(co, "commit", "--quiet", "-m", "p moved")
-        assert reached({"a": provenance(**{fb: c_p}), "b": provenance(**{fb: c_p})}) == {"a"}
+        assert reached({"a": provenance(**{wb: c_p}), "b": provenance(**{wb: c_p})}) == {"a"}
         # A recorded tip on main's side of the merge base (the branch had
         # nothing then; main moved since) is the merge base.
         upstream = sh(co, "commit-tree", f"{main0}^{{tree}}", "-p", main0, "-m", "upstream")
         sh(co, "push", "--quiet", "origin", f"{upstream}:main")
         sh(co, "fetch", "--quiet")
         sh(co, "rebase", "--quiet", "origin/main")
-        assert reached({"a": provenance(**{fb: main0}), "b": provenance(**{fb: main0})}) == {"a", "b"}
+        assert reached({"a": provenance(**{wb: main0}), "b": provenance(**{wb: main0})}) == {"a", "b"}
         # Between two commits, as the wait for a deploy under way measures
         # its increment (reached_between): x.nix's change reaches a alone.
         tip = sh(co, "rev-parse", "HEAD")
@@ -1170,7 +1170,7 @@ def lanes_cases(d: Path) -> None:
     targets a branch's later work is not deployed to, the record a target
     runs, an attested one included, and what a landing finds undeployed."""
     scratch_env()
-    fb, other = "work/tester/9", "work/other/1"
+    wb, other = "work/tester/9", "work/other/1"
     files = {
         "nixos/flake.nix": "{\n  outputs = { self, nixpkgs }: {\n"
         "    hosts = [ ./hosts/a/configuration.nix ./hosts/b/configuration.nix ];\n  };\n}\n",
@@ -1181,7 +1181,7 @@ def lanes_cases(d: Path) -> None:
         "nixos/modules/y.nix": "{ ... }: { }\n",
         "README.md": "docs\n",
     }
-    with scratch_origin(d, files, fb=fb) as (_origin, seed, co):
+    with scratch_origin(d, files, wb=wb) as (_origin, seed, co):
         main0 = sh(co, "rev-parse", "origin/main")
         sh(seed, "switch", "--quiet", "-c", other)
         put(seed, "nixos/modules/x.nix", "{ ... }: { x = 1; }\n", "o1: a's")
@@ -1193,10 +1193,10 @@ def lanes_cases(d: Path) -> None:
         o1, o2 = sh(co, "rev-parse", f"{tip}~2"), sh(co, "rev-parse", f"{tip}~1")
 
         # The commit of the branch standing for the one a record holds.
-        def provenance(rewritten: dict[str, str]) -> None:
-            """The branch's provenance as fetched from origin."""
-            checkout.write_provenance(other, rewritten)
-            sh(co, "update-ref", f"{checkout.PROVENANCE_REFS}/{other}", proc.rev(f"{checkout.REWRITTEN_REFS}/{other}") or "")
+        def rebase_map(rewritten: dict[str, str]) -> None:
+            """The branch's rebase map as fetched from origin."""
+            checkout.write_rebase_map(other, rewritten)
+            sh(co, "update-ref", f"{checkout.REBASE_MAP_REFS}/{other}", proc.rev(f"{checkout.REWRITTEN_REFS}/{other}") or "")
             sh(co, "update-ref", "-d", f"{checkout.REWRITTEN_REFS}/{other}")
 
         ahead = out_at(co, tip, "pending")
@@ -1205,21 +1205,21 @@ def lanes_cases(d: Path) -> None:
         assert lanes.carried_commit(other, ahead, tip) == tip  # its push on its way
         # Reset back within its increments: what is left of it.
         assert lanes.carried_commit(other, tip, o2) == o2
-        # No provenance places it: dropped, as is a commit not here at all.
+        # No rebase map places it: dropped, as is a commit not here at all.
         assert lanes.carried_commit(other, was1, tip) is None and lanes.carried_commit(other, "f" * 40, tip) is None
         # A rebase's rewrite.
-        provenance({was1: o1})
+        rebase_map({was1: o1})
         assert lanes.carried_commit(other, was1, tip) == o1
         assert lanes.carried_commit(other, out_at(co, main0, "never replayed"), tip) is None
         # One the rebase dropped (its change upstream already) stands for
         # the one before it; one not in this repository, for its rewrite -
         # unless the branch dropped that since.
         assert lanes.carried_commit(other, out_at(co, was1, "dropped by the rebase"), tip) == o1
-        provenance({was1: o1, "e" * 40: o2, "d" * 40: was1})
+        rebase_map({was1: o1, "e" * 40: o2, "d" * 40: was1})
         assert lanes.carried_commit(other, "e" * 40, tip) == o2 and lanes.carried_commit(other, "d" * 40, tip) is None
-        provenance({was1: o1})
-        assert checkout.read_provenance(other) == {was1: o1}
-        assert checkout.read_provenance(fb) == {} and checkout.read_provenance(fb, local=True) == {}
+        rebase_map({was1: o1})
+        assert checkout.read_rebase_map(other) == {was1: o1}
+        assert checkout.read_rebase_map(wb) == {} and checkout.read_rebase_map(wb, local=True) == {}
 
         # The targets behind the branch: those reading what it changed past
         # the commit their record holds.
@@ -1276,21 +1276,21 @@ def lanes_cases(d: Path) -> None:
 
         def undeployed() -> list[str]:
             clear_memo()
-            return lanes.undeployed(fb, "HEAD", str(co))
+            return lanes.undeployed(wb, "HEAD", str(co))
 
         assert undeployed() == ["a"]
-        history("a", record("", toplevel=NEW, branches={fb: c1}))
+        history("a", record("", toplevel=NEW, branches={wb: c1}))
         assert undeployed() == []
         put(co, "nixos/modules/y.nix", "{ ... }: { mine = 1; }\n", "c2: b's")
         assert undeployed() == ["b"]
-        history("b", record("", toplevel=NEW, branches={fb: c1}))
+        history("b", record("", toplevel=NEW, branches={wb: c1}))
         assert undeployed() == ["b"]
-        history("b", record("", toplevel=NEW, branches={fb: sh(co, "rev-parse", "HEAD")}))
+        history("b", record("", toplevel=NEW, branches={wb: sh(co, "rev-parse", "HEAD")}))
         assert undeployed() == []
         # The landing itself: refused on them unless --not-yet-deployed.
         sh(co, "update-ref", "-d", f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/b")
-        assert f"{fb} is not yet deployed to b:" in dies(lambda: commands.holds(fb, "HEAD"))
-        assert "landing with b not yet deployed" in printed(lambda: commands.holds(fb, "HEAD", not_yet_deployed=True))
+        assert f"{wb} is not yet deployed to b:" in dies(lambda: commands.holds(wb, "HEAD"))
+        assert "landing with b not yet deployed" in printed(lambda: commands.holds(wb, "HEAD", not_yet_deployed=True))
         assert not sh(co, "worktree", "list").count("deploy-wt")
     say("lanes: ok")
 
@@ -1329,9 +1329,9 @@ def remote_cases(d: Path) -> None:
     deletion that landed not repeated, any other failure and a spent
     budget left as they are; git() runs no network verb."""
     scratch_env()
-    fb = "work/tester/9"
+    wb = "work/tester/9"
     with scratch_origin(d, {"a.txt": "one\n"}) as (origin, _seed, co):
-        sh(co, "checkout", "--quiet", "-b", fb)
+        sh(co, "checkout", "--quiet", "-b", wb)
         stub, plan = d / "stub", d / "plan"
         stub.mkdir()
         (stub / "git").write_text(FAKE_GIT.format(python=sys.executable, plan=str(plan), git=shutil.which("git")))
@@ -1356,30 +1356,30 @@ def remote_cases(d: Path) -> None:
             planned("before inband")
             put(co, "b.txt", "b\n", "b")
             b = sh(co, "rev-parse", "HEAD")
-            lease = f"--force-with-lease=refs/heads/{fb}:"
-            note = warned(lambda: proc.git_remote("push", "--quiet", "origin", f"{fb}:refs/heads/{fb}", lease))
+            lease = f"--force-with-lease=refs/heads/{wb}:"
+            note = warned(lambda: proc.git_remote("push", "--quiet", "origin", f"{wb}:refs/heads/{wb}", lease))
             assert note == ("note: git push: the remote failed on its own side (remote: Internal Server Error); "
                             "retrying in 0.01 s\n"), note
-            assert calls() == ["push", "push"] and at(fb) == b
+            assert calls() == ["push", "push"] and at(wb) == b
             # Landed, then an HTTP 5xx: the same push again finds it done, the lease as it was.
             planned("after http")
             put(co, "c.txt", "c\n", "c")
             c = sh(co, "rev-parse", "HEAD")
             with contextlib.redirect_stderr(io.StringIO()):
-                proc.git_remote("push", "--quiet", "origin", f"{fb}:refs/heads/{fb}", f"{lease}{b}")
-            assert calls() == ["push", "push"] and at(fb) == c
-            assert sh(co, "rev-parse", f"refs/remotes/origin/{fb}") == c
+                proc.git_remote("push", "--quiet", "origin", f"{wb}:refs/heads/{wb}", f"{lease}{b}")
+            assert calls() == ["push", "push"] and at(wb) == c
+            assert sh(co, "rev-parse", f"refs/remotes/origin/{wb}") == c
             # A push cut off as stalled is not asked again: the stall guard bounds it.
             planned("before stall")
-            p = proc.git_remote("push", "--quiet", "origin", f"{fb}:refs/heads/{fb}", check=False)
+            p = proc.git_remote("push", "--quiet", "origin", f"{wb}:refs/heads/{wb}", check=False)
             assert p.returncode != 0 and not p.retried and calls() == ["push"]
             # A refusal settles a push, unless it answers the retry of one that may be going through yet.
             planned("before refused")
-            p = proc.git_remote("push", "--quiet", "origin", f"{fb}:refs/heads/{fb}", check=False)
+            p = proc.git_remote("push", "--quiet", "origin", f"{wb}:refs/heads/{wb}", check=False)
             assert p.returncode != 0 and proc.refused(p) and calls() == ["push"]
             planned("before http", "before refused")
             with contextlib.redirect_stderr(io.StringIO()):
-                p = proc.git_remote("push", "--quiet", "origin", f"{fb}:refs/heads/{fb}", check=False)
+                p = proc.git_remote("push", "--quiet", "origin", f"{wb}:refs/heads/{wb}", check=False)
             assert p.returncode != 0 and p.retried and not proc.refused(p) and calls() == ["push", "push"]
             # A fetch, and the failures a retry may follow: two.
             planned("before http", "before inband")
@@ -1392,7 +1392,7 @@ def remote_cases(d: Path) -> None:
             assert p.returncode == 1 and "error: 502" in p.stderr and calls() == ["ls-remote"] * 3
             # Any other failure is the command's answer, as is a server error past the time given.
             planned("before refused")
-            assert warned(lambda: proc.git_remote("push", "--quiet", "origin", f"{fb}:refs/heads/{fb}", check=False)) == ""
+            assert warned(lambda: proc.git_remote("push", "--quiet", "origin", f"{wb}:refs/heads/{wb}", check=False)) == ""
             assert calls() == ["push"]
             planned("before http")
             with mock.patch.object(proc, "RETRY_WAITS", (30, 30)):
@@ -1485,16 +1485,16 @@ def names_cases(d: Path) -> None:
     cores, land, status and the prompt's note."""
     scratch_env()
     names = RepoNames("up", "trunk")
-    fb, other = "work/tester/9", "work/other/1"
-    with scratch_origin(d, {"a.txt": "one\n"}, fb=fb, names=names) as (_origin, seed, co):
-        assert checkout.current_branch() == fb
-        assert sh(co, "config", f"branch.{fb}.merge") == "refs/heads/trunk"
-        assert sh(co, "config", f"branch.{fb}.remote") == "up" and sh(co, "remote") == "up"
+    wb, other = "work/tester/9", "work/other/1"
+    with scratch_origin(d, {"a.txt": "one\n"}, wb=wb, names=names) as (_origin, seed, co):
+        assert checkout.current_branch() == wb
+        assert sh(co, "config", f"branch.{wb}.merge") == "refs/heads/trunk"
+        assert sh(co, "config", f"branch.{wb}.remote") == "up" and sh(co, "remote") == "up"
         # An upstream on another remote is re-pointed.
         sh(co, "remote", "add", "origin", str(_origin))
-        sh(co, "config", f"branch.{fb}.remote", "origin")
-        checkout.ensure_on_work_branch(fb)
-        assert sh(co, "config", f"branch.{fb}.remote") == "up"
+        sh(co, "config", f"branch.{wb}.remote", "origin")
+        checkout.ensure_on_work_branch(wb)
+        assert sh(co, "config", f"branch.{wb}.remote") == "up"
         sh(co, "remote", "remove", "origin")
         put(seed, "a.txt", "ONE\n", "upstream")
         sh(seed, "push", "--quiet", "up", "HEAD:trunk")
@@ -1507,7 +1507,7 @@ def names_cases(d: Path) -> None:
         sh(seed, "push", "--quiet", "up", "HEAD:trunk")
         sh(co, "fetch", "--quiet")
         put(co, "a.txt", "one\nlocal\n")
-        assert f"rebasing {fb} onto up/trunk is not clean" in dies(checkout.ensure_rebased)
+        assert f"rebasing {wb} onto up/trunk is not clean" in dies(checkout.ensure_rebased)
         sh(co, "restore", "--staged", "--worktree", "a.txt")
         checkout.ensure_rebased()
         # The union: the other branch, on up, merged on up/trunk.
@@ -1519,7 +1519,7 @@ def names_cases(d: Path) -> None:
         fetched.set_result(subprocess.CompletedProcess([], 0))
         q = UnionQueries(lambda: "HEAD", fetched, lambda: None, lambda *_: False)
         try:
-            done = guard.decide(UnionParams(names, fb, False, proc.rev("refs/remotes/up/trunk")), q)
+            done = guard.decide(UnionParams(names, wb, False, proc.rev("refs/remotes/up/trunk")), q)
         finally:
             q.drop()
         assert done.branches == [(other, sh(co, "rev-parse", f"up/{other}"))], done
@@ -1527,18 +1527,18 @@ def names_cases(d: Path) -> None:
         # The prompt's notes, and status.
         checkout.note_prefix(co)
         assert (co / ".git/nixconvoy/main-ref").read_text() == "up/trunk\n"
-        assert f"{fb} +1" in printed(commands.status)
+        assert f"{wb} +1" in printed(commands.status)
         # A landing: trunk on up moves, the branch is reset onto it (no
         # flake here to tell what it has not deployed).
         mock.patch.object(lanes, "undeployed", lambda *_: []).start()
         put(co, "COMMIT_MSG.md", "mine\n", "msg")
-        sh(co, "push", "--quiet", "up", fb)
+        sh(co, "push", "--quiet", "up", wb)
         commands.land()
         trunk = sh(co, "rev-parse", "up/trunk")
         assert sh(co, "log", "-1", "--format=%s", trunk) == "mine"
-        assert sh(co, "rev-parse", "HEAD") == trunk and sh(co, "rev-parse", f"up/{fb}") == trunk
+        assert sh(co, "rev-parse", "HEAD") == trunk and sh(co, "rev-parse", f"up/{wb}") == trunk
         assert "b.txt" in sh(co, "ls-tree", "--name-only", trunk).split()
-        assert f"{fb} = up/trunk (idle)" in printed(commands.status)
+        assert f"{wb} = up/trunk (idle)" in printed(commands.status)
     config.set_cfg(config.parse(toml()))
 
 
@@ -1548,9 +1548,9 @@ def landing_rebase_cases(d: Path) -> None:
     main now holds as one squash replays its own alone; two imports added
     at the same spot merge structurally."""
     scratch_env()
-    fb, other = "work/tester/9", "work/other/1"
+    wb, other = "work/tester/9", "work/other/1"
     files = {"a.txt": "one\ntwo\nthree\n", "m.py": "import os\n"}
-    with scratch_origin(d, files, fb=fb) as (_origin, seed, co):
+    with scratch_origin(d, files, wb=wb) as (_origin, seed, co):
         # The other branch: two commits to one line, which this branch sits
         # on; then landed on main as one squash.
         sh(seed, "switch", "--quiet", "-c", other)
@@ -1596,7 +1596,7 @@ def landing_rebase_cases(d: Path) -> None:
     # the rebase would take main's own commits).
     for stale in ("origin.git", "seed", "homelab9"):
         remove_tree(d / stale)
-    with scratch_origin(d, files, fb=fb) as (_origin, seed, co):
+    with scratch_origin(d, files, wb=wb) as (_origin, seed, co):
         sh(seed, "switch", "--quiet", "-c", other)
         put(seed, "a.txt", "one\nTWO-x1\nthree\n", "x1")
         put(seed, "a.txt", "one\nTWO-x2\nthree\n", "x2")
@@ -1637,7 +1637,7 @@ def counterpart_cases(d: Path) -> None:
     sh(r, "switch", "--quiet", "-c", "onto", base)
     landing, onto = commit("landing"), commit("landed since")
     a1r, a3r = commit("a1 rebased"), commit("a3 rebased")
-    pending = submodule.Pending(submodule.Sub("dep", r, "dep", r, ".nixconvoy_submodule_dep.json"), "fb", a3, a3r,
+    pending = submodule.Pending(submodule.Sub("dep", r, "dep", r, ".nixconvoy_submodule_dep.json"), "wb", a3, a3r,
                                 {a1: a1r, a3: a3r}, frozenset({landed}), landing, onto)
     assert [submodule.counterpart(pending, p, landing) for p in (a1, a2, a3, landed, upstream_first, a1r, "0" * 40)] \
         == [a1r, a1r, a3r, landing, onto, a1r, a3r]
@@ -1655,10 +1655,10 @@ def git_cases(d: Path) -> None:
         return (sh(where, "rev-parse", "HEAD"), sh(where, "diff", "--cached"), sh(where, "diff"),
                 sh(where, "status", "--porcelain"))
 
-    fb = "work/tester/9"
-    with scratch_origin(d, {"a.txt": "one\ntwo\nthree\n"}, fb=fb) as (origin, seed, co):
-        assert checkout.current_branch() == fb
-        assert sh(co, "config", f"branch.{fb}.merge") == "refs/heads/main"
+    wb = "work/tester/9"
+    with scratch_origin(d, {"a.txt": "one\ntwo\nthree\n"}, wb=wb) as (origin, seed, co):
+        assert checkout.current_branch() == wb
+        assert sh(co, "config", f"branch.{wb}.merge") == "refs/heads/main"
         put(co, "b.txt", "local\n", "local")
         put(co, "COMMIT_MSG.md", "mine\n", "msg")
         put(seed, "a.txt", "ONE\ntwo\nthree\n", "upstream")
@@ -1693,7 +1693,7 @@ def git_cases(d: Path) -> None:
         put(co, "a.txt", "one\nTWO-local\nTHREE\n")
         before = state(co)
         err = dies(checkout.ensure_rebased)
-        assert f"rebasing {fb} onto origin/main is not clean" in err, err
+        assert f"rebasing {wb} onto origin/main is not clean" in err, err
         assert state(co) == before and checkout.git_op_in_progress() is None
         conflicting = checkout.staged_snapshot()
         assert "origin/main does not merge cleanly" in dies(lambda: checkout.with_main(conflicting))
@@ -1738,7 +1738,7 @@ def git_cases(d: Path) -> None:
                              cuts=None if cuts is None else lambda _wt, _union, _branches: cuts, as_if=as_if)
             try:
                 with contextlib.redirect_stdout(io.StringIO()) as said:
-                    done = guard.decide(UnionParams(NAMES, fb, False, main0 or proc.rev("refs/remotes/origin/main")), q)
+                    done = guard.decide(UnionParams(NAMES, wb, False, main0 or proc.rev("refs/remotes/origin/main")), q)
             finally:
                 q.drop()
             return done, said.getvalue()
@@ -1774,7 +1774,7 @@ def git_cases(d: Path) -> None:
         q = UnionQueries(lambda: "HEAD", fetched, lambda: None, lambda *_: True,
                          as_if={"work/other/1": proc.rev("refs/remotes/origin/main") or ""})
         try:
-            alone = guard.decide(UnionParams(NAMES, fb, False, proc.rev("refs/remotes/origin/main")), q)
+            alone = guard.decide(UnionParams(NAMES, wb, False, proc.rev("refs/remotes/origin/main")), q)
         finally:
             q.drop()
         assert alone.branches == [] and "o.txt" not in sh(co, "ls-tree", "--name-only", alone.union), alone
@@ -1794,30 +1794,30 @@ def git_cases(d: Path) -> None:
         sh(seed, "switch", "--quiet", "main")
         put(seed, "a.txt", "ONE\nTWO-upstream\nthree\nfour\n", "upstream 3")
         sh(seed, "push", "--quiet", "origin", "HEAD:main")
-        tip = sh(co, "rev-parse", fb)
+        tip = sh(co, "rev-parse", wb)
         good, status = checkout.update_checkout(co)
         assert good and status == "fast-forwarded main onto origin/main", status
-        assert sh(co, "rev-parse", fb) == tip
-        sh(co, "switch", "--quiet", fb)
+        assert sh(co, "rev-parse", wb) == tip
+        sh(co, "switch", "--quiet", wb)
         good, status = checkout.update_checkout(co)
-        assert good and f"rebased {fb}" in status and status.endswith(f"pushed {fb}"), status
-        assert proc.is_ancestor("refs/remotes/origin/main", f"refs/remotes/origin/{fb}")
+        assert good and f"rebased {wb}" in status and status.endswith(f"pushed {wb}"), status
+        assert proc.is_ancestor("refs/remotes/origin/main", f"refs/remotes/origin/{wb}")
         assert checkout.update_checkout(co) == (True, "up to date")
-        # The rebase's rewrites are the branch's provenance, pushed with it.
-        kept = checkout.read_provenance(fb, local=True)
-        assert kept[tip] == sh(co, "rev-parse", fb), kept
-        assert set(sh(co, "rev-list", f"origin/main..{fb}").split()) <= set(kept.values()), kept
-        assert sh(seed, "ls-remote", "origin", f"{checkout.PROVENANCE_REFS}/{fb}").split()[0] == proc.rev(
-            f"{checkout.REWRITTEN_REFS}/{fb}")
+        # The rebase's rewrites are the branch's rebase map, pushed with it.
+        kept = checkout.read_rebase_map(wb, local=True)
+        assert kept[tip] == sh(co, "rev-parse", wb), kept
+        assert set(sh(co, "rev-list", f"origin/main..{wb}").split()) <= set(kept.values()), kept
+        assert sh(seed, "ls-remote", "origin", f"{checkout.REBASE_MAP_REFS}/{wb}").split()[0] == proc.rev(
+            f"{checkout.REWRITTEN_REFS}/{wb}")
         sh(co, *checkout.fetch_args())
-        assert checkout.read_provenance(fb) == kept
+        assert checkout.read_rebase_map(wb) == kept
         # A later rebase's are composed in, and only the rewrites the
         # branch still holds are kept: the tip replayed again, a commit
         # replayed for the first time, the rest dropped by that rebase.
-        checkout.note_rewritten(fb, {kept[tip]: "c" * 40, "d" * 40: "e" * 40}, {"c" * 40, "e" * 40})
-        assert checkout.read_provenance(fb, local=True) == {tip: "c" * 40, kept[tip]: "c" * 40, "d" * 40: "e" * 40}
-        assert checkout.read_provenance(fb) == kept
-        sh(co, "update-ref", f"{checkout.REWRITTEN_REFS}/{fb}", proc.rev(f"{checkout.PROVENANCE_REFS}/{fb}") or "")
+        checkout.note_rewritten(wb, {kept[tip]: "c" * 40, "d" * 40: "e" * 40}, {"c" * 40, "e" * 40})
+        assert checkout.read_rebase_map(wb, local=True) == {tip: "c" * 40, kept[tip]: "c" * 40, "d" * 40: "e" * 40}
+        assert checkout.read_rebase_map(wb) == kept
+        sh(co, "update-ref", f"{checkout.REWRITTEN_REFS}/{wb}", proc.rev(f"{checkout.REBASE_MAP_REFS}/{wb}") or "")
 
         # A review subagent's worktree: a detached HEAD at another work
         # branch's tip.  Nothing of its own, so a pull leaves it alone...
@@ -1828,7 +1828,7 @@ def git_cases(d: Path) -> None:
         assert left_alone(got := checkout.update_checkout(rv)), got
         # ...while its own work branch, not checked out, is rebased in a
         # throwaway worktree and pushed.
-        own = checkout.identity_of(rv.resolve(), None).fb
+        own = checkout.identity_of(rv.resolve(), None).wb
         assert own is not None
         sh(co, "branch", own, "origin/work/other/1")
         good, status = checkout.update_checkout(rv)
@@ -1878,7 +1878,7 @@ def git_cases(d: Path) -> None:
         exited = subprocess.Popen(["true"])
         exited.wait()
         sh(co, "worktree", "lock", "--reason", f"claude agent review (pid {exited.pid})", str(rv))
-        own = checkout.identity_of(rv.resolve(), None).fb
+        own = checkout.identity_of(rv.resolve(), None).wb
         assert own is not None
         put(co, "unpushed.txt", "x\n", "unpushed")
         sh(co, "branch", own, "HEAD")
@@ -2063,20 +2063,20 @@ def git_cases(d: Path) -> None:
 
         # A subagent's pushed branch, undeployed and deleted with its
         # worktree: a review checkout at its old tip holds commits of its own.
-        sub_fb = f"{fb}-review"
-        sh(co, "worktree", "add", "--quiet", "-b", sub_fb, str(rv), "origin/main")
+        sub_wb = f"{wb}-review"
+        sh(co, "worktree", "add", "--quiet", "-b", sub_wb, str(rv), "origin/main")
         put(rv, "s.txt", "sub\n", "sub work\n\nReaches: a\nDeployed: a")
-        sh(rv, "push", "--quiet", "origin", sub_fb)
+        sh(rv, "push", "--quiet", "origin", sub_wb)
         sh(co, "fetch", "--quiet")
-        tip = proc.rev(f"refs/remotes/origin/{sub_fb}")
+        tip = proc.rev(f"refs/remotes/origin/{sub_wb}")
         commands.enter_sub("rev")
         assert commands.undeploy("origin/main")
         # Undeployed: reset onto origin/main here and there, the worktree kept.
-        assert rv.exists() and sh(rv, "branch", "--show-current") == sub_fb
-        assert proc.rev(f"refs/remotes/origin/{sub_fb}") == proc.rev("refs/remotes/origin/main")
+        assert rv.exists() and sh(rv, "branch", "--show-current") == sub_wb
+        assert proc.rev(f"refs/remotes/origin/{sub_wb}") == proc.rev("refs/remotes/origin/main")
         os.chdir(co)
         commands.close_worktrees(["rev"])
-        assert not rv.exists() and proc.rev(f"refs/remotes/origin/{sub_fb}") is None
+        assert not rv.exists() and proc.rev(f"refs/remotes/origin/{sub_wb}") is None
         sh(seed, "fetch", "--quiet")
         sh(seed, "switch", "--quiet", "--detach", "origin/main")
         put(seed, "a.txt", "ONE\nTWO-upstream\nthree\nfour\nfive\n", "upstream 4")
@@ -2095,14 +2095,14 @@ def git_cases(d: Path) -> None:
         # undeploy alone: the latest increment off the branch, here and on
         # origin, its deployed targets named for the deploy that follows;
         # unstaged edits elsewhere and untracked files stay.
-        co9, fb9 = d / "homelab90", "work/tester/90"
+        co9, wb9 = d / "homelab90", "work/tester/90"
         sh(d, "clone", "--quiet", str(origin), str(co9))
         os.chdir(co9)
-        checkout.ensure_on_work_branch(fb9)
+        checkout.ensure_on_work_branch(wb9)
         assert "nothing to undeploy: no increment beyond origin/main" in dies(commands.undeploy)
         put(co9, "i1.txt", "one\n", "inc 1\n\nReaches: a\nApplied: a")  # Applied: the trailer key before the rename, still read
         put(co9, "i2.txt", "two\n", "inc 2\n\nReaches: a, b\nDeployed: a, b")
-        sh(co9, "push", "--quiet", "origin", fb9)
+        sh(co9, "push", "--quiet", "origin", wb9)
         sh(co9, "fetch", "--quiet")
         tip, parent = sh(co9, "rev-parse", "HEAD"), sh(co9, "rev-parse", "HEAD^")
         assert "--back-to nope: no such commit" in dies(lambda: commands.undeploy("nope"))
@@ -2123,33 +2123,33 @@ def git_cases(d: Path) -> None:
         with contextlib.redirect_stdout(io.StringIO()) as out:
             assert commands.undeploy(as_if=as_if)
         said = out.getvalue()
-        assert f"--dry-activate: would undeploy {fb9}'s 1 increment(s)" in said and "deployed to a, b" in said, said
-        assert as_if == {fb9: parent} and state(co9) == before and proc.rev(f"refs/remotes/origin/{fb9}") == tip
-        assert checkout.increment_fate(fb9, tip, parent, None) == "kept"
-        assert checkout.increment_fate(fb9, tip, parent, None, parent) == "abandoned"
+        assert f"--dry-activate: would undeploy {wb9}'s 1 increment(s)" in said and "deployed to a, b" in said, said
+        assert as_if == {wb9: parent} and state(co9) == before and proc.rev(f"refs/remotes/origin/{wb9}") == tip
+        assert checkout.increment_fate(wb9, tip, parent, None) == "kept"
+        assert checkout.increment_fate(wb9, tip, parent, None, parent) == "abandoned"
         with contextlib.redirect_stdout(io.StringIO()) as out:
             assert commands.undeploy()
         said = out.getvalue()
-        assert f"undeployed {fb9}'s 1 increment(s)" in said and f"\n  {tip[:7]}" in said and \
+        assert f"undeployed {wb9}'s 1 increment(s)" in said and f"\n  {tip[:7]}" in said and \
             "deployed to a, b" in said and f"reset onto {parent[:12]}" in said, said
-        assert sh(co9, "rev-parse", "HEAD") == parent and proc.rev(f"refs/remotes/origin/{fb9}") == parent
+        assert sh(co9, "rev-parse", "HEAD") == parent and proc.rev(f"refs/remotes/origin/{wb9}") == parent
         assert not (co9 / "i2.txt").exists() and (co9 / "i1.txt").read_text() == "one, edited\n"
         assert (co9 / "u.txt").exists() and sh(co9, "status", "--porcelain") == "M i1.txt\n?? u.txt"  # stripped
         # An unstaged edit to the increment's own file: nothing moves.
         before = state(co9)
         err = dies(commands.undeploy)
         assert "unstaged edits" in err and "i1.txt" in err, err
-        assert state(co9) == before and proc.rev(f"refs/remotes/origin/{fb9}") == parent
+        assert state(co9) == before and proc.rev(f"refs/remotes/origin/{wb9}") == parent
         sh(co9, "restore", "i1.txt")
         # --back-to origin/main: every increment, their targets together.
         put(co9, "i3.txt", "three\n", "inc 3\n\nReaches: c\nDeployed: c")
-        assert f"is not on {fb9}" in dies(lambda: commands.undeploy(tip[:12]))
+        assert f"is not on {wb9}" in dies(lambda: commands.undeploy(tip[:12]))
         with contextlib.redirect_stdout(io.StringIO()) as out:
             assert commands.undeploy("origin/main")
         said = out.getvalue()
-        assert f"undeployed {fb9}'s 2 increment(s)" in said and "deployed to a, c" in said \
+        assert f"undeployed {wb9}'s 2 increment(s)" in said and "deployed to a, c" in said \
             and "reset onto origin/main" in said, said
-        assert sh(co9, "rev-parse", "HEAD") == proc.rev("refs/remotes/origin/main") == proc.rev(f"refs/remotes/origin/{fb9}")
+        assert sh(co9, "rev-parse", "HEAD") == proc.rev("refs/remotes/origin/main") == proc.rev(f"refs/remotes/origin/{wb9}")
         assert (co9 / "u.txt").exists() and not (co9 / "i1.txt").exists()
         assert "nothing to undeploy: no increment beyond origin/main" in dies(commands.undeploy)
         assert "nothing to undeploy: no increment beyond origin/main" in dies(lambda: commands.undeploy("origin/main"))
@@ -2162,12 +2162,12 @@ def announce_cases(d: Path) -> None:
     what a deploy elsewhere sees of a deploy under way (checkout.announced),
     what it leaves behind."""
     scratch_env()
-    fb = "work/tester/9"
+    wb = "work/tester/9"
     # The renewal thread makes only the first push (HEARTBEAT, __main__):
     # each renewal below is driven on this thread, dated after the first and
     # after each other (a new commit each), so no assertion waits on the
     # thread or races it.
-    with scratch_origin(d, {"a.txt": "one\n"}, fb=fb) as (_origin, seed, co):
+    with scratch_origin(d, {"a.txt": "one\n"}, wb=wb) as (_origin, seed, co):
         put(co, "a.txt", "one\ntwo\n")
         snap = checkout.staged_snapshot()
         t0 = int(time.time())
@@ -2198,20 +2198,20 @@ def announce_cases(d: Path) -> None:
             assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{ann.key}").split()[0] == ann.sha
         # Announced: listed as under way by a fetch anywhere, the author
         # date the deploy's start, this run's own branch left out.
-        ann = checkout.Announce(fb, snap)
+        ann = checkout.Announce(wb, snap)
         assert ann.collect(), ann.detail
-        assert ann.key == fb
+        assert ann.key == wb
         first = ann.sha
         sh(co, *checkout.fetch_args())
         assert sh(co, "rev-parse", f"{first}^{{tree}}") == sh(co, "rev-parse", f"{snap}^{{tree}}")
         assert sh(co, "rev-parse", f"{first}^") == sh(co, "rev-parse", "HEAD")
         assert sh(co, "log", "-1", "--format=%s", first) == \
-            f"pending increment of {fb} from tester:{co} (pid {os.getpid()})"
+            f"pending increment of {wb} from tester:{co} (pid {os.getpid()})"
         (pend,) = checkout.pending_announcements()
-        assert pend.key == pend.branch == fb and pend.sha == first and not pend.settled and \
+        assert pend.key == pend.branch == wb and pend.sha == first and not pend.settled and \
             t0 <= pend.since <= pend.at <= t0 + 2, pend
-        assert checkout.announced(fb) == {}
-        assert checkout.announced(None) == {fb: first}
+        assert checkout.announced(wb) == {}
+        assert checkout.announced(None) == {wb: first}
         # Renewed while the deploy runs: a fresh commit of the same tree on
         # origin, the author date kept (the rank), the committer date new.
         renew(ann)
@@ -2223,7 +2223,7 @@ def announce_cases(d: Path) -> None:
         # onto it) ranks as the fresh run it is.
         ann.stop()
         t1 = int(time.time())
-        again = checkout.Announce(fb, snap)
+        again = checkout.Announce(wb, snap)
         assert again.collect(), again.detail
         assert t1 <= again.since <= t1 + 2 and again.records == (), again.since
         # Withdrawn (the deploy ended without a switch): deleted, the
@@ -2231,15 +2231,15 @@ def announce_cases(d: Path) -> None:
         again.withdraw()
         sh(co, *checkout.fetch_args())
         assert checkout.pending_announcements() == []
-        assert proc.rev(f"{checkout.PENDING_REFS}/{fb}") is None
-        assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{fb}") == ""
+        assert proc.rev(f"{checkout.PENDING_REFS}/{wb}") is None
+        assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{wb}") == ""
         assert not again._thread.is_alive()
 
         # The deploy records: the union's tree, chained on the target's
         # previous record first, then main, the branches and the increment;
         # a parent not here is left out.  Carried by the announcement from
         # before the switch: parents of its commit, kept by the renewals.
-        ann = checkout.Announce(fb, snap)
+        ann = checkout.Announce(wb, snap)
         assert ann.collect(), ann.detail
         committed = checkout.deployed_commit(snap, "two\n\nReaches: a\nDeployed: a")
         main = proc.rev("refs/remotes/origin/main")
@@ -2252,7 +2252,7 @@ def announce_cases(d: Path) -> None:
         assert ann.carry({"a": rec1, "b": rec2}) is None
         carried = ann.sha
         assert sh(co, "log", "-1", "--format=%P", carried).split() == [sh(co, "rev-parse", "HEAD"), rec1, rec2]
-        assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{fb}").split()[0] == carried
+        assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{wb}").split()[0] == carried
         assert renew(ann) != carried and sh(co, "log", "-1", "--format=%P", ann.sha).split()[1:] == [rec1, rec2]
         # So do the renewal loop's own beats, each a new commit.
         beat(ann, 2)
@@ -2261,7 +2261,7 @@ def announce_cases(d: Path) -> None:
         sh(co, *checkout.fetch_args())
         (pend,) = checkout.pending_announcements()
         assert pend.carried and pend.records == (rec1, rec2), pend
-        rerun = checkout.Announce(fb, snap)
+        rerun = checkout.Announce(wb, snap)
         assert rerun.collect(), rerun.detail
         assert rerun.since == ann.since and rerun.records == (rec1, rec2)
         assert sh(co, "log", "-1", "--format=%P", rerun.sha).split()[1:] == [rec1, rec2]
@@ -2275,17 +2275,17 @@ def announce_cases(d: Path) -> None:
         assert ann.carry({"a": rec1, "b": rec2}) is None
         # The push that ends the deploy, atomic: the work branch, the
         # records onto the history branches and the announcement deleted.
-        checkout.adopt_commit(fb, committed)
-        checkout.push_deployed(fb, ann, {"a": rec1, "b": rec2})
+        checkout.adopt_commit(wb, committed)
+        checkout.push_deployed(wb, ann, {"a": rec1, "b": rec2})
         checkout.await_background_push()
         sh(co, *checkout.fetch_args())
-        assert proc.rev(f"refs/remotes/origin/{fb}") == committed
+        assert proc.rev(f"refs/remotes/origin/{wb}") == committed
         assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/a") == rec1
         assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/b") == rec2
         assert checkout.pending_announcements() == []
         assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/*") == ""
         # The local copy went with the fetch's prune.
-        assert proc.rev(f"{checkout.PENDING_REFS}/{fb}") is None
+        assert proc.rev(f"{checkout.PENDING_REFS}/{wb}") is None
         # A main checkout's deploy: the records alone.
         checkout.push_deployed(None, None, {"a": rec2})
         checkout.await_background_push()
@@ -2293,7 +2293,7 @@ def announce_cases(d: Path) -> None:
         assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/a") == rec2
         assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/b") == rec2
         # Nothing to push: no background push started.
-        checkout.push_deployed(fb, None, {})
+        checkout.push_deployed(wb, None, {})
         assert not Path(checkout.push_state("pid")).exists()
         # A main checkout's announcement (its HEAD origin lacks), under
         # main@<machine>-<checkout>, is settled by the push that ends its
@@ -2350,23 +2350,23 @@ def announce_cases(d: Path) -> None:
         # The branch not pushed (its lease failed): the announcement stays,
         # so the deploy still counts as under way (dead, once its renewals
         # stop) until a push of the branch clears it.
-        ann = checkout.Announce(fb, snap)
+        ann = checkout.Announce(wb, snap)
         assert ann.collect(), ann.detail
         put(co, "a.txt", "one\ntwo\nthree\n", "three")
-        sh(seed, "fetch", "--quiet", "origin", f"+refs/heads/{fb}:refs/heads/{fb}")
-        sh(seed, "switch", "--quiet", fb)
+        sh(seed, "fetch", "--quiet", "origin", f"+refs/heads/{wb}:refs/heads/{wb}")
+        sh(seed, "switch", "--quiet", wb)
         put(seed, "b.txt", "theirs\n", "theirs")
-        sh(seed, "push", "--quiet", "origin", fb)
-        checkout.push_deployed(fb, ann, {"a": rec1})
+        sh(seed, "push", "--quiet", "origin", wb)
+        checkout.push_deployed(wb, ann, {"a": rec1})
         err = warned(checkout.await_background_push)
         assert "background push failed" in err, err
         sh(co, *checkout.fetch_args())
-        assert list(checkout.announced(None)) == [fb]
+        assert list(checkout.announced(None)) == [wb]
         # Atomic: the history branch did not move either.
         assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/a") == rec2b
-        assert checkout.clear_refspec(fb) == [f"--force-with-lease={checkout.PENDING_REFS}/{fb}:{ann.sha}",
-                                              f":{checkout.PENDING_REFS}/{fb}"]
-        sh(co, "push", "--quiet", "origin", f":{checkout.PENDING_REFS}/{fb}")
+        assert checkout.clear_refspec(wb) == [f"--force-with-lease={checkout.PENDING_REFS}/{wb}:{ann.sha}",
+                                              f":{checkout.PENDING_REFS}/{wb}"]
+        sh(co, "push", "--quiet", "origin", f":{checkout.PENDING_REFS}/{wb}")
         # A main checkout's announcement carrying records, unsettled (its
         # deploy died, or its ending push did - a oneshot service's end
         # killed it), is under way until origin's history branches hold
@@ -2434,7 +2434,7 @@ def submodule_cases(d: Path) -> None:
     sh(dep_seed, "push", "--quiet", "origin", "HEAD:main")
     config.set_cfg(config.parse(toml(flake_dir="nixos", targets_dir="nixos/hosts")))
 
-    fb = "work/tester/9"
+    wb = "work/tester/9"
     path = "nixos/submodules/dep"
     pin_file = "nixos/submodules/.nixconvoy_submodule_dep.json"
     staged = f"{pin_file}\n{path}"  # a pin, as git lists it: the pin file and the gitlink
@@ -2464,29 +2464,29 @@ def submodule_cases(d: Path) -> None:
             as (origin, seed, co):
         dep_repo = co / ".git/modules/dep"  # the repository, as git keeps a submodule's
         assert (co / path).is_dir() and not any((co / path).iterdir())  # unpopulated, as cloned
-        checkout.ensure_on_work_branch(fb)
+        checkout.ensure_on_work_branch(wb)
         assert submodule.present(co) == []
-        assert "no submodule of this repository (they are: dep)" in dies(lambda: submodule.create("other", fb))
-        ax = submodule.create("dep", fb)
-        assert ax == co / path and submodule.branch_at(ax) == fb
+        assert "no submodule of this repository (they are: dep)" in dies(lambda: submodule.create("other", wb))
+        ax = submodule.create("dep", wb)
+        assert ax == co / path and submodule.branch_at(ax) == wb
         assert sh(ax, "rev-parse", "HEAD") == v1
-        assert sh(ax, "config", f"branch.{fb}.merge") == "refs/heads/main"
+        assert sh(ax, "config", f"branch.{wb}.merge") == "refs/heads/main"
         assert (dep_repo / "HEAD").exists() and (ax / ".git").is_file()
         assert (dep_repo / checkout.STATE_DIR / submodule.MARKER).exists()
         assert dep().repo == dep_repo
         assert not sh(co, "status", "--porcelain")  # planted at the pinned rev
-        assert submodule.create("dep", fb) == ax  # idempotent
-        assert submodule.sync(fb, None) == []  # nothing of its own: no push, the pin as it was
+        assert submodule.create("dep", wb) == ax  # idempotent
+        assert submodule.sync(wb, None) == []  # nothing of its own: no push, the pin as it was
         assert not submodule.own(co) and submodule.notes(co) == ["submodule dep"]
 
         # Staged in the worktree: committed on its branch, pushed, the gitlink pinned and staged here.
         put(ax, "tool.py", "v2\n")
-        assert "submodule dep has staged changes" in dies(lambda: submodule.sync(fb, None))
-        assert "dry activation cannot carry" in dies(lambda: submodule.sync(fb, None, dry=True))
-        told = submodule.sync(fb, "dep: v2")
+        assert "submodule dep has staged changes" in dies(lambda: submodule.sync(wb, None))
+        assert "dry activation cannot carry" in dies(lambda: submodule.sync(wb, None, dry=True))
+        told = submodule.sync(wb, "dep: v2")
         v2 = sh(ax, "rev-parse", "HEAD")
         assert v2 != v1 and sh(ax, "log", "-1", "--format=%s") == "dep: v2"
-        assert dep_ref(f"refs/heads/{fb}") == v2
+        assert dep_ref(f"refs/heads/{wb}") == v2
         assert len(told) == 2 and "pushed" in told[0] and "pinned" in told[1], told
         assert sh(co, "diff", "--cached", "--name-only") == staged
         assert pinned() == v2
@@ -2499,7 +2499,7 @@ def submodule_cases(d: Path) -> None:
         tree = subprocess.run(["git", "write-tree"], cwd=co, env=env, check=True,
                               capture_output=True, text=True).stdout.strip()
         record = sh(co, "commit-tree", tree, "-p", "HEAD", "-m", "record")
-        ann = checkout.Announce(fb, "HEAD")
+        ann = checkout.Announce(wb, "HEAD")
         assert ann.collect(), ann.detail
         assert ann.carry({"a": record}) is None
         sh(co, *checkout.fetch_args())
@@ -2507,49 +2507,49 @@ def submodule_cases(d: Path) -> None:
         ann.withdraw()
         sh(co, *checkout.fetch_args())
         assert fake not in submodule.pinned_revs(dep())
-        assert submodule.sync(fb, "again") == []  # settled: nothing to do
-        assert submodule.sync(fb, None, dry=True) == []  # deployed state: a dry run may carry it
+        assert submodule.sync(wb, "again") == []  # settled: nothing to do
+        assert submodule.sync(wb, None, dry=True) == []  # deployed state: a dry run may carry it
         assert submodule.own(co)
         assert submodule.notes(co) == ["submodule dep +1"]
         # A worktree reset below what the tree deploys: refused rather than
         # pinned away; a hand rebase of it (the same patch) passes.
         sh(ax, "reset", "--quiet", "--hard", v1)
-        err = dies(lambda: submodule.sync(fb, "again"))
+        err = dies(lambda: submodule.sync(wb, "again"))
         assert "was reset below the work the tree deploys" in err and "dep: v2" in err, err
         sh(ax, "reset", "--quiet", "--hard", v2)
         sh(ax, "commit", "--quiet", "--amend", "-m", "dep: v2, amended")
-        told = submodule.sync(fb, "same patch")
+        told = submodule.sync(wb, "same patch")
         v2b = sh(ax, "rev-parse", "HEAD")
         assert v2b != v2 and pinned() == v2b and len(told) == 2, told
         sh(ax, "reset", "--quiet", "--hard", v2)
-        noted = warned(lambda: submodule.sync(fb, "back"))  # the same patch again: nothing to say
+        noted = warned(lambda: submodule.sync(wb, "back"))  # the same patch again: nothing to say
         assert pinned() == v2 and not noted, noted
         # An amend that changes the patch: pinned, the deployed commit it
         # leaves behind named.
         (ax / "tool.py").write_text("v2, changed\n")
         sh(ax, "add", "tool.py")
         sh(ax, "commit", "--quiet", "--amend", "--no-edit")
-        noted = warned(lambda: submodule.sync(fb, "changed"))
+        noted = warned(lambda: submodule.sync(wb, "changed"))
         v2c = sh(ax, "rev-parse", "HEAD")
         assert pinned() == v2c
         assert "leaves 1 deployed commit(s) behind" in noted and v2[:7] in noted, noted
         sh(ax, "reset", "--quiet", "--hard", v2)
-        submodule.sync(fb, "back")
+        submodule.sync(wb, "back")
         assert pinned() == v2
-        assert dep_ref(f"refs/heads/{fb}") == v2
+        assert dep_ref(f"refs/heads/{wb}") == v2
 
         # A landing refuses what it would lose or never deployed.
         (ax / "tool.py").write_text("v2 edited\n")
-        assert "unstaged edits" in dies(lambda: submodule.prepare_one(dep(), fb, "m"))
+        assert "unstaged edits" in dies(lambda: submodule.prepare_one(dep(), wb, "m"))
         sh(ax, "checkout", "--", "tool.py")
         (ax / "loose.txt").write_text("x\n")  # untracked: harmless, the worktree stays
         put(ax, "tool.py", "v3\n", "hand commit, never deployed")
-        assert "not what the tree pins" in dies(lambda: submodule.prepare_one(dep(), fb, "m"))
-        assert "not deployed yet" in dies(lambda: submodule.sync(fb, None, dry=True))
+        assert "not what the tree pins" in dies(lambda: submodule.prepare_one(dep(), wb, "m"))
+        assert "not deployed yet" in dies(lambda: submodule.sync(wb, None, dry=True))
         # An undeploy's dry activation back to a commit pinning it elsewhere
         # would reset it first: left out.
         assert submodule.pin_at("HEAD", path, co) != pinned()
-        assert submodule.sync(fb, None, dry=True, at="HEAD") == []
+        assert submodule.sync(wb, None, dry=True, at="HEAD") == []
         sh(ax, "reset", "--quiet", "--hard", v2)
 
         # The deploy's commit of the pin, then the landing: the branch squashed onto its main.
@@ -2560,38 +2560,38 @@ def submodule_cases(d: Path) -> None:
         # (staged changes, an unstaged edit the reset would lose) checked
         # ahead of the checkout's own reset.
         tip = sh(co, "rev-parse", "HEAD")
-        moved = submodule.moved_pins(co, fb, tip, f"{tip}^")
+        moved = submodule.moved_pins(co, wb, tip, f"{tip}^")
         assert [(s.name, was) for s, was in moved] == [("dep", v1)], moved
         put(ax, "tool.py", "staged\n")
-        assert "submodule dep has staged changes" in dies(lambda: submodule.moved_pins(co, fb, tip, f"{tip}^"))
+        assert "submodule dep has staged changes" in dies(lambda: submodule.moved_pins(co, wb, tip, f"{tip}^"))
         sh(ax, "reset", "--quiet", "--hard", v2)
         (ax / "tool.py").write_text("v2 edited\n")
-        err = dies(lambda: submodule.moved_pins(co, fb, tip, f"{tip}^"))
+        err = dies(lambda: submodule.moved_pins(co, wb, tip, f"{tip}^"))
         assert "unstaged edits, which the reset would lose" in err and "tool.py" in err, err
-        err = dies(lambda: submodule.undeploy_pins(moved, fb))
+        err = dies(lambda: submodule.undeploy_pins(moved, wb))
         assert "the reset onto" in err and sh(ax, "rev-parse", "HEAD") == v2, err
         sh(ax, "checkout", "--", "tool.py")
-        submodule.undeploy_pins(moved, fb)
+        submodule.undeploy_pins(moved, wb)
         assert sh(ax, "rev-parse", "HEAD") == v1 and (ax / "loose.txt").exists()
-        assert dep_ref(f"refs/heads/{fb}") == v1
-        assert dep_ref(f"{submodule.PAST_REFS}/{fb}/{v2}") == v2
+        assert dep_ref(f"refs/heads/{wb}") == v1
+        assert dep_ref(f"{submodule.PAST_REFS}/{wb}/{v2}") == v2
         sh(ax, "reset", "--quiet", "--hard", v2)  # ...and back, as a deploy would carry it again
-        submodule.sync(fb, "again")
-        assert pinned() == v2 and dep_ref(f"refs/heads/{fb}") == v2
+        submodule.sync(wb, "again")
+        assert pinned() == v2 and dep_ref(f"refs/heads/{wb}") == v2
 
         # Another checkout pins the submodule on its own branch: the union
         # merges the two branches, pushed as the submodule origin's
         # refs/nixconvoy/union/dep, and pins the gitlink there.
-        co8, fb8 = d / "homelab8", "work/tester/8"
+        co8, wb8 = d / "homelab8", "work/tester/8"
         sh(d, "clone", "--quiet", str(origin), str(co8))
         os.chdir(co8)
-        checkout.ensure_on_work_branch(fb8)
-        ax8 = submodule.create("dep", fb8)
+        checkout.ensure_on_work_branch(wb8)
+        ax8 = submodule.create("dep", wb8)
         put(ax8, "tool2.py", "b\n")
-        submodule.sync(fb8, "dep: b")
+        submodule.sync(wb8, "dep: b")
         b1 = sh(ax8, "rev-parse", "HEAD")
         sh(co8, "commit", "--quiet", "-m", "dep: b")
-        sh(co8, "push", "--quiet", "origin", fb8)
+        sh(co8, "push", "--quiet", "origin", wb8)
         os.chdir(co)
         sh(co, "fetch", "--quiet")
         settled: Future[subprocess.CompletedProcess[str]] = Future()
@@ -2600,7 +2600,7 @@ def submodule_cases(d: Path) -> None:
         def union() -> UnionOutcome:
             q = UnionQueries(lambda: "HEAD", settled, lambda: None, lambda *_: False)
             try:
-                done = guard.decide(UnionParams(NAMES, fb, False, proc.rev("refs/remotes/origin/main")), q)
+                done = guard.decide(UnionParams(NAMES, wb, False, proc.rev("refs/remotes/origin/main")), q)
             finally:
                 q.drop()
             return done
@@ -2614,19 +2614,19 @@ def submodule_cases(d: Path) -> None:
         assert not sh(dep_repo, "worktree", "list", "--porcelain").count("submodule-merge")
         # The branches conflicting is the other branch's conflict.
         put(ax8, "tool.py", "vB\n", "dep: vB")
-        sh(ax8, "push", "--quiet", "--force", "origin", fb8)
+        sh(ax8, "push", "--quiet", "--force", "origin", wb8)
         os.chdir(co8)
         submodule.set_pin(dep(co8), sh(ax8, "rev-parse", "HEAD"), co8)
         sh(co8, "commit", "--quiet", "-m", "dep: vB")
-        sh(co8, "push", "--quiet", "origin", fb8)
+        sh(co8, "push", "--quiet", "origin", wb8)
         os.chdir(co)
         sh(co, "fetch", "--quiet")
         err = dies(union)
-        assert f"cannot union work branch {fb8};" in err and path in err, err
+        assert f"cannot union work branch {wb8};" in err and path in err, err
         sh(ax8, "reset", "--quiet", "--hard", b1)
-        sh(ax8, "push", "--quiet", "--force", "origin", fb8)
+        sh(ax8, "push", "--quiet", "--force", "origin", wb8)
         sh(co8, "reset", "--quiet", "--hard", "HEAD~1")
-        sh(co8, "push", "--quiet", "--force", "origin", fb8)
+        sh(co8, "push", "--quiet", "--force", "origin", wb8)
         sh(co, "fetch", "--quiet")
         assert union().union == done.union
         # Union refs are kept, pinned or not.
@@ -2640,7 +2640,7 @@ def submodule_cases(d: Path) -> None:
         (ax / "COMMIT_MSG.md").write_text("dep v2 landed\n\nthe submodule's own message\n")  # untracked
         put(dep_seed, "other.txt", "x\n", "upstream meanwhile")
         sh(dep_seed, "push", "--quiet", "origin", "HEAD:main")
-        # Past refs: the landing deletes those no ref of origin pins (fb8 pins b1).
+        # Past refs: the landing deletes those no ref of origin pins (wb8 pins b1).
         put(dep_seed, "junk.txt", "j\n", "a tip nothing pins")
         junk = sh(dep_seed, "rev-parse", "HEAD")
         sh(dep_seed, "reset", "--quiet", "--hard", "HEAD~1")
@@ -2667,10 +2667,10 @@ def submodule_cases(d: Path) -> None:
         # index - so there is nothing to take back; the ref goes with the
         # prune of the next landing finished.
         before, main_before = sh(co, "rev-parse", "HEAD"), dep_ref("refs/heads/main")
-        landings = submodule.prepare_all(fb, "dep v2 landed")
+        landings = submodule.prepare_all(wb, "dep v2 landed")
         assert len(landings) == 1 and landings[0].pending is not None and landings[0].settle
         refused = landings[0].pending
-        assert dep_ref(f"{submodule.PAST_REFS}/{fb}/{refused}") == refused
+        assert dep_ref(f"{submodule.PAST_REFS}/{wb}/{refused}") == refused
         assert dep_ref("refs/heads/main") == main_before and sh(ax, "rev-parse", "HEAD") == v2
         assert (ax / "COMMIT_MSG.md").exists() and pinned() == v2
         assert sh(co, "rev-parse", "HEAD") == before and not sh(co, "diff", "--cached")
@@ -2683,7 +2683,7 @@ def submodule_cases(d: Path) -> None:
         # The landing itself, from the start: main pushed (not here), then
         # finished - by a run that finds the worktree worked in since, which
         # leaves it where it is, then by another, which does what is left.
-        landings = submodule.prepare_all(fb, "dep v2 landed")
+        landings = submodule.prepare_all(wb, "dep v2 landed")
         pending = landings[0].pending
         assert pending is not None
         sh(co, "reset", "--quiet", "--keep", submodule.pinned_commit(before, landings, co))  # as main's commit pins
@@ -2715,17 +2715,17 @@ def submodule_cases(d: Path) -> None:
         later = sh(ax, "rev-parse", "HEAD")
         assert submodule.finish_all(landings)
         assert dep_ref("refs/heads/main") == pending and sh(ax, "rev-parse", "HEAD") == later
-        assert (ax / "COMMIT_MSG.md").exists() and dep_ref(f"refs/heads/{fb}") == v2
+        assert (ax / "COMMIT_MSG.md").exists() and dep_ref(f"refs/heads/{wb}") == v2
         sh(ax, "reset", "--quiet", "--hard", v2)
         assert submodule.finish_all(landings)
         assert not dep_ref(f"{submodule.PAST_REFS}/gone/*")
         assert dep_ref(f"{submodule.PAST_REFS}/keep/{b1}") == b1
         # The branch's deployed tip v2, pinned by nothing once the landing
-        # moved fb, goes with the next prune that has fetched it - here
+        # moved wb, goes with the next prune that has fetched it - here
         # the finish run once more, with nothing else left to do.
-        assert dep_ref(f"{submodule.PAST_REFS}/{fb}/*") == v2
+        assert dep_ref(f"{submodule.PAST_REFS}/{wb}/*") == v2
         assert submodule.fetch_refs("dep", dep_repo) and submodule.finish_all(landings)
-        assert not dep_ref(f"{submodule.PAST_REFS}/{fb}/*")
+        assert not dep_ref(f"{submodule.PAST_REFS}/{wb}/*")
         dep_main = dep_ref("refs/heads/main")
         assert sh(ax, "rev-parse", "HEAD") == dep_main
         assert sh(main_wt, "rev-parse", "HEAD") == v1
@@ -2771,39 +2771,39 @@ def submodule_cases(d: Path) -> None:
         assert (ax / "loose.txt").exists() and submodule.own(co)  # untracked: kept, and the worktree's own
         (ax / "loose.txt").unlink()
         assert not submodule.own(co)
-        submodule.finish_all(submodule.prepare_all(fb, "dep v2 landed"))  # a retry: nothing left to do
+        submodule.finish_all(submodule.prepare_all(wb, "dep v2 landed"))  # a retry: nothing left to do
         assert sh(co, "log", "-1", "--format=%s").startswith("submodule dep:")
 
         # Landed, the worktree stays on its branch at the landed commit, pushed so.
-        assert ax.exists() and submodule.branch_at(ax) == fb
-        assert dep_ref(f"refs/heads/{fb}") == dep_main
+        assert ax.exists() and submodule.branch_at(ax) == wb
+        assert dep_ref(f"refs/heads/{wb}") == dep_main
         assert submodule.keeps(dep(), co) is None
         # The removal (close <input>): worktree and branch gone, here and
         # on the origin, the branch's last tip kept under PAST_REFS there;
         # the directory stays, empty, so the gitlink is not deleted.
         submodule.remove_all(co)
         assert ax.is_dir() and not any(ax.iterdir()) and not sh(co, "status", "--porcelain")
-        assert not dep_ref(f"refs/heads/{fb}")
-        assert dep_ref(f"{submodule.PAST_REFS}/{fb}/{dep_main}") == dep_main
+        assert not dep_ref(f"refs/heads/{wb}")
+        assert dep_ref(f"{submodule.PAST_REFS}/{wb}/{dep_main}") == dep_main
         assert submodule.present(co) == []
-        assert f"refs/heads/{fb}" not in sh(dep_repo, "for-each-ref", "--format=%(refname)")
+        assert f"refs/heads/{wb}" not in sh(dep_repo, "for-each-ref", "--format=%(refname)")
 
         # close <input> --force's pieces: reset onto the submodule's main,
         # the deployed pin put back to origin/main's, staged; close refuses until then.
-        sh(co, "push", "--quiet", "origin", f"HEAD:refs/heads/{fb}")
-        ax = submodule.create("dep", fb)  # from origin/main (the branch went)
+        sh(co, "push", "--quiet", "origin", f"HEAD:refs/heads/{wb}")
+        ax = submodule.create("dep", wb)  # from origin/main (the branch went)
         put(ax, "tool.py", "v4\n")
-        submodule.sync(fb, "dep: v4")
+        submodule.sync(wb, "dep: v4")
         v4 = sh(ax, "rev-parse", "HEAD")
         assert pinned() == v4
         sh(co, "commit", "--quiet", "-m", "dep: v4")
         assert submodule.orphaned(co) == []
         why = submodule.keeps(dep(), co)
         assert why is not None and why.startswith("it carries commits not on origin/main"), why
-        submodule.reset_one(dep(), fb)
+        submodule.reset_one(dep(), wb)
         assert submodule.restore(dep(), co)
         assert ax.exists() and sh(ax, "rev-parse", "HEAD") == dep_main
-        assert dep_ref(f"refs/heads/{fb}") == dep_main
+        assert dep_ref(f"refs/heads/{wb}") == dep_main
         assert pinned() == v1  # origin/main's
         assert sh(co, "diff", "--cached", "--name-only") == staged
         assert submodule.keeps(dep(), co) is None
@@ -2823,7 +2823,7 @@ def submodule_cases(d: Path) -> None:
         os.chdir(co8)
         put(ax8, "tool3.py", "c\n", "dep: c")  # a deploy's increment from before the landing...
         t2 = sh(ax8, "rev-parse", "HEAD")
-        sh(ax8, "push", "--quiet", "--force", "origin", fb8)
+        sh(ax8, "push", "--quiet", "--force", "origin", wb8)
         submodule.set_pin(dep(co8), t2, co8)  # ...its pin staged, as that deploy's sync left it
         sh(co8, "fetch", "--quiet")
         # A text conflict beside the gitlink: the rebase is the hand's, told
@@ -2836,7 +2836,7 @@ def submodule_cases(d: Path) -> None:
         sh(co8, "fetch", "--quiet")
         put(co8, "note.txt", "mine\n")  # staged, as a deploy's state
         err = dies(checkout.ensure_rebased)
-        assert f"rebasing {fb8} onto origin/main is not clean" in err and "Could not read" not in err and \
+        assert f"rebasing {wb8} onto origin/main is not clean" in err and "Could not read" not in err and \
             f"at a stop on {path} keep this branch's own pin" in err and \
             f"git update-index --cacheinfo 160000,$(git rev-parse :3:{path}),{path}" in err, err
         assert sh(ax8, "rev-parse", "HEAD") == t2 and pinned(co8) == t2 and checkout.git_op_in_progress() is None
@@ -2848,7 +2848,7 @@ def submodule_cases(d: Path) -> None:
         # failure says why git could not do it alone and what to do.
         (ax8 / "tool2.py").write_text("b, edited\n")
         err = dies(checkout.ensure_rebased)
-        assert f"rebasing {fb8} onto origin/main is not clean" in err and "submodule dep's pin" in err and \
+        assert f"rebasing {wb8} onto origin/main is not clean" in err and "submodule dep's pin" in err and \
             f"its worktree ({ax8}) has edits" in err and "Could not read" not in err, err
         assert sh(ax8, "rev-parse", "HEAD") == t2 and pinned(co8) == t2
         sh(ax8, "checkout", "--", "tool2.py")
@@ -2866,8 +2866,8 @@ def submodule_cases(d: Path) -> None:
         assert sh(co8, "status", "--porcelain") == f"M  {pin_file}\nM  {path}"
         sh(co8, "commit", "--quiet", "-m", "dep: c")  # the deploy's commit of the increment
         assert said.count("rebased onto origin/main") == 1, said
-        assert dep_ref(f"refs/heads/{fb8}") == b2
-        assert dep_ref(f"{submodule.PAST_REFS}/{fb8}/{t2}") == t2
+        assert dep_ref(f"refs/heads/{wb8}") == b2
+        assert dep_ref(f"{submodule.PAST_REFS}/{wb8}/{t2}") == t2
         assert submodule.PENDING == {}
 
         # The default branch moving again, with no conflict to meet it (no
@@ -2912,25 +2912,25 @@ def submodule_cases(d: Path) -> None:
         b3 = sh(ax8, "rev-parse", "HEAD")
         assert b3 != b2 and proc.is_ancestor(new_main, b3, cwd=str(ax8))
         assert sh(ax8, "show", f"{b3}:tool3.py") == "c" and sh(ax8, "show", f"{b3}:more.txt") == "m"
-        assert dep_ref(f"refs/heads/{fb8}") == b3
+        assert dep_ref(f"refs/heads/{wb8}") == b3
         os.chdir(co8)
         assert pinned(co8) == b3
         assert sh(co8, "diff", "--cached", "--name-only") == staged
         sh(co8, "commit", "--quiet", "-m", "dep: b on the new main")
         os.chdir(co)
-        ax = submodule.create("dep", fb)  # from origin/main: nothing of its own
+        ax = submodule.create("dep", wb)  # from origin/main: nothing of its own
         assert submodule.restore(dep(), co)  # the orphaned pin back to main's
         sh(ax, "reset", "--quiet", "--hard", dep_main)
         (ax / "tool.py").write_text("edited\n")  # unstaged, a file the landing left alone
         pin_before = pinned()
-        assert submodule.catch_up(co, fb) == []
+        assert submodule.catch_up(co, wb) == []
         assert sh(ax, "rev-parse", "HEAD") == new_main
         assert (ax / "tool.py").read_text() == "edited\n" and not sh(ax, "diff", "--cached", "--name-only")
         assert pin_before == dep_main and pinned() == new_main  # the pin follows the fast-forward
-        assert not dep_ref(f"refs/heads/{fb}")
+        assert not dep_ref(f"refs/heads/{wb}")
         sh(ax, "reset", "--quiet", "--hard", dep_main)
         (ax / "more.txt").write_text("mine\n")  # what the landing added
-        problems = submodule.catch_up(co, fb)
+        problems = submodule.catch_up(co, wb)
         assert len(problems) == 1 and "is not clean, left as it was" in problems[0], problems
         assert sh(ax, "rev-parse", "HEAD") == dep_main and (ax / "more.txt").read_text() == "mine\n"
         assert not sh(ax, "status", "--porcelain", "-uno")
@@ -2939,29 +2939,29 @@ def submodule_cases(d: Path) -> None:
         assert not good and "submodule dep: rebasing" in status and "is not clean" in status, status
         (ax / "more.txt").unlink()
         os.chdir(co)
-        assert submodule.catch_up(co, fb) == []
+        assert submodule.catch_up(co, wb) == []
         assert sh(ax, "rev-parse", "HEAD") == new_main
         # land --with-children, three participants with the submodule: a
         # landing with work is squashed onto the end of the line the ones
         # before it left, one with nothing of its own follows its pin
         # (behind the line, and never the base of the next); main pins the
         # line's end and the default branch moves onto it.
-        co7, fb7 = d / "homelab7", "work/tester/7"
+        co7, wb7 = d / "homelab7", "work/tester/7"
         sh(d, "clone", "--quiet", str(origin), str(co7))
         os.chdir(co7)
-        checkout.ensure_on_work_branch(fb7)
-        ax7 = submodule.create("dep", fb7)
-        submodule.sync(fb7, None)
+        checkout.ensure_on_work_branch(wb7)
+        ax7 = submodule.create("dep", wb7)
+        submodule.sync(wb7, None)
         assert sh(ax7, "rev-parse", "HEAD") == new_main
         put(ax7, "tool7.py", "n\n")
-        submodule.sync(fb7, "dep: n")
+        submodule.sync(wb7, "dep: n")
         sh(co7, "commit", "--quiet", "-m", "dep: n")
         os.chdir(co8)
-        chain = submodule.prepare_all(fb8, "b landed")
+        chain = submodule.prepare_all(wb8, "b landed")
         os.chdir(co)
-        chain += submodule.prepare_all(fb, "nothing of its own", chain)
+        chain += submodule.prepare_all(wb, "nothing of its own", chain)
         os.chdir(co7)
-        chain += submodule.prepare_all(fb7, "n landed", chain)
+        chain += submodule.prepare_all(wb7, "n landed", chain)
         os.chdir(co)
         assert len(chain) == 3 and chain[1].pending is None and chain[1].landed == new_main
         lb, ln = chain[0].landed, chain[2].landed
@@ -2983,14 +2983,14 @@ def submodule_cases(d: Path) -> None:
         submodule.finish_all(chain)
         assert dep_ref("refs/heads/main") == ln
         assert sh(ax8, "rev-parse", "HEAD") == lb and sh(ax7, "rev-parse", "HEAD") == ln
-        assert dep_ref(f"refs/heads/{fb8}") == lb and dep_ref(f"refs/heads/{fb7}") == ln
+        assert dep_ref(f"refs/heads/{wb8}") == lb and dep_ref(f"refs/heads/{wb7}") == ln
         assert sh(ax, "rev-parse", "HEAD") == new_main
         # A dry activation leaves the submodule where it is; the deploy's
         # own submodule step brings it along.
         sh(ax, "reset", "--quiet", "--hard", dep_main)
-        assert submodule.sync(fb, None, dry=True) == [] and sh(ax, "rev-parse", "HEAD") == dep_main
+        assert submodule.sync(wb, None, dry=True) == [] and sh(ax, "rev-parse", "HEAD") == dep_main
         submodule.FETCHED.clear()  # a deploy of its own: co's repository has yet to see the line's end
-        assert submodule.sync(fb, None) == []
+        assert submodule.sync(wb, None) == []
         assert sh(ax, "rev-parse", "HEAD") == ln  # the default branch as the chained landing left it
         submodule.remove_all(co)
         # The pin file: every pin also writes the rev beside the gitlink,
@@ -3023,7 +3023,7 @@ def submodule_cases(d: Path) -> None:
         pins.write_text('{"committed": 1, "narHash": "nar:0"}\n')
         sh(co, "add", pin_file)
         assert warned(lambda: submodule.heal_pins(co, None, False)) and json.loads(pins.read_text())["committed"] == 1
-        assert submodule.heal_pins(co, fb, False) == [f"submodule dep: {pin_file} rewritten for {merge[:12]}"]
+        assert submodule.heal_pins(co, wb, False) == [f"submodule dep: {pin_file} rewritten for {merge[:12]}"]
         assert json.loads(pins.read_text()) == {"committed": date(merge), "narHash": f"nar:{merge}"}
         assert pin_file not in sh(co, "diff", "--name-only").split()  # staged as written
         # Stale: a malformed file, an older format, a date not the commit's;
@@ -3034,33 +3034,33 @@ def submodule_cases(d: Path) -> None:
         assert submodule.pin_stale(s, merge, submodule.pin_text(date(merge) + 1, f"nar:{merge}"))
         assert not submodule.pin_stale(s._replace(repo=d / "nowhere"), merge, submodule.pin_text(1, "n"))
         assert not submodule.pin_stale(s, "0" * 40, submodule.pin_text(1, "n"))
-        assert submodule.heal_pins(co, fb, False) == []
+        assert submodule.heal_pins(co, wb, False) == []
         # The gitlink gone, the file goes with it; back, it is back.
         sh(co, "update-index", "--force-remove", "--", path)  # the gitlink alone: the dir, populated by now, stays
-        assert submodule.heal_pins(co, fb, False) == [f"submodule dep: {pin_file} removed, its gitlink gone"]
+        assert submodule.heal_pins(co, wb, False) == [f"submodule dep: {pin_file} removed, its gitlink gone"]
         # A pin file no configured submodule claims (one removed or renamed) goes too.
         stray = "nixos/submodules/.nixconvoy_submodule_gone.json"
         put(co, stray, '{"rev": "0"}\n')
         assert warned(lambda: submodule.heal_pins(co, None, False)) and (co / stray).exists()
-        assert submodule.heal_pins(co, fb, False) == [f"{stray} removed: no submodule's pin file"]
+        assert submodule.heal_pins(co, wb, False) == [f"{stray} removed: no submodule's pin file"]
         assert not (co / stray).exists() and stray not in sh(co, "ls-files").split()
         assert not pins.exists() and pin_file not in sh(co, "ls-files").split()
         sh(co, "update-index", "--add", "--cacheinfo", f"160000,{merge},{path}")
-        assert submodule.heal_pins(co, fb, False) == [f"submodule dep: {pin_file} rewritten for {merge[:12]}"]
+        assert submodule.heal_pins(co, wb, False) == [f"submodule dep: {pin_file} rewritten for {merge[:12]}"]
         assert json.loads(pins.read_text()) == {"committed": date(merge), "narHash": f"nar:{merge}"}
         # A landing end to end, its run cut short past main's push: main
         # pins the landing commit, which its temporary ref alone holds,
         # and nothing else has moved.  The next run finishes it.
-        co5, fb5 = d / "homelab5", "work/tester/5"
+        co5, wb5 = d / "homelab5", "work/tester/5"
         sh(d, "clone", "--quiet", str(origin), str(co5))
         os.chdir(co5)
-        checkout.ensure_on_work_branch(fb5)
-        ax5 = submodule.create("dep", fb5)
-        submodule.sync(fb5, None)
+        checkout.ensure_on_work_branch(wb5)
+        ax5 = submodule.create("dep", wb5)
+        submodule.sync(wb5, None)
         put(ax5, "tool5.py", "five\n")
-        submodule.sync(fb5, "dep: five")
+        submodule.sync(wb5, "dep: five")
         put(co5, "COMMIT_MSG.md", "five landed\n", "dep: five")
-        sh(co5, "push", "--quiet", "origin", fb5)
+        sh(co5, "push", "--quiet", "origin", wb5)
         tip5, sub5, dep_was = sh(co5, "rev-parse", "HEAD"), sh(ax5, "rev-parse", "HEAD"), dep_ref("refs/heads/main")
         on_file = checkout.state_path(commands.LANDINGS)
         with mock.patch.object(lanes, "undeployed", lambda *_: []), mock.patch.object(commands, "catch_up_rest"):
@@ -3070,13 +3070,13 @@ def submodule_cases(d: Path) -> None:
             main5 = sh(origin, "rev-parse", "main")
             landed5 = sh(co5, "rev-parse", f"{main5}:{path}")
             assert landed5 != sub5 and sh(co5, "log", "-1", "--format=%s", main5) == "five landed" and on_file.exists()
-            assert dep_ref(f"{submodule.PAST_REFS}/{fb5}/{landed5}") == landed5 and dep_ref("refs/heads/main") == dep_was
+            assert dep_ref(f"{submodule.PAST_REFS}/{wb5}/{landed5}") == landed5 and dep_ref("refs/heads/main") == dep_was
             assert sh(co5, "rev-parse", "HEAD") == tip5 and sh(ax5, "rev-parse", "HEAD") == sub5 and pinned(co5) == sub5
             commands.land()
-        assert dep_ref("refs/heads/main") == landed5 and not dep_ref(f"{submodule.PAST_REFS}/{fb5}/{landed5}")
-        assert sh(ax5, "rev-parse", "HEAD") == landed5 and dep_ref(f"refs/heads/{fb5}") == landed5
+        assert dep_ref("refs/heads/main") == landed5 and not dep_ref(f"{submodule.PAST_REFS}/{wb5}/{landed5}")
+        assert sh(ax5, "rev-parse", "HEAD") == landed5 and dep_ref(f"refs/heads/{wb5}") == landed5
         assert sh(co5, "rev-parse", "HEAD") == main5 and pinned(co5) == landed5 and not on_file.exists()
-        assert not sh(co5, "status", "--porcelain") and sh(origin, "rev-parse", fb5) == main5
+        assert not sh(co5, "status", "--porcelain") and sh(origin, "rev-parse", wb5) == main5
         assert json.loads((co5 / pin_file).read_text())["narHash"] == f"nar:{landed5}"
         os.chdir(co)
     say("submodules: ok")
@@ -3093,7 +3093,7 @@ def open_cases(d: Path) -> None:
     # No flake here to scan: what each branch has not deployed is given.
     undeployed: dict[str, list[str]] = {}
     mock.patch.object(lanes, "undeployed", lambda branch, *_: undeployed.get(branch, [])).start()
-    with scratch_origin(d, {"a.txt": "one\n"}, fb="work/tester/9") as (origin, seed, co):
+    with scratch_origin(d, {"a.txt": "one\n"}, wb="work/tester/9") as (origin, seed, co):
         w = commands.open_worktree("task", "claude agent task (pid 1 start 2) 3.4")
         assert w == co / ".claude/worktrees/task" and checkout.branch_at(w) == "worktree-task"
         # Nothing ignored the directory: open excluded it for the clone.
@@ -3393,12 +3393,12 @@ def open_cases(d: Path) -> None:
         from nixconvoy import submodule  # noqa: PLC0415 - after scratch_env's config
         prepare_all = submodule.prepare_all
 
-        def main_moving(fb: str, msg: str) -> list[submodule.Landing]:
+        def main_moving(wb: str, msg: str) -> list[submodule.Landing]:
             sh(seed, "fetch", "--quiet")
             sh(seed, "reset", "--quiet", "--hard", "origin/main")
             put(seed, "moved.txt", "m\n", "landed elsewhere")
             sh(seed, "push", "--quiet", "origin", "HEAD:main")
-            return prepare_all(fb, msg)
+            return prepare_all(wb, msg)
 
         tip = sh(co, "rev-parse", "HEAD")
         # A conflicted draft is no staged change the exclusion passes over.

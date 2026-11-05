@@ -8,8 +8,8 @@ use crate::plan::{drive, Effect, Replay, Reply};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
-const FB: &str = "haswell-wsl-deploys4";
-const LISTED: [&str; 3] = [FB, "chikuwa-deploys1", "M3-Air-deploys2"];
+const WB: &str = "haswell-wsl-deploys4";
+const LISTED: [&str; 3] = [WB, "chikuwa-deploys1", "M3-Air-deploys2"];
 /// Unlisted at first; a refresh may bring a branch_prefix shaped to it.
 const NEW: &str = "chikuwa-deploys2";
 const UNLISTED: &str = "M3-Air-deploys9";
@@ -69,7 +69,7 @@ fn select_of(o: &Origin, p: &Params) -> Refs {
     }
     o.refs
         .iter()
-        .filter(|(n, s)| *n != p.fb && !o.head_has.contains(s) && o.listed.contains(n) && !o.unchanged.contains(s))
+        .filter(|(n, s)| *n != p.wb && !o.head_has.contains(s) && o.listed.contains(n) && !o.unchanged.contains(s))
         .cloned()
         .collect()
 }
@@ -219,11 +219,11 @@ fn answer(o: &mut Origin, t: &mut Trace, q: &Query) -> Reply {
 }
 
 fn params(evict: bool) -> Params {
-    Params { names: Names::default(), fb: FB.into(), evict, main0: Some("m0".into()) }
+    Params { names: Names::default(), wb: WB.into(), evict, main0: Some("m0".into()) }
 }
 
 fn arb_refs() -> impl Strategy<Value = Refs> {
-    let names = [FB, LISTED[1], LISTED[2], NEW, UNLISTED];
+    let names = [WB, LISTED[1], LISTED[2], NEW, UNLISTED];
     prop::collection::vec(prop::sample::select(vec!["s1", "s2", "s3", "s4"]), 5).prop_flat_map(move |shas| {
         let all: Refs = names.iter().zip(shas).map(|(n, s)| (n.to_string(), s.to_string())).collect();
         prop::sample::subsequence(all, 0..=5)
@@ -251,7 +251,7 @@ fn arb_origin() -> impl Strategy<Value = Origin> {
         prop::collection::vec(
             (
                 prop::sample::select(vec!["a", "b", "c"]).prop_map(str::to_string),
-                prop::sample::select(vec![FB, LISTED[1], LISTED[2], NEW, UNLISTED]).prop_map(str::to_string),
+                prop::sample::select(vec![WB, LISTED[1], LISTED[2], NEW, UNLISTED]).prop_map(str::to_string),
                 prop::sample::select(vec!["", "s1", "s2", "c1"]).prop_map(str::to_string),
             ),
             0..4,
@@ -297,7 +297,7 @@ proptest! {
         }
         for q in &asked {
             if let Query::Merge { name, sha } = q {
-                prop_assert!(name != FB);
+                prop_assert!(name != WB);
                 // A lane's commit of a branch is whatever its targets run.
                 let cut = o.cuts.iter().any(|c| c.1 == *name && c.2 == *sha);
                 prop_assert!(cut || !o.head_has.contains(sha) && !o.unchanged.contains(sha));
@@ -306,7 +306,7 @@ proptest! {
         // Each branch a pass saw unlisted (and HEAD lacks) is warned of once.
         let head_has = &o.head_has;
         let want: BTreeSet<String> = t.passes.iter()
-            .flat_map(|(refs, listed)| refs.iter().filter(move |(n, s)| n != FB && !listed.contains(n) && !head_has.contains(s)))
+            .flat_map(|(refs, listed)| refs.iter().filter(move |(n, s)| n != WB && !listed.contains(n) && !head_has.contains(s)))
             .map(|(n, _)| format!("warning: ignoring origin/{n}: not shaped like nixconvoy.toml's branch_prefix"))
             .collect();
         let warned: Vec<String> = fx.iter().filter_map(|e| match e { Effect::Warn(w) => Some(w.clone()), _ => None }).collect();
@@ -504,7 +504,7 @@ fn a_main_checkout_leaves_an_unmerged_lane_behind() {
         ..Origin::default()
     };
     o.conflicts.insert(s("c1"), vec![(s("a.nix"), false)]);
-    let p = Params { fb: String::new(), ..params(false) };
+    let p = Params { wb: String::new(), ..params(false) };
     let (_, t, _, fx, out) = run(&o, &p);
     assert_eq!(out.unwrap().branches, [(LISTED[1].to_string(), s("s1"))]);
     assert_eq!(

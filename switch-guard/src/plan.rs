@@ -322,10 +322,10 @@ pub enum Query {
     /// `git worktree remove` without force, its lock lifted first and put
     /// back when git refuses (an unclean worktree) -> Ran.
     RemoveWorktree,
-    /// Delete its branches - `fb`, and `cur` or its fresh branch when its
+    /// Delete its branches - `wb`, and `cur` or its fresh branch when its
     /// own - here and on origin -> Ran.
     DropBranches {
-        fb: String,
+        wb: String,
         cur: Option<String>,
     },
 }

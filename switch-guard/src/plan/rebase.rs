@@ -45,10 +45,10 @@ pub enum Op {
     Onto { upstream: String },
     /// Fetch, then bring the checkout and its work branch (None: the main
     /// checkout has none) onto origin/main and push the branch.
-    Sync { fb: Option<String> },
+    Sync { wb: Option<String> },
     /// Leave the checkout on its work branch, coming from main, from a
     /// detached HEAD or from a branch with nothing of its own.
-    OnWorkBranch { fb: String },
+    OnWorkBranch { wb: String },
 }
 
 /// What happened, or (Err) why the checkout was left as it was.
@@ -68,12 +68,12 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
             }
             Err(e) => Err(Halt::Die(e)),
         },
-        Op::Sync { fb } => sync(s, n, fb.as_deref()),
+        Op::Sync { wb } => sync(s, n, wb.as_deref()),
         Op::Onto { upstream } => {
             pop_tmp(s)?;
             onto(s, n, upstream)
         }
-        Op::OnWorkBranch { fb } => on_work_branch(s, n, fb).map(|()| Ok(String::new())),
+        Op::OnWorkBranch { wb } => on_work_branch(s, n, wb).map(|()| Ok(String::new())),
     }
 }
 
@@ -177,24 +177,24 @@ fn detached_onto(s: &mut Script, n: &Names, upstream: &str) -> Run<Outcome> {
     })
 }
 
-/// The local branch `fb`, not checked out here, onto origin/main in a
+/// The local branch `wb`, not checked out here, onto origin/main in a
 /// throwaway worktree: no tmp commits to protect, so commits that become
 /// empty are dropped.
-pub fn aside(s: &mut Script, n: &Names, fb: &str) -> Run<Outcome> {
-    let local = format!("refs/heads/{fb}");
+pub fn aside(s: &mut Script, n: &Names, wb: &str) -> Run<Outcome> {
+    let local = format!("refs/heads/{wb}");
     let main = n.main_ref();
     let up = n.main_short();
     if contains(s, &main, &local)? {
         return Ok(Ok(text!(rebase_up_to_date).into()));
     }
     let ff = contains(s, &local, &main)?;
-    let result = match s.ran(Query::AddWorktree { branch: fb.into() })? {
-        Err(detail) => Err(format!(text!(rebase_cannot_check_out), branch = fb, detail = detail.trim())),
+    let result = match s.ran(Query::AddWorktree { branch: wb.into() })? {
+        Err(detail) => Err(format!(text!(rebase_cannot_check_out), branch = wb, detail = detail.trim())),
         Ok(()) => match s.ran(Query::Rebase { keep_empty: false, aside: true, upstream: main })? {
-            Ok(()) => Ok(moved(ff, fb, &up)),
+            Ok(()) => Ok(moved(ff, wb, &up)),
             Err(detail) => {
                 s.tolerate(Query::RebaseAbort { aside: true })?;
-                Err(format!(text!(rebase_not_clean), branch = fb, up = up, detail = no_hints(&detail)))
+                Err(format!(text!(rebase_not_clean), branch = wb, up = up, detail = no_hints(&detail)))
             }
         },
     };
@@ -202,7 +202,7 @@ pub fn aside(s: &mut Script, n: &Names, fb: &str) -> Run<Outcome> {
     Ok(result)
 }
 
-fn sync(s: &mut Script, n: &Names, fb: Option<&str>) -> Run<Outcome> {
+fn sync(s: &mut Script, n: &Names, wb: Option<&str>) -> Run<Outcome> {
     if let Err(detail) = s.ran(Query::Fetch)? {
         return Ok(Err(failed(text!(rebase_fetch), &detail)));
     }
@@ -211,24 +211,24 @@ fn sync(s: &mut Script, n: &Names, fb: Option<&str>) -> Run<Outcome> {
         Ok(d) => d,
         Err(e) => return Ok(Err(e)),
     }];
-    let Some(fb) = fb else {
+    let Some(wb) = wb else {
         return Ok(Ok(done.remove(0)));
     };
-    let local = format!("refs/heads/{fb}");
+    let local = format!("refs/heads/{wb}");
     if rev(s, local.clone())?.is_none() {
         return Ok(Ok(done.remove(0)));
     }
-    if branch(s)?.as_deref() != Some(fb) {
-        match aside(s, n, fb)? {
+    if branch(s)?.as_deref() != Some(wb) {
+        match aside(s, n, wb)? {
             Ok(d) => done.push(d),
             Err(e) => return Ok(Err(e)),
         }
     }
-    if rev(s, local)? != rev(s, n.remote_ref(fb))? {
-        if let Err(detail) = s.ran(Query::Push { branch: fb.into() })? {
-            return Ok(Err(format!(text!(rebase_push_failed), branch = fb, detail = detail.trim())));
+    if rev(s, local)? != rev(s, n.remote_ref(wb))? {
+        if let Err(detail) = s.ran(Query::Push { branch: wb.into() })? {
+            return Ok(Err(format!(text!(rebase_push_failed), branch = wb, detail = detail.trim())));
         }
-        done.push(format!(text!(rebase_pushed), branch = fb));
+        done.push(format!(text!(rebase_pushed), branch = wb));
     }
     let steps: Vec<String> = done.into_iter().filter(|d| d != text!(rebase_up_to_date)).collect();
     Ok(Ok(if steps.is_empty() { text!(rebase_up_to_date).into() } else { steps.join(text!(rebase_steps_joiner)) }))
@@ -236,17 +236,17 @@ fn sync(s: &mut Script, n: &Names, fb: Option<&str>) -> Run<Outcome> {
 
 /// Plain `git pull --rebase` on the work branch then means the same
 /// catch-up deploys do.  Pushes are unaffected: each names its refspec.
-fn ensure_upstream(s: &mut Script, n: &Names, fb: &str) -> Run<()> {
-    if s.text(Query::Upstream { branch: fb.into() })?.as_deref() != Some(format!("{}\trefs/heads/{}", n.remote, n.main).as_str()) {
-        s.must(Query::SetUpstream { branch: fb.into() }, &format!(text!(rebase_setting_upstream), branch = fb))?;
+fn ensure_upstream(s: &mut Script, n: &Names, wb: &str) -> Run<()> {
+    if s.text(Query::Upstream { branch: wb.into() })?.as_deref() != Some(format!("{}\trefs/heads/{}", n.remote, n.main).as_str()) {
+        s.must(Query::SetUpstream { branch: wb.into() }, &format!(text!(rebase_setting_upstream), branch = wb))?;
     }
     Ok(())
 }
 
-fn on_work_branch(s: &mut Script, n: &Names, fb: &str) -> Run<()> {
+fn on_work_branch(s: &mut Script, n: &Names, wb: &str) -> Run<()> {
     let cur = branch(s)?;
-    if cur.as_deref() == Some(fb) {
-        return ensure_upstream(s, n, fb);
+    if cur.as_deref() == Some(wb) {
+        return ensure_upstream(s, n, wb);
     }
     // Nothing of its own to strand: detached at or behind origin/main, or
     // the fresh branch a subagent's worktree was created with - at its
@@ -258,21 +258,21 @@ fn on_work_branch(s: &mut Script, n: &Names, fb: &str) -> Run<()> {
         _ if safe => {}
         None => return Err(Halt::Die(stranded(n, &main))),
         Some(other) => {
-            return Err(Halt::Die(format!(text!(rebase_other_branch), other = other, main_short = n.main_short(), fb = fb, main = n.main)));
+            return Err(Halt::Die(format!(text!(rebase_other_branch), other = other, main_short = n.main_short(), wb = wb, main = n.main)));
         }
     }
-    let start = if rev(s, format!("refs/heads/{fb}"))?.is_some() {
+    let start = if rev(s, format!("refs/heads/{wb}"))?.is_some() {
         None
     } else {
         // Recover the branch from the remote if an earlier clone pushed one.
-        let remote = n.remote_ref(fb);
+        let remote = n.remote_ref(wb);
         Some(if rev(s, remote.clone())?.is_some() { remote } else { "HEAD".into() })
     };
-    if let Err(detail) = s.ran(Query::Switch { branch: fb.into(), start })? {
-        return Err(Halt::Die(format!(text!(rebase_switch_failed), fb = fb, detail = detail.trim())));
+    if let Err(detail) = s.ran(Query::Switch { branch: wb.into(), start })? {
+        return Err(Halt::Die(format!(text!(rebase_switch_failed), wb = wb, detail = detail.trim())));
     }
-    ensure_upstream(s, n, fb)?;
-    s.print(format!(text!(rebase_switched), fb = fb));
+    ensure_upstream(s, n, wb)?;
+    s.print(format!(text!(rebase_switched), wb = wb));
     Ok(())
 }
 

@@ -67,9 +67,9 @@ macro_rules! text {
     (rebase_pushed) => { "pushed {branch}" };
     (rebase_steps_joiner) => { "; " };
     (rebase_setting_upstream) => { "setting {branch}'s upstream" };
-    (rebase_other_branch) => { "on branch {other}, which carries commits not on {main_short}; deploys run from {fb} or from {main}" };
-    (rebase_switch_failed) => { "cannot switch to {fb} with the current staged/working-tree changes:\n{detail}\nresolve by hand, then re-run" };
-    (rebase_switched) => { "switched to work branch {fb}" };
+    (rebase_other_branch) => { "on branch {other}, which carries commits not on {main_short}; deploys run from {wb} or from {main}" };
+    (rebase_switch_failed) => { "cannot switch to {wb} with the current staged/working-tree changes:\n{detail}\nresolve by hand, then re-run" };
+    (rebase_switched) => { "switched to work branch {wb}" };
 
     // --- plan/prune.rs
     (prune_fetch_failed) => { "{remote} could not be fetched to judge it:\n{detail}" };
@@ -84,10 +84,10 @@ macro_rules! text {
     (prune_push_in_flight) => { "a push of its work branch is in flight" };
     (prune_nested) => { "another worktree lives inside it" };
     (prune_no_work_branch) => { "it owns no work branch" };
-    (prune_foreign_branch) => { "it has {fb}, another checkout's work branch, checked out" };
-    (prune_pushed_increments) => { "its work branch {fb} carries pushed increments: land or undeploy decides it" };
-    (prune_off_pushed_branch) => { "it is not on {fb}, which carries pushed increments; `git switch {fb}` there to discard them" };
-    (prune_unpushed) => { "it owns {fb}, which carries commits not on {remote} (a deploy whose push failed?); push it or `git switch {fb}` there and undeploy --back-to {main_short}" };
+    (prune_foreign_branch) => { "it has {wb}, another checkout's work branch, checked out" };
+    (prune_pushed_increments) => { "its work branch {wb} carries pushed increments: land or undeploy decides it" };
+    (prune_off_pushed_branch) => { "it is not on {wb}, which carries pushed increments; `git switch {wb}` there to discard them" };
+    (prune_unpushed) => { "it owns {wb}, which carries commits not on {remote} (a deploy whose push failed?); push it or `git switch {wb}` there and undeploy --back-to {main_short}" };
     (prune_dirty) => { "it has uncommitted or untracked changes, which the removal would lose; commit or discard them (git status there)" };
     (prune_not_on_origin) => { "it carries commits not on {remote}, which the removal would lose; push them (git push {remote} HEAD:{main}) or deploy from the work branch" };
     (prune_occupied) => { "a process works in it" };

@@ -52,7 +52,7 @@ fn removes_an_empty_dead_one() {
     assert_eq!(&asked[..4], &[Query::Lock, Query::Alive { pid: 7, start: Some(9), own_ends: false }, Query::Fetch, Query::TakeNameLock]);
     assert_eq!(&asked[asked.len() - 2..], &[Query::ReleaseDeployLock, Query::ReleaseNameLock]);
     assert!(asked.contains(&Query::Alive { pid: 7, start: Some(9), own_ends: false }));
-    assert!(asked.contains(&Query::DropBranches { fb: "h-deploys3-agent-x".into(), cur: Some("worktree-agent-x".into()) }));
+    assert!(asked.contains(&Query::DropBranches { wb: "h-deploys3-agent-x".into(), cur: Some("worktree-agent-x".into()) }));
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn keeps_and_says_why() {
     assert_eq!(kept(&o), "it has h-deploys3, another checkout's work branch, checked out");
     // On its own work branch: kept while that carries pushed increments,
     // removed once it is reset onto main (a land, or an undeploy back to it), pushed so.
-    let on_fb = |increments: bool| {
+    let on_wb = |increments: bool| {
         move |q: &Query| match q {
             Query::CurrentBranch => Some(Reply::Text(Some("h-deploys3-agent-x".into()))),
             Query::Rev { name } if name == "refs/remotes/origin/h-deploys3-agent-x" => Some(Reply::Text(Some("tip".into()))),
@@ -106,17 +106,17 @@ fn keeps_and_says_why() {
             _ => None,
         }
     };
-    let (_, o) = run(params(false), on_fb(true));
+    let (_, o) = run(params(false), on_wb(true));
     assert_eq!(kept(&o), "its work branch h-deploys3-agent-x carries pushed increments: land or undeploy decides it");
-    let (asked, o) = run(params(false), on_fb(false));
+    let (asked, o) = run(params(false), on_wb(false));
     assert_eq!(o, Outcome::Removed, "{asked:?}");
 }
 
 #[test]
 fn origin_and_the_local_work_branch() {
-    let fb = "h-deploys3-agent-x";
+    let wb = "h-deploys3-agent-x";
     let tip = |q: &Query| match q {
-        Query::Rev { name } if name == &format!("refs/remotes/origin/{fb}") => Some(Reply::Text(Some("t".into()))),
+        Query::Rev { name } if name == &format!("refs/remotes/origin/{wb}") => Some(Reply::Text(Some("t".into()))),
         _ => None,
     };
     let (_, o) = run(params(false), |q| tip(q).or_else(|| matches!(q, Query::Contains { .. }).then_some(Reply::Flag(false))));
@@ -124,12 +124,12 @@ fn origin_and_the_local_work_branch() {
     let (_, o) = run(params(false), |q| tip(q).or_else(|| matches!(q, Query::Contains { .. }).then_some(Reply::Flag(true))));
     assert_eq!(o, Outcome::Removed);
     let local = |q: &Query| match q {
-        Query::Rev { name } if name == &format!("refs/heads/{fb}") => Some(Reply::Text(Some("l".into()))),
+        Query::Rev { name } if name == &format!("refs/heads/{wb}") => Some(Reply::Text(Some("l".into()))),
         Query::Unpushed { sha } if sha == "l" => Some(Reply::Flag(true)),
         _ => None,
     };
     let (_, o) = run(params(false), local);
-    assert!(kept(&o).starts_with(&format!("it owns {fb}, which carries commits not on origin")));
+    assert!(kept(&o).starts_with(&format!("it owns {wb}, which carries commits not on origin")));
     let (_, o) = run(params(false), |q| (*q == Query::CurrentBranch).then(|| Reply::Text(Some("other-deploys1".into()))));
     assert_eq!(o, Outcome::Removed);
 }

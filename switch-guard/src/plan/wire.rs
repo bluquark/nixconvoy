@@ -69,10 +69,10 @@ mod tests {
         assert_eq!(line, r#"{"effects":[],"next":{"done":{"Ok":""}}}"#);
         assert!(!more);
         let p: Params = serde_json::from_value(
-            serde_json::json!({"rebase": {"names": {"remote": "origin", "main": "main"}, "op": {"sync": {"fb": null}}}}),
+            serde_json::json!({"rebase": {"names": {"remote": "origin", "main": "main"}, "op": {"sync": {"wb": null}}}}),
         )
         .unwrap();
-        assert!(matches!(p, Params::Rebase(rebase::Params { op: rebase::Op::Sync { fb: None }, .. })));
+        assert!(matches!(p, Params::Rebase(rebase::Params { op: rebase::Op::Sync { wb: None }, .. })));
         let p: Params =
             serde_json::from_value(serde_json::json!({"rebase": {"names": {"remote": "origin", "main": "main"}, "op": {"onto": {"upstream": "refs/remotes/origin/dev"}}}})).unwrap();
         assert!(
@@ -99,7 +99,7 @@ mod tests {
             line,
             r#"{"effects":[{"print":"  a: will switch"}],"next":{"done":{"affected":["a"],"plan":["a"],"drift":{"a":["untracked",""]}}}}"#
         );
-        let mut u = start(r#"{"union":{"names":{"remote":"origin","main":"main"},"fb":"w","evict":true,"main0":null}}"#).unwrap();
+        let mut u = start(r#"{"union":{"names":{"remote":"origin","main":"main"},"wb":"w","evict":true,"main0":null}}"#).unwrap();
         assert_eq!(u.decide(None).0, r#"{"effects":[{"mark":"union"}],"next":{"ask":"listed"}}"#);
         let mut p = start(r#"{"prune":{"names":{"remote":"origin","main":"main"},"name":"agent-x","named":false,"own_session_ends":false,"stopped":null}}"#).unwrap();
         assert_eq!(p.decide(None).0, r#"{"effects":[],"next":{"ask":"lock"}}"#);
