@@ -39,8 +39,8 @@ There are three ways to install nixconvoy.  Do any one of the following on your 
 <summary><b>1. Quick no-config use</b></summary>
 
 ```bash
-nix profile install github:bluquark/nixconvoy
-alias nixconvoy='nix run github:bluquark/nixconvoy -- '
+nix profile install github:bluquark/nixconvoy/release
+alias nixconvoy='nix run github:bluquark/nixconvoy/release -- '
 ```
 
 </details>
@@ -54,7 +54,7 @@ alias nixconvoy='nix run github:bluquark/nixconvoy -- '
      extra-substituters = [ "https://nixconvoy.cachix.org" ];
      extra-trusted-public-keys = [ "nixconvoy.cachix.org-1:8HCQ3qVkg+lUbouy8s7aWzWoDoGDrm0lkg07VvD8RwQ=" ];
    };
-   inputs.nixconvoy.url = "github:bluquark/nixconvoy";
+   inputs.nixconvoy.url = "github:bluquark/nixconvoy/release";
    ```
 2. In outputs:
    ```nix

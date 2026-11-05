@@ -4,6 +4,8 @@ name = "nixconvoy"
 #   git fetch origin && git tag vX.Y.Z origin/main && git push origin vX.Y.Z
 # .github/workflows/release.yml refuses a tag that is not v + this version
 # on main, then builds each system, caches it and publishes the Release.
+# Once that run has passed, move the branch the README installs from:
+#   git push origin vX.Y.Z~0:refs/heads/release
 # A dry run before tagging: gh workflow run release.yml --ref main
 version = "0.1.0"
 description = "Clobber-safe NixOS deploys for targets shared by several checkouts"

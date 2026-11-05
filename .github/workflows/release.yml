@@ -4,7 +4,10 @@
 # Each system's package (on Linux the target's crate too, the boot-assessment
 # module's) is built on a runner of its own kind, its closure pushed to
 # nixconvoy.cachix.org and pinned there (a pin is exempt from the cache's
-# eviction); the GitHub Release follows once every system is in.
+# eviction); the GitHub Release follows once every system is in.  The
+# `release` branch the README installs from is then moved by hand
+# (git push origin vX.Y.Z~0:refs/heads/release): this run's token may not
+# push a range that changes a workflow file.
 #
 # Run by hand on a pushed branch (`gh workflow run release.yml --ref
 # <branch>`) it builds and pushes the same and stops there: whether a commit
