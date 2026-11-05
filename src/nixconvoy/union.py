@@ -152,6 +152,6 @@ class UnionQueries(GitQueries):
                 return Cut(self.cuts(self.at[union], union, branches) if self.cuts is not None else [])
             case Stage(union, names, branches, lanes):
                 return Flag(self.stage(self.at[union], union, names, branches,
-                                       [(self.at[lane.union], lane) for lane in lanes]))
+                                       [(self.at.get(lane.union, ""), lane) for lane in lanes]))
             case _:
                 return super().__call__(ask)

@@ -490,3 +490,33 @@ fn targets_take_the_commits_deployed_there() {
         format!("cannot union feature branch {} as side1 runs it (c1); mergiraf could not resolve:", LISTED[2])
     );
 }
+
+/// A main checkout's deploy leaves a lane that does not merge behind
+/// rather than end: its targets are staged with no union.
+#[test]
+fn a_main_checkout_leaves_an_unmerged_lane_behind() {
+    let s = |v: &str| v.to_string();
+    let mut o = Origin {
+        refs: vec![(LISTED[1].into(), "s1".into())],
+        main: "m0".into(),
+        listed: LISTED.iter().map(|s| s.to_string()).collect(),
+        cuts: vec![(s("side1"), LISTED[1].into(), s("c1")), (s("choko"), LISTED[1].into(), s(""))],
+        ..Origin::default()
+    };
+    o.conflicts.insert(s("c1"), vec![(s("a.nix"), false)]);
+    let p = Params { fb: String::new(), ..params(false) };
+    let (_, t, _, fx, out) = run(&o, &p);
+    assert_eq!(out.unwrap().branches, [(LISTED[1].to_string(), s("s1"))]);
+    assert_eq!(
+        t.lanes,
+        [
+            Lane { targets: vec![s("choko")], union: s("union of tree "), branches: vec![] },
+            Lane { targets: vec![s("side1")], union: String::new(), branches: vec![(LISTED[1].to_string(), s("c1"))] },
+        ]
+    );
+    let warned: Vec<&Effect> = fx.iter().filter(|e| matches!(e, Effect::Warn(_))).collect();
+    assert!(
+        matches!(warned[..], [Effect::Warn(w)] if w.starts_with(&format!("warning: not deploying to side1: cannot union feature branch {} as side1 runs it (c1);", LISTED[1]))),
+        "{warned:?}"
+    );
+}

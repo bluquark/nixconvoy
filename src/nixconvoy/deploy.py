@@ -10,7 +10,7 @@ import signal
 import subprocess
 import sys
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from . import checkout, lanes, memo, proc, strings, submodule, targets
@@ -42,7 +42,6 @@ from .checkout import (
     push_deployed,
     push_feature_branch,
     record_commit,
-    restart_lineage,
     staged_differs,
     staged_snapshot,
     this_prefix,
@@ -109,6 +108,9 @@ class Run:
 
     def __init__(self, ann: Announce | None) -> None:
         self.ann = ann
+        # The targets a deploy that ended well went on without, their lane
+        # not merging: deploy() ends on them once the announcement is settled.
+        self.unmerged: list[str] = []
 
 
 def claims(provenance: str, me: str, branch: str) -> bool:
@@ -264,8 +266,6 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
         fetch.result()
         ensure_sole_writer(fb)
         ensure_rebased()
-        if not dry and is_ancestor("HEAD", main_ref()):
-            restart_lineage(fb)
         snap = staged_snapshot()
         # An increment that changes nothing any target's evaluation reads
         # is committed without a deploy, the targets left to the next
@@ -322,6 +322,8 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
                       file=sys.stderr)
             else:
                 ann.withdraw()
+    if run.unmerged:
+        die(strings.DEPLOY_UNMERGED(targets=", ".join(run.unmerged)))
 
 
 def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: list[str],
@@ -368,6 +370,8 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
     policies: dict[str, SwitchPolicy] = {}
     affected: list[str] = []
     left_alone: list[str] = []
+    # The targets whose lane did not merge (a main checkout's deploy goes on without them).
+    unmerged: list[str] = []
     tops: dict[str, Top] = {}
     committed = ""
     records: dict[str, str] = {}
@@ -395,7 +399,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             if c is None and own == cfg().main_branch:
                 c = doc.get("main")
             if isinstance(c, str) and fb is not None:
-                c = lanes.carried_commit(own, c, tip, local=True, unknown_is_tip=False)
+                c = lanes.carried_commit(own, c, tip, local=True)
             found[h] = c if isinstance(c, str) else None
         return found
 
@@ -504,7 +508,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         the feature branches shaped like `listed` (nixconvoy.toml's branch_prefix), `branches`
         the ones it merged - the targets of each of `laned` from that
         lane's union and worktree instead: whether the deploy ends here."""
-        nonlocal plan, affected, left_alone, tops, committed, records, attested, provenances, ann, policies
+        nonlocal plan, affected, left_alone, unmerged, tops, committed, records, attested, provenances, ann, policies
         if skip:
             if dry:
                 print(strings.DEPLOY_SKIP_DRY(union=union))
@@ -518,15 +522,19 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
 
         if ann is not None and not ann.collect():
             die(strings.DEPLOY_ANNOUNCE_FAILED(remote=cfg().remote, detail=ann.detail))
-        # Each target's union, its worktree and the branches it holds.
-        lane_of = {h: (lwt, lane.union, lane.branches) for lwt, lane in laned for h in lane.targets}
+        # Each target's union, its worktree and the branches it holds; a
+        # lane without a union did not merge, its targets left out of this
+        # deploy (the union core said so).
+        lane_of = {h: (lwt, lane.union, lane.branches) for lwt, lane in laned if lane.union for h in lane.targets}
+        unmerged = sorted(h for _, lane in laned if not lane.union for h in lane.targets)
 
         def lane(h: str) -> tuple[str, str, list[tuple[str, str]]]:
+            assert h not in unmerged
             return lane_of.get(h, (wt, union, branches))
 
         groups: dict[tuple[str, str], list[str]] = {}
         for h in all_targets:
-            if running.get(h) is not None:
+            if running.get(h) is not None and h not in unmerged:
                 groups.setdefault(lane(h)[:2], []).append(h)
         PERF.mark("eval")
         with memo.memo_lock(memo.memo_dir()):
@@ -537,7 +545,15 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         unproven = [g for g in ({(wt, union): None} | dict.fromkeys(groups)) if memo.precheck_unproven(g[1])]
 
         def prechecks() -> str | None:
-            return next((err for gwt, gunion in unproven if (err := memo.precheck_gate(gwt, gunion))), None)
+            """The first failure among the unproven unions' prechecks, all at once."""
+            if len(unproven) == 1:
+                return memo.precheck_gate(*unproven[0])
+            gates = ThreadPoolExecutor(len(unproven))
+            try:
+                return next((err for gate in as_completed([gates.submit(memo.precheck_gate, *g) for g in unproven])
+                             if (err := gate.result())), None)
+            finally:
+                gates.shutdown(wait=False, cancel_futures=True)
 
         check: Future[str | None] | None = None
         if unproven:
@@ -571,13 +587,14 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                      tz_offset=time.localtime().tm_gmtoff)
         verdict = decide(DriftParams(
             cx=cx, union=union, unions={h: lane_of[h][1] for h in tops if h in lane_of},
-            targets=all_targets, candidates=candidates,
+            targets=[h for h in all_targets if h not in unmerged],
+            candidates=[h for h in candidates if h not in unmerged],
             evict=evict, named=bool(filter_targets), reached=sorted(reached),
             running=running, built={h: t.out for h, t in tops.items()},
             provenances={h: p.provenance for h, p in probed.items()}),
             GitQueries(as_if=as_if) if as_if else None)
         plan, affected = verdict.plan, verdict.affected
-        left_alone = [h for h, (kind, _) in verdict.drift.items() if kind == "left-alone"]
+        left_alone = [h for h, (kind, _) in verdict.drift.items() if kind == "left-alone"] + unmerged
 
         # The target fell back from this very toplevel: switching onto it
         # would run a configuration known not to boot.
@@ -616,27 +633,35 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             committed = deployed_commit(snap, full)
         records, attested, provenances = {}, {}, {}
         if not dry:
-            docs: dict[str, dict[str, object]] = {}
+            docs: dict[tuple[str, tuple[tuple[str, str], ...]], dict[str, object]] = {}
             runs_now = running_records()
             main = rev(main_ref()) or ""
+            own = committed or rev("HEAD") or ""
+
+            def doc_of(h: str) -> dict[str, object]:
+                """The provenance of `h`'s lane."""
+                _, lunion, lbranches = lane(h)
+                key = (lunion, tuple(lbranches))
+                if key not in docs:
+                    docs[key] = provenance_record(lunion, lbranches, committed, ann.sha if ann else "",
+                                                  ann.key if ann else "")
+                return docs[key]
 
             def record(h: str, parent: str, **more: object) -> str:
-                """`h`'s record of its lane's union, on `parent`, and the
-                provenance it carries."""
+                """`h`'s record of its lane's union, on `parent` - then
+                main, the branches' commits and this branch's own, which
+                the provenance names and the history thereby keeps."""
                 _, lunion, lbranches = lane(h)
-                if lunion not in docs:
-                    docs[lunion] = provenance_record(lunion, lbranches, committed, ann.sha if ann else "",
-                                                     ann.key if ann else "")
                 subject = ((msg or "").partition("\n")[0] if committed else "") or (
                     cfg().main_branch + "".join(strings.DEPLOY_SUBJECT_BRANCH(branch=n) for n, _ in lbranches))
-                body = {**docs[lunion], "toplevel": tops[h].out, **more}
-                return record_commit(h, lunion, [parent, main, *(t for _, t in lbranches), committed], subject,
+                body = {**doc_of(h), "toplevel": tops[h].out, **more}
+                return record_commit(h, lunion, [parent, main, *(t for _, t in lbranches), own], subject,
                                      dump_json(body))
 
             for h in plan:
                 r = runs_now.get(h)
                 records[h] = record(h, (r[1] if r is not None else "") or previous_record(probed[h].provenance))
-                provenances[h] = dump_json({**docs[lane(h)[1]], "toplevel": tops[h].out, "record": records[h]})
+                provenances[h] = dump_json({**doc_of(h), "toplevel": tops[h].out, "record": records[h]})
             # A candidate this checkout's work reaches that evaluates to
             # the system it runs: nothing to switch, and without a record
             # the work would count as never deployed there (lanes.lagging).
@@ -802,4 +827,5 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         print(strings.DEPLOY_NO_DRIFT(union=union))
     if problem is not None:
         die(strings.DEPLOY_UNPUSHED(fb=fb, problem=problem))
+    run.unmerged = unmerged
     return True

@@ -786,13 +786,15 @@ def drop_branches(names: list[str]) -> list[str]:
             failed.append(strings.CLOSE_DELETE_FAILED(
                 branches=", ".join(pushed), remote=cfg().remote,
                 error=(p.stderr or "").strip() or strings.CLOSE_NO_ERROR_GIVEN))
-    # The gone branches' announcements and lineages, on their own: a stale
-    # lease (origin moved since the fetch) must not count as a branch
-    # deletion failed.
-    for b in names:
+            for b in pushed:
+                del gone[b]
+    # The gone branches' announcements and, of those gone from origin
+    # too, lineages, on their own: a stale lease (origin moved since the
+    # fetch) must not count as a branch deletion failed.
+    for b in gone:
         git("update-ref", "-d", f"{REWRITTEN_REFS}/{b}", check=False)
     clears = [spec for b in names for spec in clear_refspec(b)]
-    clears += [f":{LINEAGE_REFS}/{b}" for b in names if rev(f"{LINEAGE_REFS}/{b}")]
+    clears += [f":{LINEAGE_REFS}/{b}" for b in gone if rev(f"{LINEAGE_REFS}/{b}")]
     if clears:
         cmd = ["push", "--quiet", cfg().remote, *clears]
         p = git(*cmd, check=False)

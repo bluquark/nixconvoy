@@ -305,7 +305,7 @@ At a high level, here are the "transactional" properties they are designed to pr
 
 | Guarantee | Cost | Mitigation |
 |---|---|---|
-| **Nothing you deploy is ever silently undone.**  The input to the NixOS generation applied to your fleet is not only your current checkout, but the union of all open feature branches. |  Harder to keep track of what config ended up running on a given machine.<br><br>`deploy` can abort on a merge conflict between two feature branches. | The union result is visible on `nixconvoy-history/<target>`.<br><br>nixconvoy uses a syntax-aware merge tool called `mergiraf`, so even two edits of the same line don't necessarily cause a merge conflict. |
+| **Nothing you deploy is ever silently undone.**  The input to the NixOS generation applied to your fleet is not only your current checkout, but the union of everything the open feature branches have deployed to that machine. |  Harder to keep track of what config ended up running on a given machine.<br><br>`deploy` can abort on a merge conflict between two feature branches. | The union result is visible on `nixconvoy-history/<target>`.<br><br>nixconvoy uses a syntax-aware merge tool called `mergiraf`, so even two edits of the same line don't necessarily cause a merge conflict. |
 | **Two deploys running at the same time in different worktrees will serialize correctly.** | Trivial (lockfiles). | |
 | **Every deploy runs prechecks (lint/static analysis).** | Additional work on every deploy. | nixconvoy runs precheck in parallel with Nix's eval phase, when there is often CPU to spare. |
 | **Every deploy runs auto-rollback checks (connectivity checks).** | Trivial (small script runs after activation). | |
@@ -501,7 +501,7 @@ Also, there are two special cases: a change touching only documentation skips ev
 - **`main`.**  Contains landed commits only.  Written by `nixconvoy land` (or by hand using a normal `git commit`, usually from the primary checkout).
 - **Feature branches `nixconvoy/<branch>`.** One per checkout, conceptually "owned" by the checkout that has it checked out.  One commit per successful deploy.  Reset onto main by `land` and `undeploy`.  Nixconvoy expects that you'll never commit or force-push to one of these using raw `git` --- always use `nixconvoy`'s subcommands to interact with one of these branches, or nixconvoy may get confused later.
 - **Child branches `<parent branch>-<name>`** (`nixconvoy/<host>/main-<name>` under a main checkout).  This optional feature of nixconvoy comes into play if you use `nixconvoy open --child` or if you have the Claude Code nixconvoy plugin installed and kick off work inside a subagent.  Created on the child worktree’s first deploy, can be interacted `--with-children`.
-- **`nixconvoy-history/<target>`.** Each machine’s full deploy history, updated on every deploy which affected that target.  Each record is a commit of the exact configuration the target runs, whose parents are the previous record, origin/main, and each mergiraf'ed feature branch’s tip.  It also described what was merged to produce it and who deployed it.  With this, you can examine the history of everything nixconvoy has ever applied to your machines: for example, using `git log --first-parent origin/nixconvoy-history/<target>` and `git diff origin/nixconvoy-history/<a> origin/nixconvoy-history/<b>`.
+- **`nixconvoy-history/<target>`.** Each machine’s full deploy history, updated on every deploy which affected that target.  Each record is a commit of the exact configuration the target runs, whose parents are the previous record, origin/main, and the commit of each mergiraf'ed feature branch.  It also described what was merged to produce it and who deployed it.  With this, you can examine the history of everything nixconvoy has ever applied to your machines: for example, using `git log --first-parent origin/nixconvoy-history/<target>` and `git diff origin/nixconvoy-history/<a> origin/nixconvoy-history/<b>`.
 
 </details>
 
@@ -510,6 +510,7 @@ Also, there are two special cases: a change touching only documentation skips ev
 
 - **`refs/nixconvoy/deploying/branch/<branch>`.** An "announcement" mechanism registering the fact that a nixconvoy deploy is in progress, renewed every 10s.  This is used to inform other invocations of nixconvoy that they should wait instead of running in parallel.
 	- Normally, this is removed after a deploy completes, but I can't rule out the possibility (e.g. due to a power outage or a bug in nixconvoy) that one of these may accidentally persist and block all deploys indefinitely.  In that case, the failure message will suggest to you a `git push` command to clear it by hand.
+- **`refs/nixconvoy/lineage/<branch>`.** Which commit replaced each commit of a feature branch when nixconvoy rebased it, so that the commits named in `nixconvoy-history/<target>` can still be found on the branch.
 
 </details>
 
@@ -517,8 +518,8 @@ Also, there are two special cases: a change touching only documentation skips ev
 <summary><b>Commit message convention</b></summary>
 
 - Default message for feature branch commits generated by `nixconvoy deploy`: `<checkout>: increment <n>`. Trailers: `Reaches:` (targets whose evaluation reads a changed file) and `Deployed:` (targets actually switched to the latest configuration).
-	- A target in `Reaches` but not `Deploye`d block other feature branches' `deploy` from touching that machine, to avoid accidentally deploying in work that wasn't intended to affect that machine yet.
-	- It will also block `land` from running, which can be overridden by running `nixconvoy land --not-yet-deployed`
+	- These are informational.  What a feature branch has deployed to a target is read from `nixconvoy-history/<target>`: a change it has not yet deployed there is left out when another feature branch deploys to that target, to avoid accidentally deploying in work that wasn't intended to affect that machine yet.
+	- Such a change will also block `land` from running, which can be overridden by running `nixconvoy land --not-yet-deployed`
 
 > **Tip:** If that sounded confusing, just always run `nixconvoy deploy` without going out of your way to specify which target machine to restrict the change to.  Then, `Reaches` and `Deployed` will always be the same and you won't run into this scenario.  `nixconvoy` assumes you'll only manually specify targets when you have a good reason to restrict the deploy to only those targets (e.g. you only want to deploy a risky change to a test machine, not the prod machine).
 

@@ -25,7 +25,9 @@
 //! deployed it there, and no other checkout's deploy rolls it out.  The
 //! targets taking the same commits of the branches share a lane, a union
 //! of its own built the same way from those commits, staged beside the
-//! first; a lane that does not merge ends the run.
+//! first; a lane that does not merge ends the run - or, for a main
+//! checkout, whose work is main's advance, leaves its targets out of the
+//! deploy (a Lane with no union).
 use super::{failed, listed, Halt, Names, Query, Run, Script, BRANCHES_KEY, MSG_FILE};
 use crate::text;
 use serde::{Deserialize, Serialize};
@@ -55,7 +57,8 @@ pub struct Outcome {
 }
 
 /// A union of its own for `targets`: `branches`, each at the commit those
-/// targets take of it.
+/// targets take of it.  No `union`: they did not merge, and the targets are
+/// left out of the deploy.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Lane {
     pub targets: Vec<String>,
@@ -256,6 +259,10 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
                 s.must(Query::LaneWorktree, text!(union_creating_worktree))?;
                 match build(s, &taken)? {
                     Ok(union) => lanes.push(Lane { targets, union, branches: taken }),
+                    Err(c) if p.fb.is_empty() => {
+                        s.warn(format!(text!(union_lane_left), targets = targets.join(", "), why = lane_guidance(&targets, &c)));
+                        lanes.push(Lane { targets, union: String::new(), branches: taken });
+                    }
                     Err(c) => return Err(Halt::Die(lane_guidance(&targets, &c))),
                 }
             }

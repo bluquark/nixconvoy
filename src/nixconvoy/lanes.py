@@ -24,6 +24,8 @@ from .targets import flake_target_names
 
 # How far up a target's history its attested records are looked for.
 ATTESTED_DEPTH = 50
+# How far up a commit's first parents a rebase's rewrite of one is looked for.
+LINEAGE_DEPTH = 200
 
 
 def record_doc(sha: str) -> dict[str, object] | None:
@@ -73,37 +75,37 @@ def history_doc(target: str) -> dict[str, object] | None:
     return record_doc(tip) if tip is not None else None
 
 
-def carried_commit(branch: str, commit: str, tip: str, *, local: bool = False,
-                   unknown_is_tip: bool = True) -> str | None:
+def carried_commit(branch: str, commit: str, tip: str, *, local: bool = False) -> str | None:
     """The commit of `branch` as it is now (at `tip`) that stands for
     `commit`, the one a record holds of it: itself while the branch holds
     it; the tip when the record is ahead of it (an increment whose push is
-    on its way, or one the branch was reset below); its rewrite when a
-    rebase replayed it (the branch's lineage; `local`: this repository's
-    own copy); where the two part, when that lies within the branch's
-    increments (reset below it, then grown again); None when the branch
-    dropped it - reset to nothing of its own, or landed.  A commit a legacy
-    lineage does not know may be an unrecorded rebase's: the tip, as every
-    union took it before lineages were kept (`unknown_is_tip`; else None)."""
-    if rev(f"{commit}^{{commit}}") is None:
-        return tip if unknown_is_tip else None
-    if is_ancestor(commit, tip):
+    on its way, or one the branch was reset below); else the rewrite of
+    its nearest first-parent ancestor a rebase replayed, itself first (the
+    branch's lineage; `local`: this repository's own copy) - one a rebase
+    dropped, its change upstream already, is in the one before it; where
+    the two part, when that lies within the branch's increments (reset
+    below it, then grown again); None when the branch dropped it - reset
+    to nothing of its own, or landed - or nothing here places it."""
+    here = rev(f"{commit}^{{commit}}") is not None
+    if here and is_ancestor(commit, tip):
         return commit
-    if is_ancestor(tip, commit):
+    if here and is_ancestor(tip, commit):
         return tip
-    lineage = read_lineage(branch, local=local)
-    rewrite = lineage.rewritten.get(commit) if lineage is not None else None
+    known = read_lineage(branch, local=local)
+    line = [commit]
+    if here and known:
+        line = run(["git", "rev-list", "--first-parent", f"--max-count={LINEAGE_DEPTH}", commit],
+                   check=False).stdout.split()
+    rewrite = next((known[c] for c in line if c in known), None)
     if rewrite is not None and rev(f"{rewrite}^{{commit}}") is not None:
-        commit = rewrite
+        commit, here = rewrite, True
         if is_ancestor(commit, tip):
             return commit
+    if not here:
+        return None
     p = run(["git", "merge-base", commit, tip], check=False)
     mb = p.stdout.strip() if p.returncode == 0 else ""
-    if mb and not is_ancestor(mb, main_ref()):
-        return mb
-    if unknown_is_tip and rewrite is None and (lineage is None or lineage.legacy):
-        return tip
-    return None
+    return mb if mb and not is_ancestor(mb, main_ref()) else None
 
 
 def lagging(wt: str, union: str, branch: str, tip: str, docs: dict[str, dict[str, object] | None], *,
@@ -112,14 +114,23 @@ def lagging(wt: str, union: str, branch: str, tip: str, docs: dict[str, dict[str
     behind `branch` at `tip`, each with the commit of the branch it runs
     ("" for none of its increments): those whose evaluation reads
     something the branch changed past that commit (memo.reached_between
-    over `union`, checked out in `wt`)."""
+    over `union`, checked out in `wt`).  A commit on main's side of the
+    branch's increments (the branch had none then) is none of them."""
     p = run(["git", "merge-base", tip, main_ref()], check=False)
     floor = p.stdout.strip() if p.returncode == 0 else ""
+    carried: dict[str, str | None] = {}
     by_base: dict[str, list[str]] = {}
     for h, doc in docs.items():
         branches = doc.get("branches") if doc is not None else None
         held = branches.get(branch) if isinstance(branches, dict) else None
-        base = (carried_commit(branch, held, tip, local=local) if isinstance(held, str) else None) or floor
+        if held == tip:
+            continue
+        base = floor
+        if isinstance(held, str):
+            if held not in carried:
+                c = carried_commit(branch, held, tip, local=local)
+                carried[held] = None if c is not None and c != tip and floor and is_ancestor(c, floor) else c
+            base = carried[held] or floor
         if base != tip:
             by_base.setdefault(base, []).append(h)
     found: dict[str, str] = {}

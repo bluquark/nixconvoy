@@ -104,6 +104,7 @@ macro_rules! text {
     (union_commit_failed) => { "committing the union failed" };
     (union_checking_out) => { "checking out the union" };
     (union_conflict) => { "cannot union feature branch {name}; mergiraf could not resolve:\n  {files}\nits last deploy: {summary}\noptions:\n  - fix or rebase that branch in its own checkout, redeploy from there, re-run here\n  - if that work is abandoned: git push --force-with-lease {remote} {main_short}:{name}\n  - --evict deploys ignoring all other branches, reverting their work on every target it switches (each returns there with its own checkout's next deploy)" };
+    (union_lane_left) => { "warning: not deploying to {targets}: {why}" };
     (union_lane) => { "union for {targets}, the other branches as deployed there:" };
     (union_lane_conflict) => { "cannot union feature branch {name} as {targets} {run} it ({short}); mergiraf could not resolve:\n  {files}\noptions:\n  - deploy its tip there from its own checkout (nixconvoy deploy {args}) or land it, then re-run here\n  - --evict deploys ignoring all other branches, reverting their work on every target it switches (each returns there with its own checkout's next deploy)" };
     (union_fetching) => { "fetching {remote}" };

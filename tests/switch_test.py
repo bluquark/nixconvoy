@@ -1189,9 +1189,9 @@ def lanes_cases(d: Path) -> None:
         o1, o2 = sh(co, "rev-parse", f"{tip}~2"), sh(co, "rev-parse", f"{tip}~1")
 
         # The commit of the branch standing for the one a record holds.
-        def lineage(legacy: bool, rewritten: dict[str, str]) -> None:
+        def lineage(rewritten: dict[str, str]) -> None:
             """The branch's lineage as fetched from origin."""
-            checkout.write_lineage(other, checkout.Lineage(legacy, rewritten))
+            checkout.write_lineage(other, rewritten)
             sh(co, "update-ref", f"{checkout.LINEAGE_REFS}/{other}", proc.rev(f"{checkout.REWRITTEN_REFS}/{other}") or "")
             sh(co, "update-ref", "-d", f"{checkout.REWRITTEN_REFS}/{other}")
 
@@ -1201,17 +1201,21 @@ def lanes_cases(d: Path) -> None:
         assert lanes.carried_commit(other, ahead, tip) == tip  # its push on its way
         # Reset back within its increments: what is left of it.
         assert lanes.carried_commit(other, tip, o2) == o2
-        # Unknown to a branch with no lineage (or a legacy one): as every union took it, the tip.
-        assert lanes.carried_commit(other, was1, tip) == tip and lanes.carried_commit(other, "f" * 40, tip) == tip
-        assert lanes.carried_commit(other, was1, tip, unknown_is_tip=False) is None
-        lineage(True, {})
-        assert lanes.carried_commit(other, was1, tip) == tip
-        # A rebase's rewrite; unknown to a lineage kept from the branch's start: dropped.
-        lineage(False, {was1: o1})
+        # No lineage places it: dropped, as is a commit not here at all.
+        assert lanes.carried_commit(other, was1, tip) is None and lanes.carried_commit(other, "f" * 40, tip) is None
+        # A rebase's rewrite.
+        lineage({was1: o1})
         assert lanes.carried_commit(other, was1, tip) == o1
-        assert lanes.carried_commit(other, out_at(co, was1, "o2 before"), tip) is None
-        assert checkout.read_lineage(other) == checkout.Lineage(False, {was1: o1})
-        assert checkout.read_lineage(fb) is None and checkout.read_lineage(fb, local=True) is None
+        assert lanes.carried_commit(other, out_at(co, main0, "never replayed"), tip) is None
+        # One the rebase dropped (its change upstream already) stands for
+        # the one before it; one not in this repository, for its rewrite -
+        # unless the branch dropped that since.
+        assert lanes.carried_commit(other, out_at(co, was1, "dropped by the rebase"), tip) == o1
+        lineage({was1: o1, "e" * 40: o2, "d" * 40: was1})
+        assert lanes.carried_commit(other, "e" * 40, tip) == o2 and lanes.carried_commit(other, "d" * 40, tip) is None
+        lineage({was1: o1})
+        assert checkout.read_lineage(other) == {was1: o1}
+        assert checkout.read_lineage(fb) == {} and checkout.read_lineage(fb, local=True) == {}
 
         # The targets behind the branch: those reading what it changed past
         # the commit their record holds.
@@ -1611,21 +1615,20 @@ def git_cases(d: Path) -> None:
         assert good and f"rebased {fb}" in status and status.endswith(f"pushed {fb}"), status
         assert proc.is_ancestor("refs/remotes/origin/main", f"refs/remotes/origin/{fb}")
         assert checkout.update_checkout(co) == (True, "up to date")
-        # The rebase's rewrites are the branch's lineage, pushed with it:
-        # legacy, as the branch held increments before one was kept.
+        # The rebase's rewrites are the branch's lineage, pushed with it.
         kept = checkout.read_lineage(fb, local=True)
-        assert kept is not None and kept.legacy and kept.rewritten[tip] == sh(co, "rev-parse", fb), kept
+        assert kept[tip] == sh(co, "rev-parse", fb), kept
+        assert set(sh(co, "rev-list", f"origin/main..{fb}").split()) <= set(kept.values()), kept
         assert sh(seed, "ls-remote", "origin", f"{checkout.LINEAGE_REFS}/{fb}").split()[0] == proc.rev(
             f"{checkout.REWRITTEN_REFS}/{fb}")
         sh(co, *checkout.fetch_args())
         assert checkout.read_lineage(fb) == kept
-        # A later rebase's are composed in; a branch starting over starts it over.
-        checkout.note_rewritten(fb, {kept.rewritten[tip]: "c" * 40, "d" * 40: "e" * 40})
-        composed = checkout.read_lineage(fb, local=True)
-        assert composed is not None and composed.legacy and composed.rewritten[tip] == "c" * 40
-        assert composed.rewritten["d" * 40] == "e" * 40 and checkout.read_lineage(fb) == kept
-        checkout.restart_lineage(fb)
-        assert checkout.read_lineage(fb, local=True) == checkout.Lineage(False, {})
+        # A later rebase's are composed in, and only the rewrites the
+        # branch still holds are kept: the tip replayed again, a commit
+        # replayed for the first time, the rest dropped by that rebase.
+        checkout.note_rewritten(fb, {kept[tip]: "c" * 40, "d" * 40: "e" * 40}, {"c" * 40, "e" * 40})
+        assert checkout.read_lineage(fb, local=True) == {tip: "c" * 40, kept[tip]: "c" * 40, "d" * 40: "e" * 40}
+        assert checkout.read_lineage(fb) == kept
         sh(co, "update-ref", f"{checkout.REWRITTEN_REFS}/{fb}", proc.rev(f"{checkout.LINEAGE_REFS}/{fb}") or "")
 
         # A review subagent's worktree: a detached HEAD at another feature

@@ -102,7 +102,7 @@ TMP_PREFIX = "nixconvoy-"
 # the same refs.
 PENDING_REFS = "refs/nixconvoy/deploying/branch"
 DEPLOYED_PREFIX = "nixconvoy-history"
-# A feature branch's lineage (Lineage): on origin, and here as fetched,
+# A feature branch's lineage (read_lineage): on origin, and here as fetched,
 # LINEAGE_REFS/<branch>, pushed with the branch (push_refspecs) from
 # REWRITTEN_REFS/<branch>, this repository's own copy, which a rebase here
 # moves before the push.
@@ -593,7 +593,8 @@ class GitQueries:
         with rewrite_log(Path(where) if where else None) as (hooked, rewritten):
             done = self.rebase_logged(hooked, empty, keep_empty, where, upstream)
             if done.ok and branch is not None and listed(branch):
-                note_rewritten(branch, rewritten())
+                note_rewritten(branch, rewritten(),
+                               set(out(["git", "rev-list", f"{upstream}..HEAD"], cwd=where).split()))
         return done
 
     def rebase_logged(self, hooked: list[str], empty: str, keep_empty: bool, where: str | None, upstream: str) -> Ran:
@@ -1598,23 +1599,13 @@ def rewrite_log(d: Path | None) -> Iterator[tuple[list[str], Callable[[], dict[s
         shutil.rmtree(where, ignore_errors=True)
 
 
-class Lineage(NamedTuple):
-    """What became of a feature branch's commits as nixconvoy rebased it:
-    `rewritten`, each replayed commit by its rewrite on the branch as it is
-    now (a later rebase's composed in), kept until the branch next starts
-    from nothing of its own (restart_lineage).  A deploy record names the
-    commit of the branch its target runs; this is how that commit is found
-    on the branch after a rebase (lanes.carried_commit).  `legacy`: the
-    branch held increments before its lineage was first kept, so a commit
-    of it this does not know may be a rebase's that went unrecorded."""
-
-    legacy: bool
-    rewritten: dict[str, str]
-
-
-def read_lineage(branch: str, *, local: bool = False) -> Lineage | None:
+def read_lineage(branch: str, *, local: bool = False) -> dict[str, str]:
     """`branch`'s lineage as origin has it (as fetched) - or, `local`, as
-    this repository's own rebases left it, origin's when it made none."""
+    this repository's own rebases left it, origin's when it made none:
+    each commit a rebase of the branch replayed, by its rewrite on the
+    branch.  A deploy record names the commit of the branch its target
+    runs; this is how that commit is found on the branch after a rebase
+    (lanes.carried_commit)."""
     for ref in ([f"{REWRITTEN_REFS}/{branch}"] if local else []) + [f"{LINEAGE_REFS}/{branch}"]:
         p = run(["git", "cat-file", "blob", f"{ref}:{LINEAGE_FILE}"], check=False)
         if p.returncode != 0:
@@ -1623,40 +1614,30 @@ def read_lineage(branch: str, *, local: bool = False) -> Lineage | None:
             doc = proc.load_json(p.stdout)
         except ValueError:
             continue
-        if not isinstance(doc, dict):
-            continue
-        m = doc.get("rewritten")
+        m = doc.get("rewritten") if isinstance(doc, dict) else None
         if isinstance(m, dict) and all(isinstance(v, str) for v in m.values()):
-            return Lineage(doc.get("legacy") is not False, dict(m))
-    return None
+            return dict(m)
+    return {}
 
 
-def write_lineage(branch: str, lineage: Lineage) -> None:
-    """`lineage` as this repository's own copy of `branch`'s: a commit of
-    LINEAGE_FILE alone, the same one for the same lineage."""
-    text = proc.dump_json({"legacy": lineage.legacy, "rewritten": dict(sorted(lineage.rewritten.items()))}) + "\n"
+def write_lineage(branch: str, rewritten: dict[str, str]) -> None:
+    """`rewritten` as this repository's own copy of `branch`'s lineage: a
+    commit of LINEAGE_FILE alone, the same one for the same lineage."""
+    text = proc.dump_json({"rewritten": dict(sorted(rewritten.items()))}) + "\n"
     blob = out(["git", "hash-object", "-w", "--stdin"], input=text)
     tree = out(["git", "mktree"], input=f"100644 blob {blob}\t{LINEAGE_FILE}\n")
     commit = out(["git", "commit-tree", tree, "-m", strings.CHECKOUT_LINEAGE_SUBJECT(branch=branch)], env=MACHINE_ENV)
     git("update-ref", f"{REWRITTEN_REFS}/{branch}", commit)
 
 
-def note_rewritten(branch: str, rewritten: dict[str, str]) -> None:
-    """A rebase of `branch` replayed `rewritten` (old -> new): composed
-    into its lineage.  One kept for the first time is legacy: whatever
-    rebased the branch before went unrecorded."""
+def note_rewritten(branch: str, rewritten: dict[str, str], held: set[str]) -> None:
+    """A rebase of `branch` replayed `rewritten` (old -> new), leaving it
+    with the commits `held` of its own: composed into its lineage, of
+    which only the rewrites the branch still holds are kept."""
     if not rewritten:
         return
-    prev = read_lineage(branch, local=True)
-    earlier = {a: rewritten.get(b, b) for a, b in prev.rewritten.items()} if prev is not None else {}
-    write_lineage(branch, Lineage(prev.legacy if prev is not None else True, {**earlier, **rewritten}))
-
-
-def restart_lineage(branch: str) -> None:
-    """`branch` holds nothing of its own and is about to get an increment:
-    every commit it will hold is this repository's from here on, so a
-    commit its lineage does not know is one it dropped."""
-    write_lineage(branch, Lineage(False, {}))
+    earlier = {a: rewritten.get(b, b) for a, b in read_lineage(branch, local=True).items()}
+    write_lineage(branch, {old: new for old, new in {**earlier, **rewritten}.items() if new in held})
 
 
 def rebase_solving(d: Path, upstream: str, base: str | None, rewritten: dict[str, str]) -> bool:

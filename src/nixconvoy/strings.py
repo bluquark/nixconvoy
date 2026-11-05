@@ -406,6 +406,8 @@ DEPLOY_ASSESSED_PLAIN = M("warning: {target} is switched plainly (auto_rollback_
 DEPLOY_REJECTED_GENERATION = M("{target}'s bootloader rejected the very generation this deploy would switch it to ({stub}): it failed its boot assessment and the target fell back.  Nothing was built, switched or committed.  See `journalctl -u boot-assessment-watch -u boot-assessment` on {target}; then change the configuration, or re-arm the stub to retry it as is (sudo mv of the +0-N stub to +2 under /boot/EFI/Linux).")
 # A deploy record's subject: the main branch, then each unioned branch.
 DEPLOY_SUBJECT_BRANCH = M(" + {branch}")
+DEPLOY_UNMERGED = M("not deployed to {targets}: another branch as deployed there does not merge with this "
+                    "checkout's work (the warning above says which, and how to end it)")
 DEPLOY_DRY_KIT_REFRESH = M("{DRY_FLAG}: the switch kit on {targets} would be refreshed")
 DEPLOY_BUILD_WHERE = M(" on {host}")
 DEPLOY_BUILD_KIT = M("{target}'s switch kit")
