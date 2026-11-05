@@ -233,7 +233,7 @@ After an agent reports that it's done, review the diff of all of the code change
 > `nixconvoy land` can also be used early and proactively to multitask on not-fully-independent config changes, at the price of a bit of git-main-branch tidiness.  For example, if you notice one agent's deploys are starting to fail because it ended up touching the same line of config as another agent, you can `nixconvoy land` one side early to end the deadlock.  Later on, `nixconvoy land` that same agent a second time when its work is fully complete.
 
 
-# Basic concepts
+# User guide
 
 ## Command-line overview
 
