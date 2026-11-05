@@ -254,11 +254,14 @@ def deployed_targets(commits: str) -> list[str]:
     return sorted(names)
 
 
-def undeploy(back_to: str = "HEAD^") -> bool:
+def undeploy(back_to: str = "HEAD^", as_if: dict[str, str] | None = None) -> bool:
     """Undo the work branch's increments from HEAD back to `back_to` (cli
     docstring: Undeploy) ahead of the deploy the caller runs at once, which
     reverts them on the targets: whether any target runs what was undone,
-    so that deploy is due."""
+    so that deploy is due.
+    `as_if` (a dry activation): every check made and nothing moved, the
+    commit the branch would be reset onto recorded there under its name,
+    for that deploy to take the branch to be at."""
     await_background_push()
     git(*fetch_args())
     pop_tmp_commits()
@@ -304,12 +307,17 @@ def undeploy(back_to: str = "HEAD^") -> bool:
     if edited:
         die(strings.UNDEPLOY_LOST_EDITS(files=", ".join(edited)))
     moved = submodule.moved_pins(here, wb, prev, target)
+    summaries = "\n  ".join(summarize(ln.partition("\t")[0]) for ln in undone)
+    if as_if is not None:
+        as_if[wb] = target
+        print(strings.UNDEPLOY_DRY(wb=wb, n=len(undone), summaries=summaries))
+        print(strings.UNDEPLOY_DRY_REVERTING(targets=", ".join(deployed)) if deployed else strings.UNDEPLOY_REACHED_NONE)
+        return bool(deployed)
     p = git("reset", "--quiet", "--keep", target, check=False)
     if p.returncode != 0:
         die(strings.UNDEPLOY_RESET_FAILED(sha=target[:12], stderr=(p.stderr or "").strip()))
     submodule.undeploy_pins(moved, wb)
-    print(strings.UNDEPLOY_DONE(wb=wb, n=len(undone),
-                                summaries="\n  ".join(summarize(ln.partition("\t")[0]) for ln in undone)))
+    print(strings.UNDEPLOY_DONE(wb=wb, n=len(undone), summaries=summaries))
     if deployed:
         print(strings.UNDEPLOY_REVERTING(targets=", ".join(deployed)))
     else:

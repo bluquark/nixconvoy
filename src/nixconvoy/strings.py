@@ -142,6 +142,8 @@ UNDEPLOY_RESET_FAILED = M("the reset onto {sha} failed; nothing moved:\n{stderr}
 UNDEPLOY_DONE = M("undeployed {wb}'s {n} increment(s) (see reflog):\n  {summaries}")
 UNDEPLOY_REVERTING = M("deployed to {targets}: deploying now to revert it")
 UNDEPLOY_REACHED_NONE = "it reached no target: nothing to deploy"
+UNDEPLOY_DRY = M("{DRY_FLAG}: would undeploy {wb}'s {n} increment(s):\n  {summaries}")
+UNDEPLOY_DRY_REVERTING = M("deployed to {targets}: dry-activating the deploy that would revert it")
 
 # --- commands.py: close (subagent worktrees, their locks and branches)
 CLOSE_FORCE_NEEDS_NAMES = "--force needs the worktrees named"
@@ -292,6 +294,9 @@ CHECKOUT_NO_MSG_FILE_YET = M("note: {wb} carries work but no {MSG_FILE} yet - la
 CHECKOUT_INDEX_UNMERGED = M("cannot snapshot the index{of} (unmerged paths?)")
 CHECKOUT_INDEX_OF = M(" of {cwd}")
 CHECKOUT_SNAPSHOT_SUBJECT = "staged snapshot (not yet committed)"
+CHECKOUT_WITH_MAIN_SUBJECT = M("{main} merged for a dry activation")
+CHECKOUT_WITH_MAIN_CONFLICT = M("{DRY_FLAG}: {main} does not merge cleanly into this checkout's work, which a dry "
+                                "activation does not rebase; `{TOOL} pull` first")
 CHECKOUT_ANNOUNCE_SUBJECT = M("pending increment of {branch} from {machine}:{cwd} (pid {pid})")
 CHECKOUT_RECORD_MESSAGE = M("deploy {target}: {subject}\n\n{doc}\n")
 CHECKOUT_COMMIT_TREE_FAILED = "commit-tree failed"

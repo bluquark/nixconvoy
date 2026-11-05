@@ -63,7 +63,7 @@ def bad_usage() -> NoReturn:
 FLAGS: dict[str, tuple[dict[str, bool], bool]] = {
     "deploy": ({"-m": True, EVICT_FLAG: False, DRY_FLAG: False}, True),
     "land": ({"-m": True, "--with-children": False, "--not-yet-deployed": False}, True),
-    "undeploy": ({"--with-children": False, BACK_TO_FLAG: True}, True),
+    "undeploy": ({"--with-children": False, BACK_TO_FLAG: True, DRY_FLAG: False}, True),
     "close": ({"--force": False}, True),
     "open": ({"--submodule": False, "--child": False, "--branch": True}, True),
     "pull": ({}, False),
@@ -144,6 +144,9 @@ def dispatch() -> None:
     back_to = flags[BACK_TO_FLAG][-1] if BACK_TO_FLAG in flags else None
     with_children = "--with-children" in flags
     not_yet_deployed = "--not-yet-deployed" in flags
+    dry = DRY_FLAG in flags
+    # An undeploy's dry activation: where each branch it names would be.
+    as_if: dict[str, str] | None = {} if dry and subcmd == "undeploy" else None
 
     if subcmd == "pull":
         commands.pull()  # takes each checkout's lock itself, this one included
@@ -225,7 +228,7 @@ def dispatch() -> None:
                 commands.land(msg, not_yet_deployed)
             else:
                 try:
-                    due |= commands.undeploy(back_to or "HEAD^")
+                    due |= commands.undeploy(back_to or "HEAD^", as_if)
                 except Fail:
                     failed.append(d.name)
             lock.close()
@@ -236,11 +239,11 @@ def dispatch() -> None:
                 if parent_too:
                     print(strings.CLI_SECTION(name=here.name))
                     try:
-                        due |= commands.undeploy(back_to or "HEAD^")
+                        due |= commands.undeploy(back_to or "HEAD^", as_if)
                     except Fail:
                         failed.append(here.name)
                 if due:
-                    deploy([], None, False)
+                    deploy([], None, False, as_if=as_if)
                 if failed:
                     die(strings.UNDEPLOY_FAILED_IN(names=', '.join(failed)))
             return
@@ -248,10 +251,9 @@ def dispatch() -> None:
     if subcmd == "land":
         commands.land(msg, not_yet_deployed)
     elif subcmd == "undeploy":
-        if commands.undeploy(back_to or "HEAD^"):
-            deploy([], None, False)
+        if commands.undeploy(back_to or "HEAD^", as_if):
+            deploy([], None, False, as_if=as_if)
     else:  # deploy
-        dry = DRY_FLAG in flags
         if dry and msg is not None:
             # Accepted so a deploy's command line reruns with the flag added.
             print(strings.CLI_DRY_IGNORES_MSG(), file=sys.stderr)

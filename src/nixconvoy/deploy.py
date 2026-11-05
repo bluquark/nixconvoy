@@ -20,6 +20,7 @@ from .checkout import (
     STALE_STAMP,
     WAIT_STALE,
     Announce,
+    GitQueries,
     Pending,
     add_worktree,
     adopt_commit,
@@ -44,6 +45,7 @@ from .checkout import (
     staged_differs,
     staged_snapshot,
     this_prefix,
+    with_main,
     work_branch_name,
 )
 from .config import SwitchPolicy, cfg, main_ref, remote_ref, repo_names
@@ -179,7 +181,8 @@ def commit_unreached(wb: str, msg: str, snap: str) -> None:
     print(strings.DEPLOY_REACHES_NONE(wb=wb))
 
 
-def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = False) -> None:
+def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = False,
+           as_if: dict[str, str] | None = None) -> None:
     """`msg` describes the staged increment (default: the checkout's name
     and the increment's number on its branch); with nothing staged the
     deploy converges the targets on the union as it is.
@@ -189,7 +192,13 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     `filter_targets` names it.
     `dry`: stop after the dry activation of every target that would be
     switched, printing the units it would stop, restart or reload; nothing
-    is switched, committed or pushed."""
+    is switched, committed or pushed.
+    `as_if` (an undeploy's dry activation, so `dry`): the work branches
+    taken to be at these commits - this checkout's own as the state the
+    union builds on, another's as origin's tip of it - and the checkout
+    left where it is, origin/main merged in aside (with_main) rather than
+    rebased onto."""
+    dry = dry or as_if is not None
     skip = os.environ.get("NIXCONVOY_SKIP_SWITCH") == "1"
     all_targets = flake_target_names()
     filter_targets = expand_targets(filter_targets, all_targets)
@@ -236,8 +245,10 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
             staged_differs() or any(submodule.staged(sub.dir, less_msg=True) for sub in submodule.present(Path.cwd()))):
         msg = increment_name()
     snap = ""
+    if as_if is not None and staged_differs():
+        die(strings.UNDEPLOY_DEPLOYER_STAGED(path=Path.cwd()))
     PERF.mark("submodules")
-    for told in submodule.sync(wb, msg, dry=dry):
+    for told in submodule.sync(wb, msg, dry=dry, at=(as_if or {}).get(wb or "")):
         print(told)
     if msg is None and wb is not None and not dry and staged_differs():
         # A pin the submodule step staged on its own (a catch-up) is an
@@ -270,7 +281,8 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
         if wb is not None and current_branch() == wb:  # a detached subagent worktree commits nothing onto it
             fetch.result()
             ensure_sole_writer(wb)
-        ensure_rebased()
+        if as_if is None:
+            ensure_rebased()
 
     # The pending state the targets' provenances will name - the increment, or
     # a HEAD origin lacks (the nightly's lock commit on main) - is announced
@@ -289,7 +301,7 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
     run = Run(ann)
     try:
         pushed = run_deploy(filter_targets, candidates, all_targets, msg, evict, dry, skip,
-                             me, main0, wb, snap, run, fetch, probes)
+                             me, main0, wb, snap, run, fetch, probes, as_if)
     finally:
         lazy = run.ann is not ann
         ann = run.ann
@@ -317,10 +329,17 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
 def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: list[str],
                msg: str | None, evict: bool, dry: bool, skip: bool, me: str,
                main0: str | None, wb: str | None, snap: str, run: Run,
-               fetch: Future[subprocess.CompletedProcess[str]], probes: dict[str, Future[Probe]]) -> bool:
+               fetch: Future[subprocess.CompletedProcess[str]], probes: dict[str, Future[Probe]],
+               as_if: dict[str, str] | None = None) -> bool:
     """The deploy from its union on: whether its announcement is left to
     the push that ends it (push_deployed), rather than to withdraw."""
     ann = run.ann
+
+    def own_head() -> str:
+        """The commit this checkout's committed state is taken to be."""
+        return "HEAD" if as_if is None else with_main(as_if.get(wb or "", "HEAD"))
+
+    head = own_head()
     running: dict[str, str | None] = {}
     probed: dict[str, Probe] = {}
 
@@ -354,7 +373,10 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
     provenances: dict[str, str] = {}
 
     def refresh() -> None:
-        nonlocal snap
+        nonlocal snap, head
+        if as_if is not None:
+            head = own_head()
+            return
         ensure_rebased()
         if snap:
             snap = staged_snapshot()
@@ -405,7 +427,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                     continue
                 if mine is None:
                     mine = sorted(memo.reached_targets(
-                        wt, union, candidates, snap or "HEAD",
+                        wt, union, candidates, snap or head,
                         {h: probed[h].provenance for h in candidates if h in probed}))
                 # The announced state against what the union has of the
                 # branch: its parent (the announcer's HEAD) when origin has
@@ -481,7 +503,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             err = check.result()
             if err:
                 die(strings.PROC_WITH_NOTHING_DONE(problem=err))
-        reached = memo.reached_targets(wt, union, sorted(tops), snap or "HEAD",
+        reached = memo.reached_targets(wt, union, sorted(tops), snap or head,
                                      {h: probed[h].provenance for h in tops if h in probed})
         # The targets the other unioned branches hold back (held_targets):
         # each ran its increments to other targets alone - one already
@@ -497,7 +519,8 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         for h in sorted(tops):
             if tops[h].assessed and not tops[h].kit:
                 print(strings.DEPLOY_ASSESSED_PLAIN(target=h), file=sys.stderr)
-        cx = Context(names=repo_names(), me=(me, str(Path.cwd())), listed=sorted(listed), tips=origin_tips(),
+        cx = Context(names=repo_names(), me=(me, str(Path.cwd())), listed=sorted(listed),
+                     tips={**origin_tips(), **(as_if or {})},
                      in_flight=announced(ann.key if ann is not None else None), dead=sorted(dead),
                      tz_offset=time.localtime().tm_gmtoff)
         verdict = decide(DriftParams(
@@ -505,7 +528,8 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             evict=evict, named=bool(filter_targets), work_branch=wb is not None, reached=sorted(reached),
             running=running, built={h: t.out for h, t in tops.items()},
             held={h: sorted(bs) for h, bs in held.items()},
-            provenances={h: p.provenance for h, p in probed.items()}))
+            provenances={h: p.provenance for h, p in probed.items()}),
+            GitQueries(as_if=as_if) if as_if else None)
         plan, affected = verdict.plan, verdict.affected
         left_alone = [h for h, (kind, _) in verdict.drift.items() if kind == "left-alone"]
 
@@ -680,7 +704,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             raise moved[0]
 
     for redo in range(SWITCH_REDOS + 1):
-        queries = UnionQueries(lambda: snap or "HEAD", fetch, refresh, stage, await_pending)
+        queries = UnionQueries(lambda: snap or head, fetch, refresh, stage, await_pending, as_if)
         try:
             done = decide(UnionParams(repo_names(), wb or "", evict, main0), queries)
             if skip or dry:

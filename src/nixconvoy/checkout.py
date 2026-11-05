@@ -18,7 +18,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import IO, NamedTuple
 
@@ -31,6 +31,7 @@ from .config import (
     cfg,
     load,
     main_ref,
+    main_short,
     remote_ref,
 )
 from .guard import decide
@@ -504,9 +505,12 @@ class GitQueries:
     the throwaway worktree a rebase of a branch not checked out here
     (`aside`) runs in."""
 
-    def __init__(self, names: RepoNames | None = None) -> None:
+    def __init__(self, names: RepoNames | None = None, as_if: Mapping[str, str] | None = None) -> None:
         self.aside = ""
         self.aside_branch = ""
+        # The work branches taken to be at these commits, not at origin's
+        # tips of them (an undeploy's dry activation).
+        self.as_if = as_if or {}
         # The repository's names (a submodule's own, when the core runs there).
         self.names = names or cfg().names
 
@@ -570,7 +574,7 @@ class GitQueries:
             case SetUpstream(branch):
                 return ran(git("branch", f"--set-upstream-to={self.names.main_short}", branch, check=False))
             case Fate(branch, tip, union, checkout):
-                return Text(increment_fate(branch, tip, union, checkout))
+                return Text(increment_fate(branch, tip, union, checkout, self.as_if.get(branch)))
             case _:
                 raise ValueError(f"nixconvoy-plan asked {ask!r}")
 
@@ -634,6 +638,27 @@ def ensure_rebased() -> None:
     """Make HEAD contain origin/main, its staged and unstaged changes intact,
     or die leaving the checkout as it was."""
     decide(RebaseParams(cfg().names, EnsureRebased()))
+
+
+def with_main(ref: str) -> str:
+    """The commit `ref` with origin/main merged in: the tree ensure_rebased
+    would leave a checkout at `ref` with when the two merge cleanly (it
+    solves conflicts this does not), nothing moved.  Whichever of the two
+    holds the other, when one does."""
+    main = rev(main_ref())
+    if main is None or is_ancestor(main, ref):
+        return ref
+    if is_ancestor(ref, main):
+        return main
+    cmd = ["git", "merge-tree", "--write-tree", ref, main]
+    p = run(cmd, check=False)
+    if p.returncode == 1:  # conflicts; anything else is git's own failure
+        die(strings.CHECKOUT_WITH_MAIN_CONFLICT(main=main_short()))
+    if p.returncode != 0:
+        die(strings.PROC_CMD_FAILED(cmd=" ".join(cmd), detail=strings.PROC_DETAIL(output=(p.stderr or "").strip())))
+    tree = p.stdout.split("\n", 1)[0].strip()
+    return out(["git", "commit-tree", tree, "-p", ref, "-p", main,
+                "-m", strings.CHECKOUT_WITH_MAIN_SUBJECT(main=main_short())], env=MACHINE_ENV)
 
 
 def sibling_checkouts(here: Path | None = None) -> list[Path]:
@@ -1600,11 +1625,12 @@ def on_origin(cwd: str | None = None, names: RepoNames | None = None) -> bool:
     return tree_less_msg("HEAD", cwd) in landed
 
 
-def increment_fate(branch: str, tip: str, union: str, checkout: str | None) -> str:
+def increment_fate(branch: str, tip: str, union: str, checkout: str | None, at: str | None = None) -> str:
     """What became of `branch`'s increment at `tip`, a tip a target's provenance
     recorded that origin's tip of the branch no longer is, for the deploy
     of `union` (the drift core's Query::Fate; `checkout` the deploying one, when
-    it is on this machine).  "kept" when the switch reverts none of
+    it is on this machine; `at` the commit origin's branch is taken to be
+    at, when not its fetched tip).  "kept" when the switch reverts none of
     it: origin's branch still carries it, or origin has no such branch yet
     while the deploying checkout has it checked out (its first push on
     its way - the commit reaches the branch only after every switch - or
@@ -1618,7 +1644,7 @@ def increment_fate(branch: str, tip: str, union: str, checkout: str | None) -> s
     subagent worktree, force-pushed over, or landed and since undone)."""
     if rev(f"{tip}^{{commit}}") is None:
         return "kept"
-    up = remote_ref(branch)
+    up = at or remote_ref(branch)
     if rev(up) is not None:
         if is_ancestor(tip, up):
             return "kept"

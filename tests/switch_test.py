@@ -1339,6 +1339,13 @@ def git_cases(d: Path) -> None:
         sh(seed, "push", "--quiet", "origin", "HEAD:main")
         sh(co, "fetch", "--quiet")
 
+        # with_main: origin/main merged in aside, the same commit each
+        # time, the checkout where it was.
+        before = state(co)
+        merged = checkout.with_main("HEAD")
+        assert merged != "HEAD" and checkout.with_main("HEAD") == merged and state(co) == before
+        assert sh(co, "show", f"{merged}:a.txt") == "ONE\ntwo\nthree" and sh(co, "show", f"{merged}:b.txt") == "local"
+
         # Staged, unstaged and untracked changes ride the rebase.
         put(co, "a.txt", "one\ntwo\nTHREE\n")
         (co / "b.txt").write_text("local, unstaged\n")
@@ -1350,6 +1357,8 @@ def git_cases(d: Path) -> None:
         assert (co / "a.txt").read_text() == "ONE\ntwo\nTHREE\n"
         assert "?? u.txt" in sh(co, "status", "--porcelain")
         assert sh(co, "log", "-1", "--format=%s") == "msg"
+        assert checkout.with_main("HEAD") == "HEAD"
+        assert checkout.with_main("refs/remotes/origin/main^") == proc.rev("refs/remotes/origin/main")
 
         # A conflicting staged change: left exactly as it was.
         put(seed, "a.txt", "ONE\nTWO-upstream\nthree\n", "upstream 2")
@@ -1360,6 +1369,8 @@ def git_cases(d: Path) -> None:
         err = dies(checkout.ensure_rebased)
         assert f"rebasing {wb} onto origin/main is not clean" in err, err
         assert state(co) == before and checkout.git_op_in_progress() is None
+        conflicting = checkout.staged_snapshot()
+        assert "origin/main does not merge cleanly" in dies(lambda: checkout.with_main(conflicting))
         sh(co, "restore", "--staged", "--worktree", "a.txt")
         checkout.ensure_rebased()
 
@@ -1389,8 +1400,8 @@ def git_cases(d: Path) -> None:
             staged.append(sorted(p.name for p in Path(wt).iterdir()))
             return False
 
-        def union(main0: str | None = None) -> tuple[UnionOutcome, str]:
-            q = UnionQueries(lambda: "HEAD", fetched, lambda: refreshes.append("r"), stage)
+        def union(main0: str | None = None, as_if: dict[str, str] | None = None) -> tuple[UnionOutcome, str]:
+            q = UnionQueries(lambda: "HEAD", fetched, lambda: refreshes.append("r"), stage, as_if=as_if)
             try:
                 with contextlib.redirect_stdout(io.StringIO()) as said:
                     done = guard.decide(UnionParams(NAMES, wb, False, main0 or proc.rev("refs/remotes/origin/main")), q)
@@ -1407,6 +1418,19 @@ def git_cases(d: Path) -> None:
         redo, said = union(main0="0" * 40)
         assert refreshes == ["r"] and redo.union == done.union, (refreshes, redo)
         assert "redoing the union" in said, said
+        # A branch taken to be elsewhere than origin's tip of it (an
+        # undeploy's dry activation) is unioned from there; not at all
+        # once the checkout's state holds that commit.
+        other = proc.rev("refs/remotes/origin/work/other/1^") or ""
+        back, _ = union(as_if={"work/other/1": other})
+        assert back.branches == [("work/other/1", other)] and back.union == done.union, back  # less COMMIT_MSG.md alone
+        q = UnionQueries(lambda: "HEAD", fetched, lambda: None, lambda *_: True,
+                         as_if={"work/other/1": proc.rev("refs/remotes/origin/main") or ""})
+        try:
+            alone = guard.decide(UnionParams(NAMES, wb, False, proc.rev("refs/remotes/origin/main")), q)
+        finally:
+            q.drop()
+        assert alone.branches == [] and "o.txt" not in sh(co, "ls-tree", "--name-only", alone.union), alone
 
         # A conflict mergiraf cannot solve names the branch's checkout.
         put(seed, "b.txt", "theirs\n", "their b")
@@ -1731,6 +1755,16 @@ def git_cases(d: Path) -> None:
         assert "a hand commit, no deploy's is not a deploy's increment" in dies(commands.undeploy)
         assert "is not a deploy's increment" in dies(lambda: commands.undeploy("origin/main"))
         sh(co9, "reset", "--quiet", "--keep", "HEAD^")
+        # A dry activation: the same checks, the commit the branch would
+        # be reset onto told to the deploy, nothing moved here or on origin.
+        before, as_if = state(co9), {}
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            assert commands.undeploy(as_if=as_if)
+        said = out.getvalue()
+        assert f"--dry-activate: would undeploy {wb9}'s 1 increment(s)" in said and "deployed to a, b" in said, said
+        assert as_if == {wb9: parent} and state(co9) == before and proc.rev(f"refs/remotes/origin/{wb9}") == tip
+        assert checkout.increment_fate(wb9, tip, parent, None) == "kept"
+        assert checkout.increment_fate(wb9, tip, parent, None, parent) == "abandoned"
         with contextlib.redirect_stdout(io.StringIO()) as out:
             assert commands.undeploy()
         said = out.getvalue()
@@ -2161,6 +2195,10 @@ def submodule_cases(d: Path) -> None:
         put(ax, "tool.py", "v3\n", "hand commit, never deployed")
         assert "not what the tree pins" in dies(lambda: submodule.prepare_one(dep(), wb, "m"))
         assert "not deployed yet" in dies(lambda: submodule.sync(wb, None, dry=True))
+        # An undeploy's dry activation back to a commit pinning it elsewhere
+        # would reset it first: left out.
+        assert submodule.pin_at("HEAD", path, co) != pinned()
+        assert submodule.sync(wb, None, dry=True, at="HEAD") == []
         sh(ax, "reset", "--quiet", "--hard", v2)
 
         # The deploy's commit of the pin, then the landing: the branch squashed onto its main.
@@ -2959,6 +2997,7 @@ def open_cases(d: Path) -> None:
                          ["close", "--after", "1"], ["close", "--stopped", "1"], ["open", "--lock", "x", "y"],
                          ["hook"], ["hook", "nope"], ["hook", "session-start", "x"],
                          ["undeploy", "--back-to"], ["undeploy", "--back-to", "--with-children"], ["land", "--back-to", "x"],
+                         ["land", "--dry-activate"],
                          ["land", "-m", ""], ["land", "-m", " ", "--with-children"], ["land", "-m", "--with-children"],
                          ["land", "-m", "x", "a", "b"], ["land", "-m"]):
                 sys.argv = ["nixconvoy", *argv]

@@ -5,7 +5,7 @@ build and copy of a union (deploy.deploy)."""
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future
 from pathlib import Path
 
@@ -21,7 +21,7 @@ from .checkout import (
     work_shape,
 )
 from .config import MSG_FILE, cfg, main_ref, main_short
-from .proc import git, ok, out, rev, run, solve_with_mergiraf
+from .proc import git, is_ancestor, ok, out, rev, run, solve_with_mergiraf
 from .wire import (
     AbortMerge,
     Add,
@@ -31,6 +31,7 @@ from .wire import (
     CollectFetch,
     CommitMerge,
     CommitUnion,
+    Contains,
     DropFile,
     Flag,
     Head,
@@ -58,8 +59,9 @@ class UnionQueries(GitQueries):
     def __init__(self, base: Callable[[], str], fetch: Future[subprocess.CompletedProcess[str]],
                  refresh: Callable[[], None],
                  stage: Callable[[str, str, list[str], list[tuple[str, str]]], bool],
-                 await_pending: Callable[[str, str], bool] | None = None) -> None:
-        super().__init__()
+                 await_pending: Callable[[str, str], bool] | None = None,
+                 as_if: Mapping[str, str] | None = None) -> None:
+        super().__init__(as_if=as_if)
         self.base, self.fetch, self.refresh, self.stage = base, fetch, refresh, stage
         self.await_pending = await_pending
         self.wt = ""
@@ -77,8 +79,10 @@ class UnionQueries(GitQueries):
             case Branches():
                 listing = out(["git", "for-each-ref", "--format=%(refname:strip=3)%09%(objectname)",
                                f"refs/remotes/{cfg().remote}/"])
-                refs = [(n, t) for n, t in (ln.split("\t", 1) for ln in listing.splitlines())]
+                refs = [(n, self.as_if.get(n, t)) for n, t in (ln.split("\t", 1) for ln in listing.splitlines())]
                 return Refs([r for r in refs if listed(r[0])])
+            case Contains(a, "HEAD"):  # the checkout's state is the union's base
+                return Flag(is_ancestor(a, self.base()))
             case Unchanged(sha):
                 base = out(["git", "merge-base", main_short(), sha])
                 return Flag(ok(["git", "diff", "--quiet", base, sha, "--", ".", f":(exclude){MSG_FILE}"]))

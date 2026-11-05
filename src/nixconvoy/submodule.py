@@ -1085,16 +1085,18 @@ def catch_up_repo(sub: Sub, main: Path) -> str | None:
     return None
 
 
-def sync(wb: str | None, msg: str | None, *, dry: bool = False) -> list[str]:
+def sync(wb: str | None, msg: str | None, *, dry: bool = False, at: str | None = None) -> list[str]:
     """A deploy's submodule step: each present submodule brought onto its
     default branch (catch_up, a problem there ending the deploy; not when
     `dry`), its staged state committed onto `wb` with `msg`, pushed, and
     the tree pinned on it, staged here.  What changed, one line each.
     `dry` (a dry activation) commits and pushes nothing, so a change it
-    cannot carry is refused instead."""
+    cannot carry is refused instead.  `at` (an undeploy's): the commit the
+    checkout is taken to be at; a submodule it pins elsewhere is left out,
+    as the undeploy would reset it first (moved_pins checked that)."""
     top = Path.cwd()
     told = heal_pins(top, wb, dry)
-    found = present(top)
+    found = [sub for sub in present(top) if at is None or pin_at(at, sub.path, top) == pin(sub, top)]
     if not found:
         return told
     if wb is None:
