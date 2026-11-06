@@ -11,7 +11,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import IO, NoReturn
 
-from . import commands, config, hooks, init, names, proc, review, strings, submodule
+from . import commands, config, hooks, init, names, proc, review, strings, submodule, term
 from .checkout import (
     await_background_push,
     lock_checkout,
@@ -22,8 +22,9 @@ from .checkout import (
     sub_parent,
 )
 from .deploy import deploy, refuse_staged
-from .proc import PERF, TOOL, Fail, die, ok, out, painter
+from .proc import PERF, TOOL, Fail, die, ok, out
 from .strings import BACK_TO_FLAG, DRY_FLAG, EVICT_FLAG
+from .term import painter
 
 
 def usage(stream: IO[str] | None = None) -> str:
@@ -106,6 +107,9 @@ def dispatch() -> None:
             bad_usage()
         hooks.run_hook(args[0])
         return
+    if subcmd != "review":  # its output is its pager's
+        term.start()
+        atexit.register(term.stop)
     start = Path.cwd()
     os.chdir(out(["git", "rev-parse", "--show-toplevel"]))
     config.set_root(Path.cwd())
@@ -208,7 +212,7 @@ def dispatch() -> None:
             # checkout's lock.
             for name, d in zip(given, named, strict=True):
                 if len(given) > 1:
-                    print(strings.CLI_SECTION(name=d.name))
+                    print(term.paint(strings.CLI_SECTION(name=d.name), "bold"))
                 os.chdir(d)
                 lock = lock_checkout()
                 if lock is None:
@@ -245,7 +249,7 @@ def dispatch() -> None:
             due, failed = False, []
             for d in undo:
                 if len(undo) > 1:
-                    print(strings.CLI_SECTION(name=d.name))
+                    print(term.paint(strings.CLI_SECTION(name=d.name), "bold"))
                 os.chdir(d)
                 lock = None
                 try:

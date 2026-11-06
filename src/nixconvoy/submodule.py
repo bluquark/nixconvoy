@@ -48,7 +48,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from . import proc, strings
+from . import proc, strings, term
 from .checkout import (
     MACHINE_ENV,
     PENDING_REFS,
@@ -883,7 +883,7 @@ def create(name: str, wb: str) -> Path:
     # `git status` there counts against the branch it will land on.
     git("branch", "--quiet", f"--set-upstream-to=origin/{default}", wb, cwd=str(d), check=False)
     mark(repo)
-    print(strings.SUBMODULE_OPENED(name=name, dir=d, wb=wb, where=where))
+    print(term.good(strings.SUBMODULE_OPENED(name=name, dir=d, wb=wb, where=where)))
     return d
 
 
@@ -1019,7 +1019,7 @@ def catch_up_one(sub: Sub, wb: str, top: Path) -> str | None:
     head = rev_in(sub.dir, "HEAD")
     if head is None or was is None or head == was:
         return None
-    print(strings.SUBMODULE_STATUS(name=sub.name, status=status))
+    print(term.line(strings.SUBMODULE_STATUS, name=sub.name, status=status))
     if own and rev_in(sub.dir, f"refs/remotes/origin/{wb}") is not None:
         push_branch(sub, wb)
     if pin(sub, top) == was:
@@ -1080,8 +1080,8 @@ def catch_up_repo(sub: Sub, main: Path) -> str | None:
         p = git("checkout", "--quiet", "-B", default, want, cwd=d, check=False)
     if p.returncode != 0:
         return strings.SUBMODULE_REPO_STATUS(repo=sub.dir, name=sub.name, status=(p.stderr or "").strip())
-    print(strings.SUBMODULE_REPO_STATUS(repo=sub.dir, name=sub.name,
-                                        status=strings.SUBMODULE_REPO_AT(default=default, rev=want[:12])))
+    print(term.line(strings.SUBMODULE_REPO_STATUS, repo=sub.dir, name=sub.name,
+                    status=strings.SUBMODULE_REPO_AT(default=default, rev=want[:12])))
     return None
 
 
@@ -1492,8 +1492,8 @@ def remove_one(sub: Sub) -> None:
             if p.returncode != 0:
                 print(strings.SUBMODULE_BRANCH_DELETE_FAILED(name=sub.name, branch=cur,
                                                              stderr=(p.stderr or "").strip()), file=sys.stderr)
-    print(strings.SUBMODULE_REMOVED(name=sub.name,
-                                    with_branch=strings.SUBMODULE_REMOVED_WITH(branch=cur) if cur else ""))
+    print(term.good(strings.SUBMODULE_REMOVED(name=sub.name,
+                                              with_branch=strings.SUBMODULE_REMOVED_WITH(branch=cur) if cur else "")))
 
 
 def main_pin(sub: Sub, top: Path) -> str:
