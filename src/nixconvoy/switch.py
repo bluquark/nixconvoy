@@ -13,7 +13,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import proc, strings, targets
+from . import proc, strings, targets, term
 from .checkout import current_branch
 from .config import cfg, controller_shell, main_ref, remote_ref, shell_script
 from .guard import drive
@@ -87,6 +87,11 @@ def provenance_record(union: str, branches: list[tuple[str, str]], snap: str,
         own=own, head=rev("HEAD"), base=rev(remote_ref(own)), snap=snap,
         announce=announce, key=key, at=time.time(), machine=proc.this_machine(),
         checkout=str(Path.cwd()), pid=os.getpid())
+
+
+# What a switch's output says that outlasts it on a terminal: the system
+# units it acted on, and anything amiss.
+NOTABLE = re.compile(r"the following (changed )?units:|warning|error|fail", re.IGNORECASE)
 
 
 class SwitchedMeanwhile(Exception):
@@ -200,7 +205,10 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
     through `kit`'s helper (nix/kit.nix, already copied) or plainly when
     `kit` is "".  `quiet`
     (several switches at once) prints the activation output afterwards,
-    prefixed with the target.  Activation, confirm and rollback run in a
+    prefixed with the target; on a terminal the switch is a step
+    (term.step), its row's label what the core says it is at, its output
+    kept: NOTABLE's lines said under the line it ends in, or all of it
+    should it fail.  Activation, confirm and rollback run in a
     transient unit on the target (as nixos-rebuild does), so they complete
     even if this ssh session dies.  `provenance` (one JSON line) is claimed on
     the target under the switch lock, `digest` the provenance_digest the probe
@@ -339,8 +347,9 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
     try:
         params = SwitchParams(target, toplevel, expected, targets.ssh_address(target), quiet,
                               bool(controller_checks), os.environ.get("NIXCONVOY_FAIL_VERIFY") == "1")
-        drive(nixconvoy_switch, encode(params), perform, SwitchQuery, type(None),
-              "nixconvoy-switch", strings.SWITCH_DURING(target=target), effect)
+        with term.step(done=strings.SWITCH_DONE(target=target), keep=NOTABLE) as step:
+            drive(nixconvoy_switch, encode(params), perform, SwitchQuery, type(None),
+                  "nixconvoy-switch", strings.SWITCH_DURING(target=target), effect, step.say)
     finally:
         proc.set_finishing(was_finishing)
         if guard is not None:

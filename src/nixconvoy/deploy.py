@@ -5,6 +5,7 @@ copy and the records' push, switch, then commit and push."""
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -12,7 +13,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import checkout, lanes, memo, proc, strings, submodule, targets
+from . import checkout, lanes, memo, proc, strings, submodule, targets, term
 from .checkout import (
     DEPLOYED_PREFIX,
     PENDING_REFS,
@@ -53,7 +54,7 @@ from .proc import PERF, Fail, die, dump_json, is_ancestor, load_json, out, rev
 from .switch import SwitchedMeanwhile, parse_checks, provenance_record, switch
 from .targets import Probe, expand_targets, flake_target_names
 from .union import UnionQueries
-from .wire import Context, DriftParams, Lane, UnionParams
+from .wire import Context, DriftOutcome, DriftParams, Lane, UnionParams
 
 # Seconds between the looks at origin while waiting for a deploy under way.
 WAIT_POLL = 5
@@ -89,6 +90,30 @@ def news_of(p: Pending, now: float, fetched: float, seen: dict[str, tuple[str, f
         return True
     dead.add(p.key)
     return False
+
+
+def short(union: str) -> str:
+    """The union's commit as a verdict names it: abbreviated on a terminal."""
+    return union[:12] if term.LIVE else union
+
+
+def say_drift(lines: list[str], verdict: DriftOutcome, names: list[str]) -> None:
+    """The drift core's verdict `lines` (one per target: its name, a colon
+    and what becomes of it) on a terminal, where the step kept them: those
+    saying the same of several targets as one line, each colored by its
+    targets' part in `verdict` - to be switched, left as it is (dim), or
+    neither.  Lines not so shaped are said as they are."""
+    said: dict[str, list[str]] = {}
+    for ln in lines:
+        m = re.fullmatch(r"\s*([^\s:]+): (.*)", ln)
+        if m is None or m.group(1) not in names:
+            print("\n".join(lines))
+            return
+        said.setdefault(m.group(2), []).append(m.group(1))
+    for what, hs in said.items():
+        style = ("cyan" if all(h in verdict.plan for h in hs) else
+                 "dim" if not any(h in verdict.drift or h in verdict.affected for h in hs) else "yellow")
+        print(term.paint(strings.DEPLOY_VERDICT_LINE(targets=", ".join(hs), verdict=what), style))
 
 
 def exit_on_signal(signum: int, _frame: object) -> None:
@@ -170,16 +195,16 @@ def commit_unreached(wb: str, msg: str, snap: str) -> None:
         targets.check_builder()
         wt = add_worktree(snap)
         try:
-            print(strings.DEPLOY_RUNNING_PRECHECK)
-            err = memo.precheck_gate(wt, snap)
+            with term.step(strings.DEPLOY_RUNNING_PRECHECK, strings.DEPLOY_PRECHECK_RAN):
+                err = memo.precheck_gate(wt, snap)
+                if err:
+                    die(strings.PROC_WITH_NOTHING_DONE(problem=err))
         finally:
             drop_worktree(wt)
-        if err:
-            die(strings.PROC_WITH_NOTHING_DONE(problem=err))
     PERF.mark("commit-push")
     commit_deployed(wb, snap, f"{msg}\n\nReaches: none\nDeployed: none")
     push_work_branch(wb)
-    print(strings.DEPLOY_REACHES_NONE(wb=wb))
+    print(term.good(strings.DEPLOY_REACHES_NONE(wb=wb)))
 
 
 def refuse_staged(top: Path) -> None:
@@ -573,19 +598,20 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             check_pool = ThreadPoolExecutor(1)
             check = check_pool.submit(prechecks)
             check_pool.shutdown(wait=False)
-        print(strings.DEPLOY_EVALUATING if check is None else strings.DEPLOY_EVALUATING_PRECHECK)
         tops = {}
-        if len(groups) == 1:
-            ((gwt, gunion), hs), = groups.items()
-            tops = memo.eval_toplevels(gwt, gunion, hs, check)
-        elif groups:
-            with ThreadPoolExecutor(len(groups)) as pool:
-                for part in pool.map(lambda g: memo.eval_toplevels(g[0][0], g[0][1], g[1], check), groups.items()):
-                    tops.update(part)
-        if check is not None:
-            err = check.result()
-            if err:
-                die(strings.PROC_WITH_NOTHING_DONE(problem=err))
+        with term.step(*((strings.DEPLOY_EVALUATING, strings.DEPLOY_EVALUATED) if check is None else
+                         (strings.DEPLOY_EVALUATING_PRECHECK, strings.DEPLOY_EVALUATED_PRECHECK))):
+            if len(groups) == 1:
+                ((gwt, gunion), hs), = groups.items()
+                tops = memo.eval_toplevels(gwt, gunion, hs, check)
+            elif groups:
+                with ThreadPoolExecutor(len(groups)) as pool:
+                    for part in pool.map(lambda g: memo.eval_toplevels(g[0][0], g[0][1], g[1], check), groups.items()):
+                        tops.update(part)
+            if check is not None:
+                err = check.result()
+                if err:
+                    die(strings.PROC_WITH_NOTHING_DONE(problem=err))
         runs = own_runs(snap or head)
         reached: set[str] = set()
         for (gwt, gunion), hs in groups.items():
@@ -598,14 +624,16 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                      tips={**origin_tips(), **(as_if or {})},
                      in_flight=announced(ann.key if ann is not None else None), dead=sorted(dead),
                      tz_offset=time.localtime().tm_gmtoff)
-        verdict = decide(DriftParams(
-            cx=cx, union=union, unions={h: lane_of[h][1] for h in tops if h in lane_of},
-            targets=[h for h in all_targets if h not in unmerged],
-            candidates=[h for h in candidates if h not in unmerged],
-            evict=evict, named=bool(filter_targets), reached=sorted(reached),
-            running=running, built={h: t.out for h, t in tops.items()},
-            provenances={h: p.provenance for h, p in probed.items()}),
-            GitQueries(as_if=as_if) if as_if else None)
+        with term.step() as said:
+            verdict = decide(DriftParams(
+                cx=cx, union=union, unions={h: lane_of[h][1] for h in tops if h in lane_of},
+                targets=[h for h in all_targets if h not in unmerged],
+                candidates=[h for h in candidates if h not in unmerged],
+                evict=evict, named=bool(filter_targets), reached=sorted(reached),
+                running=running, built={h: t.out for h, t in tops.items()},
+                provenances={h: p.provenance for h, p in probed.items()}),
+                GitQueries(as_if=as_if) if as_if else None, said.log)
+        say_drift(said.lines, verdict, all_targets)
         plan, affected = verdict.plan, verdict.affected
         left_alone = [h for h, (kind, _) in verdict.drift.items() if kind == "left-alone"] + unmerged
 
@@ -712,12 +740,13 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             where = strings.DEPLOY_BUILD_WHERE(host=b) if b else ""
             PERF.mark("build")
             what = ", ".join([*plan, *(strings.DEPLOY_BUILD_KIT(target=h) for h in refresh)])
-            print(strings.DEPLOY_BUILDING(what=what, where=where))
-            err = targets.build_drvs([d for h in plan for d in (tops[h].drv, tops[h].kit_drv) if d]
-                                     + [tops[h].kit_drv for h in refresh if tops[h].kit_drv],
-                                     strings.DEPLOY_BUILD_OF(what=what))
-            if err:
-                die(strings.PROC_WITH_NOTHING_DONE(problem=err))
+            with term.step(strings.DEPLOY_BUILDING(what=what, where=where),
+                           strings.DEPLOY_BUILT(what=what, where=where)):
+                err = targets.build_drvs([d for h in plan for d in (tops[h].drv, tops[h].kit_drv) if d]
+                                         + [tops[h].kit_drv for h in refresh if tops[h].kit_drv],
+                                         strings.DEPLOY_BUILD_OF(what=what))
+                if err:
+                    die(strings.PROC_WITH_NOTHING_DONE(problem=err))
 
         # Another machine may have pushed a work branch while we built;
         # switching without it would revert its deployed changes (the union
@@ -728,9 +757,10 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             targets.copy_closure(name, [top.out, *([top.kit] if top.kit else [])], quiet)
             return targets.dry_activate(name, top.out) if dry else None
 
-        if dry and plan:
-            print(strings.DEPLOY_DRY_ACTIVATING(targets=", ".join(plan)))
-        with ThreadPoolExecutor(2 + len(plan) + len(refresh)) as pool:
+        tried = ", ".join(plan) if dry else ""
+        with term.step(strings.DEPLOY_DRY_ACTIVATING(targets=tried) if tried else "",
+                       strings.DEPLOY_DRY_ACTIVATED(targets=tried) if tried else ""), \
+                ThreadPoolExecutor(2 + len(plan) + len(refresh)) as pool:
             refetch = pool.submit(fetch_origin)
             # Carried, or a redone stage's stale records dropped.
             pushed = pool.submit(ann.carry, records) if ann is not None and (records or ann.records) else None
@@ -747,11 +777,11 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             if failures:
                 die(strings.DEPLOY_DRY_FAILED(failures="\n".join(failures)))
             if plan:
-                print(strings.DEPLOY_DRY_WOULD_SWITCH(targets=", ".join(plan), union=union))
+                print(term.good(strings.DEPLOY_DRY_WOULD_SWITCH(targets=", ".join(plan), union=short(union))))
             elif left_alone:
-                print(strings.DEPLOY_DRY_LEFT_ALONE(targets=", ".join(left_alone), union=union))
+                print(term.good(strings.DEPLOY_DRY_LEFT_ALONE(targets=", ".join(left_alone), union=short(union))))
             else:
-                print(strings.DEPLOY_DRY_NO_DRIFT(union=union))
+                print(term.good(strings.DEPLOY_DRY_NO_DRIFT(union=short(union))))
             return True
         if unpushed:
             die(strings.DEPLOY_RECORDS_ANNOUNCE_FAILED(remote=cfg().remote,
@@ -833,11 +863,11 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
     problem = push_deployed(wb, ann, records, attested)
 
     if plan:
-        print(strings.DEPLOY_DONE(targets=", ".join(plan), union=union))
+        print(term.good(strings.DEPLOY_DONE(targets=", ".join(plan), union=short(union))))
     elif left_alone:
-        print(strings.DEPLOY_LEFT_ALONE(targets=", ".join(left_alone), union=union))
+        print(term.good(strings.DEPLOY_LEFT_ALONE(targets=", ".join(left_alone), union=short(union))))
     else:
-        print(strings.DEPLOY_NO_DRIFT(union=union))
+        print(term.good(strings.DEPLOY_NO_DRIFT(union=short(union))))
     if problem is not None:
         die(strings.DEPLOY_UNPUSHED(wb=wb, problem=problem))
     run.unmerged = unmerged
