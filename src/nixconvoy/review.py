@@ -28,8 +28,9 @@ from typing import IO
 from . import config, names, strings, submodule
 from .checkout import listed, sub_parent
 from .config import MSG_FILE, ConfigError, load
-from .proc import die, painter, run
+from .proc import die, run
 from .submodule import Sub
+from .term import painter
 
 EXCLUDE_MSG = f":(top,exclude){MSG_FILE}"
 

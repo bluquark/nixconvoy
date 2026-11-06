@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import IO, NamedTuple
 
-from . import config, lanes, names, strings, submodule
+from . import config, lanes, names, strings, submodule, term
 from .checkout import (
     DEPLOYED_TRAILER,
     KEPT_EDIT,
@@ -88,6 +88,7 @@ from .config import CONFIG_FILE, MSG_FILE, cfg, main_ref, main_short, remote_ref
 from .guard import binary, decide
 from .names import label as sub_label
 from .proc import (
+    PERF,
     Fail,
     die,
     failure,
@@ -96,7 +97,6 @@ from .proc import (
     is_ancestor,
     ok,
     out,
-    painter,
     refused,
     rev,
     run,
@@ -134,6 +134,7 @@ def holds(wb: str, tip: str, not_yet_deployed: bool = False) -> None:
     (lanes.undeployed): a landing is refused on them unless
     `not_yet_deployed` (the landed work then rolls out there from the next
     deploy anywhere)."""
+    PERF.mark("check")
     wt = add_worktree(tip)
     try:
         held = lanes.undeployed(wb, tip, wt)
@@ -243,6 +244,7 @@ def push_main(r: Landed) -> None:
     landing; one origin refused, or main moved away from, can no longer
     be taken, and is forgotten; one that may yet be is kept for the next
     run."""
+    PERF.mark("push")
     note_landings([*noted_landings(), r])
     p = git_remote("push", "--quiet", cfg().remote, f"{r.commit}:refs/heads/{cfg().main_branch}", check=False)
     if p.returncode == 0:
@@ -305,6 +307,7 @@ def complete(r: Landed, locked: bool = False, fresh: bool = True) -> bool:
     done already or the checkout has moved on, so this is also how a
     later run finishes a landing cut short (not `fresh`).  False when
     something is left for a later run."""
+    PERF.mark("finish")
     main = cfg().main_branch
     # Refused where main is checked out (the main worktree): catch_up moves it.
     if not is_ancestor(r.commit, f"refs/heads/{main}"):
@@ -334,7 +337,7 @@ def complete(r: Landed, locked: bool = False, fresh: bool = True) -> bool:
             return max((d for d in dirs if e.sub.dir.is_relative_to(d)), key=lambda d: len(d.parts), default=here)
 
         done = submodule.finish_all([e for e in r.landings if top(e) not in busy]) and not busy
-        print(strings.LAND_DONE(main_branch=main, summary=summarize(r.commit)))
+        print(term.good(strings.LAND_DONE(main_branch=main, summary=summarize(r.commit))))
         kept = kept_edit()
         # A later run finds the edit of a landing after this one there, as well.
         if fresh or (kept.exists() and kept.read_text(encoding="utf-8").strip()
@@ -413,11 +416,13 @@ def resume_landings(*, locked: bool = True) -> None:
 def catch_up_rest(landed: list[Landed]) -> bool:
     """After a landing: the checkouts it did not take, and the submodule
     repositories, onto the new main; whether all could be."""
+    PERF.mark("catch-up")
     took = {Path(part.dir) for r in landed for part in r.parts}
     return catch_up([d for d in sibling_checkouts() if d not in took]) & submodule.catch_up_repos()
 
 
 def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
+    PERF.mark("fetch")
     await_background_push()
     git_remote(*fetch_args())
     pop_tmp_commits()
@@ -432,6 +437,7 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
     if staged_differs(less_msg=True):
         die(strings.LAND_STAGED)
     ensure_sole_writer(wb)  # origin's copy is reset at the end: it must be ours
+    PERF.mark("rebase")
     ensure_rebased()
     main = rev(main_ref())
     if main is None or tree_less_msg("HEAD") == out(["git", "rev-parse", f"{main_short()}^{{tree}}"]):
@@ -1084,7 +1090,7 @@ def orphans(tips: dict[str, str]) -> list[tuple[str, Path | None]]:
 def status() -> None:
     """Every checkout on this machine as a tree, this machine's orphaned
     subagent branches, and the work branches only origin holds."""
-    paint = painter()
+    paint = term.painter()
     fetched = git_remote(*fetch_args("--no-auto-gc"), check=False)
     if fetched.returncode != 0:
         print(strings.STATUS_FETCH_FAILED(stderr=(fetched.stderr or "").strip()), file=sys.stderr)
@@ -1497,6 +1503,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
     this checkout's MSG_FILE (or `message`) with each sub's MSG_FILE
     appended - every branch reset onto the new main, here and on origin,
     each worktree staying."""
+    PERF.mark("fetch")
     await_background_push()
     git_remote(*fetch_args())
     pop_tmp_commits()
@@ -1514,6 +1521,7 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
     ensure_sole_writer(wb)  # every branch is reset on origin at the end: all must be ours
     if staged_differs(less_msg=True):
         die(strings.LAND_STAGED)
+    PERF.mark("rebase")
     ensure_rebased()
     main = rev(main_ref())
     if main is None:

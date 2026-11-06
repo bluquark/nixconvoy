@@ -14,11 +14,11 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import IO, NoReturn
 
-from . import strings
+from . import strings, term
 from .strings import TOOL
 
 
@@ -53,6 +53,7 @@ class Perf:
         now = time.monotonic()
         self.phases.append((self.phase, now - self._phase_t0))
         self.phase, self._phase_t0 = phase, now
+        term.phase(phase)
 
     @contextlib.contextmanager
     def excluded(self) -> Iterator[None]:
@@ -97,8 +98,15 @@ class Perf:
                 f.write(dump_json(rec) + "\n")
         except (OSError, RuntimeError):  # RuntimeError: no resolvable HOME
             return
-        summary = " ".join(strings.PROC_PERF_PHASE(phase=k, secs=v) for k, v in phases.items()
-                           if k not in ("startup", "end"))
+        phases = {k: v for k, v in phases.items() if k not in ("startup", "end")}
+        if term.LIVE:
+            brief: dict[str, float] = {}
+            for k, v in phases.items():
+                brief[k.partition(":")[0]] = round(brief.get(k.partition(":")[0], 0.0) + v, 2)
+            summary = " ".join(strings.PROC_PERF_PHASE(phase=k, secs=v) for k, v in brief.items() if v >= 1)
+            print(term.paint(strings.PROC_PERF_BRIEF(total=rec["total"], summary=summary), "dim"))
+            return
+        summary = " ".join(strings.PROC_PERF_PHASE(phase=k, secs=v) for k, v in phases.items())
         print(strings.PROC_PERF(total=rec["total"], summary=summary, path=path))
 
 
@@ -199,6 +207,7 @@ def die(msg: str) -> NoReturn:
     if threading.current_thread() is not threading.main_thread():
         EXITING = msg
     kill_children(msg)
+    term.fail()
     sys.stdout.flush()  # keep the order straight when both streams are piped
     print(strings.PROC_DIE(msg=msg), file=sys.stderr)
     if ARMED:
@@ -233,8 +242,11 @@ def run(
     input: str | None = None,
     pass_fds: tuple[int, ...] = (),
     session: bool = False,
+    live: bool = False,
 ) -> Completed:
     """`merged` captures stderr into stdout, in order (p.stderr is None).
+    `live` (of a `merged` capture) shows each line as it comes in the
+    calling thread's step on a terminal (term.Step.show).
     `timeout` ends the command after that many seconds (stop; p.timed_out).
     `input` is fed to the command's stdin; the command inherits `pass_fds`.
     `session` starts it in a session of its own, ended as a whole."""
@@ -243,35 +255,48 @@ def run(
         full_env.update(env)
     t0 = time.monotonic()
     timed_out = False
-    with CHILDREN_LOCK:
-        gate()
-        child = subprocess.Popen(
-            cmd, cwd=cwd, env=full_env, text=True,
-            stdin=subprocess.PIPE if input is not None else None,
-            stdout=subprocess.PIPE if capture else None,
-            stderr=(subprocess.STDOUT if merged else subprocess.PIPE) if capture else None,
-            pass_fds=pass_fds, start_new_session=session,
-        )
-        CHILDREN.add(child)
-    try:
-        try:
-            stdout, stderr = child.communicate(input=input, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            stop(child)
-            try:
-                stdout, stderr = child.communicate(timeout=SUDO_GRACE + 1)
-            except subprocess.TimeoutExpired:
-                # A sudo's command outlived it holding the pipes: not waited for.
-                child.wait()
-                stdout, stderr = "", ""
-                for f in (child.stdout, child.stderr):
-                    if f:
-                        f.close()
-    finally:
+    step = term.current() if live else None
+    assert step is None or (merged and capture and timeout is None and input is None)
+    with contextlib.ExitStack() as shown:
+        if not capture:
+            shown.enter_context(term.paused())  # the command has the terminal
         with CHILDREN_LOCK:
-            CHILDREN.discard(child)
-            swept = SWEPT.pop(child, None)
+            gate()
+            child = subprocess.Popen(
+                cmd, cwd=cwd, env=full_env, text=True,
+                stdin=subprocess.PIPE if input is not None else None,
+                stdout=subprocess.PIPE if capture else None,
+                stderr=(subprocess.STDOUT if merged else subprocess.PIPE) if capture else None,
+                pass_fds=pass_fds, start_new_session=session,
+            )
+            CHILDREN.add(child)
+        try:
+            try:
+                if step is not None and child.stdout is not None:
+                    lines: list[str] = []
+                    for raw in child.stdout:
+                        lines.append(raw)
+                        step.show(raw)
+                    child.wait()
+                    stdout, stderr = "".join(lines), None
+                else:
+                    stdout, stderr = child.communicate(input=input, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                stop(child)
+                try:
+                    stdout, stderr = child.communicate(timeout=SUDO_GRACE + 1)
+                except subprocess.TimeoutExpired:
+                    # A sudo's command outlived it holding the pipes: not waited for.
+                    child.wait()
+                    stdout, stderr = "", ""
+                    for f in (child.stdout, child.stderr):
+                        if f:
+                            f.close()
+        finally:
+            with CHILDREN_LOCK:
+                CHILDREN.discard(child)
+                swept = SWEPT.pop(child, None)
     if swept is not None:
         raise Fail(swept)
     p = Completed(cmd, child.returncode, stdout, stderr)
@@ -517,17 +542,22 @@ def stream(cmd: list[str], *, held_as: str | None = None,
            sink: list[str] | None = None) -> int:
     """Run `cmd` with stderr merged into stdout and its lines squashed
     (squash_agenix), printed as they arrive - or, with `held_as`, all at
-    once at the end under that prefix - and appended to `sink`."""
+    once at the end under that prefix - and appended to `sink`.  On a
+    terminal they are the calling thread's step's instead, when it has
+    one (term.Step.log)."""
     gate()
     t0 = time.monotonic()
     p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT, text=True)
     assert p.stdout is not None
     held: list[str] = []
+    step = term.current()
     for line in squash_agenix(raw.rstrip("\n") for raw in p.stdout):
         if sink is not None:
             sink.append(line)
-        if held_as is None:
+        if step is not None:
+            step.log(line)
+        elif held_as is None:
             print(line, flush=True)
         else:
             held.append(held_as + line)
@@ -536,20 +566,6 @@ def stream(cmd: list[str], *, held_as: str | None = None,
     if held:
         print("\n".join(held), flush=True)
     return rc
-
-
-def painter(stream: IO[str] | None = None) -> Callable[[str, str], str]:
-    """paint(text, style) in SGR codes when `stream` (stdout) is a terminal
-    (NO_COLOR unset), else the text as is: bold, dim, gray, green, yellow,
-    red, cyan, magenta."""
-    if not (stream or sys.stdout).isatty() or os.environ.get("NO_COLOR"):
-        return lambda text, _style: text
-    codes = {"bold": "1", "dim": "2", "gray": "90", "green": "32", "yellow": "33", "red": "31",
-             "cyan": "36", "magenta": "35"}
-
-    def paint(text: str, style: str) -> str:
-        return "\033[" + ";".join(codes[c] for c in style.split()) + "m" + text + "\033[0m"
-    return paint
 
 
 HELD: list[IO[str]] = []  # locks held until exit
