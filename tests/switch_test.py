@@ -66,7 +66,6 @@ from nixconvoy import (
     names,
     proc,
     review,
-    strings,
     switch,
     targets,
 )
@@ -827,7 +826,8 @@ def provenance_cases() -> None:
     with mock.patch.object(targets, "target_cmd",
                            return_value=["sh", "-c", "seq 1 9 >&2; echo 'Permission denied (publickey).' >&2; exit 255"]):
         assert targets.probe("side1").error == "5\n6\n7\n8\n9\nPermission denied (publickey)."
-    told = strings.DEPLOY_UNREACHABLE(targets="a", reasons=strings.DEPLOY_UNREACHABLE_REASON(address="me@a", error="x"))
+    told = targets.strings.DEPLOY_UNREACHABLE(
+        targets="a", reasons=targets.strings.DEPLOY_UNREACHABLE_REASON(address="me@a", error="x"))
     assert told.endswith("re-run\n  ssh me@a: x"), told
     with mock.patch.object(targets, "target_cmd", return_value=["sh", "-c", "echo late >&2; exec sleep 5"]), \
             mock.patch.object(targets, "PROBE_TIMEOUT", 0.2):
