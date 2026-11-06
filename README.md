@@ -135,7 +135,7 @@ After following the Installation instructions above to set `~/homelab` up with n
 > [!NOTE]
 > `nixconvoy open <worktree-path> [--branch <branch-suffix>]` creates a new worktree (by invoking `git worktree add` internally), then switches it to a new work branch prefixed by `nixconvoy/` (or any other pattern of your choice specified by the `branch_prefix` setting).
 > 
-> As a reminder, a git worktree is a directory containing another checkout of a local git repo, linked to it in a parent/child relationship tracked by git.  Worktrees function similarly to regular checkouts, except they don't have a `.git` directory: their git objects are stored in their parent's.  This means creating/deleting worktrees can be as safe and lightweight as switching branches within a single checkout.
+> As a reminder, a [git worktree](https://git-scm.com/docs/git-worktree) is a directory containing another checkout of a local git repo, linked to it in a parent/child relationship tracked by git.  Worktrees function similarly to regular checkouts, except they don't have a `.git` directory: their git objects are stored in their parent's.  This means creating/deleting worktrees can be as safe and lightweight as switching branches within a single checkout.
 
 Then, stage a change and run `nixconvoy deploy` --- this subcommand commits your changes to the branch nixconvoy created for the worktree, and applies a new NixOS generation to your server.  You can repeatedly stage more incremental changes and `deploy` them.  When you're done, `nixconvoy land` rolls up the entire series of deployed changes into one git commit, and applies it to both `main` and `origin/main`.
 
@@ -220,7 +220,7 @@ Absence-means-removal is one of the best properties of NixOS, but for me, it som
 > [!NOTE]
 > So what's the trick?  Nixconvoy uses git worktrees and refs to keep track of everything you have been deploying.  Instead of deploying what's in your current checkout, it merges your latest staged changes with other checkouts' deployed-but-not-landed changes, then builds the NixOS generation from that.
 >
-> Merge conflicts are also less frequent with nixconvoy than with a default installation of `git merge`, because nixconvoy bundles in a syntax-aware merge tool called `mergiraf`.
+> Merge conflicts are also less frequent with nixconvoy than with a default installation of `git merge`, because nixconvoy bundles in a syntax-aware merge tool called [`mergiraf`](https://mergiraf.org/).
 
 ## Multitasking with coding agents
 
@@ -592,4 +592,4 @@ There are some features that other NixOS deployment tools support but nixconvoy 
 * Nixconvoy's ssh user must have passwordless sudo on the entire NixOS fleet.
 * No offline deploys --- every deploy requires the Git origin to be reachable.
 
-If one of these is a hard blocker for you, consider an alternative NixOS deployment tool, such as deploy-rs, colmena or comin.
+If one of these is a hard blocker for you, consider an alternative NixOS deployment tool, such as [deploy-rs](https://github.com/serokell/deploy-rs), [colmena](https://github.com/nix-community/colmena) or [comin](https://github.com/nlewo/comin).
