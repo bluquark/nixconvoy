@@ -207,8 +207,11 @@ def _redraw(show: bool = True) -> None:
     rows = _rows() if show and not (_PAUSED or _MIDLINE or _STOPPED.is_set()) else []
     if not (_DRAWN or rows):
         return
+    # Each line erased by itself: erasing down the screen from its top
+    # row is a clear to some terminals, which scroll it into their history.
+    spare = max(_DRAWN - len(rows), 0)
     _TTY.write((f"\033[{_DRAWN}A\r" if _DRAWN else "") + "".join(r + "\033[K\n" for r in rows)
-               + ("\033[J" if len(rows) < _DRAWN else ""))
+               + "\033[K\n" * spare + (f"\033[{spare}A" if spare else ""))
     _TTY.flush()
     _DRAWN = len(rows)
 
@@ -216,15 +219,29 @@ def _redraw(show: bool = True) -> None:
 class Above:
     """stdout or stderr once the terminal is taken: what is written lands
     above the rows, a note's, a warning's or die()'s first word (TINTS)
-    in its color on stderr."""
+    in its color on stderr.  A thread's text is held until its line ends
+    (print writes the newline apart) or a flush, so no two threads' lines
+    splice."""
 
     def __init__(self, stream: IO[str], tinted: bool) -> None:
         self.stream, self.tinted = stream, tinted
+        self.held = threading.local()
 
     def write(self, text: str) -> int:
+        whole = getattr(self.held, "text", "") + text
+        lines, newline, self.held.text = whole.rpartition("\n")
+        self.put(lines + newline)
+        return len(text)
+
+    def flush(self) -> None:
+        text, self.held.text = getattr(self.held, "text", ""), ""
+        self.put(text)
+        self.stream.flush()
+
+    def put(self, text: str) -> None:
         global _MIDLINE
         if not text:
-            return 0
+            return
         with _LOCK:
             _redraw(show=False)
             said = text
@@ -236,7 +253,6 @@ class Above:
             self.stream.flush()
             _MIDLINE = not text.endswith("\n")
             _redraw()
-        return len(text)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.stream, name)
@@ -274,6 +290,7 @@ def stop() -> None:
         for name in ("stdout", "stderr"):
             s = getattr(sys, name)
             if isinstance(s, Above):
+                s.flush()
                 setattr(sys, name, s.stream)
 
 

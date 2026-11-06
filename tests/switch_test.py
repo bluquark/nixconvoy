@@ -209,10 +209,8 @@ class Terminal(io.StringIO):
         for count, code, char in re.findall(r"\033\[([\d;]*)([A-Za-z])|([\s\S])", self.getvalue()):
             if code == "A":
                 row -= int(count)
-            elif code in ("K", "J"):
+            elif code == "K":
                 del lines[row][col:]
-                if code == "J":
-                    del lines[row + 1:]
             elif char == "\r":
                 col = 0
             elif char == "\n":
@@ -222,7 +220,9 @@ class Terminal(io.StringIO):
                 lines[row][col:col + 1] = [char]
                 col += 1
         shown = ["".join(ln) for ln in lines]
-        return shown[:-1] if shown[-1] == "" else shown
+        while shown and not shown[-1]:
+            del shown[-1]
+        return shown
 
 
 @contextlib.contextmanager
@@ -4141,8 +4141,10 @@ def term_cases() -> None:
     off one, its label alone."""
     with on_terminal() as tty:
         with term.step("building x...", "built x") as st:
-            st.show("copying path 'a'...\n")
-            print("a line printed meanwhile")
+            st.show("copying path '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-a'...\n")
+            sys.stdout.write("a line ")  # held until its end: another thread's goes in whole
+            assert len(tty.screen()) == 1 and "building x" in tty.screen()[0], tty.screen()
+            print("printed meanwhile")
             print("note: said to stderr", file=sys.stderr)
             during = tty.screen()
         with term.step("copying closure to x...", keep=re.compile("kept")) as st:
@@ -4156,7 +4158,7 @@ def term_cases() -> None:
             pass
         proc.run(["true"], capture=False)  # the terminal is the command's meanwhile
     assert during[:2] == ["a line printed meanwhile", "note: said to stderr"], during
-    assert len(during) == 3 and re.fullmatch(r". building x  0s  copying path 'a'\.\.\.", during[2]), during
+    assert len(during) == 3 and re.fullmatch(r". building x  0s  copying path '/nix/store/a'\.\.\.", during[2]), during
     took = r"  \d+\.\ds"
     for line, want in zip(tty.screen()[2:], (
             "✓ built x" + took, "✓ copying closure to x" + took, "    a line kept",
