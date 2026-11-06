@@ -26,6 +26,7 @@ SYSTEM_RE = re.compile(r'"((?:x86_64|aarch64|i686|riscv64|armv7l|powerpc64le)-(?
 PLATFORM_LINE_RE = re.compile(r"hostPlatform|\bsystem\s*=")
 MAX_DEPTH = 3  # how deep under the root the flake and hosts directories are looked for
 DEFAULT_BRANCH_PREFIX = "nixconvoy/"
+NO_ATTRIBUTE = "does not provide attribute"  # nix's error for an output the flake lacks
 
 
 def main(flake_arg: str | None, start: Path) -> None:
@@ -52,8 +53,8 @@ def main(flake_arg: str | None, start: Path) -> None:
     hosts_dir = find_hosts_dir(root, flake, targets)
     system, system_how = detect_system(root, ref, hosts_dir, targets, nix)
     prefix = DEFAULT_BRANCH_PREFIX
-    checks = nix.json(ref, f"checks.{system}", strings.INIT_WHAT_CHECKS,
-                      apply="builtins.attrNames") if system_how != strings.INIT_SYSTEM_GUESSED else None
+    checks = nix.json(ref, f"checks.{system}", strings.INIT_WHAT_CHECKS, apply="builtins.attrNames",
+                      optional=True) if system_how != strings.INIT_SYSTEM_GUESSED else None
     check_names = sorted(c for c in checks if isinstance(c, str)) if isinstance(checks, list) else []
     ssh = f"{this_user()}@{{target}}"
     remote, main = detect_names(notes)
@@ -137,19 +138,24 @@ class NixProbe:
             return None
         return p.stdout
 
-    def json(self, ref: str, attr: str, what: str, apply: str | None = None) -> object | None:
+    def json(self, ref: str, attr: str, what: str, apply: str | None = None,
+             optional: bool = False) -> object | None:
         """`ref#attr` evaluated (through `apply`) as JSON: offline once the
         inputs are fetched, fetching what it forces when the archive (every
-        input, needed or not) failed."""
+        input, needed or not) failed.  `optional`: no note when the flake
+        has no such attribute."""
         if self.missing:
             self.notes.append(strings.INIT_NIX_NOT_ON_PATH(what=what))
             return None
         if ref not in self.fetched:
             self.fetched[ref] = self.nix(["nix", "flake", "archive", ref], what,
                                          strings.INIT_DOING_FETCH(ref=ref)) is not None
+        noted = len(self.notes)
         got = self.nix(["nix", "eval", *(["--offline"] if self.fetched[ref] else []), "--json", f"{ref}#{attr}",
                         *(["--apply", apply] if apply else [])], what, strings.INIT_DOING_EVAL)
         if got is None:
+            if optional and any(NO_ATTRIBUTE in n for n in self.notes[noted:]):
+                del self.notes[noted:]
             return None
         try:
             return json.loads(got)
@@ -235,7 +241,7 @@ def detect_system(root: Path, ref: str, hosts_dir: str | None, targets: list[str
     if len(seen) == 1:
         return seen.pop(), strings.INIT_SYSTEM_FROM_FILES(hosts_dir=hosts_dir)
     if targets:
-        got = nix.json(ref, f'nixosConfigurations."{targets[0]}".config.nixpkgs.hostPlatform.system',
+        got = nix.json(ref, f'nixosConfigurations."{targets[0]}".pkgs.stdenv.hostPlatform.system',
                        strings.INIT_WHAT_SYSTEM(target=targets[0]))
         if isinstance(got, str) and got:
             return got, strings.INIT_SYSTEM_EVALUATED(target=targets[0])

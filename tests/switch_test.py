@@ -877,6 +877,16 @@ def provenance_cases() -> None:
     p = targets.parse_probe(f"{OLD}\n\n")
     assert p == targets.Probe(OLD, "", hashlib.sha256(b"").hexdigest()), p
     assert targets.kit_link(NEW) == "/var/lib/nixconvoy/kits/new-system"
+    # An unread target carries what ssh said, told under the refusal.
+    with mock.patch.object(targets, "target_cmd",
+                           return_value=["sh", "-c", "echo 'Host key verification failed.' >&2; exit 255"]):
+        p = targets.probe("side1")
+    assert p.running is None and p.error == "Host key verification failed.", p
+    with mock.patch.object(targets, "target_cmd", return_value=["false"]):
+        assert targets.probe("side1").error == "exit 1, nothing said"
+    with mock.patch.object(targets, "target_cmd", return_value=["sh", "-c", "echo late >&2; exec sleep 5"]), \
+            mock.patch.object(targets, "PROBE_TIMEOUT", 0.2):
+        assert targets.probe("side1").error == "no answer within 0.2 s\nlate"
 
     with mock.patch.object(switch, "rev"), mock.patch.object(switch, "current_branch"):
         def record(branch: str | None, head: str, origin: str | None, snap: str) -> object:
@@ -3996,7 +4006,7 @@ def init_cases(d: Path) -> None:
     hosts: list[str] | None = ["a", "b"]
 
     def fake_nix(self: init.NixProbe, ref: str, attr: str, what: str,  # noqa: ARG001 - NixProbe.json's signature
-                 apply: str | None = None) -> object | None:  # noqa: ARG001
+                 apply: str | None = None, optional: bool = False) -> object | None:  # noqa: ARG001
         if hosts is None:
             self.notes.append(f"no nix on PATH: {what} not read")
             return None
@@ -4097,6 +4107,20 @@ def init_cases(d: Path) -> None:
         assert not (bare / "nixconvoy.toml").exists()
     finally:
         os.chdir(prev)
+    # An optional attribute the flake lacks leaves no note; another failure does.
+    notes: list[str] = []
+    nix = init.NixProbe(notes)
+    nix.fetched["."] = True
+    failure = "error: flake '.' does not provide attribute 'checks.x86_64-linux'"
+
+    def failing(cmd: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 1, "", failure)
+
+    with mock.patch.object(init.subprocess, "run", failing):
+        assert nix.json(".", "checks.x86_64-linux", "checks", optional=True) is None and not notes, notes
+        assert nix.json(".", "checks.x86_64-linux", "checks") is None and len(notes) == 1, notes
+        failure = "error: infinite recursion encountered"
+        assert nix.json(".", "checks.x86_64-linux", "checks", optional=True) is None and len(notes) == 2, notes
     say("init: ok")
 
 

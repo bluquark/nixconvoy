@@ -387,7 +387,10 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         records_run.clear()
         unreachable = [h for h in candidates if running.get(h) is None]
         if unreachable:
-            die(strings.DEPLOY_UNREACHABLE(targets=", ".join(unreachable)))
+            said = {h: probed[h].error for h in unreachable if h in probed and probed[h].error}
+            die(strings.DEPLOY_UNREACHABLE(targets=", ".join(unreachable), reasons="".join(
+                strings.DEPLOY_UNREACHABLE_REASON(address=targets.ssh_address(h), error=e.replace("\n", "\n    "))
+                for h, e in said.items())))
         if ann is not None:
             # A target running this checkout's announced increment from
             # an earlier run that ended without its push: still its claim.
