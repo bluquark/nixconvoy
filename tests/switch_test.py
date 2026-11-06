@@ -3942,7 +3942,7 @@ def init_cases(d: Path) -> None:
     hosts: list[str] | None = ["a", "b"]
 
     def fake_nix(self: init.NixProbe, ref: str, attr: str, what: str,  # noqa: ARG001 - NixProbe.json's signature
-                 apply: str | None = None) -> object | None:  # noqa: ARG001
+                 apply: str | None = None, optional: bool = False) -> object | None:  # noqa: ARG001
         if hosts is None:
             self.notes.append(f"no nix on PATH: {what} not read")
             return None
@@ -4043,6 +4043,20 @@ def init_cases(d: Path) -> None:
         assert not (bare / "nixconvoy.toml").exists()
     finally:
         os.chdir(prev)
+    # An optional attribute the flake lacks leaves no note; another failure does.
+    notes: list[str] = []
+    nix = init.NixProbe(notes)
+    nix.fetched["."] = True
+    failure = "error: flake '.' does not provide attribute 'checks.x86_64-linux'"
+
+    def failing(cmd: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 1, "", failure)
+
+    with mock.patch.object(init.subprocess, "run", failing):
+        assert nix.json(".", "checks.x86_64-linux", "checks", optional=True) is None and not notes, notes
+        assert nix.json(".", "checks.x86_64-linux", "checks") is None and len(notes) == 1, notes
+        failure = "error: infinite recursion encountered"
+        assert nix.json(".", "checks.x86_64-linux", "checks", optional=True) is None and len(notes) == 2, notes
     say("init: ok")
 
 
