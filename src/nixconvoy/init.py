@@ -18,7 +18,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from . import config, strings
+from . import config, strings, term
 from .config import CONFIG_FILE
 from .proc import die, out, run
 
@@ -66,12 +66,12 @@ def main(flake_arg: str | None, start: Path) -> None:
     except config.ConfigError as e:  # a bug in render, never the user's
         die(strings.INIT_INVALID(error=e))
     (root / CONFIG_FILE).write_text(text, encoding="utf-8")
-    print(strings.INIT_WROTE())
+    print(term.good(strings.INIT_WROTE()))
     print(strings.INIT_WROTE_FLAKE(flake=flake, targets=", ".join(targets)))
     print(strings.INIT_WROTE_SYSTEM(system=system, how=system_how, ssh=ssh, prefix=prefix))
     print(strings.INIT_WROTE_REMOTE(remote=remote, main=main))
     for n in notes:
-        print(strings.INIT_WROTE_NOTE(note=n))
+        print(term.paint(strings.INIT_WROTE_NOTE(note=n), "yellow"))
 
 
 def detect_names(notes: list[str]) -> tuple[str, str]:

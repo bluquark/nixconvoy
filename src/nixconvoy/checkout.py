@@ -22,7 +22,7 @@ from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import IO, NamedTuple
 
-from . import config, proc, strings
+from . import config, proc, strings, term
 from .config import (
     CLAUDE_WORKTREES,
     CONFIG_FILE,
@@ -759,10 +759,15 @@ def update_checkout(path: Path) -> tuple[bool, str]:
 
 
 def catch_up(paths: list[Path]) -> bool:
-    """update_checkout each of `paths`, printing one status line each;
-    whether all succeeded."""
+    """update_checkout each of `paths`, printing one status line each (on
+    a terminal dim for a checkout left where it was, yellow for one that
+    could not be moved); whether all succeeded."""
+    def head(d: Path) -> str:
+        return run(["git", "rev-parse", "-q", "--verify", "HEAD"], cwd=str(d), check=False).stdout if d.is_dir() else ""
+
     good = True
     for d in paths:
+        was = head(d) if term.LIVE else ""
         try:
             done, status = update_checkout(d)
         except FileNotFoundError as e:
@@ -771,8 +776,9 @@ def catch_up(paths: list[Path]) -> bool:
             done, status = False, strings.CHECKOUT_NOT_CAUGHT_UP(error=e)
         if not done and not d.is_dir():
             continue
-        print(strings.CHECKOUT_CATCH_UP_LINE(name=d.name, status=status), file=sys.stdout if done else sys.stderr,
-              flush=True)
+        style = "yellow" if not done else "dim" if term.LIVE and head(d) == was else ""
+        print(term.line(strings.CHECKOUT_CATCH_UP_LINE, style, name=d.name, status=status),
+              file=sys.stdout if done else sys.stderr, flush=True)
         good &= done
     return good
 
@@ -1414,7 +1420,9 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str],
             pushed_note = ["git", "update-ref", f"{PUSHED_REFS}/{wb}", head]
             what.append(strings.CHECKOUT_PUSHING_BRANCH(wb=wb, sha=head[:12]))
     refspecs += [f"+{sha}:refs/heads/{DEPLOYED_PREFIX}/{h}" for h, sha in records.items()]
-    what += [f"{DEPLOYED_PREFIX}/{h}" for h in [*records, *(attested or {})]]
+    recorded = [*records, *(attested or {})]
+    what += ([strings.CHECKOUT_PUSHING_RECORDS(n=len(recorded))] if term.LIVE and recorded
+             else [f"{DEPLOYED_PREFIX}/{h}" for h in recorded])
     if ann is not None and ann.key == wb:
         if problem is None:
             ann.stop()
@@ -1468,7 +1476,7 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str],
     f.pid.write_text(str(child.pid))
     what_s = ", ".join(what) or strings.CHECKOUT_PUSHING_CLEARED
     if not proc.oneshot_run():
-        print(strings.CHECKOUT_PUSHING_BG(what=what_s))
+        print(term.paint(strings.CHECKOUT_PUSHING_BG(what=what_s), "dim"))
         return problem
     # The run's end ends the unit, which kills the push: waited for, its
     # failure told here as well as by the next run, which collects it.

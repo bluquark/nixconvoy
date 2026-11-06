@@ -12,7 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NoReturn, overload
 
-from . import proc, strings, wire
+from . import proc, strings, term, wire
 from .proc import die, dump_json, load_json
 from .wire import (
     DriftOutcome,
@@ -50,15 +50,19 @@ def binary(name: str) -> str:
 
 
 def drive(exe: str, params: object, perform: Perform, query: object, outcome: object,
-          name: str, during: str, effect: Callable[[Effect], None] | None = None) -> Any:
+          name: str, during: str, effect: Callable[[Effect], None] | None = None,
+          say: Callable[[str], None] | None = None) -> Any:
     """Run one of the cores (`exe`) to its end: send `params` (encoded),
     perform each query it asks (one of the union `query`, answered by what
-    `perform` returns), print what it says to, and return its outcome (an
-    `outcome`); its die message dies here."""
+    `perform` returns), print what it says to (stdout's lines given to
+    `say` instead), and return its outcome (an `outcome`); its die message
+    dies here."""
     try:
-        core = subprocess.Popen([exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        core = subprocess.Popen([exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=term.child_stderr(),
+                                text=True)
     except OSError as e:
         die(strings.GUARD_CANNOT_RUN(name=name, exe=exe, error=e))
+    term.relay(core.stderr)
     assert core.stdin is not None and core.stdout is not None
     core_in, core_out = core.stdin, core.stdout
 
@@ -86,6 +90,8 @@ def drive(exe: str, params: object, perform: Perform, query: object, outcome: ob
                 lost(strings.GUARD_SENT(line=line.strip(), error=e))
             for e in effects:
                 match e:
+                    case Print(s) if say is not None:
+                        say(s)
                     case Print(s):
                         print(s, flush=True)
                     case Warn(s):
@@ -119,18 +125,21 @@ CORES: dict[type, tuple[str, object]] = {
 
 
 @overload
-def decide(params: DriftParams, perform: PlanPerform | None = None) -> DriftOutcome: ...
+def decide(params: DriftParams, perform: PlanPerform | None = None,
+           say: Callable[[str], None] | None = None) -> DriftOutcome: ...
 @overload
 def decide(params: RebaseParams, perform: PlanPerform | None = None) -> RebaseOutcome: ...
 @overload
 def decide(params: UnionParams, perform: PlanPerform | None = None) -> UnionOutcome: ...
 @overload
 def decide(params: PruneParams, perform: PlanPerform | None = None) -> PruneOutcome: ...
-def decide(params: DriftParams | RebaseParams | UnionParams | PruneParams, perform: PlanPerform | None = None) -> object:
+def decide(params: DriftParams | RebaseParams | UnionParams | PruneParams, perform: PlanPerform | None = None,
+           say: Callable[[str], None] | None = None) -> object:
     """The outcome of nixconvoy-plan's core `params` are of, its git queries
-    performed in the current checkout unless `perform` says otherwise."""
+    performed in the current checkout unless `perform` says otherwise, the
+    lines it prints given to `say` when set."""
     from .checkout import GitQueries  # noqa: PLC0415 - the queries decide through here too
 
     core, outcome = CORES[type(params)]
     return drive(binary("nixconvoy-plan"), {core: wire.encode(params)}, perform or GitQueries(), PlanQuery, outcome,
-                 "nixconvoy-plan", strings.GUARD_DECIDING(core=core))
+                 "nixconvoy-plan", strings.GUARD_DECIDING(core=core), say=say)
