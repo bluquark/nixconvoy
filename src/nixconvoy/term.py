@@ -31,8 +31,9 @@ _LOCAL = threading.local()
 # What a note, a warning and die()'s message start with (strings.py), each
 # in its color on a terminal.
 TINTS = (("warning:", "yellow"), ("note:", "cyan"), (strings.PROC_DIE(msg="").rstrip(), "bold red"))
-# Escape sequences and control characters, which a row's one line cannot hold.
-UNPRINTABLE = re.compile(r"\033\[[0-9;?]*[A-Za-z]|[\x00-\x1f\x7f]")
+# What a row's one line leaves out of its step's latest output: escape
+# sequences and control characters, and a store path's hash.
+UNSHOWN = re.compile(r"\033\[[0-9;?]*[A-Za-z]|[\x00-\x1f\x7f]|(?<=/nix/store/)[a-z0-9]{32}-")
 
 
 def painter(stream: IO[str] | None = None) -> Callable[[str, str], str]:
@@ -88,7 +89,7 @@ class Step:
 
     def show(self, line: str) -> None:
         """A line of output kept elsewhere: the row's latest."""
-        self.tail = UNPRINTABLE.sub("", line).strip()
+        self.tail = UNSHOWN.sub("", line).strip()
 
     def log(self, line: str) -> None:
         """A line of the step's output: printed, or on a terminal kept

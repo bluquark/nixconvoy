@@ -386,6 +386,7 @@ PROC_PERF = M("perf: total {total}s ({summary}) -> {path}")
 PROC_PERF_PHASE = M("{phase} {secs}s")
 # On a terminal: the phases of a second or more, a switch's without its targets.
 PROC_PERF_BRIEF = M("{total}s ({summary})")
+PROC_PERF_TOTAL = M("{total}s")
 PROC_DIE = M("{TOOL}: {msg}")
 PROC_STILL_ARMED = M("{TOOL}: {targets} still armed: each finishes verifying and is then confirmed or rolled back")
 PROC_CMD_FAILED = M("`{cmd}` failed{detail}")
