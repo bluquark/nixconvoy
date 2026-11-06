@@ -455,6 +455,7 @@ TARGETS_PHANTOM_TAG = M("{CONFIG_FILE} tags {phantom} as {tag}, but the inventor
 TARGETS_UNKNOWN = M("unknown target(s) {unknown}; the inventory has: {inventory}")
 TARGETS_PROBE_TIMED_OUT = M("no answer within {secs} s")
 TARGETS_PROBE_SILENT = M("exit {code}, nothing said")
+TARGETS_PROBE_UNREAD = M("connected, but {path} could not be read (exit {code}): is it a NixOS machine?")
 TARGETS_REFRESHING_KIT = M("refreshing the switch kit on {target}...")
 TARGETS_KIT_ROOT_FAILED = M("rooting the switch kit on {target} failed (exit {code}){detail}")
 TARGETS_NIX_TIMEOUT = M("`nix {cmd}` timed out after {secs} s")

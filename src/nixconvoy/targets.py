@@ -19,6 +19,8 @@ from .proc import die, load_json, run
 # Seconds one probe of a target may take, so a stalled ssh session holds
 # neither a deploy's start nor verification past the deadline.
 PROBE_TIMEOUT = 20
+PROBE_ERROR_LINES = 6
+SSH_FAILED = 255  # ssh's exit status for a failure of its own; any other is the remote command's
 # Where a target keeps the provenance of the system it runs (switch.provenance_doc),
 # claimed under the switch lock before activation, read by every probe.
 # Persistent, so a reboot keeps it beside the system it describes.
@@ -139,7 +141,7 @@ class Probe(NamedTuple):
     digest: str
     # The kit rooted for the running system (kit_link), "" when none.
     kit: str = ""
-    # Why `running` is None, in ssh's own words.
+    # Why `running` is None: what ssh or the target said.
     error: str = ""
 
 
@@ -204,10 +206,15 @@ def probe(name: str) -> Probe:
     running None when it cannot be read, error saying why."""
     p = run(target_cmd(name, ["sh", "-c", probe_script()]), check=False, timeout=PROBE_TIMEOUT)
     if p.returncode != 0:
-        said = (p.stderr or "").strip()
+        # The cause is ssh's last lines; a login banner comes before them.
+        said = "\n".join((p.stderr or "").strip().splitlines()[-PROBE_ERROR_LINES:])
         if p.timed_out:
-            said = strings.TARGETS_PROBE_TIMED_OUT(secs=PROBE_TIMEOUT) + (f"\n{said}" if said else "")
-        return Probe(None, "", "", error=said or strings.TARGETS_PROBE_SILENT(code=p.returncode))
+            lead = strings.TARGETS_PROBE_TIMED_OUT(secs=PROBE_TIMEOUT)
+        elif p.returncode != SSH_FAILED:
+            lead = strings.TARGETS_PROBE_UNREAD(path=CURRENT_SYSTEM, code=p.returncode)
+        else:
+            lead = "" if said else strings.TARGETS_PROBE_SILENT(code=p.returncode)
+        return Probe(None, "", "", error="\n".join(filter(None, [lead, said])))
     return parse_probe(p.stdout)
 
 

@@ -66,6 +66,7 @@ from nixconvoy import (
     names,
     proc,
     review,
+    strings,
     switch,
     targets,
 )
@@ -818,8 +819,16 @@ def provenance_cases() -> None:
                            return_value=["sh", "-c", "echo 'Host key verification failed.' >&2; exit 255"]):
         p = targets.probe("side1")
     assert p.running is None and p.error == "Host key verification failed.", p
+    with mock.patch.object(targets, "target_cmd", return_value=["sh", "-c", "exit 255"]):
+        assert targets.probe("side1").error == "exit 255, nothing said"
+    # A login that worked on a machine with no running system is not ssh's failure.
     with mock.patch.object(targets, "target_cmd", return_value=["false"]):
-        assert targets.probe("side1").error == "exit 1, nothing said"
+        assert targets.probe("side1").error == f"connected, but {targets.CURRENT_SYSTEM} could not be read (exit 1): is it a NixOS machine?"
+    with mock.patch.object(targets, "target_cmd",
+                           return_value=["sh", "-c", "seq 1 9 >&2; echo 'Permission denied (publickey).' >&2; exit 255"]):
+        assert targets.probe("side1").error == "5\n6\n7\n8\n9\nPermission denied (publickey)."
+    told = strings.DEPLOY_UNREACHABLE(targets="a", reasons=strings.DEPLOY_UNREACHABLE_REASON(address="me@a", error="x"))
+    assert told.endswith("re-run\n  ssh me@a: x"), told
     with mock.patch.object(targets, "target_cmd", return_value=["sh", "-c", "echo late >&2; exec sleep 5"]), \
             mock.patch.object(targets, "PROBE_TIMEOUT", 0.2):
         assert targets.probe("side1").error == "no answer within 0.2 s\nlate"
