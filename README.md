@@ -61,6 +61,7 @@ alias nixconvoy='nix run --accept-flake-config github:bluquark/nixconvoy/release
    };
    inputs.nixconvoy.url = "github:bluquark/nixconvoy/release";
    ```
+   Then run `nix flake lock` and commit `flake.lock`.
 2. In outputs:
    ```nix
    packages.x86_64-linux.nixconvoy = nixconvoy.packages.x86_64-linux.nixconvoy;
@@ -77,7 +78,7 @@ alias nixconvoy='nix run --accept-flake-config github:bluquark/nixconvoy/release
 <details>
 <summary><b>3. NixOS system package</b></summary>
 
-First add the input from method 2 step 1 and pass it to your modules through `specialArgs:`.  Then:
+First add the input from method 2 step 1, name `nixconvoy` in your `outputs` arguments, and pass it to your modules through `specialArgs`.  Then add the module below and apply it once the old way (`sudo nixos-rebuild switch --flake .#<host> --accept-flake-config`).
 
 ```nix
 { nixconvoy, pkgs, ... }: {
