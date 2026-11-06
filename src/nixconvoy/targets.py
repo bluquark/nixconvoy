@@ -139,6 +139,8 @@ class Probe(NamedTuple):
     digest: str
     # The kit rooted for the running system (kit_link), "" when none.
     kit: str = ""
+    # Why `running` is None, in ssh's own words.
+    error: str = ""
 
 
 def kit_link(toplevel: str) -> str:
@@ -202,10 +204,13 @@ def probe_script() -> str:
 
 def probe(name: str) -> Probe:
     """The target's running system and its provenance, in one round trip;
-    running None when it cannot be read."""
+    running None when it cannot be read, error saying why."""
     p = run(target_cmd(name, ["sh", "-c", probe_script()]), check=False, timeout=PROBE_TIMEOUT)
     if p.returncode != 0:
-        return Probe(None, "", "")
+        said = (p.stderr or "").strip()
+        if p.timed_out:
+            said = strings.TARGETS_PROBE_TIMED_OUT(secs=PROBE_TIMEOUT) + (f"\n{said}" if said else "")
+        return Probe(None, "", "", error=said or strings.TARGETS_PROBE_SILENT(code=p.returncode))
     return parse_probe(p.stdout)
 
 

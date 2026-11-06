@@ -39,13 +39,13 @@ There are three ways to install nixconvoy.  Do any one of the following on your 
 <summary><b>1. Quick no-config use</b></summary>
 
 ```bash
-nix profile install github:bluquark/nixconvoy/release
+nix profile install --accept-flake-config github:bluquark/nixconvoy/release
 ```
 
 Or, without installing:
 
 ```bash
-alias nixconvoy='nix run github:bluquark/nixconvoy/release -- '
+alias nixconvoy='nix run --accept-flake-config github:bluquark/nixconvoy/release -- '
 ```
 
 </details>
@@ -69,7 +69,7 @@ alias nixconvoy='nix run github:bluquark/nixconvoy/release -- '
    ```sh
    #!/bin/sh
    FLAKE_DIR=nixos  # adjust as needed
-   exec nix run "$(git rev-parse --show-toplevel)/$FLAKE_DIR#nixconvoy" -- "$@"
+   exec nix run --accept-flake-config "$(git rev-parse --show-toplevel)/$FLAKE_DIR#nixconvoy" -- "$@"
    ```
 
 </details>
@@ -378,7 +378,6 @@ After you've staged a git change, `nixconvoy deploy` both commits it to the work
 ```toml
 config_version = 1
 flake_dir = "nixos"
-targets_dir = "nixos/hosts"
 targets_arch = "x86_64-linux"
 
 ssh_address_template = "bluquark@{target}.home.bluquark.net"
