@@ -1045,11 +1045,49 @@ def find_sub(name: str, verb: str = "close") -> Path:
     return names.worktree(name, Path.cwd().resolve(), verb)
 
 
+def held(d: Path) -> bool:
+    """Whether the worktree `d` is held: any checkout but a subagent
+    worktree; a subagent worktree unless its lock names a claude session
+    that is gone.  A hand lock, a sessionless one (`open --child` by hand)
+    and none at all are a person's, as the sweeps take them."""
+    if sub_parent(d) is None:
+        return True
+    reason = worktree_lock(d)
+    if reason is None or reason.endswith(SESSIONLESS):
+        return True
+    return lock_pid_alive(reason) is not False
+
+
+def orphans(tips: dict[str, str]) -> list[tuple[str, Path | None]]:
+    """(branch, worktree owning it or None) for each orphan among `tips`
+    (origin's): one of this machine's listed branches shaped as a
+    subagent's (<prefix><branch-suffix>-<name>; a checkout's with a '-' in
+    its suffix is told apart only while that checkout stands) with commits
+    beyond origin/main and every other listed branch, which no checkout
+    here owns or whose owner is a subagent worktree no live session holds."""
+    prefix = this_prefix()
+    work = [b for b in tips if listed(b)]
+    owners = branch_owners(Path.cwd().resolve())
+    found = []
+    for b in sorted(work):
+        if not b.startswith(prefix) or "-" not in b[len(prefix):]:
+            continue
+        d = owners.get(b)
+        if d is not None and held(d):
+            continue
+        others = [remote_ref(o) for o in [cfg().main_branch, *work] if o != b and o in tips]
+        if run(["git", "rev-list", "-n", "1", remote_ref(b), "--not", *others], check=False).stdout.strip():
+            found.append((b, d))
+    return found
+
+
 def status() -> None:
-    """Every checkout on this machine as a tree, and the work branches only
-    origin holds (cli docstring: Status)."""
+    """Every checkout on this machine as a tree, this machine's orphaned
+    subagent branches, and the work branches only origin holds."""
     paint = painter()
-    git_remote(*fetch_args("--no-auto-gc"), check=False)
+    fetched = git_remote(*fetch_args("--no-auto-gc"), check=False)
+    if fetched.returncode != 0:
+        print(strings.STATUS_FETCH_FAILED(stderr=(fetched.stderr or "").strip()), file=sys.stderr)
     main = rev(main_ref())
     tips = origin_tips()
     here = Path.cwd().resolve()
@@ -1120,11 +1158,11 @@ def status() -> None:
         if own and cur is not None and cur != cfg().main_branch and git_common(d) == git_common(Path.cwd()):
             # By the checkout's files as they are: a note, not a verdict.
             try:
-                held = lanes.undeployed(cur, head, str(d))
+                undeployed = lanes.undeployed(cur, head, str(d))
             except (Fail, OSError):
-                held = []
-            if held:
-                notes.append(p(strings.STATUS_HOLDS_BACK(targets=", ".join(held)), "yellow"))
+                undeployed = []
+            if undeployed:
+                notes.append(p(strings.STATUS_HOLDS_BACK(targets=", ".join(undeployed)), "yellow"))
         notes += [p(a, "cyan") for a in submodule.notes(d)]
         if ident.kind == "sub" and not own and not any(counts.values()) and cur != ident.wb:
             if sessionless:
@@ -1170,8 +1208,17 @@ def status() -> None:
             print(f"{name}  {paint(strings.STATUS_NOT_A_CHECKOUT, 'dim')}")
         for d in sorted(d for d in checkouts if d != top and parent(d) == top):
             show("  └ ", d, width - 4)
+    orphaned = orphans(tips)
+    if orphaned:
+        print(paint(strings.STATUS_ORPHANS_HEADER, "dim"))
+        for b, d in orphaned:
+            n = out(["git", "rev-list", "--count", f"{main_short()}..{tips[b]}"])
+            entry = strings.STATUS_ORPHAN_ENTRY(branch=b, n=n, summary=summarize(tips[b]),
+                                                where=d if d is not None else strings.STATUS_ORPHAN_NO_WORKTREE)
+            print(f"  {paint(entry, 'red')}")
     local = {g(d, "symbolic-ref", "--short", "-q", "HEAD") for d in checkouts}
     local |= set(out(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/"]).splitlines())
+    local |= {b for b, _ in orphaned}
     elsewhere = []
     for name, tip in sorted(tips.items()):
         if name == cfg().main_branch or name in local or not listed(name):

@@ -11,7 +11,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import IO, NoReturn
 
-from . import commands, config, hooks, init, names, orphans, proc, review, strings, submodule
+from . import commands, config, hooks, init, names, proc, review, strings, submodule
 from .checkout import (
     await_background_push,
     lock_checkout,
@@ -97,8 +97,7 @@ def dispatch() -> None:
                                       rev=f" ({rev.read_text().strip()})" if rev.exists() else ""))
         print(usage())
         return
-    if args[0] not in ("deploy", "land", "undeploy", "close", "pull", "status", "review", "open", "hook", "init",
-                       "orphans"):
+    if args[0] not in ("deploy", "land", "undeploy", "close", "pull", "status", "review", "open", "hook", "init"):
         bad_usage()
     subcmd = args.pop(0)
     if subcmd == "hook":
@@ -119,11 +118,6 @@ def dispatch() -> None:
     if subcmd == "review":
         os.chdir(start)  # its paths are the caller's
         sys.exit(review.main(args))
-    if subcmd == "orphans":
-        if args:
-            bad_usage()
-        orphans.main()
-        return
     if subcmd not in ("status", "close", "open"):
         atexit.register(PERF.write, Path.cwd())
     takes, positionals = FLAGS[subcmd]

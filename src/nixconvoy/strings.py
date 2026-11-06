@@ -47,7 +47,6 @@ open --submodule <input>
 close [<path> ... | <worktree> ... | <submodule> ...] [--force]
 pull
 status
-orphans
 hook <event> < <hook-input>
 = Deploying and committing changes
 deploy [<target> | @<tag> ...] [-m <msg>] [--evict] [--dry-activate]
@@ -219,6 +218,7 @@ OPEN_CHECKOUT_ON = M("checkout {name} on {branch}")
 OPEN_CHECKOUT_ON_TAKEN = M("checkout {name} on {branch} ({remote}'s copy: this checkout's now)")
 
 # --- commands.py: status
+STATUS_FETCH_FAILED = M("note: git fetch failed, showing the refs fetched before: {stderr}")
 STATUS_DETACHED_AT_MAIN = M("detached at {main}")
 STATUS_DETACHED_NOTHING_OWN = M("detached at {sha}, nothing of its own")
 STATUS_DETACHED_AHEAD = M("detached, {n} ahead of {main}")
@@ -244,6 +244,9 @@ STATUS_SUBJECT = M('"{subject}"')
 STATUS_OP_IN_PROGRESS = M("[{op} in progress]")
 STATUS_DEPLOYING = "[deploying]"
 STATUS_NOT_A_CHECKOUT = "(not a checkout here)"
+STATUS_ORPHANS_HEADER = "orphaned subagent branches (no live session holds them; each still unions into every deploy):"
+STATUS_ORPHAN_ENTRY = M("{branch} +{n}: {summary}  {where}")
+STATUS_ORPHAN_NO_WORKTREE = "(no worktree)"
 STATUS_ELSEWHERE_HEADER = M("on {remote} only (other machines' checkouts):")
 STATUS_ELSEWHERE_ENTRY = M("{branch} +{n}: {summary}")
 STATUS_SUBMODULES = M("submodules: {names} ({TOOL} open --submodule <input>)")
@@ -350,10 +353,6 @@ NAMES_NO_WORKTREE_ON_BRANCH = M("no worktree on this machine is on branch {name}
 NAMES_NOT_FOUND = M("no subagent worktree or branch named {name}{listing}")
 NAMES_NOT_FOUND_LISTING = M("; the subagent worktrees here: {worktrees}")
 NAMES_NOT_SUBAGENT = M("{name} is the checkout {path}, not a subagent worktree")
-
-# --- orphans.py
-ORPHANS_FETCH_FAILED = M("note: git fetch failed, judging the refs fetched before: {stderr}")
-ORPHANS_NO_WORKTREE = "(no worktree)"
 
 # --- review.py
 REVIEW_UNKNOWN_NAME = M("review: no subagent worktree, submodule, branch or path named {name}")

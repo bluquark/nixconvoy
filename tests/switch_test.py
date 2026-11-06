@@ -3162,6 +3162,24 @@ def open_cases(d: Path) -> None:
         assert checkout.worktree_lock(w) == "claude agent task (pid 1 start 2) 3.4"
         assert checkout.identity_of(w.resolve(), "worktree-task") == checkout.Checkout("sub", "work/tester/9-task")
         assert checkout.sub_parent(w.resolve()) == co.resolve() and checkout.sub_parent(co.resolve()) is None
+        # status: this machine's subagent branches on origin that no live
+        # session's worktree owns are orphans, with a worktree or without;
+        # an agent checkout's and another machine's are origin's alone.
+        tree = sh(co, "rev-parse", "origin/main^{tree}")
+        pushed = ("work/tester/9-task", "work/tester/9-gone", "work/tester/8", "work/other/9-x")
+        for b in pushed:
+            sh(co, "push", "--quiet", "origin", sh(co, "commit-tree", "-p", "origin/main", "-m", b, tree) + f":refs/heads/{b}")
+        said = printed(commands.status)
+        mine, _, others = said.partition("orphaned subagent branches")[2].partition("on origin only")
+        assert [ln.split()[0] for ln in mine.splitlines() if ln.startswith("  ")] == [pushed[1], pushed[0]], said
+        assert "(no worktree)" in mine and str(w.resolve()) in mine, said
+        assert [ln.split()[0] for ln in others.splitlines() if ln.startswith("  ")] == [pushed[3], pushed[2]], said
+        sh(co, "worktree", "unlock", str(w))
+        sh(co, "worktree", "lock", "--reason", f"claude agent task (pid {os.getpid()})", str(w))
+        assert commands.orphans(checkout.origin_tips()) == [(pushed[1], None)]  # its session alive
+        sh(co, "worktree", "unlock", str(w))
+        sh(co, "worktree", "lock", "--reason", "claude agent task (pid 1 start 2) 3.4", str(w))
+        sh(co, "push", "--quiet", "origin", *(f":refs/heads/{b}" for b in pushed))
         # Nested deeper, still this checkout's; a worktree of another
         # repository nested here (a submodule's) is nobody's subagent.
         deep = co / "elsewhere/deeper/other"
@@ -3941,7 +3959,7 @@ def init_cases(d: Path) -> None:
     try:
         assert "usage:" in dies(lambda: run_cli(["init", "--ssh-domain", "lan"]))
         assert not (repo / "nixconvoy.toml").exists()
-        assert "usage:" in dies(lambda: run_cli(["orphans", "x"]))  # a command without the toml still reaches its arguments
+        assert "usage:" in dies(lambda: run_cli(["status", "x"]))  # a command without the toml still reaches its arguments
         assert not (repo / ".git/nixconvoy/branch-prefix").exists()
         run_cli(["init"])
         c = config.load(repo)
@@ -3958,7 +3976,7 @@ def init_cases(d: Path) -> None:
         assert (repo / ".git/nixconvoy/branch-prefix").read_text() == "nixconvoy/\n"  # init notes the prefix (the repo's, not the suite's)
         assert (repo / ".git/nixconvoy/main-ref").read_text() == "origin/main\n"
         (repo / ".git/nixconvoy/branch-prefix").unlink()
-        assert "usage:" in dies(lambda: run_cli(["orphans", "x"]))  # as does any later command
+        assert "usage:" in dies(lambda: run_cli(["status", "x"]))  # as does any later command
         assert (repo / ".git/nixconvoy/branch-prefix").read_text() == "nixconvoy/\n"
         (repo / "nixconvoy.toml").unlink()
         # The flake named, relative to where init runs; the one remote and
