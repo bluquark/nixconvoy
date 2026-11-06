@@ -235,7 +235,7 @@ def detect_system(root: Path, ref: str, hosts_dir: str | None, targets: list[str
     if len(seen) == 1:
         return seen.pop(), strings.INIT_SYSTEM_FROM_FILES(hosts_dir=hosts_dir)
     if targets:
-        got = nix.json(ref, f'nixosConfigurations."{targets[0]}".config.nixpkgs.hostPlatform.system',
+        got = nix.json(ref, f'nixosConfigurations."{targets[0]}".pkgs.stdenv.hostPlatform.system',
                        strings.INIT_WHAT_SYSTEM(target=targets[0]))
         if isinstance(got, str) and got:
             return got, strings.INIT_SYSTEM_EVALUATED(target=targets[0])

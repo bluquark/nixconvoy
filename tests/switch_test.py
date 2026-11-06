@@ -813,6 +813,16 @@ def provenance_cases() -> None:
     p = targets.parse_probe(f"{OLD}\n\n")
     assert p == targets.Probe(OLD, "", hashlib.sha256(b"").hexdigest()), p
     assert targets.kit_link(NEW) == "/var/lib/nixconvoy/kits/new-system"
+    # An unread target carries what ssh said, told under the refusal.
+    with mock.patch.object(targets, "target_cmd",
+                           return_value=["sh", "-c", "echo 'Host key verification failed.' >&2; exit 255"]):
+        p = targets.probe("side1")
+    assert p.running is None and p.error == "Host key verification failed.", p
+    with mock.patch.object(targets, "target_cmd", return_value=["false"]):
+        assert targets.probe("side1").error == "exit 1, nothing said"
+    with mock.patch.object(targets, "target_cmd", return_value=["sh", "-c", "echo late >&2; exec sleep 5"]), \
+            mock.patch.object(targets, "PROBE_TIMEOUT", 0.2):
+        assert targets.probe("side1").error == "no answer within 0.2 s\nlate"
 
     with mock.patch.object(switch, "rev"), mock.patch.object(switch, "current_branch"):
         def record(branch: str | None, head: str, origin: str | None, snap: str) -> object:

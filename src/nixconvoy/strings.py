@@ -396,7 +396,8 @@ DEPLOY_REACHES_NO_TARGET = "the increment reaches no target"
 DEPLOY_NOTHING_STAGED = "nothing is staged; stage the change or drop -m"
 DEPLOY_ANNOUNCEMENT_KEPT_RECORDS = M("note: {targets} were switched (or a switch was started), so this deploy's announcement stays, carrying their deploy records: re-run to finish the deploy, or clear it (git push {remote} :{pending_refs}/{key})")
 DEPLOY_ANNOUNCEMENT_KEPT_INCREMENT = M("note: {targets} run this checkout's unpushed increment (or a switch onto it was started), so its announcement stays: re-run to finish the deploy, or clear it to have the increment reverted by the next deploy there (git push {remote} :{pending_refs}/{key})")
-DEPLOY_UNREACHABLE = M("unreachable: {targets}; {NOTHING_DONE}; fix connectivity (or restrict targets) and re-run")
+DEPLOY_UNREACHABLE = M("unreachable: {targets}; {NOTHING_DONE}; fix connectivity (or restrict targets) and re-run{reasons}")
+DEPLOY_UNREACHABLE_REASON = M("\n  ssh {address}: {error}")
 DEPLOY_WAITING = M("waiting for {key}'s deploy under way: its increment and this checkout's both reach {targets}...")
 DEPLOY_STILL_WAITING = M("still waiting for {keys} ({minutes:.0f} min)")
 DEPLOY_REMOTE_SILENT = M("{remote} stopped answering while waiting for the deploy under way; {NOTHING_DONE}")
@@ -452,6 +453,8 @@ TARGETS_NONE_FOUND = M("no targets found under {dir}/")
 TARGETS_NO_TAG = M("no target carries the tag {tag} ({CONFIG_FILE}: targets.<name>.tags)")
 TARGETS_PHANTOM_TAG = M("{CONFIG_FILE} tags {phantom} as {tag}, but the inventory has no such target (it has: {inventory})")
 TARGETS_UNKNOWN = M("unknown target(s) {unknown}; the inventory has: {inventory}")
+TARGETS_PROBE_TIMED_OUT = M("no answer within {secs} s")
+TARGETS_PROBE_SILENT = M("exit {code}, nothing said")
 TARGETS_REFRESHING_KIT = M("refreshing the switch kit on {target}...")
 TARGETS_KIT_ROOT_FAILED = M("rooting the switch kit on {target} failed (exit {code}){detail}")
 TARGETS_NIX_TIMEOUT = M("`nix {cmd}` timed out after {secs} s")
@@ -536,7 +539,7 @@ INIT_TOML_CHILD_WORKTREES = M(
 INIT_TOML_PRECHECK = M("# Precheck step that runs in parallel with eval. Names a flake check (checks.<targets_arch>.<name>).")
 INIT_TOML_BUILD = (
     "# List of build machines with fallbacks if the earlier ones are unavailable.\n"
-    "# The {local_hostname} is considered unavailable if it's the wrong CPU architecture (i.e. my Macbook).\n"
+    "# The {local_hostname} is considered unavailable if it's the wrong CPU architecture (e.g. a Mac).\n"
     "builders = [\"{local_hostname}\"]")
 # A statement proving the internet reachable from where it runs: exactly the 204 Google answers.
 PROBE = '[ "$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" https://www.google.com/generate_204)" = 204 ]'
@@ -555,7 +558,7 @@ INIT_TOML_SWITCH = M(
     "# # this machine still reaches the internet, through it\n"
     "# auto_rollback_checks = [{{ controller_shell = ['" + PROBE.replace("{", "{{").replace("}", "}}") + "'] }}]")
 INIT_TOML_TARGETS = (
-    "# nixconvoy init populates your targets from nixosConfiguration.")
+    "# nixconvoy init populates your targets from the flake's nixosConfigurations.")
 INIT_TOML_FIRST_TARGET = M(
     "# # overrides ssh_address_template, if one target has an unusual username or domain-name\n"
     "# ssh_address = \"root@10.0.0.9\"\n"
