@@ -321,10 +321,30 @@ def identity_of(here: Path, cur: str | None) -> Checkout:
     if cur and owned(cur):
         return Checkout("sub" if parent is not None else "agent", cur)
     if parent is not None:
-        pb = branch_of(parent)
-        base = pb if pb and owned(pb) else this_prefix() + "main"
-        return Checkout("sub", f"{base}-{here.name}")
+        return Checkout("sub", sub_branch(parent, here.name))
     return Checkout("main", None)
+
+
+def sub_branch(parent: Path, name: str) -> str:
+    """The work branch of the subagent worktree `name` nested in the checkout `parent`."""
+    pb = branch_of(parent)
+    return f"{pb if pb and owned(pb) else this_prefix() + 'main'}-{name}"
+
+
+def branch_owners(here: Path) -> dict[str, Path]:
+    """The checkout owning each work branch, among `here` and its siblings.
+    A checkout's suffix may hold a '-', so the name alone does not tell
+    <branch-suffix>-<name> from another checkout's branch: this does, for
+    the checkouts on this machine."""
+    owners: dict[str, Path] = {}
+    for d in [here, *sibling_checkouts(here)]:
+        try:
+            wb = identity_of(d, branch_at(d)).wb
+        except FileNotFoundError:  # removed since it was listed
+            continue
+        if wb is not None:
+            owners.setdefault(wb, d)
+    return owners
 
 
 def checkout_identity() -> Checkout:

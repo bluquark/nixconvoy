@@ -9,13 +9,11 @@ from pathlib import Path
 from . import strings
 from .checkout import (
     SESSIONLESS,
-    branch_at,
+    branch_owners,
     fetch_args,
-    identity_of,
     listed,
     lock_pid_alive,
     origin_tips,
-    sibling_checkouts,
     sub_parent,
     this_prefix,
     worktree_lock,
@@ -39,25 +37,19 @@ def held(d: Path) -> bool:
 
 def find() -> list[tuple[str, Path | None, str]]:
     """(branch, worktree owning it or None, COMMIT_MSG.md's subject) for
-    each orphan: one of this machine's listed subagent branches
-    (<prefix><branch-suffix>-<name>) on origin with commits beyond origin/main and
-    every other listed branch, which no checkout here owns or whose owner
-    is a subagent worktree no live session holds."""
+    each orphan: one of this machine's listed branches shaped as a
+    subagent's (<prefix><branch-suffix>-<name>; a checkout's with a '-' in
+    its suffix is told apart only while that checkout stands) on origin
+    with commits beyond origin/main and every other listed branch, which
+    no checkout here owns or whose owner is a subagent worktree no live
+    session holds."""
     fetched = git_remote(*fetch_args("--no-auto-gc"), check=False)
     if fetched.returncode != 0:
         print(strings.ORPHANS_FETCH_FAILED(stderr=(fetched.stderr or "").strip()), file=sys.stderr)
     prefix = this_prefix()
     tips = origin_tips()
     work = [b for b in tips if listed(b)]
-    here = Path.cwd().resolve()
-    owners: dict[str, Path] = {}
-    for d in [here, *sibling_checkouts(here)]:
-        try:
-            wb = identity_of(d, branch_at(d)).wb
-        except FileNotFoundError:  # removed since it was listed
-            continue
-        if wb is not None:
-            owners.setdefault(wb, d)
+    owners = branch_owners(Path.cwd().resolve())
     found = []
     for b in sorted(work):
         if not b.startswith(prefix) or "-" not in b[len(prefix):]:

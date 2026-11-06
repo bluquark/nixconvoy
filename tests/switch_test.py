@@ -3253,6 +3253,22 @@ def open_cases(d: Path) -> None:
         assert sh(co, "rev-parse", "origin/work/tester/homelab5") == sh(co, "rev-parse", "origin/main")
         assert "origin holds work/tester/other" in dies(lambda: commands.open_checkout(d / "other", None))
         assert "origin holds work/tester/x-task" in dies(lambda: commands.open_checkout(d / "x", None))
+        # A suffix may hold a '-': the branch is then shaped as a subagent's
+        # of a shorter-named checkout, which opens all the same while this
+        # one stands.  A branch a checkout or a subagent worktree here owns
+        # (the subagent's from before its first deploy) is never opened,
+        # nor a subagent worktree whose branch would be a checkout's.
+        fw = commands.open_checkout(d / "homelab-firewall", None)
+        assert checkout.branch_at(fw) == "work/tester/homelab-firewall"
+        assert checkout.branch_at(commands.open_checkout(d / "homelab", None)) == "work/tester/homelab"
+        commands.close_checkout(d / "homelab")
+        assert f"is the work branch of {w.resolve()}" in dies(lambda: commands.open_checkout(d / "y", "9-task"))
+        assert f"is the work branch of {fw.resolve()}" in dies(lambda: commands.open_checkout(d / "y", "homelab-firewall"))
+        commands.open_checkout(d / "9-kid", None)
+        assert "would own work/tester/9-kid" in dies(lambda: commands.open_worktree("kid", None))
+        commands.close_checkout(d / "9-kid")
+        commands.close_checkout(d / "homelab-firewall")
+        assert "work/tester/main-<name>" in dies(lambda: commands.open_checkout(d / "y", "main"))
         one = commands.open_checkout(d / "other", "other")  # --branch <branch-suffix>
         assert one == d / "other" and checkout.branch_at(one) == "work/tester/other"
         assert sh(one, "rev-parse", "HEAD") == sh(co, "rev-parse", "origin/work/tester/other")
