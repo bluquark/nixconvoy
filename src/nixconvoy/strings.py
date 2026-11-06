@@ -41,18 +41,18 @@ SYNOPSIS = """\
 = Setting up a repository
 init [<flake-dir>]
 = Managing worktrees
-open <path> [--branch <branch-suffix>]
-open --child <worktree>
-open --submodule <input>
-close [<path> ... | <worktree> ... | <submodule> ...] [--force]
+open <worktree-path> [--branch <branch-suffix>]
+open --child <child-worktree>
+open --submodule <submodule>
+close [<path> ... | <child-worktree> ... | <submodule> ...] [--force]
 pull
 status
 hook <event> < <hook-input>
 = Deploying and committing changes
 deploy [<target> | @<tag> ...] [-m <msg>] [--evict] [--dry-activate]
-undeploy [<worktree> ... | --with-children] [--back-to <rev>] [--dry-activate]
-review [<worktree> | <submodule> | <branch> ... | --with-children] [<diff-arg> ...]
-land [<worktree> ... | --with-children] [-m <msg>] [--not-yet-deployed]
+undeploy [<child-worktree> ... | --with-children] [--back-to <rev>] [--dry-activate]
+review [<child-worktree> | <submodule> | <work-branch> ... | --with-children] [<diff-arg> ...]
+land [<child-worktree> ... | --with-children] [-m <msg>] [--not-yet-deployed]
 """
 USAGE_HEADING = "usage:"
 CLI_VERSION = M("{TOOL} {version}{rev}\n")
