@@ -352,7 +352,7 @@ def build_on(host: str, drvs: list[str], what: str,
     so the copy needs no signing or trusted user there."""
     tgt = ssh_address(host)
     p = run(["nix", "copy", "--derivation", "--to", f"ssh://{tgt}", *drvs],
-            env={"NIX_SSHOPTS": " ".join(ssh_opts())}, check=False, capture=capture, merged=True, live=capture)
+            env={"NIX_SSHOPTS": " ".join(ssh_opts())}, check=False, capture=capture, merged=True)
     if p.returncode != 0:
         return strings.TARGETS_COPY_DRVS_FAILED(host=host, detail=strings.PROC_DETAIL(output=p.stdout) if capture else "")
     via = ["ssh", *ssh_opts(), tgt]
@@ -361,7 +361,7 @@ def build_on(host: str, drvs: list[str], what: str,
         return strings.TARGETS_BUILD_FAILED_ON_BECAUSE(what=what, host=host, error=cmd)
     build = [*via, shlex.join(cmd)]
     p = run([*build, *sandbox_opts(build, drvs), *(f"{d}^out" for d in drvs)],
-            check=False, capture=capture, merged=True, live=capture)
+            check=False, capture=capture, merged=True)
     if p.returncode != 0:
         return strings.TARGETS_BUILD_FAILED_ON(what=what, host=host,
                                                detail=strings.PROC_DETAIL(output=p.stdout) if capture else "")
@@ -383,7 +383,7 @@ def build_drvs(drvs: list[str], what: str, opts: tuple[str, ...] = (),
     if isinstance(build, str):
         return strings.TARGETS_BUILD_FAILED_BECAUSE(what=what, error=build)
     p = run([*build, *sandbox_opts(build, drvs), *(f"{d}^out" for d in drvs)],
-            check=False, capture=capture, merged=True, live=capture)
+            check=False, capture=capture, merged=True)
     if p.returncode != 0:
         return strings.TARGETS_BUILD_FAILED(what=what, detail=strings.PROC_DETAIL(output=p.stdout) if capture else "")
     return None
@@ -401,6 +401,12 @@ def off_lan(tgt: str) -> bool:
                for a in addrs)
 
 
+def built_on(target: str) -> bool:
+    """Whether `target` is the machine the closures are realised on, which
+    is copied nothing."""
+    return target == (builder_host() or proc.this_machine())
+
+
 def copy_closure(target: str, paths: list[str], quiet: bool = False, fatal: bool = True) -> str | None:
     """Copy `paths`' closures (the toplevel, the switch kit) to `target`,
     outside the switch lock (a union rebuilt after it merely leaves a few
@@ -414,11 +420,10 @@ def copy_closure(target: str, paths: list[str], quiet: bool = False, fatal: bool
         return msg
     b = builder_host()
     sshopts = " ".join(ssh_opts())
-    if target == (b or proc.this_machine()):
-        return None  # built there
+    if built_on(target):
+        return None
     tgt = ssh_address(target)
-    with term.step(strings.TARGETS_COPYING_CLOSURE(target=target),
-                   strings.TARGETS_COPIED_CLOSURE(target=target)) as step:
+    with term.step(strings.TARGETS_COPYING_CLOSURE(target=target), part=True) as step:
         # Off-LAN targets (a VPS over the tailnet) substitute what they can
         # themselves, so only custom-built paths cross the slow uplink; on a
         # LAN a straight copy beats any download and per-path probe.
@@ -428,10 +433,10 @@ def copy_closure(target: str, paths: list[str], quiet: bool = False, fatal: bool
             there = shlex.quote(" ".join(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *SSH_KEEPALIVE]))
             p = run(["ssh", *ssh_opts(), ssh_address(b),
                      f"NIX_SSHOPTS={there} nix copy {' '.join(subst)} --to ssh://{tgt} {' '.join(paths)}"],
-                    check=False, capture=quiet, merged=True, live=quiet)
+                    check=False, capture=quiet, merged=True)
         else:
             p = run(["nix", "copy", *subst, "--to", f"ssh://{tgt}", *paths],
-                    env={"NIX_SSHOPTS": sshopts}, check=False, capture=quiet, merged=True, live=quiet)
+                    env={"NIX_SSHOPTS": sshopts}, check=False, capture=quiet, merged=True)
         if p.returncode != 0:
             step.ok = False
             return failed(strings.TARGETS_COPY_CLOSURE_FAILED(

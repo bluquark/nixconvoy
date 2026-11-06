@@ -244,7 +244,9 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
         match ask:
             case TakeGuard():
                 guard = subprocess.Popen(switch_guard_cmd(target, expected, toplevel, digest),
-                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=term.child_stderr(), text=True)
+                term.relay(guard.stderr)
                 assert guard.stdin is not None and guard.stdout is not None
                 line = guard.stdout.readline().strip()
                 if line == "LOCKED":

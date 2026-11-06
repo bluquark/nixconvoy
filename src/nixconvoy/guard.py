@@ -12,7 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NoReturn, overload
 
-from . import proc, strings, wire
+from . import proc, strings, term, wire
 from .proc import die, dump_json, load_json
 from .wire import (
     DriftOutcome,
@@ -58,9 +58,11 @@ def drive(exe: str, params: object, perform: Perform, query: object, outcome: ob
     `say` instead), and return its outcome (an `outcome`); its die message
     dies here."""
     try:
-        core = subprocess.Popen([exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        core = subprocess.Popen([exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=term.child_stderr(),
+                                text=True)
     except OSError as e:
         die(strings.GUARD_CANNOT_RUN(name=name, exe=exe, error=e))
+    term.relay(core.stderr)
     assert core.stdin is not None and core.stdout is not None
     core_in, core_out = core.stdin, core.stdout
 

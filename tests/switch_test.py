@@ -67,6 +67,7 @@ from nixconvoy import (
     names,
     proc,
     review,
+    strings,
     switch,
     targets,
     term,
@@ -206,7 +207,7 @@ class Terminal(io.StringIO):
         erasures performed, its colors dropped."""
         lines: list[list[str]] = [[]]
         row = col = 0
-        for count, code, char in re.findall(r"\033\[([\d;]*)([A-Za-z])|([\s\S])", self.getvalue()):
+        for count, code, char in re.findall(r"\033\[([\d;?]*)([A-Za-z])|([\s\S])", self.getvalue()):
             if code == "A":
                 row -= int(count)
             elif code == "K":
@@ -4150,21 +4151,31 @@ def term_cases() -> None:
         with term.step("copying closure to x...", keep=re.compile("kept")) as st:
             st.log("a line kept")
             st.log("a line dropped")
+        with term.step("a part of it...", part=True):
+            pass
+        print(term.good("landed on main\nits second line"))
+        print(term.line(strings.CHECKOUT_CATCH_UP_LINE, "dim", name="homelab2", status="up to date"))
         try:
             with term.step("switching x...") as st:
                 st.log("what it said")
                 proc.die("the switch of x failed")
         except proc.Fail:
             pass
+        with contextlib.suppress(proc.Fail), term.step("copying closure to y..."):
+            raise proc.Fail("swept by the failure above")  # not its own: no line
         proc.run(["true"], capture=False)  # the terminal is the command's meanwhile
+        assert term.clip("日本語のログ", 7) == "日本語…" and term.cells("日本語…") == 7
     assert during[:2] == ["a line printed meanwhile", "note: said to stderr"], during
     assert len(during) == 3 and re.fullmatch(r". building x  0s  copying path '/nix/store/a'\.\.\.", during[2]), during
     took = r"  \d+\.\ds"
     for line, want in zip(tty.screen()[2:], (
             "✓ built x" + took, "✓ copying closure to x" + took, "    a line kept",
+            "✓ landed on main", "its second line", "homelab2: up to date",
             "✗ switching x" + took, "    what it said", "nixconvoy: the switch of x failed"), strict=True):
         assert re.fullmatch(want, line), tty.screen()
     assert "\033[36mnote:\033[0m said" in tty.getvalue(), tty.getvalue()
+    assert "\033[1mhomelab2\033[0m: \033[2mup to date\033[0m\n" in tty.getvalue(), tty.getvalue()
+    assert term.line(strings.CHECKOUT_CATCH_UP_LINE, "dim", name="homelab2", status="up to date") == "homelab2: up to date"
 
     def plain() -> None:
         with term.step("building x...", "built x") as st:

@@ -8,9 +8,11 @@ import contextlib
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from collections.abc import Callable, Iterator
 from typing import IO, Any
 
@@ -52,11 +54,24 @@ def painter(stream: IO[str] | None = None) -> Callable[[str, str], str]:
 
 def paint(text: str, style: str) -> str:
     """`text` in `style` (painter) once the terminal is taken, else as is."""
-    return painter(_TTY)(text, style) if LIVE else text
+    return _PAINT(text, style) if LIVE else text
+
+
+def cells(text: str) -> int:
+    """The columns `text` takes on a terminal."""
+    return sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
 
 
 def clip(text: str, room: int) -> str:
-    return text if len(text) <= room else text[:max(room - 1, 0)] + "…" if room > 0 else ""
+    """`text`, cut short with an ellipsis to fit `room` columns."""
+    if cells(text) <= room:
+        return text
+    fits = ""
+    for c in text:
+        if cells(fits + c) >= room:
+            break
+        fits += c
+    return fits + "…" if room > 0 else ""
 
 
 class Step:
@@ -64,8 +79,8 @@ class Step:
     label, the seconds so far and the latest line of its output - then the
     one line it ends in."""
 
-    def __init__(self, label: str, done: str, keep: re.Pattern[str] | None) -> None:
-        self.label, self.done, self.keep = label, done, keep
+    def __init__(self, label: str, done: str, keep: re.Pattern[str] | None, part: bool) -> None:
+        self.label, self.done, self.keep, self.part = label, done, keep, part
         self.tail = ""
         self.lines: list[str] = []
         self.t0 = time.monotonic()
@@ -83,7 +98,7 @@ class Step:
         """A line of a core's: one ending in ... is what the step is at
         now, its row's label on a terminal; any other is printed."""
         if LIVE and line.endswith("..."):
-            self.label, self.tail = line[:-3], ""
+            self.label, self.tail = UNSHOWN.sub("", line[:-3]), ""
         else:
             print(line, flush=True)
 
@@ -103,12 +118,14 @@ class Step:
 
     def row(self, now: float, width: int, frame: str) -> str:
         secs = strings.TERM_ELAPSED(secs=now - self.t0)
-        label = clip(self.label, width - len(secs) - 5)
-        tail = clip(self.tail, width - len(label) - len(secs) - 7)
+        label = clip(self.label, width - cells(secs) - 5)
+        tail = clip(self.tail, width - cells(label) - cells(secs) - 7)
         return (f"{paint(frame, 'cyan')} {label}  {paint(secs, 'dim')}"
                 + (f"  {paint(tail, 'dim')}" if tail else ""))
 
-    def end(self, failed: bool = False) -> None:
+    def end(self, failed: bool = False, told: bool = True) -> None:
+        """The row gone, and unless not `told` the line the step ends in
+        (step)."""
         if not self.open:
             return
         self.open = False
@@ -122,11 +139,13 @@ class Step:
         took = paint(strings.TERM_TOOK(secs=time.monotonic() - self.t0), "dim")
         indent = "    " if self.label else ""
         out: list[str] = []
-        if failed:
+        if not told:
+            pass
+        elif failed:
             if self.label:
                 out.append(f"{paint(strings.TERM_FAILED, 'red')} {self.label}  {took}")
             out += [indent + ln for ln in self.lines]
-        else:
+        elif not self.part:
             if self.done or self.label:
                 out.append(f"{paint(strings.TERM_OK, 'green')} {self.done or self.label}  {took}")
             if self.keep is not None:
@@ -146,18 +165,21 @@ def _steps() -> list[Step]:
 
 
 @contextlib.contextmanager
-def step(label: str = "", done: str = "", keep: re.Pattern[str] | None = None) -> Iterator[Step]:
+def step(label: str = "", done: str = "", keep: re.Pattern[str] | None = None,
+         part: bool = False) -> Iterator[Step]:
     """A step of the run, the calling thread's while the block runs: off a
     terminal `label` printed and no more; on one a row (Step; none while it
     has neither a label nor output), ending in `done` (default: the label)
-    with the time it took - or, the block raising (die() included: fail)
-    or clearing the step's `ok`, in the label marked failed and all its
-    kept output."""
-    s = Step(label.removesuffix("...") if LIVE else label, done, keep)
+    with the time it took - in no line for a `part` of a step another
+    thread ends - or, the block dying (die(): fail) or clearing the step's
+    `ok`, in the label marked failed and all its kept output.  A block
+    raising otherwise (a sibling's failure sweeping it, a signal) ends it
+    in no line: the failure is another's to say."""
+    s = Step(label.removesuffix("...") if LIVE else label, done, keep, part)
     try:
         yield s
     except BaseException:
-        s.end(failed=True)
+        s.end(told=False)
         raise
     s.end(failed=not s.ok)
 
@@ -182,8 +204,18 @@ def phase(name: str) -> None:
 
 
 def good(text: str) -> str:
-    """A run's verdict that it ended well, marked so on a terminal."""
-    return f"{paint(strings.TERM_OK, 'green')} {paint(text, 'bold')}" if LIVE else text
+    """A verdict that something ended well, its first line marked so on a
+    terminal."""
+    first, newline, rest = text.partition("\n")
+    return f"{paint(strings.TERM_OK, 'green')} {paint(first, 'bold')}{newline}{rest}" if LIVE else text
+
+
+def line(template: strings.M, style: str = "", **fields: object) -> str:
+    """`template` filled with `fields`, the first of them (what the line
+    is about) bold on a terminal and the rest in `style`."""
+    about = next(iter(fields))
+    return template(**{k: paint(str(v), "bold" if k == about else style) if k == about or style else v
+                       for k, v in fields.items()})
 
 
 def _rows() -> list[str]:
@@ -210,8 +242,10 @@ def _redraw(show: bool = True) -> None:
     # Each line erased by itself: erasing down the screen from its top
     # row is a clear to some terminals, which scroll it into their history.
     spare = max(_DRAWN - len(rows), 0)
-    _TTY.write((f"\033[{_DRAWN}A\r" if _DRAWN else "") + "".join(r + "\033[K\n" for r in rows)
-               + "\033[K\n" * spare + (f"\033[{spare}A" if spare else ""))
+    # No wrapping meanwhile: a row wider than the screen after all (a
+    # window narrowed since) is cut, not spread over lines never erased.
+    _TTY.write("\033[?7l" + (f"\033[{_DRAWN}A\r" if _DRAWN else "") + "".join(r + "\033[K\n" for r in rows)
+               + "\033[K\n" * spare + (f"\033[{spare}A" if spare else "") + "\033[?7h")
     _TTY.flush()
     _DRAWN = len(rows)
 
@@ -225,18 +259,23 @@ class Above:
 
     def __init__(self, stream: IO[str], tinted: bool) -> None:
         self.stream, self.tinted = stream, tinted
-        self.held = threading.local()
+        self.held: dict[int, str] = {}  # by thread
 
     def write(self, text: str) -> int:
-        whole = getattr(self.held, "text", "") + text
-        lines, newline, self.held.text = whole.rpartition("\n")
-        self.put(lines + newline)
+        me = threading.get_ident()
+        with _LOCK:
+            lines, newline, rest = (self.held.pop(me, "") + text).rpartition("\n")
+            if rest:
+                self.held[me] = rest
+            self.put(lines + newline)
         return len(text)
 
-    def flush(self) -> None:
-        text, self.held.text = getattr(self.held, "text", ""), ""
-        self.put(text)
-        self.stream.flush()
+    def flush(self, every: bool = False) -> None:
+        """The calling thread's held text written (`every` thread's)."""
+        with _LOCK:
+            for thread in list(self.held) if every else [threading.get_ident()]:
+                self.put(self.held.pop(thread, ""))
+            self.stream.flush()
 
     def put(self, text: str) -> None:
         global _MIDLINE
@@ -268,11 +307,11 @@ def start() -> None:
     """Take the terminal for the run, when stdout and stderr both are one
     that redraws (and takes the marks: UTF-8): LIVE from here on, both
     streams writing above the rows (Above)."""
-    global LIVE, _TTY
+    global LIVE, _TTY, _PAINT
     if LIVE or not (sys.stdout.isatty() and sys.stderr.isatty()) or os.environ.get("TERM") == "dumb" \
             or "utf" not in (sys.stdout.encoding or "").lower():
         return
-    _TTY = sys.stdout
+    _TTY, _PAINT = sys.stdout, painter(sys.stdout)
     LIVE = True
     _STOPPED.clear()
     sys.stdout, sys.stderr = Above(sys.stdout, False), Above(sys.stderr, True)  # type: ignore[assignment]
@@ -290,7 +329,7 @@ def stop() -> None:
         for name in ("stdout", "stderr"):
             s = getattr(sys, name)
             if isinstance(s, Above):
-                s.flush()
+                s.flush(every=True)
                 setattr(sys, name, s.stream)
 
 
@@ -312,4 +351,25 @@ def paused() -> Iterator[None]:
                 _redraw()
 
 
+def relay(pipe: IO[str] | None) -> None:
+    """A child's stderr, piped (PIPE) because the terminal is taken, said
+    through this process's from a thread of its own: above the rows, not
+    across them."""
+    if pipe is None:
+        return
+
+    def pump() -> None:
+        with pipe:
+            for line in pipe:
+                sys.stderr.write(line)
+    threading.Thread(target=pump, daemon=True).start()
+
+
+def child_stderr() -> int | None:
+    """What a child whose stderr is not captured gets for it: this
+    process's, or on a terminal a pipe for relay."""
+    return subprocess.PIPE if LIVE else None
+
+
 _TTY: IO[str] = sys.stdout
+_PAINT = painter(sys.stdout)

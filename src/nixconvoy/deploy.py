@@ -755,8 +755,10 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             return targets.dry_activate(name, top.out) if dry else None
 
         tried = ", ".join(plan) if dry else ""
+        sent = ", ".join(n for n in plan if not targets.built_on(n))
         with term.step(strings.DEPLOY_DRY_ACTIVATING(targets=tried) if tried else "",
-                       strings.DEPLOY_DRY_ACTIVATED(targets=tried) if tried else ""), \
+                       strings.DEPLOY_DRY_ACTIVATED(targets=tried) if tried
+                       else strings.DEPLOY_COPIED(targets=sent) if sent else ""), \
                 ThreadPoolExecutor(2 + len(plan) + len(refresh)) as pool:
             refetch = pool.submit(fetch_origin)
             # Carried, or a redone stage's stale records dropped.

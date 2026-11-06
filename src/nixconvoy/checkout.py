@@ -759,10 +759,15 @@ def update_checkout(path: Path) -> tuple[bool, str]:
 
 
 def catch_up(paths: list[Path]) -> bool:
-    """update_checkout each of `paths`, printing one status line each;
-    whether all succeeded."""
+    """update_checkout each of `paths`, printing one status line each (on
+    a terminal dim for a checkout left where it was, yellow for one that
+    could not be moved); whether all succeeded."""
+    def head(d: Path) -> str:
+        return run(["git", "rev-parse", "-q", "--verify", "HEAD"], cwd=str(d), check=False).stdout if d.is_dir() else ""
+
     good = True
     for d in paths:
+        was = head(d) if term.LIVE else ""
         try:
             done, status = update_checkout(d)
         except FileNotFoundError as e:
@@ -771,8 +776,9 @@ def catch_up(paths: list[Path]) -> bool:
             done, status = False, strings.CHECKOUT_NOT_CAUGHT_UP(error=e)
         if not done and not d.is_dir():
             continue
-        print(strings.CHECKOUT_CATCH_UP_LINE(name=d.name, status=status), file=sys.stdout if done else sys.stderr,
-              flush=True)
+        style = "yellow" if not done else "dim" if term.LIVE and head(d) == was else ""
+        print(term.line(strings.CHECKOUT_CATCH_UP_LINE, style, name=d.name, status=status),
+              file=sys.stdout if done else sys.stderr, flush=True)
         good &= done
     return good
 

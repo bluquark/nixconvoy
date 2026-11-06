@@ -78,6 +78,7 @@ class Perf:
 
     def write(self, cwd: Path) -> None:
         self.mark("end")
+        term.stop()  # the perf line goes where the last row was
         merged: dict[str, float] = {}
         for name, secs in self.phases:
             merged[name] = merged.get(name, 0.0) + secs
@@ -243,11 +244,11 @@ def run(
     input: str | None = None,
     pass_fds: tuple[int, ...] = (),
     session: bool = False,
-    live: bool = False,
 ) -> Completed:
-    """`merged` captures stderr into stdout, in order (p.stderr is None).
-    `live` (of a `merged` capture) shows each line as it comes in the
-    calling thread's step on a terminal (term.Step.show).
+    """`merged` captures stderr into stdout, in order (p.stderr is None):
+    on a terminal each line shown as it comes in the calling thread's step
+    (term.Step.show), when it has one and the command neither `timeout`
+    nor `input`.
     `timeout` ends the command after that many seconds (stop; p.timed_out).
     `input` is fed to the command's stdin; the command inherits `pass_fds`.
     `session` starts it in a session of its own, ended as a whole."""
@@ -256,8 +257,7 @@ def run(
         full_env.update(env)
     t0 = time.monotonic()
     timed_out = False
-    step = term.current() if live else None
-    assert step is None or (merged and capture and timeout is None and input is None)
+    step = term.current() if capture and merged and timeout is None and input is None else None
     with contextlib.ExitStack() as shown:
         if not capture:
             shown.enter_context(term.paused())  # the command has the terminal
@@ -275,9 +275,10 @@ def run(
             try:
                 if step is not None and child.stdout is not None:
                     lines: list[str] = []
-                    for raw in child.stdout:
-                        lines.append(raw)
-                        step.show(raw)
+                    with child.stdout:
+                        for raw in child.stdout:
+                            lines.append(raw)
+                            step.show(raw)
                     child.wait()
                     stdout, stderr = "".join(lines), None
                 else:

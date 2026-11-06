@@ -307,7 +307,6 @@ def complete(r: Landed, locked: bool = False, fresh: bool = True) -> bool:
     done already or the checkout has moved on, so this is also how a
     later run finishes a landing cut short (not `fresh`).  False when
     something is left for a later run."""
-    PERF.mark("finish")
     main = cfg().main_branch
     # Refused where main is checked out (the main worktree): catch_up moves it.
     if not is_ancestor(r.commit, f"refs/heads/{main}"):
@@ -324,8 +323,8 @@ def complete(r: Landed, locked: bool = False, fresh: bool = True) -> bool:
             try:
                 lock = lock_checkout()
                 if lock is None:
-                    print(strings.CHECKOUT_CATCH_UP_LINE(
-                        name=d.name, status=strings.CHECKOUT_SKIPPED_LOCKED(holder=lock_holder())), file=sys.stderr)
+                    print(term.line(strings.CHECKOUT_CATCH_UP_LINE, "yellow", name=d.name,
+                                    status=strings.CHECKOUT_SKIPPED_LOCKED(holder=lock_holder())), file=sys.stderr)
                     busy.add(d)
                 else:
                     locks.append(lock)
@@ -416,7 +415,6 @@ def resume_landings(*, locked: bool = True) -> None:
 def catch_up_rest(landed: list[Landed]) -> bool:
     """After a landing: the checkouts it did not take, and the submodule
     repositories, onto the new main; whether all could be."""
-    PERF.mark("catch-up")
     took = {Path(part.dir) for r in landed for part in r.parts}
     return catch_up([d for d in sibling_checkouts() if d not in took]) & submodule.catch_up_repos()
 
@@ -466,7 +464,9 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
     landed = Landed(out(["git", "commit-tree", tree, "-p", main, "-m", msg]), main,
                     [Part(str(here), wb, tip, draft)], landings)
     push_main(landed)
+    PERF.mark("finish")
     finish_landing(landed)
+    PERF.mark("catch-up")
     if not catch_up_rest([landed]):
         die(strings.LAND_CATCH_UP_FAILED())
 
@@ -497,6 +497,7 @@ def undeploy(back_to: str = "HEAD^", as_if: dict[str, str] | None = None) -> boo
     `as_if` (a dry activation): every check made and nothing moved, the
     commit the branch would be reset onto recorded there under its name,
     for that deploy to take the branch to be at."""
+    PERF.mark("fetch")
     await_background_push()
     git_remote(*fetch_args())
     pop_tmp_commits()
@@ -548,11 +549,12 @@ def undeploy(back_to: str = "HEAD^", as_if: dict[str, str] | None = None) -> boo
         print(strings.UNDEPLOY_DRY(wb=wb, n=len(undone), summaries=summaries))
         print(strings.UNDEPLOY_DRY_REVERTING(targets=", ".join(deployed)) if deployed else strings.UNDEPLOY_REACHED_NONE)
         return bool(deployed)
+    PERF.mark("reset")
     p = git("reset", "--quiet", "--keep", target, check=False)
     if p.returncode != 0:
         die(strings.UNDEPLOY_RESET_FAILED(sha=target[:12], stderr=(p.stderr or "").strip()))
     submodule.undeploy_pins(moved, wb)
-    print(strings.UNDEPLOY_DONE(wb=wb, n=len(undone), summaries=summaries))
+    print(term.good(strings.UNDEPLOY_DONE(wb=wb, n=len(undone), summaries=summaries)))
     if deployed:
         print(strings.UNDEPLOY_REVERTING(targets=", ".join(deployed)))
     else:
@@ -585,10 +587,11 @@ def close_worktrees(names: list[str], *, force: bool = False) -> None:
         subs = ([find_sub(n) for n in names] if names
                 else sorted(d for d in sibling_checkouts() if sub_parent(d) == top))
         if not subs:
-            print(strings.CLOSE_NO_SUBS(top=top), flush=True)
+            print(term.paint(strings.CLOSE_NO_SUBS(top=top), "dim"), flush=True)
         fetched: list[PlanReply] = []
         for d in subs:
             label = sub_label(d)
+            style = "green"
             try:
                 if not d.is_dir():
                     continue  # removed since it was listed
@@ -600,11 +603,12 @@ def close_worktrees(names: list[str], *, force: bool = False) -> None:
                 else:
                     why = prune_one(d, named=bool(names), own_session_ends=bool(names), fetched=fetched)
                     verdict = strings.CLOSE_EMPTY_REMOVED if why is None else strings.CLOSE_KEPT(why=why)
+                    style = "green" if why is None else "yellow"
             except Exception as e:  # noqa: BLE001 - one worktree's failure, reported
-                verdict = strings.CLOSE_CHECK_FAILED(error=failure(e))
+                verdict, style = strings.CLOSE_CHECK_FAILED(error=failure(e)), "red"
             finally:
                 os.chdir(top)
-            print(strings.CLOSE_VERDICT(label=label, verdict=verdict), flush=True)
+            print(term.line(strings.CLOSE_VERDICT, style, label=label, verdict=verdict), flush=True)
 
 
 def close_submodules(names: list[str], *, force: bool = False) -> None:
@@ -943,10 +947,10 @@ def finish(wb: str, lease: str, onto: str | None = None) -> None:
     onto = onto or main_short()
     git_remote(*push_cmd(wb, lease))
     note_pushed(wb, rev(f"refs/heads/{wb}") or "")
-    print(strings.LAND_RESET_ONTO(wb=wb, onto=onto))
+    print(term.paint(strings.LAND_RESET_ONTO(wb=wb, onto=onto), "dim"))
     here = Path.cwd().resolve()
     if sub_parent(here) is not None and rev("HEAD") == rev(main_ref()):
-        print(strings.LAND_WORKTREE_STAYS(name=here.name))
+        print(term.paint(strings.LAND_WORKTREE_STAYS(name=here.name), "dim"))
 
 
 def remove_sub(here: Path, branches: list[str]) -> None:
@@ -971,8 +975,8 @@ def remove_sub(here: Path, branches: list[str]) -> None:
     held.close()
     if failed:
         die("\n".join(failed))
-    print(strings.CLOSE_SUB_REMOVED(path=here.relative_to(parent), branches=", ".join(names)
-                                    or strings.CLOSE_NO_OWN_BRANCH, remote=cfg().remote))
+    print(term.good(strings.CLOSE_SUB_REMOVED(path=here.relative_to(parent), branches=", ".join(names)
+                                              or strings.CLOSE_NO_OWN_BRANCH, remote=cfg().remote)))
 
 
 def sub_branches(here: Path, cur: str | None, branches: list[str]) -> list[str]:
@@ -1437,8 +1441,8 @@ def open_checkout(path: Path, branch: str | None) -> Path:
             die(strings.OPEN_PUSH_FAILED(branch=branch, why=why, stderr=err))
         note_pushed(branch, rev(f"refs/heads/{branch}") or "")
     print(d)
-    print((strings.OPEN_CHECKOUT_ON_TAKEN if branch in tips and branch not in local else strings.OPEN_CHECKOUT_ON)(
-        name=d.name, branch=branch, remote=cfg().remote), file=sys.stderr)
+    print(term.good((strings.OPEN_CHECKOUT_ON_TAKEN if branch in tips and branch not in local
+                     else strings.OPEN_CHECKOUT_ON)(name=d.name, branch=branch, remote=cfg().remote)), file=sys.stderr)
     return d
 
 
@@ -1492,8 +1496,8 @@ def close_checkout(path: Path, *, force: bool = False) -> None:
     failed = drop_branches(names)
     if failed:
         die("\n".join(failed))
-    print(strings.CLOSE_CHECKOUT_REMOVED(path=d, branches=", ".join(sorted(names)) or strings.CLOSE_NO_OWN_BRANCH,
-                                         remote=cfg().remote))
+    print(term.good(strings.CLOSE_CHECKOUT_REMOVED(path=d, branches=", ".join(sorted(names))
+                                                   or strings.CLOSE_NO_OWN_BRANCH, remote=cfg().remote)))
 
 
 def land_with_children(message: str | None = None, not_yet_deployed: bool = False) -> None:
@@ -1641,10 +1645,12 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
         landed = Landed(out(["git", "commit-tree", tree, "-p", main, "-m", msg]), main,
                         [Part(str(d), b, tips[d], drafts[d]) for d, b in [(here, wb), *parts]], landings)
         push_main(landed)
+        PERF.mark("finish")
         finish_landing(landed, locked=True)
     finally:
         for lock in locks:
             lock.close()
+    PERF.mark("catch-up")
     if not catch_up_rest([landed]):
         die(strings.LAND_CATCH_UP_FAILED())
 
