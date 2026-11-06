@@ -11,7 +11,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import IO, NoReturn
 
-from . import commands, config, hooks, init, names, proc, review, strings, submodule
+from . import commands, config, hooks, init, names, proc, review, strings, submodule, term
 from .checkout import (
     await_background_push,
     lock_checkout,
@@ -22,8 +22,9 @@ from .checkout import (
     sub_parent,
 )
 from .deploy import deploy, refuse_staged
-from .proc import PERF, TOOL, Fail, die, ok, out, painter
+from .proc import PERF, TOOL, Fail, die, ok, out
 from .strings import BACK_TO_FLAG, DRY_FLAG, EVICT_FLAG
+from .term import painter
 
 
 def usage(stream: IO[str] | None = None) -> str:
@@ -120,6 +121,8 @@ def dispatch() -> None:
         sys.exit(review.main(args))
     if subcmd not in ("status", "close", "open"):
         atexit.register(PERF.write, Path.cwd())
+        term.start()
+        atexit.register(term.stop)  # run first: the perf line goes below the last row's place
     takes, positionals = FLAGS[subcmd]
     flags: dict[str, list[str]] = {}
     given: list[str] = []
