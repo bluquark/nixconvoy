@@ -3253,6 +3253,49 @@ def open_cases(d: Path) -> None:
         assert sh(co, "rev-parse", "origin/work/tester/homelab5") == sh(co, "rev-parse", "origin/main")
         assert "origin holds work/tester/other" in dies(lambda: commands.open_checkout(d / "other", None))
         assert "origin holds work/tester/x-task" in dies(lambda: commands.open_checkout(d / "x", None))
+        # A suffix may hold a '-': the branch is then shaped as a subagent's
+        # of a shorter-named checkout, which opens all the same while this
+        # one stands.  A branch a checkout or a subagent worktree here owns
+        # (the subagent's from before its first deploy) is never opened,
+        # nor a subagent worktree whose branch would be a checkout's.
+        fw = commands.open_checkout(d / "homelab-firewall", None)
+        assert checkout.branch_at(fw) == "work/tester/homelab-firewall"
+        assert checkout.branch_at(commands.open_checkout(d / "homelab", None)) == "work/tester/homelab"
+        commands.close_checkout(d / "homelab")
+        assert f"is the work branch of {w.resolve()}" in dies(lambda: commands.open_checkout(d / "y", "9-task"))
+        assert f"is the work branch of {fw.resolve()}" in dies(lambda: commands.open_checkout(d / "y", "homelab-firewall"))
+        commands.open_checkout(d / "9-kid", None)
+        assert "would own work/tester/9-kid" in dies(lambda: commands.open_worktree("kid", None))
+        # Two subagent worktrees, neither deployed, would own one branch: the
+        # second is refused, whichever checkout's it is.
+        os.chdir(d / "9-kid")
+        commands.open_worktree("x", None)
+        os.chdir(co)
+        assert "would own work/tester/9-kid-x" in dies(lambda: commands.open_worktree("kid-x", None))
+        commands.open_worktree("kid-z", None)
+        os.chdir(d / "9-kid")
+        assert "would own work/tester/9-kid-z" in dies(lambda: commands.open_worktree("z", None))
+        commands.remove_sub((d / "9-kid/.claude/worktrees/x").resolve(), [])
+        os.chdir(co)
+        commands.remove_sub((co / ".claude/worktrees/kid-z").resolve(), [])
+        commands.close_checkout(d / "9-kid")
+        # Mid-rebase (HEAD detached) the checkout still owns its branch; the
+        # default name is not opened over a subagent's branch either; a
+        # removed subagent's branch under a standing checkout's does not
+        # hold the shorter name.
+        put(fw, "r.txt", "r\n", "to rebase")
+        sh(fw, "-c", "sequence.editor=sed -i.bak 1s/^pick/edit/", "rebase", "--quiet", "-i", "HEAD~1")
+        assert checkout.branch_at(fw) is None
+        assert checkout.branch_owners(co.resolve())["work/tester/homelab-firewall"] == fw.resolve()
+        sh(fw, "rebase", "--abort")
+        sh(fw, "reset", "--quiet", "--hard", "HEAD~1")
+        assert f"is the work branch of {w.resolve()}" in dies(lambda: commands.open_checkout(d / "9-task", None))
+        sh(seed, "push", "--quiet", "origin", "HEAD:refs/heads/work/tester/homelab-firewall-gone")
+        commands.close_checkout(commands.open_checkout(d / "homelab", None))
+        sh(seed, "push", "--quiet", "origin", ":refs/heads/work/tester/homelab-firewall-gone")
+        sh(co, "fetch", "--quiet", "--prune")
+        commands.close_checkout(d / "homelab-firewall")
+        assert "work/tester/main-<name>" in dies(lambda: commands.open_checkout(d / "y", "main"))
         one = commands.open_checkout(d / "other", "other")  # --branch <branch-suffix>
         assert one == d / "other" and checkout.branch_at(one) == "work/tester/other"
         assert sh(one, "rev-parse", "HEAD") == sh(co, "rev-parse", "origin/work/tester/other")
