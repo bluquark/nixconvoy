@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-from . import proc, strings
+from . import proc, strings, term
 from .config import cfg
 from .proc import die, load_json, run
 
@@ -164,13 +164,16 @@ def refresh_kit(target: str, toplevel: str, kit: str) -> str | None:
     """A target already running `toplevel` whose rooted kit is not `kit`
     (its policy or the kit sources moved): the kit copied and rooted in
     place of the old, no switch.  The failure text, or None."""
-    print(strings.TARGETS_REFRESHING_KIT(target=target))
-    if kit:
-        err = copy_closure(target, [kit], quiet=True, fatal=False)
-        if err:
-            return err
-    p = run(target_cmd(target, ["sh", "-c", kit_root_script(toplevel, kit)], sudo=True),
-            check=False, timeout=PROBE_TIMEOUT, merged=True)
+    with term.step(strings.TARGETS_REFRESHING_KIT(target=target),
+                   strings.TARGETS_REFRESHED_KIT(target=target)) as step:
+        step.ok = False
+        if kit:
+            err = copy_closure(target, [kit], quiet=True, fatal=False)
+            if err:
+                return err
+        p = run(target_cmd(target, ["sh", "-c", kit_root_script(toplevel, kit)], sudo=True),
+                check=False, timeout=PROBE_TIMEOUT, merged=True)
+        step.ok = p.returncode == 0
     if p.returncode != 0:
         return strings.TARGETS_KIT_ROOT_FAILED(
             target=target, code=p.returncode,
@@ -381,8 +384,10 @@ def build_drvs(drvs: list[str], what: str, opts: tuple[str, ...] = (),
                capture: bool = False) -> str | None:
     """Realise `drvs` in the builder's store when set, else here.  The failure
     text (naming `what`, with the build output when `capture` kept it off
-    the terminal) or None; the caller dies, since this also runs on the
-    precheck thread."""
+    the terminal - as a terminal taken for the run's rows always does, the
+    calling thread's step showing its latest line) or None; the caller
+    dies, since this also runs on the precheck thread."""
+    capture = capture or term.LIVE
     b = builder_host()
     if b:
         return build_on(b, drvs, what, opts, capture)
@@ -408,39 +413,47 @@ def off_lan(tgt: str) -> bool:
                for a in addrs)
 
 
+def built_on(target: str) -> bool:
+    """Whether `target` is the machine the closures are realised on, which
+    is copied nothing."""
+    return target == (builder_host() or proc.this_machine())
+
+
 def copy_closure(target: str, paths: list[str], quiet: bool = False, fatal: bool = True) -> str | None:
     """Copy `paths`' closures (the toplevel, the switch kit) to `target`,
     outside the switch lock (a union rebuilt after it merely leaves a few
-    extra paths there).  `quiet` keeps nix's progress output for the
-    failure message, which ends the deploy, or is returned with `fatal`
-    off."""
+    extra paths there).  `quiet` (and a terminal taken for the run's rows)
+    keeps nix's progress output for the failure message, which ends the
+    deploy, or is returned with `fatal` off."""
+    quiet = quiet or term.LIVE
     def failed(msg: str) -> str | None:
         if fatal:
             die(msg)
         return msg
     b = builder_host()
     sshopts = " ".join(ssh_opts())
-    if target == (b or proc.this_machine()):
-        return None  # built there
+    if built_on(target):
+        return None
     tgt = ssh_address(target)
-    print(strings.TARGETS_COPYING_CLOSURE(target=target))
-    # Off-LAN targets (a VPS over the tailnet) substitute what they can
-    # themselves, so only custom-built paths cross the slow uplink; on a
-    # LAN a straight copy beats any download and per-path probe.
-    subst = ["-s"] if off_lan(tgt) else []
-    if b:
-        # The outputs live on the builder, not here.
-        there = shlex.quote(" ".join(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *SSH_KEEPALIVE]))
-        p = run(["ssh", *ssh_opts(), ssh_address(b),
-                 f"NIX_SSHOPTS={there} nix copy {' '.join(subst)} --to ssh://{tgt} {' '.join(paths)}"],
-                check=False, capture=quiet, merged=True)
-    else:
-        p = run(["nix", "copy", *subst, "--to", f"ssh://{tgt}", *paths],
-                env={"NIX_SSHOPTS": sshopts}, check=False, capture=quiet, merged=True)
-    if p.returncode != 0:
-        return failed(strings.TARGETS_COPY_CLOSURE_FAILED(
-            target=target,
-            detail=strings.PROC_DETAIL_LINES(output=p.stdout.strip()) if p.stdout else ""))
+    with term.step(strings.TARGETS_COPYING_CLOSURE(target=target), part=True) as step:
+        # Off-LAN targets (a VPS over the tailnet) substitute what they can
+        # themselves, so only custom-built paths cross the slow uplink; on a
+        # LAN a straight copy beats any download and per-path probe.
+        subst = ["-s"] if off_lan(tgt) else []
+        if b:
+            # The outputs live on the builder, not here.
+            there = shlex.quote(" ".join(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *SSH_KEEPALIVE]))
+            p = run(["ssh", *ssh_opts(), ssh_address(b),
+                     f"NIX_SSHOPTS={there} nix copy {' '.join(subst)} --to ssh://{tgt} {' '.join(paths)}"],
+                    check=False, capture=quiet, merged=True)
+        else:
+            p = run(["nix", "copy", *subst, "--to", f"ssh://{tgt}", *paths],
+                    env={"NIX_SSHOPTS": sshopts}, check=False, capture=quiet, merged=True)
+        if p.returncode != 0:
+            step.ok = False
+            return failed(strings.TARGETS_COPY_CLOSURE_FAILED(
+                target=target,
+                detail=strings.PROC_DETAIL_LINES(output=p.stdout.strip()) if p.stdout else ""))
     return None
 
 

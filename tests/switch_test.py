@@ -34,6 +34,7 @@ import io
 import itertools
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -70,9 +71,29 @@ from nixconvoy import (
     switch,
     targets,
 )
+from nixconvoy import (
+    checkout,
+    cli,
+    commands,
+    config,
+    deploy,
+    guard,
+    hooks,
+    init,
+    lanes,
+    memo,
+    names,
+    proc,
+    review,
+    strings,
+    switch,
+    targets,
+    term,
+)
 from nixconvoy.union import UnionQueries
 from nixconvoy.wire import (
     Context,
+    DriftOutcome,
     DriftParams,
     Lane,
     Ran,
@@ -189,6 +210,51 @@ def warned(f: Callable[[], object]) -> str:
     with contextlib.redirect_stderr(err):
         f()
     return err.getvalue()
+
+
+class Terminal(io.StringIO):
+    """A terminal for term.start() to take, as stdout and stderr both."""
+
+    encoding = "utf-8"
+
+    def isatty(self) -> bool:
+        return True
+
+    def screen(self) -> list[str]:
+        """What it shows of what was written: term's cursor moves and
+        erasures performed, its colors dropped."""
+        lines: list[list[str]] = [[]]
+        row = col = 0
+        for count, code, char in re.findall(r"\033\[([\d;?]*)([A-Za-z])|([\s\S])", self.getvalue()):
+            if code == "A":
+                row -= int(count)
+            elif code == "K":
+                del lines[row][col:]
+            elif char == "\r":
+                col = 0
+            elif char == "\n":
+                row, col = row + 1, 0
+                lines += [[] for _ in range(row + 1 - len(lines))]
+            elif char:
+                lines[row][col:col + 1] = [char]
+                col += 1
+        shown = ["".join(ln) for ln in lines]
+        while shown and not shown[-1]:
+            del shown[-1]
+        return shown
+
+
+@contextlib.contextmanager
+def on_terminal() -> Iterator[Terminal]:
+    """The block's run as on a terminal (term.LIVE), which is yielded."""
+    tty = Terminal()
+    with contextlib.redirect_stdout(tty), contextlib.redirect_stderr(tty):
+        term.start()
+        try:
+            yield tty
+        finally:
+            term.stop()
+            term.LIVE = False
 
 
 def check(what: object) -> None:
@@ -361,6 +427,22 @@ def switch_scenarios(d: Path) -> None:
     died, s = scenario("nixconvoy-switch crashes", nixconvoy_switch=str(crash))
     assert died is not None and "nixconvoy-switch stopped answering" in died, died
     assert s["running"] == OLD and s["armed"] is False, s
+
+    # On a terminal a switch ends in one line, its output kept off the
+    # screen; one that fails says all of it, then why.
+    with on_terminal() as tty:
+        died, s = scenario("confirmed, on a terminal")
+    shown = tty.screen()
+    assert died is None and s["running"] == NEW, (died, s)
+    assert len(shown) == 1 and re.fullmatch(r"✓ switched testhost  \d+\.\ds", shown[0]), shown
+    with on_terminal() as tty:
+        died, s = scenario("verification fails, on a terminal", check_ok=False)
+    shown = tty.screen()
+    assert died is not None and s["running"] == OLD, (died, s)
+    failed = [i for i, ln in enumerate(shown) if re.fullmatch(r"✗ verifying testhost  \d+\.\ds", ln)]
+    armed = [i for i, ln in enumerate(shown) if ln.startswith("    confirmed-switch: armed, rolling back to ")]
+    told = [i for i, ln in enumerate(shown) if ln.startswith("nixconvoy: the switch of testhost did not verify")]
+    assert failed and armed and told and failed[0] < armed[0] < told[0] == len(shown) - 1, shown
 
 
 def report(text: str, *, tips: dict[str, str] | None = None,
@@ -4105,9 +4187,64 @@ def service_cases() -> None:
         assert not proc.oneshot_run()
 
 
+def term_cases() -> None:
+    """A step's row on a terminal and the line it ends in (term.step);
+    off one, its label alone."""
+    with on_terminal() as tty:
+        with term.step("building x...", "built x") as st:
+            st.show("copying path '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-a'...\n")
+            sys.stdout.write("a line ")  # held until its end: another thread's goes in whole
+            assert len(tty.screen()) == 1 and "building x" in tty.screen()[0], tty.screen()
+            print("printed meanwhile")
+            print("note: said to stderr", file=sys.stderr)
+            during = tty.screen()
+        with term.step("copying closure to x...", keep=re.compile("kept")) as st:
+            st.log("a line kept")
+            st.log("a line dropped")
+        with term.step("a part of it...", part=True):
+            pass
+        print(term.good("landed on main\nits second line"))
+        print(term.line(strings.CHECKOUT_CATCH_UP_LINE, "dim", name="homelab2", status="up to date"))
+        try:
+            with term.step("switching x...") as st:
+                st.log("what it said")
+                proc.die("the switch of x failed")
+        except proc.Fail:
+            pass
+        with contextlib.suppress(proc.Fail), term.step("copying closure to y..."):
+            raise proc.Fail("swept by the failure above")  # not its own: no line
+        proc.run(["true"], capture=False)  # the terminal is the command's meanwhile
+        assert term.clip("日本語のログ", 7) == "日本語…" and term.cells("日本語…") == 7
+    assert during[:2] == ["a line printed meanwhile", "note: said to stderr"], during
+    assert len(during) == 3 and re.fullmatch(r". building x  0s  copying path '/nix/store/a'\.\.\.", during[2]), during
+    took = r"  \d+\.\ds"
+    for line, want in zip(tty.screen()[2:], (
+            "✓ built x" + took, "✓ copying closure to x" + took, "    a line kept",
+            "✓ landed on main", "its second line", "homelab2: up to date",
+            "✗ switching x" + took, "    what it said", "nixconvoy: the switch of x failed"), strict=True):
+        assert re.fullmatch(want, line), tty.screen()
+    assert "\033[36mnote:\033[0m said" in tty.getvalue(), tty.getvalue()
+    assert "\033[1mhomelab2\033[0m: \033[2mup to date\033[0m\n" in tty.getvalue(), tty.getvalue()
+    assert term.line(strings.CHECKOUT_CATCH_UP_LINE, "dim", name="homelab2", status="up to date") == "homelab2: up to date"
+
+    def plain() -> None:
+        with term.step("building x...", "built x") as st:
+            st.log("its output")
+            st.say("verifying x...")
+    assert printed(plain) == "building x...\nits output\nverifying x...\n", printed(plain)
+
+    # The drift core's lines: those saying the same of several targets as one.
+    verdict = DriftOutcome(affected=["a"], plan=["a"], drift={"a": ("this-branch", "")})
+    with on_terminal() as tty:
+        deploy.say_drift(["  a: will switch", "  b: up to date", "  c: up to date"], verdict, ["a", "b", "c"])
+        deploy.say_drift(["  a: will switch", "something else"], verdict, ["a", "b", "c"])
+    assert tty.screen() == ["  a: will switch", "  b, c: up to date", "  a: will switch", "something else"], tty.screen()
+    assert "\033[36m  a: will switch" in tty.getvalue() and "\033[2m  b, c: up to date" in tty.getvalue()
+
+
 def unit_cases() -> None:
     for cases in (gate_cases, provenance_cases, target_cases, builder_cases, memo_cases, await_cases,
-                  service_cases):
+                  service_cases, term_cases):
         cases()
 
 
