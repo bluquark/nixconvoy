@@ -144,15 +144,12 @@ class Config:
     # Addressed as a target (ssh_address).
     builders: tuple[str, ...]
     # The remote origin/main and the work branches live on, and main's name
-    # there: `remote` and `main_branch` (origin and main unless set).
-    remote: str = "origin"
-    main_branch: str = "main"
+    # there: `remote` and `main_branch`.
+    remote: str
+    main_branch: str
     # precheck: a flake check (checks.<targets_arch>.<precheck>) proven
     # before any build; empty is none.
     precheck: str = ""
-    # Determinate Nix's parallel evaluation (builtins.parallel, --eval-cores):
-    # None is "auto", on when the nix here knows the feature.
-    parallel_eval: bool | None = None
     # [switch]: every target's switch policy unless its table overrides.
     switch: SwitchPolicy = field(default_factory=SwitchPolicy)
     targets: dict[str, TargetConfig] = field(default_factory=dict)
@@ -238,15 +235,6 @@ def _str(t: dict[str, object], k: str, where: str, default: str | None = "") -> 
     v = _required(t, k, where) if default is None else t.get(k, default)
     if not isinstance(v, str):
         raise ConfigError(strings.CONFIG_NOT_A_STRING(where=where, key=k))
-    return v
-
-
-def _auto_bool(t: dict[str, object], k: str, where: str) -> bool | None:
-    v = _required(t, k, where)
-    if v == "auto":
-        return None
-    if not isinstance(v, bool):
-        raise ConfigError(strings.CONFIG_NOT_AUTO_BOOL(key=k if where == CONFIG_FILE else f"{where}.{k}"))
     return v
 
 
@@ -360,7 +348,7 @@ def parse(text: str) -> Config:
     if isinstance(version, bool) or version != 1:
         raise ConfigError(strings.CONFIG_VERSION(version=version))
     known = {"config_version", "flake_dir", "targets_dir", "targets_arch", "ssh_address_template", "branch_prefix",
-             "child_worktrees", "builders", "parallel_eval", "remote", "main_branch", "precheck", "switch",
+             "child_worktrees", "builders", "remote", "main_branch", "precheck", "switch",
              "targets", "submodules", "work_branches"}
     if "work_branches" in doc and not _noted_work_branches:
         # The allowlist this once had, superseded by branch_prefix's shape:
@@ -378,6 +366,8 @@ def parse(text: str) -> Config:
         raise ConfigError(strings.CONFIG_BUILDER_GONE())
     if "hostnames" in doc:
         raise ConfigError(strings.CONFIG_HOSTNAMES_GONE())
+    if "parallel_eval" in doc:
+        raise ConfigError(strings.CONFIG_PARALLEL_EVAL_GONE())
     for k in doc:
         if k not in known:
             raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=k))
@@ -387,6 +377,12 @@ def parse(text: str) -> Config:
     targets_dir = _str(doc, "targets_dir", CONFIG_FILE)
     targets_arch = _str(doc, "targets_arch", CONFIG_FILE, None)
     ssh_template = _template(doc, "ssh_address_template", "target")
+    remote = _str(doc, "remote", CONFIG_FILE, None)
+    if not valid_remote(remote):
+        raise ConfigError(strings.CONFIG_REMOTE(remote=remote))
+    main_branch = _str(doc, "main_branch", CONFIG_FILE, None)
+    if not valid_branch(main_branch, remote):
+        raise ConfigError(strings.CONFIG_MAIN_BRANCH(remote=remote, main_branch=main_branch))
     branch_prefix = _template(doc, "branch_prefix", "local_hostname")
     # ASCII, and braces only as {local_hostname}: the nix side (a deploy-time
     # regex over it) and the shape matchers read it verbatim.
@@ -396,12 +392,6 @@ def parse(text: str) -> Config:
     if not children or ".." in children.split("/"):
         raise ConfigError(strings.CONFIG_CHILD_WORKTREES())
     builders = _templates(doc, "builders", "local_hostname")
-    remote = _str(doc, "remote", CONFIG_FILE, "origin")
-    if not valid_remote(remote):
-        raise ConfigError(strings.CONFIG_REMOTE(remote=remote))
-    main_branch = _str(doc, "main_branch", CONFIG_FILE, "main")
-    if not valid_branch(main_branch, remote):
-        raise ConfigError(strings.CONFIG_MAIN_BRANCH(remote=remote, main_branch=main_branch))
     switch = _switch(_table(doc.get("switch", {}), "switch"), "switch", None)
     targets: dict[str, TargetConfig] = {}
     for name, h in _table(doc.get("targets", {}), "targets").items():
@@ -432,7 +422,6 @@ def parse(text: str) -> Config:
         remote=remote,
         main_branch=main_branch,
         precheck=_str(doc, "precheck", CONFIG_FILE),
-        parallel_eval=_auto_bool(doc, "parallel_eval", CONFIG_FILE) if "parallel_eval" in doc else None,
         switch=switch,
         targets=targets,
     )
@@ -503,8 +492,3 @@ def main_short() -> str:
 
 def remote_ref(branch: str) -> str:
     return cfg().names.remote_ref(branch)
-
-
-def parallel_eval() -> bool | None:
-    """nixconvoy.toml's parallel_eval; None is auto."""
-    return cfg().parallel_eval

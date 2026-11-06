@@ -518,9 +518,6 @@ def target_cases() -> None:
     assert targets.target_cmd("a", ["true"])[0] == "ssh" and targets.flake_target_names() == ["a", "tester"]
     config.set_cfg(config.parse(toml('[targets.a]\n', targets_dir="")))
     assert targets.flake_target_names() == ["a"]
-    for extra, want in (("", None), ('parallel_eval = "auto"\n', None), ("parallel_eval = false\n", False)):
-        config.set_cfg(config.parse(toml(extra)))
-        assert config.parallel_eval() is want, (extra, config.parallel_eval())
     config.set_cfg(config.parse(toml('[targets.a]\ntags = ["vps"]\n[targets.zz]\ntags = ["vps"]\n')))
     for bad in (["@nope"], ["zz"], ["@vps"]):
         try:
@@ -542,12 +539,14 @@ def target_cases() -> None:
                           (toml(builders='["big", "{host}"]'), "builders[1] is a template over {local_hostname} alone"),
                           (toml(builders='[""]'), "builders[0] is a template over {local_hostname}, not empty"),
                           (toml().replace('builders = ["{local_hostname}"]\n', ""), "builders is required"),
+                          (toml().replace('remote = "origin"\n', ""), "remote is required"),
+                          (toml().replace('main_branch = "main"\n', ""), "main_branch is required"),
                           (toml(builders='"big"'), "builders is a non-empty list of templates over {local_hostname}"),
                           (toml(builders='[]'), "builders is a non-empty list of templates over {local_hostname}"),
                           (toml(builders='[3]'), "builders is a non-empty list of templates over {local_hostname}"),
                           (toml('builder = "big"\n'), "builder is gone: builders is a list"),
                           (toml('[hostnames.a]\nbuilder = "big"\n'), "[hostnames] is gone"),
-                          (toml("parallel_eval = 1\n"), "parallel_eval must be true, false"),
+                          (toml("parallel_eval = false\n"), "parallel_eval is gone"),
                           (toml().replace("config_version = 1", "config_version = true"), "not supported"),
                           (toml('[targets.a]\nlocal_only = true\n'), "unknown key targets.a.local_only"),
                           (toml('[switch]\nconfirmed = false\n'), "unknown key switch.confirmed"),
@@ -932,7 +931,7 @@ def toml(extra: str = "", precheck: str = "", builders: str = '["{local_hostname
     repos use, `over` overriding; `builders` a TOML value) and `precheck`,
     `extra` appended."""
     keys = {"flake_dir": ".", "targets_dir": "hosts", "targets_arch": "x86_64-linux", "ssh_address_template": "{target}",
-            "branch_prefix": "work/{local_hostname}/", "child_worktrees": ".claude/worktrees", **over}
+            "remote": "origin", "main_branch": "main", "branch_prefix": "work/{local_hostname}/", "child_worktrees": ".claude/worktrees", **over}
     return ("config_version = 1\n" + "".join(f'{k} = "{v}"\n' for k, v in keys.items())
             + f"builders = {builders}\n" + (f'precheck = "{precheck}"\n' if precheck else "") + extra)
 
@@ -3907,7 +3906,6 @@ def init_cases(d: Path) -> None:
         assert c.inventory == ["a", "b"] and c.target_root("a") is None
         assert c.ssh_template == me + "@{target}" and c.branch_prefix == "nixconvoy/", c
         assert c.child_worktrees == ".claude/worktrees" and c.builders == ("{local_hostname}",) and not c.precheck
-        assert c.parallel_eval is None
         assert (c.remote, c.main_branch) == ("origin", "main"), c  # no remote: assumed
         assert set(c.targets) == {"a", "b"} and not c.target("a").dir
         text = (repo / "nixconvoy.toml").read_text()

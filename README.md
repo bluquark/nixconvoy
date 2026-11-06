@@ -376,6 +376,9 @@ targets_arch = "x86_64-linux"
 
 ssh_address_template = "bluquark@{target}.home.bluquark.net"
 
+remote = "origin"
+main_branch = "main"
+
 # Prefix for all nixconvoy work branches (visible in `git branch`).
 # {local_hostname} can be omitted for concision, if you only ever launch nixconvoy from one machine.
 branch_prefix = "nixconvoy/{local_hostname}/"
@@ -388,7 +391,7 @@ child_worktrees = ".claude/worktrees"
 # The {local_hostname} is considered unavailable if it's the wrong CPU architecture (i.e. my Macbook).
 builders = ["{local_hostname}", "minipc"]
 
-# Precheck step that runs in parallel with eval.  Should be an executable from your PATH.
+# Precheck step that runs in parallel with eval.  Names a flake check (checks.<targets_arch>.<name>).
 precheck = "repo-lint"
 
 # Configure automatic rollback if after activating the new NixOS generation, if:

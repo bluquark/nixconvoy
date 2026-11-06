@@ -31,7 +31,6 @@ from .config import (
     SwitchPolicy,
     cfg,
     main_ref,
-    parallel_eval,
     parse,
     root,
 )
@@ -781,8 +780,7 @@ def eval_toplevels(wt: str, union: str, targets: list[str],
         print(strings.MEMO_MEMOIZED(targets=", ".join(h for h in targets if h not in stale)))
     c = cfg()
     flake = f"{wt}/{c.flake_path}" if c.flake_path != "." else wt
-    par_eval = parallel_eval()
-    parallel = parallel_eval_known() if par_eval is None else par_eval
+    parallel = parallel_eval_known()
 
     def eval_target(h: str) -> Top | str:
         """The target's Top, written and rooted, or the failure text."""

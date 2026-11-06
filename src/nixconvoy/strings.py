@@ -525,40 +525,24 @@ INIT_SYSTEM_GUESS_NOTE = M("system guessed from this machine's architecture{seve
 INIT_SYSTEM_GUESSED = "guessed"
 
 # --- init.py: render (the comments of the nixconvoy.toml written)
-INIT_TOML_REMOTE = "# The remote the work branches are pushed to and main is landed on, and main's name there."
 INIT_TOML_BRANCH_PREFIX = M(
-    "# A checkout's work branch is <branch_prefix><branch-suffix>, `open <path>` naming it after the path.\n"
-    "# {{local_hostname}} in the prefix is this machine's hostname, a namespace per machine when you want one.\n"
-    "# Every branch shaped so ({{local_hostname}} any hostname) is a work branch {TOOL} unions into a deploy;\n"
-    "# a pushed branch shaped otherwise is ignored.")
+    "# Prefix for all nixconvoy work branches (visible in `git branch`).\n"
+    "# {{local_hostname}} can be omitted for concision, if you only ever launch nixconvoy from one machine.")
 INIT_TOML_CHILD_WORKTREES = M(
-    "# Child worktrees are an optional feature of {TOOL} that can be used by hand if desired,\n"
-    "# but is primarily intended to hook into worktrees that harnesses automatically create to isolate their"
-    " subagents.\n"
+    "# The subdirectory child worktrees are placed in.\n"
     "# The default directory is set to Claude Code's, so that {TOOL}'s Claude Code plugin works out of the box.")
-INIT_TOML_PRECHECK = M("# Optional: a flake check (checks.<targets_arch>.<name>) proven before any build{these}.")
-INIT_TOML_PRECHECK_THESE = M("; this flake's: {checks}")
+INIT_TOML_PRECHECK = M("# Precheck step that runs in parallel with eval. Names a flake check (checks.<targets_arch>.<name>).")
 INIT_TOML_BUILD = (
-    "# The machines the closures may be realised on (a target's name, or one ~/.ssh/config knows),\n"
-    "# tried in order: the first that is reachable, whose nix daemon builds for this user, and\n"
-    "# which builds targets_arch is the builder, from which the closures are copied to the targets;\n"
-    "# its nix daemon builds them or hands them to its own remote builders.  {local_hostname} is\n"
-    "# this machine's hostname: realise locally.\n"
+    "# List of build machines with fallbacks if the earlier ones are unavailable.\n"
+    "# The {local_hostname} is considered unavailable if it's the wrong CPU architecture (i.e. my Macbook).\n"
     "builders = [\"{local_hostname}\"]")
-INIT_TOML_PARALLEL_EVAL = (
-    "# Optional: Determinate Nix's parallel evaluation: true, false or \"auto\" (when nix has it).\n"
-    "# parallel_eval = \"auto\"")
 # A statement proving the internet reachable from where it runs: exactly the 204 Google answers.
 PROBE = '[ "$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" https://www.google.com/generate_204)" = 204 ]'
 INIT_TOML_SWITCH = M(
-    "# How the targets are switched (every target's defaults; a [targets.<name>.switch] extends them).\n"
-    "# A switch is confirmed: a rollback timer is armed on the target, the new system activated and,\n"
-    "# within ssh_deadline_secs of the activation's end, found running over a new ssh connection,\n"
-    "# verified by each further check and only then set as the profile and boot entry; otherwise the\n"
-    "# target rolls back on its own.  A target's list is appended to this one (its ssh_deadline_secs\n"
-    "# replacing), a `false` item striking the fleet's of its kind; auto_rollback_checks = false\n"
-    "# switches it plainly, as nixos-rebuild switch.  The shell statements run at once, each in a\n"
-    "# shell of its own under `set -eu -o pipefail`, any one's non-zero exit failing the switch.\n"
+    "# Configure automatic rollback after activating the new NixOS generation.\n"
+    "# The default check recommended for all setups is to roll back if ssh connectivity is lost after N seconds.\n"
+    "# Another built-in check is whether the target reaches the internet, and you can also provide arbitrary other\n"
+    "# checks that run on either the target machine or the control machine.\n"
     "[switch]\n"
     "auto_rollback_checks = [\n"
     "  {{ ssh_deadline_secs = {deadline} }},\n"
@@ -569,11 +553,7 @@ INIT_TOML_SWITCH = M(
     "# # this machine still reaches the internet, through it\n"
     "# auto_rollback_checks = [{{ controller_shell = ['" + PROBE.replace("{", "{{").replace("}", "}}") + "'] }}]")
 INIT_TOML_TARGETS = (
-    "# The targets: one table per nixosConfiguration (the inventory, as there is no targets_dir);\n"
-    "# a nixosConfiguration added later needs its table here.\n"
-    "# A deploy re-evaluates a target only when flake.nix, a file it names (transitively) or the\n"
-    "# target's own directory changed: a directory named after it beside the other targets' is\n"
-    "# found on its own, `dir` names one elsewhere.")
+    "# nixconvoy init populates your targets from nixosConfiguration.")
 INIT_TOML_FIRST_TARGET = M(
     "# # overrides ssh_address_template, if one target has an unusual username or domain-name\n"
     "# ssh_address = \"root@10.0.0.9\"\n"
@@ -774,7 +754,6 @@ CONFIG_UNKNOWN_KEY = M("{CONFIG_FILE}: unknown key {key}")
 CONFIG_NOT_A_TABLE = M("{where} must be a table")
 CONFIG_NOT_A_STRING = M("{where}.{key} must be a string")
 CONFIG_NOT_STRINGS = M("{where}.{key} must be a list of strings")
-CONFIG_NOT_AUTO_BOOL = M('{CONFIG_FILE}: {key} must be true, false or "auto"')
 CONFIG_NOT_A_TEMPLATE = M("{CONFIG_FILE}: {key} is a template over {{{placeholder}}} alone ({error!r})")
 CONFIG_EMPTY_TEMPLATE = M("{CONFIG_FILE}: {key} is a template over {{{placeholder}}}, not empty")
 CONFIG_DEADLINE = M("{CONFIG_FILE}: {where}.ssh_deadline_secs is a number of seconds, above 0 (auto_rollback_checks = "
@@ -804,11 +783,12 @@ CONFIG_REMOTE = M("{CONFIG_FILE}: remote is a git remote's name (letters, digits
                   "not starting with '-'), not {remote!r}")
 CONFIG_MAIN_BRANCH = M("{CONFIG_FILE}: main_branch is a branch's name (main, not {remote}/main or refs/...), "
                        "not {main_branch!r}")
-CONFIG_EVAL_GONE = M("{CONFIG_FILE}: [eval] is gone: precheck and parallel_eval are top-level keys")
+CONFIG_EVAL_GONE = M("{CONFIG_FILE}: [eval] is gone: precheck is a top-level key")
 CONFIG_BUILDER_GONE = M("{CONFIG_FILE}: builder is gone: builders is a list of machines tried in order, the first "
                         "usable one realising the closures (builders = [\"{{local_hostname}}\"] realises here)")
 CONFIG_HOSTNAMES_GONE = M("{CONFIG_FILE}: [hostnames] is gone: a machine falls through builders to one that can "
-                          "build, parallel_eval is a top-level key, and a target is the machine of its hostname")
+                          "build, and a target is the machine of its hostname")
+CONFIG_PARALLEL_EVAL_GONE = M("{CONFIG_FILE}: parallel_eval is gone: nix evaluates in parallel whenever it can")
 CONFIG_NOT_TEMPLATES = M("{CONFIG_FILE}: {key} is a non-empty list of templates over {{{placeholder}}}")
 CONFIG_TARGET_DIR = M("{CONFIG_FILE}: targets.{name}.dir is a directory inside the repository, "
                       "relative to its root, not {dir!r}")
