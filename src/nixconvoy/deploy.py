@@ -761,7 +761,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         sent = ", ".join(n for n in plan if not targets.built_on(n))
         with term.step(strings.DEPLOY_DRY_ACTIVATING(targets=tried) if tried else "",
                        strings.DEPLOY_DRY_ACTIVATED(targets=tried) if tried
-                       else strings.DEPLOY_COPIED(targets=sent) if sent else ""), \
+                       else strings.DEPLOY_COPIED(targets=sent) if sent else "") as copying, \
                 ThreadPoolExecutor(2 + len(plan) + len(refresh)) as pool:
             refetch = pool.submit(fetch_origin)
             # Carried, or a redone stage's stale records dropped.
@@ -769,6 +769,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             copies = [pool.submit(copy_then_dry, n, tops[n], len(plan) > 1) for n in plan]
             refreshes = [pool.submit(targets.refresh_kit, h, tops[h].out, tops[h].kit) for h in refresh]
             failures = [r for r in (cp.result() for cp in copies) if r]
+            copying.ok = not failures
             # The old kit stays rooted there: the next deploy tries again.
             for err in (r.result() for r in refreshes):
                 if err:

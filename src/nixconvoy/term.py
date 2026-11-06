@@ -66,9 +66,10 @@ def clip(text: str, room: int) -> str:
     """`text`, cut short with an ellipsis to fit `room` columns."""
     if cells(text) <= room:
         return text
-    fits = ""
+    fits, used = "", 1  # the ellipsis
     for c in text:
-        if cells(fits + c) >= room:
+        used += cells(c)
+        if used > room:
             break
         fits += c
     return fits + "…" if room > 0 else ""
@@ -139,13 +140,11 @@ class Step:
         took = paint(strings.TERM_TOOK(secs=time.monotonic() - self.t0), "dim")
         indent = "    " if self.label else ""
         out: list[str] = []
-        if not told:
-            pass
-        elif failed:
+        if told and failed:
             if self.label:
                 out.append(f"{paint(strings.TERM_FAILED, 'red')} {self.label}  {took}")
             out += [indent + ln for ln in self.lines]
-        elif not self.part:
+        elif told and not self.part:
             if self.done or self.label:
                 out.append(f"{paint(strings.TERM_OK, 'green')} {self.done or self.label}  {took}")
             if self.keep is not None:
@@ -191,8 +190,9 @@ def current() -> Step | None:
 
 
 def fail() -> None:
-    """The calling thread's steps ended as failed, ahead of the message
-    die() prints below their output."""
+    """The calling thread's steps ended as failed, for good - whatever
+    catches die()'s Fail - ahead of the message die() prints below their
+    output."""
     for s in reversed(list(_steps())):
         s.end(failed=True)
 
@@ -228,7 +228,7 @@ def _rows() -> list[str]:
     if _PHASE is not None:
         name, t0 = _PHASE
         secs = strings.TERM_ELAPSED(secs=now - t0)
-        return [f"{paint(frame, 'cyan')} {paint(clip(name, size.columns - len(secs) - 5) + '  ' + secs, 'dim')}"]
+        return [f"{paint(frame, 'cyan')} {paint(clip(name, size.columns - cells(secs) - 5) + '  ' + secs, 'dim')}"]
     return []
 
 
@@ -351,18 +351,22 @@ def paused() -> Iterator[None]:
                 _redraw()
 
 
-def relay(pipe: IO[str] | None) -> None:
+def relay(pipe: IO[str] | None) -> Callable[[], None]:
     """A child's stderr, piped (PIPE) because the terminal is taken, said
     through this process's from a thread of its own: above the rows, not
-    across them."""
+    across them.  What it returns waits (a second at most) for all the
+    child wrote to be said, once the child is over: before the failure
+    that text explains is told."""
     if pipe is None:
-        return
+        return lambda: None
 
     def pump() -> None:
         with pipe:
             for line in pipe:
                 sys.stderr.write(line)
-    threading.Thread(target=pump, daemon=True).start()
+    thread = threading.Thread(target=pump, daemon=True)
+    thread.start()
+    return lambda: thread.join(1)
 
 
 def child_stderr() -> int | None:

@@ -221,6 +221,7 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
     held = f"[{target}] " if quiet else None
     helper = f"{kit}/confirmed-switch"
     guard: subprocess.Popen[str] | None = None
+    guard_said = term.relay(None)
 
     def detached(argv: list[str], unit: str | None = None,
                  sink: list[str] | None = None) -> int:
@@ -240,13 +241,13 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
         return ms / 1000 if ms is not None else float(PROBE_TIMEOUT)
 
     def perform(ask: SwitchQuery) -> SwitchReply:
-        nonlocal guard
+        nonlocal guard, guard_said
         match ask:
             case TakeGuard():
                 guard = subprocess.Popen(switch_guard_cmd(target, expected, toplevel, digest),
                                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                          stderr=term.child_stderr(), text=True)
-                term.relay(guard.stderr)
+                guard_said = term.relay(guard.stderr)
                 assert guard.stdin is not None and guard.stdout is not None
                 line = guard.stdout.readline().strip()
                 if line == "LOCKED":
@@ -362,6 +363,7 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
                 guard.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 guard.kill()
+            guard_said()
 
 
 __all__ = ["provenance_digest", "provenance_doc", "provenance_record", "switch",

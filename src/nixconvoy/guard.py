@@ -62,11 +62,12 @@ def drive(exe: str, params: object, perform: Perform, query: object, outcome: ob
                                 text=True)
     except OSError as e:
         die(strings.GUARD_CANNOT_RUN(name=name, exe=exe, error=e))
-    term.relay(core.stderr)
+    said = term.relay(core.stderr)
     assert core.stdin is not None and core.stdout is not None
     core_in, core_out = core.stdin, core.stdout
 
     def lost(what: str) -> NoReturn:
+        said()
         die(strings.GUARD_LOST(name=name, what=what, during=during))
 
     def send(msg: object) -> None:

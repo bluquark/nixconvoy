@@ -103,7 +103,8 @@ class Perf:
         if term.LIVE:
             brief: dict[str, float] = {}
             for k, v in phases.items():
-                brief[k.partition(":")[0]] = round(brief.get(k.partition(":")[0], 0.0) + v, 2)
+                name = k.partition(":")[0]
+                brief[name] = round(brief.get(name, 0.0) + v, 2)
             summary = " ".join(strings.PROC_PERF_PHASE(phase=k, secs=v) for k, v in brief.items() if v >= 1)
             print(term.paint(strings.PROC_PERF_BRIEF(total=rec["total"], summary=summary) if summary
                              else strings.PROC_PERF_TOTAL(total=rec["total"]), "dim"))

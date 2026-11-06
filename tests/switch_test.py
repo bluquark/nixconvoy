@@ -4197,13 +4197,19 @@ def term_cases() -> None:
             raise proc.Fail("swept by the failure above")  # not its own: no line
         proc.run(["true"], capture=False)  # the terminal is the command's meanwhile
         assert term.clip("日本語のログ", 7) == "日本語…" and term.cells("日本語…") == 7
+        assert term.clip("abcdefgh", 5) == "abcd…" and term.clip("abcde", 5) == "abcde" and term.clip("abc", 0) == ""
+        said = term.relay(subprocess.Popen(["sh", "-c", "echo its last words >&2"], stderr=term.child_stderr(),
+                                           text=True).stderr)
+        said()
+        assert "its last words" in tty.screen()[-1], tty.screen()
     assert during[:2] == ["a line printed meanwhile", "note: said to stderr"], during
     assert len(during) == 3 and re.fullmatch(r". building x  0s  copying path '/nix/store/a'\.\.\.", during[2]), during
     took = r"  \d+\.\ds"
     for line, want in zip(tty.screen()[2:], (
             "✓ built x" + took, "✓ copying closure to x" + took, "    a line kept",
             "✓ landed on main", "its second line", "homelab2: up to date",
-            "✗ switching x" + took, "    what it said", "nixconvoy: the switch of x failed"), strict=True):
+            "✗ switching x" + took, "    what it said", "nixconvoy: the switch of x failed",
+            "its last words"), strict=True):
         assert re.fullmatch(want, line), tty.screen()
     assert "\033[36mnote:\033[0m said" in tty.getvalue(), tty.getvalue()
     assert "\033[1mhomelab2\033[0m: \033[2mup to date\033[0m\n" in tty.getvalue(), tty.getvalue()
