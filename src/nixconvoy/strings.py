@@ -336,6 +336,8 @@ CHECKOUT_PUSHING_BG = M("pushing {what} in the background")
 CHECKOUT_PUSHING_WAITED = M("pushing {what} (a service's run: waited for)")
 CHECKOUT_PUSH_WAITED_FAILED = M("note: the push failed ({status}); the next run's push retries it{log}")
 CHECKOUT_PUSHING_CLEARED = "the cleared announcement"
+# On a terminal, in place of the deploy records' branches.
+CHECKOUT_PUSHING_RECORDS = M("{n} deploy record(s)")
 
 # --- checkout.py: worktree locks
 CHECKOUT_NO_LOCK_REASON = "no reason given"
@@ -368,6 +370,13 @@ UNION_MERGE_SUBJECT = M("union {name}")
 UNION_COMMIT_SUBJECT = "deploy union of work branches"
 
 
+# --- term.py: a step's row on a terminal, and the line it ends in
+TERM_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+TERM_OK = "✓"
+TERM_FAILED = "✗"
+TERM_ELAPSED = M("{secs:.0f}s")
+TERM_TOOK = M("{secs:.1f}s")
+
 # --- proc.py
 PROC_WITH_NOTHING_DONE = M("{problem}; {NOTHING_DONE}")
 # A failure's command output, appended to its message as {detail} when there is any.
@@ -375,6 +384,9 @@ PROC_DETAIL = M(":\n{output}")
 PROC_DETAIL_LINES = M("\n{output}")
 PROC_PERF = M("perf: total {total}s ({summary}) -> {path}")
 PROC_PERF_PHASE = M("{phase} {secs}s")
+# On a terminal: the phases of a second or more, a switch's without its targets.
+PROC_PERF_BRIEF = M("{total}s ({summary})")
+PROC_PERF_TOTAL = M("{total}s")
 PROC_DIE = M("{TOOL}: {msg}")
 PROC_STILL_ARMED = M("{TOOL}: {targets} still armed: each finishes verifying and is then confirmed or rolled back")
 PROC_CMD_FAILED = M("`{cmd}` failed{detail}")
@@ -387,6 +399,7 @@ DEPLOY_STALE_STAMP = M("warning: {key}'s deploy last renewed its announcement {m
 DEPLOY_NO_NEWS = M("warning: no news of {key}'s deploy for {secs} s (its announcement is no longer renewed): taken as dead, going on without it")
 DEPLOY_KILLED_BY_SIGNAL = M("killed by signal {signum}")
 DEPLOY_RUNNING_PRECHECK = "running the precheck..."
+DEPLOY_PRECHECK_RAN = "ran the precheck"
 DEPLOY_REACHES_NONE = M("reaches no target: committed onto {wb} and pushed; nothing built or switched (the probes' results dropped)")
 DEPLOY_FOREIGN_INCREMENTS = M("{remote} holds {wb} with increments this worktree never pushed: another worktree of this name?  `git log {main_ref}..{remote_wb}` shows them; open this worktree under another name, or `git branch {wb} {remote_wb}` to take them over")
 DEPLOY_NOT_WORK_BRANCH = M("on branch {branch}, not a work branch of this machine's ({prefix}<branch-suffix>); the main checkout deploys from {main_branch} (a hand commit there is claimed as {main_branch}'s until pushed)")
@@ -406,6 +419,10 @@ DEPLOY_SKIP = M("NIXCONVOY_SKIP_SWITCH=1: skipping probe+eval+switch (union {uni
 DEPLOY_ANNOUNCE_FAILED = M("announcing this deploy on {remote} failed; {NOTHING_DONE}:\n{detail}")
 DEPLOY_EVALUATING = "evaluating targets..."
 DEPLOY_EVALUATING_PRECHECK = "evaluating targets, running the precheck..."
+DEPLOY_EVALUATED = "evaluated targets"
+DEPLOY_EVALUATED_PRECHECK = "evaluated targets, ran the precheck"
+# The drift core's lines saying the same of several targets, as one on a terminal.
+DEPLOY_VERDICT_LINE = M("  {targets}: {verdict}")
 DEPLOY_ASSESSED_PLAIN = M("warning: {target} is switched plainly (auto_rollback_checks = false) but carries the boot-assessment module: a counted boot there runs no switch checks")
 DEPLOY_REJECTED_GENERATION = M("{target}'s bootloader rejected the very generation this deploy would switch it to ({stub}): it failed its boot assessment and the target fell back.  Nothing was built, switched or committed.  See `journalctl -u boot-assessment-watch -u boot-assessment` on {target}; then change the configuration, or re-arm the stub to retry it as is (sudo mv of the +0-N stub to +2 under /boot/EFI/Linux).")
 # A deploy record's subject: the main branch, then each unioned branch.
@@ -417,7 +434,10 @@ DEPLOY_BUILD_WHERE = M(" on {host}")
 DEPLOY_BUILD_KIT = M("{target}'s switch kit")
 DEPLOY_BUILDING = M("building {what}{where}...")
 DEPLOY_BUILD_OF = M("build of {what}")
+DEPLOY_BUILT = M("built {what}{where}")
+DEPLOY_COPIED = M("copied closure to {targets}")
 DEPLOY_DRY_ACTIVATING = M("dry-activating {targets}...")
+DEPLOY_DRY_ACTIVATED = M("dry-activated {targets}")
 DEPLOY_KIT_REFRESH_FAILED = M("warning: {err}")
 DEPLOY_DRY_FAILED = M("{DRY_FLAG}: {NOTHING_DONE}; a dry activation failed:\n{failures}")
 DEPLOY_DRY_WOULD_SWITCH = M("{DRY_FLAG}: {targets} would be switched (union {union}); {NOTHING_DONE}")
@@ -445,6 +465,7 @@ SWITCH_CHECK_UNPARSED = M('{shell} cannot parse "{statement}": {detail}')
 DEPLOY_CONTROLLER_CHECK_UNPARSED = M("nothing switched: {target}'s controller_shell check: {fault}")
 SWITCH_CHECK_INTERRUPTED = M("check interrupted: {error}")
 SWITCH_DURING = M(" while switching {target}")
+SWITCH_DONE = M("switched {target}")
 
 # --- targets.py
 TARGETS_INVENTORY_UNREADABLE = M("cannot read the target inventory under {dir}/: {error}")
@@ -453,6 +474,7 @@ TARGETS_NO_TAG = M("no target carries the tag {tag} ({CONFIG_FILE}: targets.<nam
 TARGETS_PHANTOM_TAG = M("{CONFIG_FILE} tags {phantom} as {tag}, but the inventory has no such target (it has: {inventory})")
 TARGETS_UNKNOWN = M("unknown target(s) {unknown}; the inventory has: {inventory}")
 TARGETS_REFRESHING_KIT = M("refreshing the switch kit on {target}...")
+TARGETS_REFRESHED_KIT = M("refreshed the switch kit on {target}")
 TARGETS_KIT_ROOT_FAILED = M("rooting the switch kit on {target} failed (exit {code}){detail}")
 TARGETS_NIX_TIMEOUT = M("`nix {cmd}` timed out after {secs} s")
 TARGETS_NIX_NO_JSON = M("`nix {cmd}` printed no JSON object:\n{output}")
