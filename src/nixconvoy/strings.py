@@ -203,8 +203,11 @@ OPEN_BRANCH_HELD = M("{remote} holds {held}: a removed checkout's, or another ma
                      "shared).  `--branch {name}` makes it this checkout's, `--branch <branch-suffix>` opens another")
 OPEN_NOT_WORK_BRANCH = M("{branch} is not a work branch of this machine's: one named {prefix}<branch-suffix>; "
                             "`--branch <branch-suffix>` names one")
-OPEN_BAD_SUFFIX = M("{branch}: a checkout's branch is {prefix}<branch-suffix> with a suffix that is not 'main' "
-                    "and holds no '-'; name one with --branch <branch-suffix>")
+OPEN_SUFFIX_MAIN = M("{branch}: {prefix}main-<name> is a subagent worktree's of the main checkout; "
+                     "name another with --branch <branch-suffix>")
+OPEN_BRANCH_OWNED = M("{branch} is the work branch of {owner}; name another with --branch <branch-suffix>")
+OPEN_CHILD_BRANCH_OWNED = M("a subagent worktree {name} here would own {branch}, the work branch of {owner}: "
+                            "open it under another name")
 OPEN_DIVERGED = M("{branch} here and on {remote} have diverged: `git branch -f {branch} "
                   "{remote}/{branch}` takes {remote}'s copy (or the other way round), then re-run")
 OPEN_ADD_FAILED = M("git worktree add failed:\n{stderr}")

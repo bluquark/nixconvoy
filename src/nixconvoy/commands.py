@@ -29,6 +29,7 @@ from .checkout import (
     ancestor_pids,
     await_background_push,
     branch_at,
+    branch_owners,
     catch_up,
     checkout_identity,
     clear_refspec,
@@ -71,6 +72,7 @@ from .checkout import (
     sole_writer_problem,
     staged_differs,
     state_path,
+    sub_branch,
     sub_dir,
     sub_parent,
     summarize,
@@ -1261,7 +1263,8 @@ def open_worktree(name: str, lock_reason: str | None) -> Path:
     (nixconvoy.toml's `child_worktrees`; root: the checkout this one's subagent
     worktrees hang off) on the fresh branch worktree-<name> off origin's
     default branch - a worktree of that name is reused - owning <root's
-    branch>-<name> from its first deploy.  Under the name lock prune holds
+    branch>-<name> from its first deploy, refused when a checkout here owns
+    that branch (its suffix holding the '-').  Under the name lock prune holds
     while judging a worktree of the name.  `lock_reason` is the worktree
     lock Claude Code's create hook names its session with (replacing a
     reused one's); without it a hand-opened worktree is locked as
@@ -1274,6 +1277,13 @@ def open_worktree(name: str, lock_reason: str | None) -> Path:
     if name in names.gitmodule_names(root):
         die(strings.OPEN_NAME_IS_SUBMODULE(name=name))
     d = root / sub_dir() / name
+    if (root / CONFIG_FILE).is_file() and not d.is_dir():
+        wb = sub_branch(root, name)
+        # A checkout's branch exists from its open: without one, nothing to look for.
+        if rev(f"refs/heads/{wb}") or rev(remote_ref(wb)):
+            owner = branch_owners(root).get(wb)
+            if owner is not None:
+                die(strings.OPEN_CHILD_BRANCH_OWNED(name=name, branch=wb, owner=owner))
     ensure_excluded(root, d)
     branch = f"worktree-{name}"
     base = default_base(root)
@@ -1345,7 +1355,8 @@ def open_checkout(path: Path, branch: str | None) -> Path:
     prefix), else <branch_prefix><path's name>, refused when origin holds
     that branch or a subagent branch under it (a removed checkout's, or
     another machine's when the prefix is shared: `branch` names it to take
-    it over, or another).  A named branch is taken as
+    it over, or another); one a checkout here owns - its own, or a
+    subagent worktree's <branch-suffix>-<name> - is never opened.  A named branch is taken as
     this repository or origin holds it (origin's copy over a stale local
     one), else new off origin's default branch; a branch made here is
     pushed at once, so origin holds it from then on.  Its upstream is
@@ -1366,18 +1377,23 @@ def open_checkout(path: Path, branch: str | None) -> Path:
     tips = origin_tips()
     local = set(out(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/"]).split())
     prefix = this_prefix()
+    owners = branch_owners(here)
     if branch is None:
         branch = f"{prefix}{d.name}"
-        held = sorted(b for b in tips if b == branch or b.startswith(f"{branch}-"))
-        if held:
+        # A branch under this name that a checkout here owns is that checkout's, not a subagent's of this one.
+        held = sorted(b for b in tips if b == branch or (b.startswith(f"{branch}-") and b not in owners))
+        if held and branch not in owners:
             die(strings.OPEN_BRANCH_HELD(remote=cfg().remote, held=", ".join(held), name=d.name))
     elif not branch.startswith(prefix) and "/" not in branch:
         branch = f"{prefix}{branch}"
     if not owned(branch):
         die(strings.OPEN_NOT_WORK_BRANCH(branch=branch, prefix=prefix))
-    if branch.removeprefix(prefix) == "main" or "-" in branch.removeprefix(prefix):
-        # "<branch-suffix>-<name>" is a subagent worktree's branch, "main-<name>" the main checkout's.
-        die(strings.OPEN_BAD_SUFFIX(branch=branch, prefix=prefix))
+    if branch.removeprefix(prefix) == "main":
+        # "main-<name>" is a subagent worktree's of the main checkout.
+        die(strings.OPEN_SUFFIX_MAIN(branch=branch, prefix=prefix))
+    if branch in owners:
+        # A subagent worktree's "<branch-suffix>-<name>", or a checkout's of that very name.
+        die(strings.OPEN_BRANCH_OWNED(branch=branch, owner=owners[branch]))
     d.parent.mkdir(parents=True, exist_ok=True)
     if branch in local and branch in tips and rev(f"refs/heads/{branch}") != tips[branch]:
         # Origin's copy taken over a stale local one; a local one ahead
