@@ -13,7 +13,6 @@ from typing import IO, NoReturn
 
 from . import commands, config, hooks, init, names, proc, review, strings, submodule, term
 from .checkout import (
-    await_background_push,
     lock_checkout,
     lock_holder,
     note_prefix,
@@ -238,7 +237,6 @@ def dispatch() -> None:
             # moves, and nothing is staged for that deploy to carry, a dead
             # run's tmp commits unwound.
             take_lock()
-            await_background_push()
             pop_tmp_commits()
             refuse_staged(here)
             if not dry:

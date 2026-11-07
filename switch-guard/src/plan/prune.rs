@@ -142,9 +142,6 @@ fn judge(s: &mut Script, p: &Params) -> Run<Result<(String, Option<String>), Out
     if let Some(op) = s.text(Query::OpInProgress)? {
         return kept(format!(text!(prune_op_in_progress), op = op));
     }
-    if s.flag(Query::PushInFlight)? {
-        return kept(text!(prune_push_in_flight));
-    }
     if s.flag(Query::Nested)? {
         return kept(text!(prune_nested));
     }

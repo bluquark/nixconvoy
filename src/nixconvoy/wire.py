@@ -641,11 +641,6 @@ class Alive(Variant):
 
 
 @dataclass(frozen=True)
-class PushInFlight(Variant):
-    pass
-
-
-@dataclass(frozen=True)
 class Nested(Variant):
     pass
 
@@ -687,7 +682,7 @@ PlanQuery = (
     | Upstream | Fate | SetUpstream | Listed | Branches | Unchanged | Worktree | LaneWorktree | Summary | Merge
     | DropFile | Solve | Add | AbortMerge | CommitMerge | StripTree | Head | HeadTree | CommitUnion | Checkout
     | CollectFetch | Refresh | AwaitPending | Cuts | Stage | TakeNameLock | ReleaseNameLock | TakeDeployLock
-    | ReleaseDeployLock | Lock | Alive | PushInFlight | Nested | OwnBranch | Unpushed | Dirty | Occupied
+    | ReleaseDeployLock | Lock | Alive | Nested | OwnBranch | Unpushed | Dirty | Occupied
     | RemoveWorktree | DropBranches
 )
 

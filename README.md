@@ -550,8 +550,8 @@ Also, there are two special cases: a change touching only documentation skips ev
 - **`/tmp/nixconvoy-deploy-wt.*`**.  The temporary worktree the union commit is merged inside of.
 - **`~/.cache/nixconvoy/eval-memo/`**.  The eval memo keyed on git blob hashes.  This is used to enable the optimization "Only targets that could possibly be affected by a file you changed are re-evaluated"
 - **`~/.cache/nixconvoy/logs/`**.  Logs of nixconvoy deploys and worktree prunes.  May be useful to diagnose bugs and performance problems.
-- ``<main-checkout>/.git/worktrees/<name>/nixconvoy/``. A deploy lock & background push state file.
-- **`<main-checkout>/.git/nixconvoy/`**.  Worktree open/close locks, a copy of the branch prefix --- as well as the main checkout's deploy lock & background push state file.
+- ``<main-checkout>/.git/worktrees/<name>/nixconvoy/``. A deploy lock.
+- **`<main-checkout>/.git/nixconvoy/`**.  Worktree open/close locks, a copy of the branch prefix --- as well as the main checkout's deploy lock.
 
 </details>
 

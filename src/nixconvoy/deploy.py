@@ -25,7 +25,6 @@ from .checkout import (
     add_worktree,
     adopt_commit,
     announced,
-    await_background_push,
     commit_deployed,
     current_branch,
     deployed_commit,
@@ -243,7 +242,6 @@ def deploy(filter_targets: list[str], msg: str | None, evict: bool, dry: bool = 
 
     candidates = filter_targets or list(all_targets)
 
-    await_background_push()
     main0 = rev(main_ref())
     # Non-candidates are probed best-effort: the verdict reports their
     # drift.

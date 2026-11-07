@@ -27,7 +27,6 @@ from .checkout import (
     add_worktree,
     adopt_origin_tip,
     ancestor_pids,
-    await_background_push,
     branch_at,
     branch_owners,
     catch_up,
@@ -64,7 +63,6 @@ from .checkout import (
     pop_tmp_commits,
     proc_stat,
     push_cmd,
-    push_in_flight,
     ran,
     require_work_branch,
     restage_msg,
@@ -115,7 +113,6 @@ from .wire import (
     PlanQuery,
     PlanReply,
     PruneParams,
-    PushInFlight,
     Ran,
     ReleaseDeployLock,
     ReleaseNameLock,
@@ -368,13 +365,12 @@ def settle_landings(*, fetched: bool = False) -> list[Landed]:
     is finished (its push went through unknown to its run, or the run was
     cut short), one main moved away from forgotten, one main may yet
     take - it is still where the landing was built - kept until it has
-    moved.  `fetched`: origin is, by the caller, the background push
-    awaited and a dead rebase's tmp commits unwound.  Those main holds."""
+    moved.  `fetched`: origin is, by the caller, fetched and a dead
+    rebase's tmp commits unwound.  Those main holds."""
     on_file = state_path(LANDINGS)
     if not on_file.exists():
         return []
     if not fetched:
-        await_background_push()
         git_remote(*fetch_args())
         pop_tmp_commits()
     held = []
@@ -421,7 +417,6 @@ def catch_up_rest(landed: list[Landed]) -> bool:
 
 def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
     PERF.mark("fetch")
-    await_background_push()
     git_remote(*fetch_args())
     pop_tmp_commits()
     # A landing finished only now was the one asked for, unless work was done here since.
@@ -473,7 +468,6 @@ def land(message: str | None = None, not_yet_deployed: bool = False) -> None:
 
 def pull() -> None:
     """This checkout and its siblings onto origin/main (cli docstring)."""
-    await_background_push()
     binary("nixconvoy-plan")  # dies here rather than once a checkout moved
     resume_landings(locked=False)
     if not (catch_up([Path.cwd(), *sibling_checkouts()]) & submodule.catch_up_repos()):
@@ -498,7 +492,6 @@ def undeploy(back_to: str = "HEAD^", as_if: dict[str, str] | None = None) -> boo
     commit the branch would be reset onto recorded there under its name,
     for that deploy to take the branch to be at."""
     PERF.mark("fetch")
-    await_background_push()
     git_remote(*fetch_args())
     pop_tmp_commits()
     ident = checkout_identity()
@@ -850,8 +843,6 @@ class PruneQueries(GitQueries):
             case Alive(pid, start, own_ends):
                 reason = f"pid {pid}" + (f" start {start}" if start is not None else "")
                 return Flag(lock_live(reason) if own_ends else lock_pid_alive(reason) is not False)
-            case PushInFlight():
-                return Flag(push_in_flight())
             case Nested():
                 inside = [Path(ln[len("worktree "):]).resolve() for ln in out(
                     ["git", "worktree", "list", "--porcelain"]).splitlines() if ln.startswith("worktree ")]
@@ -872,7 +863,6 @@ class PruneQueries(GitQueries):
                     self.fetched.append(super().__call__(ask))
                 return self.fetched[0]
             case RemoveWorktree():
-                await_background_push(wait=False)  # its last push's outcome, told before its files go
                 submodule.remove_all(self.d)  # nested in it: their registrations go first
                 # Under the name lock, which every relock takes too: the lock
                 # judged is the one lifted.
@@ -1508,7 +1498,6 @@ def land_with_children(message: str | None = None, not_yet_deployed: bool = Fals
     appended - every branch reset onto the new main, here and on origin,
     each worktree staying."""
     PERF.mark("fetch")
-    await_background_push()
     git_remote(*fetch_args())
     pop_tmp_commits()
     here = Path.cwd().resolve()

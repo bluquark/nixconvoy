@@ -68,7 +68,6 @@ fn keeps_and_says_why() {
             "the claude session that spawned its agent still runs",
         ),
         (Query::OpInProgress, Reply::Text(Some("rebase".into())), "a rebase is in progress"),
-        (Query::PushInFlight, Reply::Flag(true), "a push of its work branch is in flight"),
         (Query::Nested, Reply::Flag(true), "another worktree lives inside it"),
         (Query::OwnBranch, Reply::Text(None), "it owns no work branch"),
         (Query::Fetch, Reply::Ran { ok: false, detail: "offline".into() }, "origin could not be fetched"),

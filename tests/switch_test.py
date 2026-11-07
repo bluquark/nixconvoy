@@ -26,7 +26,6 @@ from __future__ import annotations
 import atexit
 import collections
 import contextlib
-import fcntl
 import functools
 import getpass
 import hashlib
@@ -36,7 +35,6 @@ import json
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -1551,12 +1549,6 @@ def remote_cases(d: Path) -> None:
             with contextlib.redirect_stderr(io.StringIO()):
                 p = proc.git_remote("push", "--quiet", "origin", *checkout.delete_args({ref: c}), check=False)
             assert p.returncode != 0 and "stale info" in p.stderr and at(ref) == base
-            # The command a background script runs: the same, by its exit code, git's output as it comes.
-            planned("before inband")
-            p = subprocess.run([*proc.GIT_REMOTE_CMD, "push", "--quiet", "origin", f":{ref}"],
-                               capture_output=True, text=True, check=False)
-            assert p.returncode == 0 and "retrying" in p.stderr and calls() == ["push", "push"] and gone(ref), p
-            assert "[remote rejected]" in p.stdout, p
         # What the remote alone can have caused, and what a network or another writer can too.
         for theirs in ("fatal: unable to access 'https://o/r.git/': The requested URL returned error: 503",
                        "error: RPC failed; HTTP 500 curl 22 The requested URL returned error: 500",
@@ -2004,63 +1996,7 @@ def git_cases(d: Path) -> None:
         out = printed(lambda: commands.close_worktrees([]))
         assert f"/review: kept, it owns {own}, which carries commits not on origin" in out, out
         sh(co, "branch", "-D", own)
-        # A background push holds it while its sh holds its lock with no
-        # status written; one over is collected (its failure told, its
-        # files cleared) by the removal.
-        pidf, statusf, logf, lockf = (checkout.state_path(f"push.{k}", rv.resolve())
-                                      for k in ("pid", "status", "log", "lock"))
-
-        def pusher(script: str) -> subprocess.Popen[bytes]:
-            """A push's shape (push_deployed): sh holds the lock, its children not."""
-            with lockf.open("a") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                return subprocess.Popen(["sh", "-c", f"({script}) {lock.fileno()}>&-"], start_new_session=True,
-                                        pass_fds=(lock.fileno(),))
-
-        running = pusher("sleep 60")
-        try:
-            pidf.write_text(str(running.pid))
-            out = printed(lambda: commands.close_worktrees([]))
-            assert "/review: kept, a push of its work branch is in flight" in out, out
-            os.chdir(rv)
-            try:
-                assert checkout.await_background_push(wait=False) and pidf.exists()
-            finally:
-                os.chdir(co)
-        finally:
-            with contextlib.suppress(OSError):
-                os.killpg(running.pid, signal.SIGKILL)
-            running.wait()
-        # The sh gone, a child of its still running: not a push in flight.
-        orphaned = pusher("sleep 60 & exit 0")
-        orphaned.wait()
-        os.chdir(rv)
-        try:
-            try:
-                pidf.write_text(str(orphaned.pid))
-                assert not checkout.push_in_flight()
-            finally:
-                with contextlib.suppress(OSError):
-                    os.killpg(orphaned.pid, signal.SIGKILL)
-            # Over with its status written: collected without a word, a
-            # status left half-written with it; gone without one: told as final.
-            statusf.write_text("0\n")
-            statusf.with_name("push.status.tmp").write_text("0")
-            assert warned(lambda: checkout.await_background_push(wait=False)) == ""
-            assert not pidf.exists() and not statusf.with_name("push.status.tmp").exists()
-            pidf.write_text(str(running.pid))
-            err = warned(lambda: checkout.await_background_push(wait=False))
-            assert "/review failed (gone without a status): the deploy records" in err and not pidf.exists(), err
-        finally:
-            os.chdir(co)
-        # The removal tells the outcome of a push that failed.
-        pidf.write_text(str(running.pid))
-        statusf.write_text("1\n")
-        logf.write_text("rejected\n")
-        outs: list[str] = []
-        err = warned(lambda: outs.append(printed(lambda: commands.close_worktrees([]))))
-        assert "/review failed (1): the deploy records" in err and "rejected" in err, err
-        out = outs[0]
+        out = printed(lambda: commands.close_worktrees([]))
         assert out.endswith("/review: empty, removed\n"), out
         assert not rv.exists() and Path.cwd().resolve() == co.resolve()
         out = printed(lambda: commands.close_worktrees([]))
@@ -2395,7 +2331,6 @@ def announce_cases(d: Path) -> None:
         # records onto the history branches and the announcement deleted.
         checkout.adopt_commit(wb, committed)
         checkout.push_deployed(wb, ann, {"a": rec1, "b": rec2})
-        checkout.await_background_push()
         sh(co, *checkout.fetch_args())
         assert proc.rev(f"refs/remotes/origin/{wb}") == committed
         assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/a") == rec1
@@ -2406,16 +2341,15 @@ def announce_cases(d: Path) -> None:
         assert proc.rev(f"{checkout.PENDING_REFS}/{wb}") is None
         # A main checkout's deploy: the records alone.
         checkout.push_deployed(None, None, {"a": rec2})
-        checkout.await_background_push()
         sh(co, *checkout.fetch_args())
         assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/a") == rec2
         assert proc.rev(f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/b") == rec2
-        # Nothing to push: no background push started.
-        checkout.push_deployed(wb, None, {})
-        assert not Path(checkout.push_state("pid")).exists()
+        # Nothing to push: no push made.
+        with mock.patch.object(checkout, "git_remote", side_effect=AssertionError("pushed")):
+            checkout.push_deployed(wb, None, {})
         # A main checkout's announcement (its HEAD origin lacks), under
         # main@<machine>-<checkout>, is settled by the push that ends its
-        # deploy (over, not waited for) and cleared by the push of main
+        # deploy and cleared by the push of main
         # that lands that HEAD, not by nixconvoy.
         key = checkout.announce_key("main")
         assert key.startswith("main@tester-") and len(key) == len("main@tester-") + 8, key
@@ -2423,7 +2357,6 @@ def announce_cases(d: Path) -> None:
         assert ann.collect(), ann.detail
         assert ann.key == key
         checkout.push_deployed(None, ann, {"a": rec2})
-        checkout.await_background_push()
         sh(co, *checkout.fetch_args())
         (pend,) = checkout.pending_announcements()
         assert (pend.key, pend.branch, pend.settled) == (key, "main", True), pend
@@ -2433,7 +2366,6 @@ def announce_cases(d: Path) -> None:
         assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{key}") != ""
         # Cleared, it is swept by the next deploy's ending push.
         checkout.push_deployed(None, None, {"a": rec2})
-        checkout.await_background_push()
         sh(co, *checkout.fetch_args())
         assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{key}") == ""
         # One announcing a HEAD main holds already (a deploy with nothing
@@ -2447,7 +2379,6 @@ def announce_cases(d: Path) -> None:
         sh(co, *checkout.fetch_args())
         assert [p.key for p in checkout.pending_announcements()] == [key] and checkout.announcements()[1] == {}
         checkout.push_deployed(None, ann, {"a": rec2b})
-        checkout.await_background_push()
         sh(co, *checkout.fetch_args())
         assert checkout.pending_announcements() == [] and list(checkout.announcements()[1]) == [key]
         # The sweep is not atomic: a cleared announcement renewed since the
@@ -2460,10 +2391,20 @@ def announce_cases(d: Path) -> None:
         moved = out_at(co, plain, "renewed")
         sh(co, "push", "--quiet", "--force", "origin", f"{moved}:{checkout.PENDING_REFS}/{key}")
         checkout.push_deployed(None, None, {})
-        checkout.await_background_push()
         assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{other}") == ""
         assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{key}").split()[0] == moved
         sh(co, "push", "--quiet", "origin", f":{checkout.PENDING_REFS}/{key}")
+        # Attested records go with the sweep, ref by ref: one leased on the
+        # record origin's history branch holds lands, one leased on a record
+        # it moved past is refused, and the swept announcement goes anyway.
+        sh(co, "push", "--quiet", "origin", f"{plain}:{checkout.PENDING_REFS}/{other}")
+        sh(co, *checkout.fetch_args())
+        att_a = checkout.record_commit("a", snap, [rec2b, main], "attested", "{}")
+        att_b = checkout.record_commit("b", snap, [rec2, main], "attested", "{}")
+        assert warned(lambda: checkout.push_deployed(None, None, {}, {"a": (att_a, rec1), "b": (att_b, rec2)})) == ""
+        assert sh(seed, "ls-remote", "origin", f"refs/heads/{checkout.DEPLOYED_PREFIX}/a").split()[0] == rec2b
+        assert sh(seed, "ls-remote", "origin", f"refs/heads/{checkout.DEPLOYED_PREFIX}/b").split()[0] == att_b
+        assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{other}") == ""
         sh(co, *checkout.fetch_args())
         # The branch not pushed (its lease failed): the announcement stays,
         # so the deploy still counts as under way (dead, once its renewals
@@ -2475,9 +2416,8 @@ def announce_cases(d: Path) -> None:
         sh(seed, "switch", "--quiet", wb)
         put(seed, "b.txt", "theirs\n", "theirs")
         sh(seed, "push", "--quiet", "origin", wb)
-        checkout.push_deployed(wb, ann, {"a": rec1})
-        err = warned(checkout.await_background_push)
-        assert "background push failed" in err, err
+        err = warned(lambda: checkout.push_deployed(wb, ann, {"a": rec1}))
+        assert "the push failed; the next run's push retries it" in err and "[rejected]" in err, err
         sh(co, *checkout.fetch_args())
         assert list(checkout.announced(None)) == [wb]
         # Atomic: the history branch did not move either.
@@ -2486,8 +2426,8 @@ def announce_cases(d: Path) -> None:
                                               f":{checkout.PENDING_REFS}/{wb}"]
         sh(co, "push", "--quiet", "origin", f":{checkout.PENDING_REFS}/{wb}")
         # A main checkout's announcement carrying records, unsettled (its
-        # deploy died, or its ending push did - a oneshot service's end
-        # killed it), is under way until origin's history branches hold
+        # deploy died, or its ending push did), is under way until origin's
+        # history branches hold
         # every record it carries: cleared then, and swept.
         sh(co, "push", "--quiet", "origin", "HEAD:main")
         sh(co, *checkout.fetch_args())
@@ -2507,7 +2447,6 @@ def announce_cases(d: Path) -> None:
         sh(co, *checkout.fetch_args())
         assert checkout.pending_announcements() == [] and list(checkout.announcements()[1]) == [key]
         checkout.push_deployed(None, None, {})
-        checkout.await_background_push()
         assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{key}") == ""
     say("announcements: ok")
 
@@ -4140,35 +4079,6 @@ def in_scratch(cases: Callable[[Path], None]) -> Callable[[], None]:
     return run
 
 
-def service_cases() -> None:
-    """A oneshot service's run (proc.oneshot_run): the unit from the cgroup
-    path, its main process among the ancestors."""
-    assert proc.cgroup_unit("0::/system.slice/dtach-bash2.service\n") == "dtach-bash2.service"
-    assert proc.cgroup_unit("0::/system.slice/system-x.slice/x@1.service/sub\n") == "x@1.service"
-    assert proc.cgroup_unit("0::/user.slice/user-1000.slice/session-3.scope\n") is None
-    assert proc.cgroup_unit("") is None
-    assert os.getppid() in proc.ancestors(os.getpid()) and os.getpid() not in proc.ancestors(os.getpid())
-    assert proc.ancestors(1) == set()
-    assert proc.cgroup_unit("0::/system.slice/sshd@3-[::1]:22-[::1]:5.service\n") == "sshd@3-[::1]:22-[::1]:5.service"
-    with mock.patch.object(proc, "cgroup_unit", return_value="x.service"), \
-            mock.patch.object(proc, "run", side_effect=OSError("no systemctl")):
-        assert not proc.oneshot_run()
-    with mock.patch.object(proc, "cgroup_unit", return_value="x.service"), \
-            mock.patch.object(proc, "run", return_value=proc.Completed([], 0, f"Type=oneshot\nMainPID={os.getppid()}\n", "")):
-        assert proc.oneshot_run()
-    with mock.patch.object(proc, "cgroup_unit", return_value="x.service"), \
-            mock.patch.object(proc, "run", return_value=proc.Completed([], 0, f"Type=simple\nMainPID={os.getppid()}\n", "")):
-        assert not proc.oneshot_run()
-    # Its own process the unit's main one: its exit ends the unit, whatever the type.
-    for kind in ("oneshot", "simple"):
-        with mock.patch.object(proc, "cgroup_unit", return_value="x.service"), \
-                mock.patch.object(proc, "run", return_value=proc.Completed([], 0, f"Type={kind}\nMainPID={os.getpid()}\n", "")):
-            assert proc.oneshot_run()
-    with mock.patch.object(proc, "cgroup_unit", return_value="x.service"), \
-            mock.patch.object(proc, "run", return_value=proc.Completed([], 1, "", "")):
-        assert not proc.oneshot_run()
-
-
 def term_cases() -> None:
     """A step's row on a terminal and the line it ends in (term.step);
     off one, its label alone."""
@@ -4232,7 +4142,7 @@ def term_cases() -> None:
 
 def unit_cases() -> None:
     for cases in (gate_cases, provenance_cases, target_cases, builder_cases, memo_cases, await_cases,
-                  service_cases, term_cases):
+                  term_cases):
         cases()
 
 

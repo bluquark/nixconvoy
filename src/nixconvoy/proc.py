@@ -399,17 +399,14 @@ def undone(args: list[str], cwd: str | None, env: dict[str, str],
 
 
 def git_remote(*args: str, cwd: str | None = None, env: dict[str, str] | None = None,
-               check: bool = True, timeout: float | None = None, streamed: bool = False) -> Completed:
+               check: bool = True, timeout: float | None = None) -> Completed:
     """A git command that talks to a remote (NET_VERBS, `submodule
     update`), under GIT_NET and retried (RETRY_WAITS) while the remote
     fails on its own side (SERVER_ERROR): whether such a command landed
     is unknown, so each must leave the remote the same when repeated after
     landing, which undone sees to for the one that does not.  `timeout`
     covers the retries too, each given at least the time the attempt
-    before took.  `streamed` prints the command's output as it comes
-    (stream; the environment and directory this process's own), all of it
-    then the result's stderr."""
-    assert not streamed or (cwd, env, timeout) == (None, None, None)
+    before took."""
     net = PUSH_NET if args[0] == "push" else GIT_NET
     full_env = {**GIT_ENV, **(env or {})}
     deadline = None if timeout is None else time.monotonic() + timeout
@@ -420,11 +417,7 @@ def git_remote(*args: str, cwd: str | None = None, env: dict[str, str] | None = 
     def attempt(todo: list[str]) -> tuple[Completed, float, re.Match[str] | None]:
         """`todo` run: its result, the seconds it took, its server error."""
         cmd, t0 = [*GIT, *net, *todo], time.monotonic()
-        if streamed:
-            lines: list[str] = []
-            p = Completed(cmd, stream(cmd, sink=lines), "", "\n".join(lines))
-        else:
-            p = run(cmd, cwd=cwd, env=full_env, check=False, timeout=left())
+        p = run(cmd, cwd=cwd, env=full_env, check=False, timeout=left())
         failed = p.returncode != 0 and not p.timed_out
         return p, time.monotonic() - t0, SERVER_ERROR.search(p.stderr or "") if failed else None
     todo = list(args)
@@ -453,18 +446,6 @@ def git_remote(*args: str, cwd: str | None = None, env: dict[str, str] | None = 
     return p
 
 
-# git_remote as a command of its own (its arguments git's), for a script
-# that outlives this process: this package's directory is its first argument.
-GIT_REMOTE_CMD = (sys.executable, "-I", "-c",
-                  "import sys; sys.path.insert(0, sys.argv.pop(1)); from nixconvoy import proc; proc.git_remote_main()",
-                  str(Path(__file__).resolve().parents[1]))
-
-
-def git_remote_main() -> None:
-    os.environ.update(GIT_ENV)
-    sys.exit(git_remote(*sys.argv[1:], check=False, streamed=True).returncode)
-
-
 def rev(ref: str) -> str | None:
     p = run(["git", "rev-parse", "-q", "--verify", ref], check=False)
     if p.returncode != 0:
@@ -478,50 +459,6 @@ def is_ancestor(a: str, b: str, cwd: str | None = None) -> bool:
 
 def this_machine() -> str:
     return socket.gethostname().split(".")[0]
-
-
-def cgroup_unit(cgroup: str) -> str | None:
-    """The systemd service a /proc/<pid>/cgroup listing puts the process
-    in: the innermost .service on its path, or None."""
-    for ln in cgroup.splitlines():
-        for seg in reversed(ln.split(":", 2)[-1].split("/")):
-            if seg.endswith(".service"):
-                return seg
-    return None
-
-
-def ancestors(pid: int) -> set[int]:
-    """The pids of `pid`'s ancestors, up to init."""
-    found: set[int] = set()
-    while pid > 1:
-        try:
-            stat = Path(f"/proc/{pid}/stat").read_text()
-            pid = int(stat.rpartition(")")[2].split()[1])
-        except (OSError, ValueError, IndexError):
-            break
-        found.add(pid)
-    return found
-
-
-def oneshot_run() -> bool:
-    """Whether this process's exit ends the systemd service its cgroup
-    names: this process is the unit's main process, or the unit is
-    Type=oneshot with its main process among this one's ancestors.  The
-    unit's end kills what its cgroup still holds, so nothing started here
-    outlives the run (push_deployed waits for its push instead)."""
-    try:
-        unit = cgroup_unit(Path("/proc/self/cgroup").read_text())
-        if unit is None:
-            return False
-        p = run(["systemctl", "show", "-p", "Type", "-p", "MainPID", unit], check=False)
-    except OSError:
-        return False
-    props = dict(ln.split("=", 1) for ln in p.stdout.splitlines() if "=" in ln)
-    main_pid = props.get("MainPID", "")
-    if not main_pid.isdigit():
-        return False
-    me = os.getpid()
-    return int(main_pid) == me or (props.get("Type") == "oneshot" and int(main_pid) in ancestors(me))
 
 
 def monotonic_ms() -> int:

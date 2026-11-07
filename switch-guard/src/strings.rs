@@ -82,7 +82,6 @@ macro_rules! text {
     (prune_hand_lock) => { "locked by hand ({why}): `git worktree unlock` it to let prune judge it" };
     (prune_session_runs) => { "the claude session that spawned its agent still runs" };
     (prune_op_in_progress) => { "a {op} is in progress" };
-    (prune_push_in_flight) => { "a push of its work branch is in flight" };
     (prune_nested) => { "another worktree lives inside it" };
     (prune_no_work_branch) => { "it owns no work branch" };
     (prune_foreign_branch) => { "it has {wb}, another checkout's work branch, checked out" };

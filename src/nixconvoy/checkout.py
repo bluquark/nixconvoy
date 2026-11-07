@@ -124,10 +124,6 @@ REBASE_MAP_FILE = "rebase-map.json"
 HEARTBEAT = 10
 WAIT_STALE = 30
 STALE_STAMP = 600
-# A renewal push slower than this is given up (the next renewal retries):
-# one hanging past WAIT_STALE would have the deploy taken for dead.  A
-# withdrawal too: one that never lands costs other deploys at most WAIT_STALE.
-PUSH_TIMEOUT = 15
 
 
 # Wall time at the start of the last fetch of origin that succeeded (the
@@ -438,9 +434,7 @@ def write_holder(f: IO[str]) -> None:
 
 def lock_holder(d: Path | None = None) -> str:
     """The run holding the checkout's (`d`, else the current one) lock, for
-    the refusal: its arguments, pid and age as write_holder wrote them.  A
-    recorded pid that is gone (or reused, by its /proc start time) left the
-    lock to a child of its own (a finished run's background push); an
+    the refusal: its arguments, pid and age as write_holder wrote them; an
     older build wrote nothing."""
     where = d or Path.cwd()
     try:
@@ -448,10 +442,7 @@ def lock_holder(d: Path | None = None) -> str:
     except OSError:
         line = ""
     held = holder_of(line)
-    if held is None:
-        return strings.CHECKOUT_LOCK_UNKNOWN_HOLDER()
-    what, alive, _ = held
-    return what if alive else strings.CHECKOUT_LOCK_CHILD_OF(what=what)
+    return strings.CHECKOUT_LOCK_UNKNOWN_HOLDER() if held is None else held[0]
 
 
 def flock_holder(path: Path) -> int | None:
@@ -927,103 +918,6 @@ def commit_deployed(wb: str, snap: str, msg: str) -> None:
     adopt_commit(wb, deployed_commit(snap, msg))
 
 
-def push_state(kind: str) -> Path:
-    """The background push's pid/status/log file (in the git dir)."""
-    return state_path(f"push.{kind}")
-
-
-class PushFiles(NamedTuple):
-    pid: Path
-    status: Path
-    tmp: Path  # the status, written whole: echoed here, then moved
-    log: Path
-    lock: Path
-
-
-def push_files() -> PushFiles:
-    """The background push's files (push_deployed), beside each other in the
-    git dir."""
-    pid = push_state("pid")
-    return PushFiles(pid, *(pid.with_name(f"push.{k}") for k in ("status", "status.tmp", "log", "lock")))
-
-
-def push_running(lockf: Path) -> bool:
-    """Whether the background push holding `lockf` (push_deployed's flock,
-    held by its sh alone) still runs: a shared lock, tried and dropped at
-    once, conflicts only with its exclusive one.  No lock file means no
-    push ever started."""
-    if not lockf.exists():
-        return False
-    try:
-        with lockf.open("r") as f:
-            fcntl.flock(f, fcntl.LOCK_SH | fcntl.LOCK_NB)
-    except OSError:
-        return True
-    return False
-
-
-def push_in_flight(f: PushFiles | None = None) -> bool:
-    """Whether the previous run's background push still runs: no status
-    written, its lock held."""
-    if f is None:
-        f = push_files()
-    return not f.status.exists() and push_running(f.lock)
-
-
-# How long the deadline's kill of a background push waits for its lock to
-# go, per signal (SIGTERM, then SIGKILL).
-PUSH_KILL_WAIT = 5
-
-
-def await_background_push(*, wait: bool = True) -> bool:
-    """Collect the previous run's background push (push_deployed) before
-    anything fetches or pushes: wait for it (up to a minute, then it is
-    killed), report a failure (this run's push retries it) and clear its
-    files.  Not waited for (a removal, no push of its own to retry with),
-    one still running is left so, True; one over is collected the same,
-    its failure told as final.  The status file is written whole (the
-    script's mv), so one present is a push over."""
-    f = push_files()
-    if not f.pid.exists():
-        return False
-    try:
-        pid = int(f.pid.read_text().strip())
-    except ValueError:
-        pid = 0
-    alive = push_in_flight(f)
-    if alive and not wait:
-        return True
-    deadline = time.monotonic() + PUSH_WAIT
-    while alive and time.monotonic() < deadline:
-        time.sleep(0.05)
-        alive = push_in_flight(f)
-    if f.status.exists():
-        status = f.status.read_text().strip()
-    elif alive:
-        # The lock held is the push's sh alive: its pid, the group's, is its own.
-        status = strings.CHECKOUT_PUSH_TIMED_OUT
-        for sig in (signal.SIGTERM, signal.SIGKILL) if pid > 0 else ():
-            with contextlib.suppress(OSError):
-                os.killpg(pid, sig)
-            end = time.monotonic() + PUSH_KILL_WAIT
-            while push_running(f.lock) and time.monotonic() < end:
-                time.sleep(0.05)
-            if not push_running(f.lock):
-                break
-    else:
-        status = strings.CHECKOUT_PUSH_GONE if pid > 0 else strings.CHECKOUT_PUSH_NO_PID
-    log = f.log.read_text().strip() if f.log.exists() else ""
-    for path in (f.pid, f.status, f.tmp, f.log):
-        with contextlib.suppress(OSError):
-            path.unlink()
-    if status != "0":
-        detail = strings.CHECKOUT_PUSH_BG_LOG(log=log) if log else ""
-        print(strings.CHECKOUT_PUSH_BG_FAILED(status=status, log=detail) if wait
-              else strings.CHECKOUT_PUSH_BG_FAILED_FINAL(where=Path.cwd(), status=status, remote=cfg().remote,
-                                                         log=detail), file=sys.stderr)
-    return False
-
-
 # The tip this repository last pushed onto a work branch (or took from
 # origin's copy at open): the proof that origin's copy is ours to push over.
 PUSHED_REFS = "refs/nixconvoy/pushed"
@@ -1097,8 +991,8 @@ def push_cmd(wb: str, lease: str) -> list[str]:
 
 
 def push_work_branch(wb: str) -> None:
-    """Push the work branch (a deploy's end pushes in the background instead:
-    push_deployed)."""
+    """Push the work branch (a deploy's end pushes it with the rest of the
+    deploy instead: push_deployed)."""
     head = rev(f"refs/heads/{wb}")
     if head is None or rev(remote_ref(wb)) == head:
         return
@@ -1200,7 +1094,7 @@ class Announce:
             if not sha:
                 return False
             p = git_remote("push", "--quiet", "--force", cfg().remote, f"{sha}:{PENDING_REFS}/{self.key}",
-                           check=False, timeout=PUSH_TIMEOUT)
+                           check=False)
             if p.returncode != 0:
                 self.detail = (p.stderr or "").strip() or strings.CHECKOUT_PUSH_FAILED
                 return False
@@ -1247,11 +1141,11 @@ class Announce:
         """Delete the announcement: the deploy ended without a switch, so
         the next deploy anywhere need not wait for it; after die() too.
         Leased on the last renewal that landed; unleased when none did,
-        since a push that landed but timed out here must not strand it."""
+        since a push that landed but was reported failed must not strand it."""
         self.stop()
         with proc.finishing():
             git_remote("push", "--quiet", cfg().remote, *delete_args({f"{PENDING_REFS}/{self.key}": self.sha}),
-                       check=False, timeout=PUSH_TIMEOUT)
+                       check=False)
 
 
 def announce_key(branch: str) -> str:
@@ -1372,52 +1266,39 @@ def record_commit(target: str, union: str, parents: list[str], subject: str, doc
                env=DATELESS_ENV)
 
 
-# How long a deploy's ending push waits for the lock of the one before
-# (held past the deadline's kill: pathological).
-PUSH_LOCK_WAIT = 10
-# How long a run waits for a background push: the next run for the one
-# before, before anything of its own (then it is killed); a oneshot
-# service's run for its own, before its end ends the unit (then it is
-# left to that).
-PUSH_WAIT = 60
-
-
 def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str],
                   attested: dict[str, tuple[str, str]] | None = None) -> str | None:
-    """The push that ends a deploy, in the background, atomic - all of it
-    lands or none, so a deploy waiting on the announcement finds the
-    branch moved when it clears, and a settled announcement never outlives
-    records its history refs lack: the work branch, leased on origin's tip
-    as fetched; each switched target's record onto
-    refs/heads/DEPLOYED_PREFIX/<target>; the branch's announcement deleted
-    (this run's, or an earlier run's whose push failed; unleased, a
-    missing one being nothing) - or, under another key than the branch's
-    (a main checkout's), settled.  Then,
-    once that landed, each of `attested` (a target's record made without a
-    switch, with the record it chains on) goes onto that target's history
-    branch, leased on that record, and the cleared announcements as fetched
-    are deleted (neither atomically), each leased on what it held, a
-    refusal tolerated (the target switched meanwhile; a
-    hand clear or another deploy got there first; what stays is swept by
-    the next deploy ending well).  A background push outlives this
-    process, its outcome collected by the next run
-    (await_background_push).  Another writer of the branch since the
+    """The push that ends a deploy, atomic - all of it lands or none, so a
+    deploy waiting on the announcement finds the branch moved when it
+    clears, and a settled announcement never outlives records its history
+    refs lack: the work branch, leased on origin's tip as fetched; each
+    switched target's record onto refs/heads/DEPLOYED_PREFIX/<target>; the
+    branch's announcement deleted (this run's, or an earlier run's whose
+    push failed; unleased, a missing one being nothing) - or, under
+    another key than the branch's (a main checkout's), settled.  Then,
+    once that landed, in one push, ref by ref: each of `attested` (a
+    target's record made without a switch, with the record it chains on)
+    onto that target's history branch, leased on that record, and the
+    cleared announcements as fetched deleted, each leased on what it held,
+    a refusal tolerated (the target switched meanwhile; a hand clear or
+    another deploy got there first; what stays is swept by the next deploy
+    ending well).  A failure is told, not fatal: the next run's push
+    retries all of it (the records chain on what is there, the branch's
+    announcement stays for it).  Another writer of the branch since the
     check before the switches (a later fetch brought its tip) is the
     problem returned: the branch is not pushed and its announcement is
     left to the caller, as for a deploy that ended without its push; the
-    records and the sweep go anyway.  The push before still holding its
-    lock past the deadline's kill (await_background_push) is fatal: the
-    announcement stays, so a re-run finishes this deploy."""
+    records and the sweep go anyway."""
     refspecs: list[str] = []
     what: list[str] = []
     problem: str | None = None
-    pushed_note: list[str] = []
+    pushed: tuple[str, str] | None = None  # the work branch and the tip pushed
     head = rev(f"refs/heads/{wb}") if wb else None
     if wb and head and current_branch() == wb and rev(remote_ref(wb)) != head:
         problem = sole_writer_problem(wb)
         if problem is None:
             refspecs += push_refspecs(wb, rev(remote_ref(wb)) or "")
-            pushed_note = ["git", "update-ref", f"{PUSHED_REFS}/{wb}", head]
+            pushed = (wb, head)
             what.append(strings.CHECKOUT_PUSHING_BRANCH(wb=wb, sha=head[:12]))
     refspecs += [f"+{sha}:refs/heads/{DEPLOYED_PREFIX}/{h}" for h, sha in records.items()]
     recorded = [*records, *(attested or {})]
@@ -1438,60 +1319,18 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str],
               for a in (f"{sha}:refs/heads/{DEPLOYED_PREFIX}/{h}", f"--force-with-lease=refs/heads/{DEPLOYED_PREFIX}/{h}:{on}")]
     if not refspecs and not sweep and not attest:
         return problem
-    f = push_files()
-    hold = os.environ.get("NIXCONVOY_HOLD_PUSH", "")
-    push = [*proc.GIT_REMOTE_CMD, "push", "--quiet", cfg().remote]
-    body = (shlex.join([*push, "--atomic", *refspecs]) if refspecs else "true") + "; rc=$?"
-    if pushed_note:
-        body += f'; [ "$rc" = 0 ] && {shlex.join(pushed_note)}'
-    if attest:
-        body += f'; [ "$rc" = 0 ] && {shlex.join([*push, *attest])}'
-    if sweep:
-        body += f'; [ "$rc" = 0 ] && {shlex.join([*push, *delete_args(sweep)])}'
-    body += '; exit "$rc"'
-    # The lock, taken here and passed to the sh, is held while that sh lives
-    # (push_running): closed for its subshell, so no child of git's (a
-    # credential daemon) keeps it.
-    with f.lock.open("a") as lock:
-        deadline = time.monotonic() + PUSH_LOCK_WAIT
-        while True:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    die(strings.CHECKOUT_PUSH_LOCK_HELD(lock=f.lock, secs=PUSH_LOCK_WAIT))
-                time.sleep(0.05)
-        for path in (f.status, f.tmp):
-            with contextlib.suppress(OSError):
-                path.unlink()
-        script = (f'({body}) {lock.fileno()}>&-; rc=$?'
-                  '; echo "$rc" >"$0.tmp" && mv -f "$0.tmp" "$0"')
-        if hold:
-            script = f"sleep {shlex.quote(hold)}; {script}"
-        with f.log.open("w") as log:
-            child = subprocess.Popen(["sh", "-c", script, str(f.status)], stdin=subprocess.DEVNULL,
-                                     stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
-                                     pass_fds=(lock.fileno(),))
-    f.pid.write_text(str(child.pid))
-    what_s = ", ".join(what) or strings.CHECKOUT_PUSHING_CLEARED
-    if not proc.oneshot_run():
-        print(term.paint(strings.CHECKOUT_PUSHING_BG(what=what_s), "dim"))
-        return problem
-    # The run's end ends the unit, which kills the push: waited for, its
-    # failure told here as well as by the next run, which collects it.
-    print(strings.CHECKOUT_PUSHING_WAITED(what=what_s), flush=True)
-    deadline = time.monotonic() + PUSH_WAIT
-    while push_in_flight(f) and time.monotonic() < deadline:
-        time.sleep(0.05)
-    if f.status.exists():
-        status = f.status.read_text().strip()
-    else:
-        status = strings.CHECKOUT_PUSH_TIMED_OUT if push_in_flight(f) else strings.CHECKOUT_PUSH_GONE
-    if status != "0":
-        log = f.log.read_text().strip() if f.log.exists() else ""
-        print(strings.CHECKOUT_PUSH_WAITED_FAILED(status=status, log=strings.CHECKOUT_PUSH_BG_LOG(log=log) if log else ""),
-              file=sys.stderr)
+    print(term.paint(strings.CHECKOUT_PUSHING(what=", ".join(what) or strings.CHECKOUT_PUSHING_CLEARED), "dim"), flush=True)
+    if refspecs:
+        p = git_remote("push", "--quiet", "--atomic", cfg().remote, *refspecs, check=False)
+        if p.returncode != 0:
+            output = "\n".join(x for x in ((p.stdout or "").strip(), (p.stderr or "").strip()) if x)
+            print(strings.CHECKOUT_PUSH_DEPLOYED_FAILED(output=strings.CHECKOUT_PUSH_OUTPUT(output=output) if output else ""),
+                  file=sys.stderr)
+            return problem
+        if pushed:
+            note_pushed(*pushed)
+    if attest or sweep:
+        git_remote("push", "--quiet", cfg().remote, *attest, *delete_args(sweep), check=False)
     return problem
 
 

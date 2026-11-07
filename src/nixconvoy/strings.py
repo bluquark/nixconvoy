@@ -263,7 +263,6 @@ CHECKOUT_NEEDS_WB = M("{what} needs a work branch, and this checkout has none: "
 
 # --- checkout.py: deploy lock holders
 CHECKOUT_LOCK_UNKNOWN_HOLDER = M("another {TOOL}")
-CHECKOUT_LOCK_CHILD_OF = M("a child of {what}")
 CHECKOUT_HOLDER_CMD = M("`{TOOL} {args}`")
 CHECKOUT_HOLDER_CMD_BARE = M("`{TOOL}`")
 CHECKOUT_HOLDER_GONE = M("{what} (pid {pid}, gone; started {age} ago)")
@@ -313,16 +312,6 @@ CHECKOUT_RENEW_FAILED = M("note: renewing this deploy's announcement failed; a d
                           "elsewhere may take this one for dead:\n{detail}")
 
 # --- checkout.py: pushes
-CHECKOUT_PUSH_TIMED_OUT = "timed out"
-CHECKOUT_PUSH_NO_PID = "no pid"
-CHECKOUT_PUSH_GONE = "gone without a status"
-CHECKOUT_PUSH_LOCK_HELD = M("the previous run's background push still runs (holding {lock}) {secs} s after this "
-                            "deploy's end, so nothing of it is pushed: re-run once that push is over")
-CHECKOUT_PUSH_BG_FAILED = M("note: the previous run's background push failed ({status}); this run's "
-                            "push retries it{log}")
-CHECKOUT_PUSH_BG_FAILED_FINAL = M("note: the last background push of {where} failed ({status}): the deploy records "
-                                  "it carried are not on {remote}, and nothing retries them{log}")
-CHECKOUT_PUSH_BG_LOG = M(":\n{log}")
 CHECKOUT_SOLE_WRITER = M("{wb} moved on {remote} ({sha}): another checkout deployed on it, but a work branch has one "
                          "writer.  `git log refs/heads/{wb}..{up_ref}` shows what it holds; in that "
                          "branch's checkout, `git rebase --autostash {up_ref}` carries this checkout's "
@@ -332,9 +321,9 @@ CHECKOUT_PUSH_WB_FAILED = M("pushing {wb} failed - it moved on {remote}, but thi
                             "only writer.  Investigate:\n{stderr}")
 CHECKOUT_PUSHED = M("pushed {wb} ({sha})")
 CHECKOUT_PUSHING_BRANCH = M("{wb} ({sha})")
-CHECKOUT_PUSHING_BG = M("pushing {what} in the background")
-CHECKOUT_PUSHING_WAITED = M("pushing {what} (a service's run: waited for)")
-CHECKOUT_PUSH_WAITED_FAILED = M("note: the push failed ({status}); the next run's push retries it{log}")
+CHECKOUT_PUSHING = M("pushing {what}")
+CHECKOUT_PUSH_DEPLOYED_FAILED = M("note: the push failed; the next run's push retries it{output}")
+CHECKOUT_PUSH_OUTPUT = M(":\n{output}")
 CHECKOUT_PUSHING_CLEARED = "the cleared announcement"
 # On a terminal, in place of the deploy records' branches.
 CHECKOUT_PUSHING_RECORDS = M("{n} deploy record(s)")

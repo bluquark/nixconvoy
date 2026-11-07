@@ -304,8 +304,6 @@ pub enum Query {
         start: Option<u64>,
         own_ends: bool,
     },
-    /// Whether a background push of its work branch runs -> Flag.
-    PushInFlight,
     /// Whether another worktree lives under its directory -> Flag.
     Nested,
     /// The work branch it owns -> Text.
