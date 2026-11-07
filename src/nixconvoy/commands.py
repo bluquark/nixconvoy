@@ -243,7 +243,7 @@ def push_main(r: Landed) -> None:
     run."""
     PERF.mark("push")
     note_landings([*noted_landings(), r])
-    p = git_remote("push", "--quiet", cfg().remote, f"{r.commit}:refs/heads/{cfg().main_branch}", check=False)
+    p = git_remote("push", cfg().remote, f"{r.commit}:refs/heads/{cfg().main_branch}", check=False)
     if p.returncode == 0:
         return
     git_remote(*fetch_args(), check=False)
@@ -998,7 +998,7 @@ def drop_branches(names: list[str]) -> list[str]:
     if pushed:
         # One push (a stall ends it: prune holds the worktree's name lock
         # meanwhile).
-        p = git_remote("push", "--quiet", cfg().remote, *(f":refs/heads/{b}" for b in pushed),
+        p = git_remote("push", cfg().remote, *(f":refs/heads/{b}" for b in pushed),
                        *(f"--force-with-lease=refs/heads/{b}:{old}" for b, old in pushed.items()), check=False)
         if p.returncode != 0:
             failed.append(strings.CLOSE_DELETE_FAILED(
@@ -1014,7 +1014,7 @@ def drop_branches(names: list[str]) -> list[str]:
     clears = [spec for b in names for spec in clear_refspec(b)]
     clears += [f":{REBASE_MAP_REFS}/{b}" for b in gone if rev(f"{REBASE_MAP_REFS}/{b}")]
     if clears:
-        p = git_remote("push", "--quiet", cfg().remote, *clears, check=False)
+        p = git_remote("push", cfg().remote, *clears, check=False)
         if p.returncode != 0:
             failed.append(strings.CLOSE_DELETE_ANNOUNCEMENTS_FAILED(
                 branches=", ".join(names), remote=cfg().remote, refs=PENDING_REFS,

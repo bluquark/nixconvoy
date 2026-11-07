@@ -987,7 +987,7 @@ def push_refspecs(wb: str, lease: str) -> list[str]:
 
 
 def push_cmd(wb: str, lease: str) -> list[str]:
-    return ["push", "--quiet", "--atomic", cfg().remote, *push_refspecs(wb, lease)]
+    return ["push", "--atomic", cfg().remote, *push_refspecs(wb, lease)]
 
 
 def push_work_branch(wb: str) -> None:
@@ -1002,7 +1002,7 @@ def push_work_branch(wb: str) -> None:
     note_pushed(wb, head)
     clear = clear_refspec(wb)
     if clear:
-        git_remote("push", "--quiet", cfg().remote, *clear, check=False)
+        git_remote("push", cfg().remote, *clear, check=False)
     print(strings.CHECKOUT_PUSHED(wb=wb, sha=head[:12] if head else "?"))
 
 
@@ -1093,7 +1093,7 @@ class Announce:
             sha = self._commit(settled=False)
             if not sha:
                 return False
-            p = git_remote("push", "--quiet", "--force", cfg().remote, f"{sha}:{PENDING_REFS}/{self.key}",
+            p = git_remote("push", "--force", cfg().remote, f"{sha}:{PENDING_REFS}/{self.key}",
                            check=False)
             if p.returncode != 0:
                 self.detail = (p.stderr or "").strip() or strings.CHECKOUT_PUSH_FAILED
@@ -1144,7 +1144,7 @@ class Announce:
         since a push that landed but was reported failed must not strand it."""
         self.stop()
         with proc.finishing():
-            git_remote("push", "--quiet", cfg().remote, *delete_args({f"{PENDING_REFS}/{self.key}": self.sha}),
+            git_remote("push", cfg().remote, *delete_args({f"{PENDING_REFS}/{self.key}": self.sha}),
                        check=False)
 
 
@@ -1321,7 +1321,7 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str],
         return problem
     print(term.paint(strings.CHECKOUT_PUSHING(what=", ".join(what) or strings.CHECKOUT_PUSHING_CLEARED), "dim"), flush=True)
     if refspecs:
-        p = git_remote("push", "--quiet", "--atomic", cfg().remote, *refspecs, check=False)
+        p = git_remote("push", "--atomic", cfg().remote, *refspecs, check=False)
         if p.returncode != 0:
             output = "\n".join(x for x in ((p.stdout or "").strip(), (p.stderr or "").strip()) if x)
             print(strings.CHECKOUT_PUSH_DEPLOYED_FAILED(output=strings.CHECKOUT_PUSH_OUTPUT(output=output) if output else ""),
@@ -1330,7 +1330,7 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str],
         if pushed:
             note_pushed(*pushed)
     if attest or sweep:
-        git_remote("push", "--quiet", cfg().remote, *attest, *delete_args(sweep), check=False)
+        git_remote("push", cfg().remote, *attest, *delete_args(sweep), check=False)
     return problem
 
 

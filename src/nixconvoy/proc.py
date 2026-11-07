@@ -321,13 +321,18 @@ def ok(cmd: list[str], *, cwd: str | None = None, env: dict[str, str] | None = N
     return run(cmd, cwd=cwd, env=env, check=False, timeout=timeout).returncode == 0
 
 
-# A git transfer under 1 kB/s for 10 s aborts (HTTPS remotes; ssh ones have
-# no such limit): a stall ends quickly whatever the repository's size, which
-# no total limit could promise without cutting a big clone short.
-GIT_NET = ("-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=10")
-# A push's server goes quiet while it takes the pack in; cut off then, the
-# push has landed but is reported failed.
-PUSH_NET = (*GIT_NET[:-1], "http.lowSpeedTime=30")
+# A git transfer carrying nothing at all (under 1 B/s) for 10 s aborts
+# (HTTPS remotes; ssh ones have no such limit): a dead connection ends
+# quickly whatever the repository's size, which no total limit could
+# promise without cutting a big clone short.  A liveness check, not a rate
+# one: what a server sends while it takes a push in - its sideband
+# progress (hence --progress) while it indexes the pack, receive-pack's
+# keepalive packets while its hooks and ref update run - is a trickle,
+# and a push cut off then has landed but is reported failed.
+GIT_NET = ("-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=10")
+# What a push's --progress adds to its stderr.
+PUSH_PROGRESS = re.compile(r"^(?:remote: )?(?:(?:Enumerating|Counting|Compressing|Writing) objects|Resolving deltas):.*\n?"
+                           r"|^Delta compression using .*\n?|^Total \d+ \(delta .*\n?", re.MULTILINE)
 NET_VERBS = frozenset({"fetch", "push", "clone", "ls-remote"})
 # No credential prompt: a helper that has none to give fails at once.
 GIT_ENV = {"GIT_TERMINAL_PROMPT": "0"}
@@ -402,12 +407,13 @@ def git_remote(*args: str, cwd: str | None = None, env: dict[str, str] | None = 
                check: bool = True, timeout: float | None = None) -> Completed:
     """A git command that talks to a remote (NET_VERBS, `submodule
     update`), under GIT_NET and retried (RETRY_WAITS) while the remote
-    fails on its own side (SERVER_ERROR): whether such a command landed
+    fails on its own side (SERVER_ERROR); a push with --progress
+    (PUSH_PROGRESS, stripped from its stderr): whether such a command landed
     is unknown, so each must leave the remote the same when repeated after
     landing, which undone sees to for the one that does not.  `timeout`
     covers the retries too, each given at least the time the attempt
     before took."""
-    net = PUSH_NET if args[0] == "push" else GIT_NET
+    net = GIT_NET
     full_env = {**GIT_ENV, **(env or {})}
     deadline = None if timeout is None else time.monotonic() + timeout
 
@@ -418,9 +424,11 @@ def git_remote(*args: str, cwd: str | None = None, env: dict[str, str] | None = 
         """`todo` run: its result, the seconds it took, its server error."""
         cmd, t0 = [*GIT, *net, *todo], time.monotonic()
         p = run(cmd, cwd=cwd, env=full_env, check=False, timeout=left())
+        if todo[0] == "push" and p.stderr:
+            p.stderr = PUSH_PROGRESS.sub("", p.stderr)
         failed = p.returncode != 0 and not p.timed_out
         return p, time.monotonic() - t0, SERVER_ERROR.search(p.stderr or "") if failed else None
-    todo = list(args)
+    todo = ["push", "--progress", *args[1:]] if args[0] == "push" else list(args)
     p, took, error = attempt(todo)
     for wait in RETRY_WAITS:
         if error is None or (deadline is not None and time.monotonic() + wait + took > deadline):
