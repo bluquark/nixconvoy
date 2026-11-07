@@ -1473,7 +1473,7 @@ def remote_cases(d: Path) -> None:
             put(co, "b.txt", "b\n", "b")
             b = sh(co, "rev-parse", "HEAD")
             lease = f"--force-with-lease=refs/heads/{wb}:"
-            note = warned(lambda: proc.git_remote("push", "--quiet", "origin", f"{wb}:refs/heads/{wb}", lease))
+            note = warned(lambda: proc.git_remote("push", "origin", f"{wb}:refs/heads/{wb}", lease))
             assert note == ("note: git push: the remote failed on its own side (remote: Internal Server Error); "
                             "retrying in 0.01 s\n"), note
             assert calls() == ["push", "push"] and at(wb) == b
@@ -1482,20 +1482,20 @@ def remote_cases(d: Path) -> None:
             put(co, "c.txt", "c\n", "c")
             c = sh(co, "rev-parse", "HEAD")
             with contextlib.redirect_stderr(io.StringIO()):
-                proc.git_remote("push", "--quiet", "origin", f"{wb}:refs/heads/{wb}", f"{lease}{b}")
+                proc.git_remote("push", "origin", f"{wb}:refs/heads/{wb}", f"{lease}{b}")
             assert calls() == ["push", "push"] and at(wb) == c
             assert sh(co, "rev-parse", f"refs/remotes/origin/{wb}") == c
             # A push cut off as stalled is not asked again: the stall guard bounds it.
             planned("before stall")
-            p = proc.git_remote("push", "--quiet", "origin", f"{wb}:refs/heads/{wb}", check=False)
+            p = proc.git_remote("push", "origin", f"{wb}:refs/heads/{wb}", check=False)
             assert p.returncode != 0 and not p.retried and calls() == ["push"]
             # A refusal settles a push, unless it answers the retry of one that may be going through yet.
             planned("before refused")
-            p = proc.git_remote("push", "--quiet", "origin", f"{wb}:refs/heads/{wb}", check=False)
+            p = proc.git_remote("push", "origin", f"{wb}:refs/heads/{wb}", check=False)
             assert p.returncode != 0 and proc.refused(p) and calls() == ["push"]
             planned("before http", "before refused")
             with contextlib.redirect_stderr(io.StringIO()):
-                p = proc.git_remote("push", "--quiet", "origin", f"{wb}:refs/heads/{wb}", check=False)
+                p = proc.git_remote("push", "origin", f"{wb}:refs/heads/{wb}", check=False)
             assert p.returncode != 0 and p.retried and not proc.refused(p) and calls() == ["push", "push"]
             # A fetch, and the failures a retry may follow: two.
             planned("before http", "before inband")
@@ -1508,7 +1508,7 @@ def remote_cases(d: Path) -> None:
             assert p.returncode == 1 and "error: 502" in p.stderr and calls() == ["ls-remote"] * 3
             # Any other failure is the command's answer, as is a server error past the time given.
             planned("before refused")
-            assert warned(lambda: proc.git_remote("push", "--quiet", "origin", f"{wb}:refs/heads/{wb}", check=False)) == ""
+            assert warned(lambda: proc.git_remote("push", "origin", f"{wb}:refs/heads/{wb}", check=False)) == ""
             assert calls() == ["push"]
             planned("before http")
             with mock.patch.object(proc, "RETRY_WAITS", (30, 30)):
@@ -1519,14 +1519,14 @@ def remote_cases(d: Path) -> None:
             sh(co, "push", "--quiet", "origin", f"{c}:{ref}", f"{c}:{other}")
             planned("after inband")
             with contextlib.redirect_stderr(io.StringIO()):
-                p = proc.git_remote("push", "--quiet", "origin", *checkout.delete_args({ref: c}), check=False)
+                p = proc.git_remote("push", "origin", *checkout.delete_args({ref: c}), check=False)
             assert p.returncode == 0 and calls() == ["push", "ls-remote"] and gone(ref)
             # ...asked again when the remote fails to say so, the server error the answer if it never does...
             for failures, rc in ((["before http"], 0), (["before http", "before inband"], 1)):
                 sh(co, "push", "--quiet", "origin", f"{c}:{ref}")
                 planned("after inband", *failures)
                 with contextlib.redirect_stderr(io.StringIO()):
-                    p = proc.git_remote("push", "--quiet", "origin", *checkout.delete_args({ref: c}), check=False)
+                    p = proc.git_remote("push", "origin", *checkout.delete_args({ref: c}), check=False)
                 assert p.returncode == rc and calls() == ["push", "ls-remote", "ls-remote"] and gone(ref), p
                 assert rc == 0 or ("Internal Server Error" in p.stderr and "stale info" not in p.stderr), p
             # ...one that did not is made again, with what the first left undone...
@@ -1534,20 +1534,20 @@ def remote_cases(d: Path) -> None:
             sh(co, "push", "--quiet", "origin", f":{other}")
             planned("before inband")
             with contextlib.redirect_stderr(io.StringIO()):
-                p = proc.git_remote("push", "--quiet", "origin", *checkout.delete_args({ref: c, other: c}), check=False)
+                p = proc.git_remote("push", "origin", *checkout.delete_args({ref: c, other: c}), check=False)
             assert p.returncode == 0 and calls() == ["push", "ls-remote", "push"] and gone(ref)
             # ...and beside other refs in an atomic push, those are pushed again without it.
             sh(co, "push", "--quiet", "origin", f"{c}:{ref}")
             planned("after http")
             with contextlib.redirect_stderr(io.StringIO()):
-                p = proc.git_remote("push", "--quiet", "--atomic", "origin", f"+{base}:{other}", f":{ref}",
+                p = proc.git_remote("push", "--atomic", "origin", f"+{base}:{other}", f":{ref}",
                                     f"--force-with-lease={ref}:{c}", check=False)
             assert p.returncode == 0 and calls() == ["push", "ls-remote", "push"] and gone(ref) and at(other) == base
             # A ref another writer put there since is still refused.
             sh(co, "push", "--quiet", "origin", f"{base}:{ref}")
             planned("before inband")
             with contextlib.redirect_stderr(io.StringIO()):
-                p = proc.git_remote("push", "--quiet", "origin", *checkout.delete_args({ref: c}), check=False)
+                p = proc.git_remote("push", "origin", *checkout.delete_args({ref: c}), check=False)
             assert p.returncode != 0 and "stale info" in p.stderr and at(ref) == base
         # What the remote alone can have caused, and what a network or another writer can too.
         for theirs in ("fatal: unable to access 'https://o/r.git/': The requested URL returned error: 503",

@@ -509,7 +509,7 @@ def prune_past_refs(sub: Sub) -> None:
              if r.rsplit("/", 1)[1] not in wanted]
     if not stale:
         return
-    p = git_remote("push", "--quiet", "origin", *(f":{r}" for r in stale), cwd=str(sub.repo), check=False)
+    p = git_remote("push", "origin", *(f":{r}" for r in stale), cwd=str(sub.repo), check=False)
     if p.returncode != 0:
         print(strings.SUBMODULE_PAST_REFS_DELETE_FAILED(name=sub.name, stderr=(p.stderr or "").strip()),
               file=sys.stderr)
@@ -624,7 +624,7 @@ def union_rev(sub: Sub, top: Path, ours: str, theirs: str) -> str | None:
         if sha is None:
             return None
         ref = f"{UNION_REFS}/{sub.name}/{sha}"
-        p = git_remote("push", "--quiet", "--force", "origin", f"{sha}:{ref}", cwd=str(repo), check=False)
+        p = git_remote("push", "--force", "origin", f"{sha}:{ref}", cwd=str(repo), check=False)
         if p.returncode != 0:
             die(strings.SUBMODULE_UNION_PUSH_FAILED(name=sub.name, ref=ref, stderr=(p.stderr or "").strip()))
         git("update-ref", ref, sha, cwd=str(repo), check=False)
@@ -1299,7 +1299,7 @@ def prepare_one(sub: Sub, wb: str, fallback_msg: str, base: str | None = None) -
             landed = main
         else:
             landed = pending = out(["git", "commit-tree", tree, "-p", main, "-m", msg], cwd=str(sub.dir))
-            p = git_remote("push", "--quiet", "origin", f"{landed}:{PAST_REFS}/{wb}/{landed}",
+            p = git_remote("push", "origin", f"{landed}:{PAST_REFS}/{wb}/{landed}",
                            cwd=str(sub.dir), check=False)
             if p.returncode != 0:
                 die(strings.SUBMODULE_LAND_PUSH_FAILED(name=sub.name, stderr=(p.stderr or "").strip()))
@@ -1326,11 +1326,11 @@ def finish_one(landing: Landing) -> bool:
     done = True
     if pending is not None:
         repo = str(sub.repo)  # not the worktree: one removed since still has its landing on main
-        p = git_remote("push", "--quiet", "origin", f"{pending}:refs/heads/{default}", cwd=repo, check=False)
+        p = git_remote("push", "origin", f"{pending}:refs/heads/{default}", cwd=repo, check=False)
         if p.returncode == 0 or (fetch_refs(sub.name, sub.repo)
                                  and is_ancestor(pending, f"refs/remotes/origin/{default}", cwd=repo)):
             print(strings.SUBMODULE_LANDED(name=sub.name, default=default, rev=pending[:12]))
-            git_remote("push", "--quiet", "origin", f":{landing_ref(landing)}", cwd=repo, check=False)
+            git_remote("push", "origin", f":{landing_ref(landing)}", cwd=repo, check=False)
             git("update-ref", "-d", landing_ref(landing), cwd=repo, check=False)
         else:
             done = proc.refused(p)
@@ -1362,7 +1362,7 @@ def push_branch(sub: Sub, wb: str) -> None:
     if head is None or old == head:
         return
     past = [f"+{old}:{PAST_REFS}/{wb}/{old}"] if old and not is_ancestor(old, head, cwd=str(sub.dir)) else []
-    p = git_remote("push", "--quiet", "--atomic", "origin", f"+{head}:refs/heads/{wb}", *past,
+    p = git_remote("push", "--atomic", "origin", f"+{head}:refs/heads/{wb}", *past,
                    f"--force-with-lease=refs/heads/{wb}:{old or ''}", cwd=str(sub.dir), check=False)
     if p.returncode != 0:
         die(strings.SUBMODULE_PUSH_BRANCH_FAILED(name=sub.name, wb=wb, stderr=(p.stderr or "").strip()))
@@ -1487,7 +1487,7 @@ def remove_one(sub: Sub) -> None:
         old = rev_in(repo, f"refs/remotes/origin/{cur}")
         if old:
             # The tip stays under PAST_REFS: the work branch as pushed pins it.
-            p = git_remote("push", "--quiet", "--atomic", "origin", f"+{old}:{PAST_REFS}/{cur}/{old}", f":refs/heads/{cur}",
+            p = git_remote("push", "--atomic", "origin", f"+{old}:{PAST_REFS}/{cur}/{old}", f":refs/heads/{cur}",
                            f"--force-with-lease=refs/heads/{cur}:{old}", cwd=str(repo), check=False)
             if p.returncode != 0:
                 print(strings.SUBMODULE_BRANCH_DELETE_FAILED(name=sub.name, branch=cur,
