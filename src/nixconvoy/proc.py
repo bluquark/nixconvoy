@@ -321,13 +321,16 @@ def ok(cmd: list[str], *, cwd: str | None = None, env: dict[str, str] | None = N
     return run(cmd, cwd=cwd, env=env, check=False, timeout=timeout).returncode == 0
 
 
-# A git transfer under 1 kB/s for 10 s aborts (HTTPS remotes; ssh ones have
-# no such limit): a stall ends quickly whatever the repository's size, which
-# no total limit could promise without cutting a big clone short.
-GIT_NET = ("-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=10")
-# What a push's --progress adds to its stderr: the sideband progress the
-# server sends while it takes the pack in keeps the transfer under the
-# stall limit (cut off then, a push has landed but is reported failed).
+# A git transfer carrying nothing at all (under 1 B/s) for 10 s aborts
+# (HTTPS remotes; ssh ones have no such limit): a dead connection ends
+# quickly whatever the repository's size, which no total limit could
+# promise without cutting a big clone short.  A liveness check, not a rate
+# one: what a server sends while it takes a push in - its sideband
+# progress (hence --progress) while it indexes the pack, receive-pack's
+# keepalive packets while its hooks and ref update run - is a trickle,
+# and a push cut off then has landed but is reported failed.
+GIT_NET = ("-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=10")
+# What a push's --progress adds to its stderr.
 PUSH_PROGRESS = re.compile(r"^(?:remote: )?(?:(?:Enumerating|Counting|Compressing|Writing) objects|Resolving deltas):.*\n?"
                            r"|^Delta compression using .*\n?|^Total \d+ \(delta .*\n?", re.MULTILINE)
 NET_VERBS = frozenset({"fetch", "push", "clone", "ls-remote"})

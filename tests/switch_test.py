@@ -1419,7 +1419,7 @@ ERRORS = {{
     "http": "error: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502\n",
     "inband": "remote: Internal Server Error\n ! [remote rejected] x -> y (Internal Server Error)\n",
     "refused": " ! [rejected] x -> y (fetch first)\n",
-    "stall": "error: RPC failed; curl 28 Operation too slow. Less than 1000 bytes/sec transferred the last 30 seconds\n",
+    "stall": "error: RPC failed; curl 28 Operation too slow. Less than 1 bytes/sec transferred the last 10 seconds\n",
 }}
 args = sys.argv[1:]
 verb = next(a for i, a in enumerate(args) if not a.startswith("-") and (i == 0 or args[i - 1] != "-c"))
@@ -1558,7 +1558,7 @@ def remote_cases(d: Path) -> None:
                        "remote: Unexpected system error after push was received.",
                        "fatal: remote error: \n  Storage server temporarily offline. See https://status.github.com"):
             assert proc.SERVER_ERROR.search(theirs), theirs
-        stall = "error: RPC failed; curl 28 Operation too slow. Less than 1000 bytes/sec transferred the last 30 seconds"
+        stall = "error: RPC failed; curl 28 Operation too slow. Less than 1 bytes/sec transferred the last 10 seconds"
 
         def said(stderr: str) -> proc.Completed:
             return proc.Completed([], 1, "", stderr)
