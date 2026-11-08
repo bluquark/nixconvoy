@@ -996,6 +996,7 @@ def push_work_branch(wb: str) -> None:
     head = rev(f"refs/heads/{wb}")
     if head is None or rev(remote_ref(wb)) == head:
         return
+    term.say(strings.CHECKOUT_PUSHING(what=strings.CHECKOUT_PUSHING_BRANCH(wb=wb, sha=head[:12])))
     p = git_remote(*push_cmd(wb, ensure_sole_writer(wb)), check=False)
     if p.returncode != 0:
         die(strings.CHECKOUT_PUSH_WB_FAILED(wb=wb, remote=cfg().remote, stderr=p.stderr.strip()))
@@ -1003,7 +1004,6 @@ def push_work_branch(wb: str) -> None:
     clear = clear_refspec(wb)
     if clear:
         git_remote("push", cfg().remote, *clear, check=False)
-    print(strings.CHECKOUT_PUSHED(wb=wb, sha=head[:12] if head else "?"))
 
 
 DATELESS_ENV = {k: v for k, v in MACHINE_ENV.items() if not k.endswith("_DATE")}
@@ -1319,7 +1319,7 @@ def push_deployed(wb: str | None, ann: Announce | None, records: dict[str, str],
               for a in (f"{sha}:refs/heads/{DEPLOYED_PREFIX}/{h}", f"--force-with-lease=refs/heads/{DEPLOYED_PREFIX}/{h}:{on}")]
     if not refspecs and not sweep and not attest:
         return problem
-    print(term.paint(strings.CHECKOUT_PUSHING(what=", ".join(what) or strings.CHECKOUT_PUSHING_CLEARED), "dim"), flush=True)
+    term.say(strings.CHECKOUT_PUSHING(what=", ".join(what) or strings.CHECKOUT_PUSHING_CLEARED))
     if refspecs:
         p = git_remote("push", "--atomic", cfg().remote, *refspecs, check=False)
         if p.returncode != 0:

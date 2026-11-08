@@ -10,7 +10,9 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import checkout, lanes, memo, proc, strings, submodule, targets, term
@@ -202,8 +204,30 @@ def commit_unreached(wb: str, msg: str, snap: str) -> None:
             drop_worktree(wt)
     PERF.mark("commit-push")
     commit_deployed(wb, snap, f"{msg}\n\nReaches: none\nDeployed: none")
-    push_work_branch(wb)
-    print(term.good(strings.DEPLOY_REACHES_NONE(wb=wb)))
+    with commit_push(wb, committed=True):
+        push_work_branch(wb)
+    print(term.good(strings.DEPLOY_REACHES_NONE))
+
+
+@contextmanager
+def commit_push(wb: str | None, committed: bool) -> Iterator[None]:
+    """The commit-push phase's step, while the checkout is on the work
+    branch `wb` with a tip origin lacks (the increment this deploy
+    `committed` onto it, or an earlier deploy's): the push within says
+    what it pushes, and the step ends in the tip committed and pushed (a
+    push updates the remote-tracking ref) - or, origin still without it,
+    failed."""
+    head = rev(f"refs/heads/{wb}") if wb else None
+    if wb is None or head is None or current_branch() != wb or rev(remote_ref(wb)) == head:
+        yield
+        return
+    with term.step() as s:
+        yield
+        if rev(remote_ref(wb)) == head:
+            s.done = (strings.DEPLOY_COMMITTED_PUSHED if committed else strings.CHECKOUT_PUSHED)(wb=wb, sha=head[:12])
+        else:
+            s.ok = False
+            s.label = strings.CHECKOUT_PUSHING(what=strings.CHECKOUT_PUSHING_BRANCH(wb=wb, sha=head[:12])).removesuffix("...")
 
 
 def refuse_staged(top: Path) -> None:
@@ -552,7 +576,8 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             if wb is not None:
                 if snap:
                     commit_deployed(wb, snap, msg or "")
-                push_work_branch(wb)
+                with commit_push(wb, committed=bool(snap)):
+                    push_work_branch(wb)
             print(strings.DEPLOY_SKIP(union=union))
             return True
 
@@ -861,7 +886,8 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         adopt_commit(wb, committed)
     # A local main ahead of origin is pushed by its owner once every
     # target it affects has switched.
-    problem = push_deployed(wb, ann, records, attested)
+    with commit_push(wb, committed=bool(committed)):
+        problem = push_deployed(wb, ann, records, attested)
 
     if plan:
         print(term.good(strings.DEPLOY_DONE(targets=", ".join(plan), union=short(union))))

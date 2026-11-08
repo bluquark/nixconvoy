@@ -189,6 +189,16 @@ def current() -> Step | None:
     return steps[-1] if LIVE and steps else None
 
 
+def say(line: str) -> None:
+    """`line` said by the calling thread's step (Step.say) when it has one
+    on a terminal, else printed (dim on a terminal)."""
+    s = current()
+    if s is not None:
+        s.say(line)
+    else:
+        print(paint(line, "dim"), flush=True)
+
+
 def fail() -> None:
     """The calling thread's steps ended as failed, for good - whatever
     catches die()'s Fail - ahead of the message die() prints below their
