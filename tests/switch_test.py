@@ -894,7 +894,7 @@ def provenance_cases() -> None:
     assert p.digest == hashlib.sha256(text.encode()).hexdigest(), p
     p = targets.parse_probe(f"{OLD}\n")
     assert p == targets.Probe(OLD, "", hashlib.sha256(b"").hexdigest()), p
-    assert targets.kit_link(NEW) == "/var/lib/nixconvoy/kits/new-system"
+    assert targets.kit_link(NEW) == "/var/lib/nixconvoy/post-switch-checks/new-system"
     # An unread target carries what ssh said, told under the refusal.
     with mock.patch.object(targets, "target_cmd",
                            return_value=["sh", "-c", "echo 'Host key verification failed.' >&2; exit 255"]):
@@ -1023,6 +1023,29 @@ def guard_cases(d: Path) -> None:
     assert lock(g, provenance_line("/nix/store/d-system")) == "WROTE"
     until_eof(g)
     assert not provenance.exists()
+
+    # The kit's rooting script: switched plainly, the system's own link goes
+    # (`own`, which the store holds, so the prune alone would keep it); either
+    # way so does the link of a system the store no longer holds, and a
+    # failed rooting fails the script.
+    kits, tools = d / "kits", d / "tools"
+    targets.KIT_DIR = str(kits)
+    held, own = itertools.islice((p for p in Path("/nix/store").iterdir() if not p.name.startswith(".")), 2)
+    kits.mkdir()
+    tools.mkdir()
+    for name in ("gone-system", held.name, own.name):
+        point(kits / name, str(held))
+    (tools / "nix-store").write_text('#!/bin/sh\nexit "$ROOTING"\n')
+    (tools / "nix-store").chmod(0o755)
+
+    def root(kit: str, rooting: int = 0) -> int:
+        return subprocess.run(["sh", "-c", targets.kit_root_script(str(own), kit)], check=False,
+                              env={"PATH": f"{tools}:{os.environ['PATH']}", "ROOTING": str(rooting)}).returncode
+
+    assert root("") == 0
+    assert [p.name for p in kits.iterdir()] == [held.name], list(kits.iterdir())
+    assert root("/nix/store/a-kit") == 0
+    assert root("/nix/store/a-kit", rooting=1) != 0
     say("switch guard: ok")
 
 

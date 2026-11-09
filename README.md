@@ -581,8 +581,9 @@ Also, there are two special cases: a change touching only documentation skips ev
 <summary><b>Local state on the target NixOS machines</b></summary>
 
 - `/var/lib/nixconvoy/provenance.json`: a record of the mergiraf union, each branch tip, which machine and checkout deployed it, and when.  (Used for safety checks at the switch stage of `nixconvoy deploy`.  Unless something went wrong, this file is entirely duplicative of state tracked in git.)
-- `/var/lib/nixconvoy/kits/`: one symlink per NixOS generation nixconvoy switched to, each pointing at a store path containing the auto-rollback executable, its settings, and your `post_switch` `target_shell` checks.  The symlinks are Nix GC roots, so a garbage collection can't delete the rollback executable out from under a switch in progress.  (Not created if `post_switch = false`.)
-- `/run/confirmed-switch/`: an in-progress switch's record, including which generation to roll back to.
+- `/var/lib/nixconvoy/post-switch-checks/`: one symlink per NixOS generation nixconvoy switched to, each pointing at a store path containing the auto-rollback executable, its settings, and your `post_switch` `target_shell` checks.  The symlinks are Nix GC roots, so a garbage collection can't delete the rollback executable out from under a switch in progress.  (Not created if `post_switch = false`.)
+- `/run/nixconvoy/switch/`: an in-progress switch's record, including which generation to roll back to.
+- `/tmp/nixconvoy-deploy.lock`: a lock a deploy holds while it switches this machine, so that a second deploy to the same machine waits for the first to finish.
 </details>
 
 ## Codebase

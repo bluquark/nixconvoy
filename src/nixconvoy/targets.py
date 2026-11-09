@@ -29,10 +29,10 @@ PROVENANCE_FILE: str = "/var/lib/nixconvoy/provenance.json"
 # link per system named after its store path (kit_link): a collection in the
 # rollback window cannot take the helper the timer runs.  A deploy prunes
 # the links of systems the store no longer holds.
-KIT_DIR: str = "/var/lib/nixconvoy/kits"
+KIT_DIR: str = "/var/lib/nixconvoy/post-switch-checks"
 CURRENT_SYSTEM: str = "/run/current-system"
 SYSTEM_PROFILE: str = "/nix/var/nix/profiles/system"
-SWITCH_LOCK: str = "/tmp/nixconvoy-switch.lock"  # noqa: S108 - every deploy shares it
+SWITCH_LOCK: str = "/tmp/nixconvoy-deploy.lock"  # noqa: S108 - every deploy shares it
 PROVENANCE_WRITER: str = "sudo -n"
 # Restricted settings for the build phase alone, honoured only from a
 # trusted user (elsewhere Nix warns and ignores them); every other nix

@@ -34,9 +34,10 @@ def fake_target(argv: list[str]) -> int:
     rc = 0
     helper = f"{KIT}/confirmed-switch"
     match argv:
-        case ["sh", "-c", script] if f"--add-root /var/lib/nixconvoy/kits/new-system --indirect -r {KIT}" in script:
+        case ["sh", "-c", script] if (f"--add-root /var/lib/nixconvoy/post-switch-checks/new-system --indirect -r {KIT}"
+                                      in script):
             state["rooted"] = True
-        case ["sh", "-c", script] if script.startswith("rm -f /var/lib/nixconvoy/kits/new-system;"):
+        case ["sh", "-c", script] if script.startswith("rm -f /var/lib/nixconvoy/post-switch-checks/new-system;"):
             state["unrooted"] = True
         case ["readlink", "/run/current-system"]:
             print(state["running"])

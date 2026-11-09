@@ -1,6 +1,6 @@
 # The switch kit a deploy pushes to a target beside its toplevel (memo.py
 # evaluates this against the target's own pkgs and config, the switch step
-# roots it under /var/lib/nixconvoy/kits by the toplevel's name): the confirmed-switch helper
+# roots it under /var/lib/nixconvoy/post-switch-checks by the toplevel's name): the confirmed-switch helper
 # nixconvoy-switch drives, its settings (`target`: the target's name in
 # nixconvoy.toml, for the checks' NIXCONVOY_TARGET) and the target's checks
 # (`checks`: the post-switch target_shell statements, each run under `prelude`).  So a target
@@ -12,7 +12,7 @@ let
   switchGuard = import ./switch-guard-target.nix { inherit pkgs; };
   # Where the helper keeps the armed switch's record (`previous` names the
   # system being replaced).
-  state = "/run/confirmed-switch";
+  state = "/run/nixconvoy/switch";
   # The checks' PATH.
   tools = [ pkgs.coreutils pkgs.util-linux config.systemd.package pkgs.curl config.nix.package
             pkgs.iproute2 pkgs.gnugrep pkgs.gnused pkgs.gawk pkgs.findutils ];

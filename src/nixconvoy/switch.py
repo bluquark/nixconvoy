@@ -276,7 +276,7 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
                 # The kit (copied with the toplevel) rooted for it before
                 # the helper runs: a failure is the core's to end (Code 2).
                 # Switched plainly, a kit an earlier policy rooted for this
-                # toplevel is dropped, so no boot runs its checks.
+                # toplevel is dropped.
                 p = run(targets.target_cmd(target, ["sh", "-c", targets.kit_root_script(toplevel, kit)],
                                            sudo=True), check=False, timeout=PROBE_TIMEOUT, merged=True)
                 if not kit:
