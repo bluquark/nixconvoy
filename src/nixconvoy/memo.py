@@ -1,7 +1,7 @@
 """The eval memo: each target's toplevel (and its switch kit) keyed by
 exactly what its evaluation can read, so a change to a module one target
 imports re-evaluates that target alone and a no-op redeploy evaluates
-nothing; the precheck's pass memoized on the union's tree."""
+nothing; the flake checks' passes memoized on the union's tree."""
 
 from __future__ import annotations
 
@@ -52,17 +52,13 @@ MEMO_LOCK = threading.Lock()
 
 
 class Top(NamedTuple):
-    """A target's evaluated toplevel, its switch kit (nix/kit.nix, evaluated
-    against the target's own pkgs: "" for a target switched plainly) and
-    the policy its configuration declares through the boot-assessment
-    module."""
+    """A target's evaluated toplevel and its switch kit (nix/kit.nix,
+    evaluated against the target's own pkgs: "" for a target switched
+    plainly)."""
     out: str
     drv: str
     kit: str
     kit_drv: str
-    # systemd-boot boot counting (the boot-assessment module): a generation
-    # the target fell back from is never switched to.
-    assessed: bool
 
 
 def memo_entry(obj: object) -> Top | None:
@@ -73,7 +69,7 @@ def memo_entry(obj: object) -> Top | None:
     kit, kit_drv = obj.get("kit", ""), obj.get("kit_drv", "")
     if not (isinstance(o, str) and isinstance(drv, str) and isinstance(kit, str) and isinstance(kit_drv, str)):
         return None
-    return Top(o, drv, kit, kit_drv, obj.get("assessed") is True)
+    return Top(o, drv, kit, kit_drv)
 
 
 def memo_read(path: Path) -> Top | None:
@@ -88,7 +84,7 @@ def memo_write(path: Path, ent: Top) -> None:
     try:
         tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
         tmp.write_text(dump_json({"out": ent.out, "drv": ent.drv, "kit": ent.kit,
-                                  "kit_drv": ent.kit_drv, "assessed": ent.assessed}))
+                                  "kit_drv": ent.kit_drv}))
         tmp.replace(path)
     except OSError:
         pass
@@ -370,7 +366,7 @@ def file_facts(wt: str, f: str) -> tuple[frozenset[str], tuple[str, ...]]:
     target_eval_reads, the same whichever target asks: the words it names
     and the repo paths its path literals name (a directory named counts
     whole, `.` being the repository; one outside it skipped, as is, in
-    flake.nix, the precheck's `<check> = import <path> { ... };`
+    flake.nix, a flake check's `<check> = import <path> { ... };`
     stanza, which no target's evaluation reads).  Cached, since the
     targets' scans share most files."""
     c = cfg()
@@ -383,18 +379,18 @@ def file_facts(wt: str, f: str) -> tuple[frozenset[str], tuple[str, ...]]:
     if f == flake_nix:
         m = OUTPUTS_ARGS.search(text)
         words = SPECIAL_ARGS.sub("", text[m.end():] if m else text)
-        if c.precheck:
+        for check in c.flakes:
             # `checks.<system>.<check> = import <path> { ... };`, or a bare
             # `<check> = import <path>` binding when none is written so: the
             # whole stanza is dropped where its braces are flat, else the
             # import alone.
-            leaf = rf"{re.escape(c.precheck)}\s*=\s*import\s+(\.\.?/[\w.+\-/]*)"
+            leaf = rf"{re.escape(check)}\s*=\s*import\s+(\.\.?/[\w.+\-/]*)"
             stanza = next((p for p in (rf"checks\.[^\s=]*\.{leaf}", rf"(?<![\w\-.]){leaf}")
-                           if re.search(p, text)), None)
+                           if re.search(p, scan)), None)
             if stanza:
-                for m in re.finditer(stanza, text):
+                for m in re.finditer(stanza, scan):
                     skipped.add(os.path.normpath(Path(f).parent / m.group(1)))
-                scan = re.sub(stanza + r"\s*\{[^{}]*\}\s*;", "", text)
+                scan = re.sub(stanza + r"\s*\{[^{}]*\}\s*;", "", scan)
                 words = re.sub(stanza + r"\s*\{[^{}]*\}\s*;", "", words)
         named = frozenset(WORD.findall(words))
     else:
@@ -700,15 +696,16 @@ def kit_nar_hash() -> str:
     return p.stdout.strip()
 
 
-def kit_expr(pol: SwitchPolicy) -> str:
-    """The kit's derivation for a target (`c`, its nixosConfiguration):
+def kit_expr(pol: SwitchPolicy, target: str) -> str:
+    """The kit's derivation for `target` (`c`, its nixosConfiguration):
     nix/kit.nix over its pkgs and config with `pol`; null for one switched
     plainly."""
     if not pol.confirmed:
         return "null"
     tree = (f'builtins.fetchTree {{ type = "path"; path = {nix_string(kit_src())}; '
             f'narHash = {nix_string(kit_nar_hash())}; }}')
-    return (f'import "${{{tree}}}/nix/kit.nix" {{ inherit (c) pkgs config; deadline = {pol.deadline}; '
+    return (f'import "${{{tree}}}/nix/kit.nix" {{ inherit (c) pkgs config; target = {nix_string(target)}; '
+            f'deadline = {pol.deadline}; '
             f'internetCheck = {"true" if pol.has("internet") else "false"}; prelude = {nix_string(SHELL_PRELUDE)}; '
             f'checks = [ {" ".join(nix_string(st) for st in pol.statements("target_shell"))} ]; }}')
 
@@ -716,18 +713,15 @@ def kit_expr(pol: SwitchPolicy) -> str:
 def eval_expr(target: str, parallel: bool, pol: SwitchPolicy) -> str:
     """The --apply over nixosConfigurations: the toplevel's and the kit's
     out/drv (not outPath: toJSON collapses any attrset holding an outPath
-    attribute to that path string) and the policy the boot-assessment
-    module declares.  With parallel evaluation the nspawn containers'
+    attribute to that path string).  With parallel evaluation the nspawn containers'
     toplevels (nested NixOS evaluations, about a second each) are forced
     beside the target's - the only parallelism one configuration offers.
     tryEval passes over a container declared by `path` alone, whose
     `config` is unset."""
     head = (f'cs: let c = cs."{target}"; top = c.config.system.build.toplevel; '
-            f'kit = {kit_expr(pol)}; '
-            'ncv = c.config.nixconvoy or {}; '
+            f'kit = {kit_expr(pol, target)}; '
             'policy = { out = top.outPath; drv = top.drvPath; '
-            'kit = if kit == null then "" else kit.outPath; kit_drv = if kit == null then "" else kit.drvPath; '
-            'assessed = (ncv.bootAssessment or {}).enable or false; }; ')
+            'kit = if kit == null then "" else kit.outPath; kit_drv = if kit == null then "" else kit.drvPath; }; ')
     if not parallel:
         return head + "in policy"
     return (head + "containers = map (x: (builtins.tryEval x.config.system.build.toplevel.outPath).value) "
@@ -756,7 +750,7 @@ def eval_toplevels(wt: str, union: str, targets: list[str],
     cache, hence memo_dir.  A .drv is trusted only while rooted (root_drv,
     which keeps its closure whole through the build): a memo entry's is
     rooted again here before the hit counts, a fresh evaluation's as soon
-    as its eval returns.  A failing `check` (the precheck) ends the deploy
+    as its eval returns.  A failing `check` (the tree gate) ends the deploy
     at once rather than after the evals."""
     d = memo_dir()
     keys = {h: target_eval_key(wt, union, h) for h in targets}
@@ -804,7 +798,7 @@ def eval_toplevels(wt: str, union: str, targets: list[str],
         evals = {h: pool.submit(eval_target, h) for h in stale}
         pending = set(evals.values())
         while pending:
-            # While the precheck is pending, wake to notice its failure early.
+            # While the tree gate is pending, wake to notice its failure early.
             waiting = check is not None and not check.done()
             done, _ = wait(pending, timeout=0.2 if waiting else None, return_when=FIRST_COMPLETED)
             pending -= done
@@ -819,7 +813,7 @@ def eval_toplevels(wt: str, union: str, targets: list[str],
 
 
 def precheck_log() -> Path:
-    """The prechecks' proof log: one JSON line per tree a check passed on
+    """The flake checks' proof log: one JSON line per tree a check passed on
     - the `check`, the `tree`, `at` (UTC), the `checkout` that proved it,
     the check's `out` and `drv` - appended by prove_tree, never pruned (a
     line per distinct tree is nothing).  Keyed on the whole tree, so
@@ -877,34 +871,59 @@ def prove_tree(log: Path, check: str, tree: str, ent: Top) -> None:
         print(strings.MEMO_PROOF_WRITE_FAILED(log=log, error=e), file=sys.stderr)
 
 
-def precheck_gate(wt: str, rev: str) -> str | None:
-    """Prove the precheck (the flake's checks.<system>.<check>) for `rev`,
-    checked out in `wt`: the failure text, or None once it passes, from the
-    memo or by building it.  Its own build rather than an input of the
-    toplevels', so a violation is reported before any package build is
-    scheduled and never sways the toplevel build's sandbox decision.
-    Output is captured (-L: the whole report, not nix's log tail) and the
-    caller dies, since this runs on a thread beside the target evals."""
+def tree_gate(wt: str, rev: str) -> str | None:
+    """The pre-switch checks that see the tree alone, for `rev` checked out
+    in `wt`: the flake checks (checks.<system>.<name>) its tree has no
+    proof for yet, evaluated and built as one and each then logged; and
+    the controller statements, run every deploy with the tree as their
+    cwd.  The failure text, or None.  The flake checks' own build rather
+    than an input of the toplevels', so a violation is reported before any
+    package build is scheduled and never sways the toplevel build's sandbox
+    decision.  Output is captured (-L: the whole report, not nix's log
+    tail) and the caller dies, since this runs on a thread beside the
+    target evals."""
+    from .switch import parse_checks, run_checks  # noqa: PLC0415 - switch imports this module
     from .targets import build_drvs  # noqa: PLC0415 - targets imports this module
 
     c = cfg()
     log, tree = precheck_log(), precheck_tree(rev)
-    if tree_proven(log, c.precheck, tree):
-        return None
-    flake = f"{wt}/{c.flake_path}" if c.flake_path != "." else wt
-    p = run(["nix", "eval", "--json", f"{flake}#checks.{c.targets_arch}.{c.precheck}",
-             "--apply", "c: { out = c.outPath; drv = c.drvPath; }"], check=False)
-    if p.returncode != 0:
-        return strings.MEMO_PRECHECK_EVAL_FAILED(stderr=p.stderr.strip())
-    ent = memo_entry(load_json(p.stdout))
-    if ent is None:
-        return strings.MEMO_PRECHECK_NO_DRV(stdout=p.stdout[:500])
-    err = build_drvs([ent.drv], strings.MEMO_PRECHECK_WHAT(check=c.precheck), ("-L",), capture=True)
-    if err is None:
-        prove_tree(log, c.precheck, tree, ent)
-    return err
+    due = [n for n in c.flakes if not tree_proven(log, n, tree)]
+    if due:
+        flake = f"{wt}/{c.flake_path}" if c.flake_path != "." else wt
+        attrs = " ".join(f"{nix_string(n)} = {{ out = cs.{nix_string(n)}.outPath; drv = cs.{nix_string(n)}.drvPath; }};"
+                         for n in due)
+        p = run(["nix", "eval", "--json", f"{flake}#checks.{c.targets_arch}", "--apply", f"cs: {{ {attrs} }}"],
+                check=False)
+        if p.returncode != 0:
+            return strings.MEMO_FLAKE_EVAL_FAILED(checks=", ".join(due), stderr=p.stderr.strip())
+        doc = load_json(p.stdout)
+        ents = {n: memo_entry(doc.get(n)) if isinstance(doc, dict) else None for n in due}
+        for n, ent in ents.items():
+            if ent is None:
+                return strings.MEMO_FLAKE_NO_DRV(check=n, stdout=p.stdout[:500])
+        err = build_drvs([ent.drv for ent in ents.values() if ent], strings.MEMO_FLAKE_WHAT(checks=", ".join(due)),
+                         ("-L",), capture=True)
+        if err:
+            return err
+        for n, ent in ents.items():
+            if ent:
+                prove_tree(log, n, tree, ent)
+    if c.tree_statements:
+        if (fault := parse_checks(c.tree_statements)) is not None:
+            return strings.MEMO_TREE_CHECK_UNPARSED(fault=fault)
+        code, report = run_checks(c.tree_statements, None, cwd=wt)
+        if code != 0:
+            return strings.MEMO_TREE_CHECK_FAILED(report=report or "")
+    return None
 
 
-def precheck_unproven(rev: str) -> bool:
-    check = cfg().precheck
-    return bool(check) and not tree_proven(precheck_log(), check, precheck_tree(rev))
+def tree_checks_due(rev: str) -> bool:
+    """Whether tree_gate has anything to run for `rev`: a flake check its
+    tree has no proof for, or any controller statement (run every time)."""
+    c = cfg()
+    if c.tree_statements:
+        return True
+    if not c.flakes:
+        return False
+    log, tree = precheck_log(), precheck_tree(rev)
+    return any(not tree_proven(log, n, tree) for n in c.flakes)

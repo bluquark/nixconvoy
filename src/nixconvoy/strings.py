@@ -387,8 +387,8 @@ DEPLOY_ALIVE_AGAIN = M("{key}'s deploy is under way again: waited for after all"
 DEPLOY_STALE_STAMP = M("warning: {key}'s deploy last renewed its announcement {minutes:.0f} min ago (by its machine's clock): taken as dead, going on without it")
 DEPLOY_NO_NEWS = M("warning: no news of {key}'s deploy for {secs} s (its announcement is no longer renewed): taken as dead, going on without it")
 DEPLOY_KILLED_BY_SIGNAL = M("killed by signal {signum}")
-DEPLOY_RUNNING_PRECHECK = "running the precheck..."
-DEPLOY_PRECHECK_RAN = "ran the precheck"
+DEPLOY_RUNNING_PRECHECK = "running the pre-switch checks..."
+DEPLOY_PRECHECK_RAN = "ran the pre-switch checks"
 DEPLOY_REACHES_NONE = "reaches no target: nothing built or switched"
 DEPLOY_COMMITTED_PUSHED = M("committed onto {wb} and pushed ({sha})")
 DEPLOY_FOREIGN_INCREMENTS = M("{remote} holds {wb} with increments this worktree never pushed: another worktree of this name?  `git log {main_ref}..{remote_wb}` shows them; open this worktree under another name, or `git branch {wb} {remote_wb}` to take them over")
@@ -409,27 +409,23 @@ DEPLOY_SKIP_DRY = M("NIXCONVOY_SKIP_SWITCH=1 {DRY_FLAG}: union {union}; nothing 
 DEPLOY_SKIP = M("NIXCONVOY_SKIP_SWITCH=1: skipping probe+eval+switch (union {union})")
 DEPLOY_ANNOUNCE_FAILED = M("announcing this deploy on {remote} failed; {NOTHING_DONE}:\n{detail}")
 DEPLOY_EVALUATING = "evaluating targets..."
-DEPLOY_EVALUATING_PRECHECK = "evaluating targets, running the precheck..."
+DEPLOY_EVALUATING_PRECHECK = "evaluating targets, running the pre-switch checks..."
 DEPLOY_EVALUATED = "evaluated targets"
-DEPLOY_EVALUATED_PRECHECK = "evaluated targets, ran the precheck"
+DEPLOY_EVALUATED_PRECHECK = "evaluated targets, ran the pre-switch checks"
+DEPLOY_PRE_SWITCH_FAILED = M("{target}'s pre-switch check failed: {report}; nothing was built, switched or committed")
 # The drift core's lines saying the same of several targets, as one on a terminal.
 DEPLOY_VERDICT_LINE = M("  {targets}: {verdict}")
-DEPLOY_ASSESSED_PLAIN = M("warning: {target} is switched plainly (auto_rollback_checks = false) but carries the boot-assessment module: a counted boot there runs no switch checks")
-DEPLOY_REJECTED_GENERATION = M("{target}'s bootloader rejected the very generation this deploy would switch it to ({stub}): it failed its boot assessment and the target fell back.  Nothing was built, switched or committed.  See `journalctl -u boot-assessment-watch -u boot-assessment` on {target}; then change the configuration, or re-arm the stub to retry it as is (sudo mv of the +0-N stub to +2 under /boot/EFI/Linux).")
 # A deploy record's subject: the main branch, then each unioned branch.
 DEPLOY_SUBJECT_BRANCH = M(" + {branch}")
 DEPLOY_UNMERGED = M("not deployed to {targets}: another branch as deployed there does not merge with this "
                     "checkout's work (the warning above says which, and how to end it)")
-DEPLOY_DRY_KIT_REFRESH = M("{DRY_FLAG}: the switch kit on {targets} would be refreshed")
 DEPLOY_BUILD_WHERE = M(" on {host}")
-DEPLOY_BUILD_KIT = M("{target}'s switch kit")
 DEPLOY_BUILDING = M("building {what}{where}...")
 DEPLOY_BUILD_OF = M("build of {what}")
 DEPLOY_BUILT = M("built {what}{where}")
 DEPLOY_COPIED = M("copied closure to {targets}")
 DEPLOY_DRY_ACTIVATING = M("dry-activating {targets}...")
 DEPLOY_DRY_ACTIVATED = M("dry-activated {targets}")
-DEPLOY_KIT_REFRESH_FAILED = M("warning: {err}")
 DEPLOY_DRY_FAILED = M("{DRY_FLAG}: {NOTHING_DONE}; a dry activation failed:\n{failures}")
 DEPLOY_DRY_WOULD_SWITCH = M("{DRY_FLAG}: {targets} would be switched (union {union}); {NOTHING_DONE}")
 DEPLOY_DRY_LEFT_ALONE = M("{DRY_FLAG}: nothing would be switched: {targets} left alone, running another checkout's work this checkout's does not reach (union {union})")
@@ -467,9 +463,6 @@ TARGETS_UNKNOWN = M("unknown target(s) {unknown}; the inventory has: {inventory}
 TARGETS_PROBE_TIMED_OUT = M("no answer within {secs} s")
 TARGETS_PROBE_SILENT = M("exit {code}, nothing said")
 TARGETS_PROBE_UNREAD = M("connected, but {path} could not be read (exit {code}): is it a NixOS machine?")
-TARGETS_REFRESHING_KIT = M("refreshing the switch kit on {target}...")
-TARGETS_REFRESHED_KIT = M("refreshed the switch kit on {target}")
-TARGETS_KIT_ROOT_FAILED = M("rooting the switch kit on {target} failed (exit {code}){detail}")
 TARGETS_NIX_TIMEOUT = M("`nix {cmd}` timed out after {secs} s")
 TARGETS_NIX_NO_JSON = M("`nix {cmd}` printed no JSON object:\n{output}")
 TARGETS_NIX_FAILED = M("`nix {cmd}` failed:\n{error}")
@@ -485,7 +478,6 @@ TARGETS_COPYING_CLOSURE = M("copying closure to {target}...")
 TARGETS_COPY_CLOSURE_FAILED = M("copying the closure to {target} failed; {NOTHING_DONE} - the changes are still staged{detail}")
 TARGETS_BUILDER_SKIPPED = M("builder {host} is unusable: {problem}")
 TARGETS_NO_BUILDER = M("no usable builder among {names} ({CONFIG_FILE}: builders); {NOTHING_DONE}")
-TARGETS_ESP_SCAN_FAILED = M("could not scan {target}'s ESP for rejected generations (exit {code}); {NOTHING_DONE}")
 TARGETS_DRY_ACTIVATE_FAILED = M("dry-activating the new system on {target} failed (exit {code}); {NOTHING_DONE}{detail}")
 TARGETS_WOULD = M("  {target}: would {verb} {units}")
 TARGETS_WOULD_NOTHING = M("  {target}: would stop, restart or reload no unit")
@@ -549,27 +541,29 @@ INIT_TOML_BRANCH_PREFIX = M(
 INIT_TOML_CHILD_WORKTREES = M(
     "# The subdirectory child worktrees are placed in.\n"
     "# The default directory is set to Claude Code's, so that {TOOL}'s Claude Code plugin works out of the box.")
-INIT_TOML_PRECHECK = M("# Precheck step that runs in parallel with eval. Names a flake check (checks.<targets_arch>.<name>).")
+INIT_TOML_PRE_SWITCH = M(
+    "# Checks every deploy must pass before switching anything.  Flake checks (checks.<targets_arch>.<name>)\n"
+    "# and controller_shell statements run in parallel with eval; target_shell statements run as root on each\n"
+    "# target about to be switched, before the build.\n"
+    "[checks.pre_switch]")
 INIT_TOML_BUILD = (
     "# List of build machines with fallbacks if the earlier ones are unavailable.\n"
     "# The {local_hostname} is considered unavailable if it's the wrong CPU architecture (e.g. a Mac).\n"
     "builders = [\"{local_hostname}\"]")
 # A statement proving the internet reachable from where it runs: exactly the 204 Google answers.
 PROBE = '[ "$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" https://www.google.com/generate_204)" = 204 ]'
-INIT_TOML_SWITCH = M(
-    "# Configure automatic rollback after activating the new NixOS generation.\n"
+INIT_TOML_POST_SWITCH = M(
+    "# Checks the new NixOS generation must pass once activated, or the target rolls itself back.\n"
     "# The default check recommended for all setups is to roll back if ssh connectivity is lost after N seconds.\n"
     "# Another built-in check is whether the target reaches the internet, and you can also provide arbitrary other\n"
-    "# checks that run on either the target machine or the control machine.\n"
-    "[switch]\n"
-    "auto_rollback_checks = [\n"
-    "  {{ ssh_deadline_secs = {deadline} }},\n"
-    "#   {{ internet = true }},  # the target reaches the internet\n"
-    "#   {{ target_shell = [\"systemctl is-active -q nginx.service\"] }},  # run as root on the target\n"
-    "]\n"
-    "# [targets.router.switch]\n"
+    "# checks that run on either the target machine or the control machine.  post_switch = false switches plainly.\n"
+    "[checks.post_switch]\n"
+    "ssh_deadline_secs = {deadline}\n"
+    "# internet = true  # the target reaches the internet\n"
+    "# target_shell = [\"systemctl is-active -q nginx.service\"]  # run as root on the target\n"
+    "# [targets.router.checks.post_switch]\n"
     "# # this machine still reaches the internet, through it\n"
-    "# auto_rollback_checks = [{{ controller_shell = ['" + PROBE.replace("{", "{{").replace("}", "}}") + "'] }}]")
+    "# controller_shell = ['" + PROBE.replace("{", "{{").replace("}", "}}") + "']")
 INIT_TOML_TARGETS = (
     "# nixconvoy init populates your targets from the flake's nixosConfigurations.")
 INIT_TOML_FIRST_TARGET = M(
@@ -774,24 +768,36 @@ CONFIG_NOT_A_STRING = M("{where}.{key} must be a string")
 CONFIG_NOT_STRINGS = M("{where}.{key} must be a list of strings")
 CONFIG_NOT_A_TEMPLATE = M("{CONFIG_FILE}: {key} is a template over {{{placeholder}}} alone ({error!r})")
 CONFIG_EMPTY_TEMPLATE = M("{CONFIG_FILE}: {key} is a template over {{{placeholder}}}, not empty")
-CONFIG_DEADLINE = M("{CONFIG_FILE}: {where}.ssh_deadline_secs is a number of seconds, above 0 (auto_rollback_checks = "
-                    "false switches plainly)")
-CONFIG_CHECK_DEADLINE_TWICE = M("{CONFIG_FILE}: {where} is a second ssh_deadline_secs item: one per list (a target's "
-                                "replaces [switch]'s)")
-CONFIG_CHECK_NO_DEADLINE = M("{CONFIG_FILE}: {where} has checks but no {{ ssh_deadline_secs = <seconds> }} item, their "
-                             "deadline, and [switch] gives none")
-CONFIG_DEADLINE_SECS_GONE = M("{CONFIG_FILE}: {where}.deadline_secs is gone: the deadline is auto_rollback_checks' "
-                              "{{ ssh_deadline_secs = <seconds> }} item, counted from the activation's end")
-CONFIG_CHECKS = M("{CONFIG_FILE}: {where} is a list of checks, tables like {{ ssh_deadline_secs = 10 }}, or false "
-                  "(switched plainly)")
-CONFIG_CHECK_STRIKE = M("{CONFIG_FILE}: {where} strikes nothing: [switch] has no fleet checks over it (leave "
+CONFIG_DEADLINE = M("{CONFIG_FILE}: {where} is a number of seconds, above 0, counted from the activation's end "
+                    "(post_switch = false switches plainly)")
+CONFIG_CHECK_NO_DEADLINE = M("{CONFIG_FILE}: {where} has checks but no ssh_deadline_secs, their deadline, and "
+                             "[checks.post_switch] gives none")
+CONFIG_POST_NOT_TABLE = M("{CONFIG_FILE}: {where} is a table of the checks a switch must pass - ssh_deadline_secs = "
+                          "<seconds>, internet = true, target_shell / controller_shell = [\"...\"] (statements, each "
+                          "run in a shell of its own) - or false (switched plainly)")
+CONFIG_PRE_NOT_TABLE = M("{CONFIG_FILE}: {where} is a table of the checks a deploy must pass before switching: flake = "
+                         "[\"<check>\"] (checks.<targets_arch>.<check>, proven beside eval), controller_shell = "
+                         "[\"...\"] (run beside eval too) and target_shell = [\"...\"] (run before the build)")
+CONFIG_CHECK_KIND = M("{CONFIG_FILE}: {where} is no {phase} check: {kinds}, or ssh_deadline_secs under post_switch")
+CONFIG_CHECK_OTHER_PHASE = M("{CONFIG_FILE}: {where} is a {other} check, not a {phase} one: a flake check's result is "
+                             "the tree's whatever runs, internet is proven after the switch, and a pre-switch failure "
+                             "ends the deploy before the build with nothing to roll back")
+CONFIG_CHECK_FLEET_ONLY = M("{CONFIG_FILE}: {where}: a pre-switch {kind} check sees the tree alone and runs once per "
+                            "deploy, so it is the fleet's: [checks.pre_switch]")
+CONFIG_CHECK_STRIKE = M("{CONFIG_FILE}: {where} strikes nothing: [checks.{phase}] has no fleet checks of it (leave "
                         "the kind out instead)")
-CONFIG_CHECK_ITEM = M("{CONFIG_FILE}: {where} is a table with one key: ssh_deadline_secs = <seconds>, internet = "
-                      "true, or target_shell / controller_shell = [\"...\"] (statements, each run in a shell of its "
-                      "own); = false strikes the fleet's checks of that kind")
-CONFIG_CHECK_SHELL = M("{CONFIG_FILE}: {where}.{kind} is a list of statements (strings), each run in a shell of its own, "
+CONFIG_CHECK_SHELL = M("{CONFIG_FILE}: {where} is a list of statements (strings), each run in a shell of its own, "
                        "or false (striking the fleet's)")
+CONFIG_CHECK_FLAKE_TWICE = M("{CONFIG_FILE}: {where} names a check twice")
+CONFIG_CHECK_FLAKE = M("{CONFIG_FILE}: {where} is a list of the flake's check names (checks.<targets_arch>.<name>)")
+CONFIG_CHECK_INTERNET = M("{CONFIG_FILE}: {where} is true, or false (striking the fleet's)")
 CONFIG_CHECK_KIND_GONE = M("{CONFIG_FILE}: {where}: `{kind}` is gone: use {instead}")
+CONFIG_PRECHECK_GONE = M("{CONFIG_FILE}: precheck is gone: the flake checks are [checks.pre_switch]'s flake = "
+                         "[\"<check>\"] (checks.<targets_arch>.<check>, each proven beside eval)")
+CONFIG_SWITCH_GONE = M("{CONFIG_FILE}: {where} is gone: a switch's checks are [checks.post_switch]'s (a target's "
+                       "[targets.<name>.checks.post_switch]), a table - ssh_deadline_secs = <seconds> for the "
+                       "{{ ssh_deadline_secs = N }} item, internet = true, target_shell / controller_shell = [\"...\"] - "
+                       "or false, switching plainly")
 CONFIG_WORK_BRANCHES_IGNORED = M("note: {CONFIG_FILE}: work_branches is ignored (a work branch is any branch shaped like "
                                  "branch_prefix, {{local_hostname}} in it any hostname): drop the line")
 CONFIG_BRANCH_PREFIX_CHARS = M("{CONFIG_FILE}: branch_prefix may hold ASCII letters, digits, '.', '-', '_', '/' and "
@@ -801,7 +807,7 @@ CONFIG_REMOTE = M("{CONFIG_FILE}: remote is a git remote's name (letters, digits
                   "not starting with '-'), not {remote!r}")
 CONFIG_MAIN_BRANCH = M("{CONFIG_FILE}: main_branch is a branch's name (main, not {remote}/main or refs/...), "
                        "not {main_branch!r}")
-CONFIG_EVAL_GONE = M("{CONFIG_FILE}: [eval] is gone: precheck is a top-level key")
+CONFIG_EVAL_GONE = M("{CONFIG_FILE}: [eval] is gone: the flake checks are [checks.pre_switch]'s flake = [\"<check>\"]")
 CONFIG_BUILDER_GONE = M("{CONFIG_FILE}: builder is gone: builders is a list of machines tried in order, the first "
                         "usable one realising the closures (builders = [\"{{local_hostname}}\"] realises here)")
 CONFIG_HOSTNAMES_GONE = M("{CONFIG_FILE}: [hostnames] is gone: a machine falls through builders to one that can "
@@ -839,9 +845,11 @@ MEMO_EVAL_FAILED = M("evaluating {target} failed:\n{stderr}")
 MEMO_NO_TOPLEVEL = M("nix eval returned no toplevel for {target}:\n{stdout}")
 MEMO_DRV_COLLECTED = M("{target}'s .drv was collected as soon as it was evaluated; re-run")
 MEMO_CHECK_FAILED = M("{failure}; {NOTHING_DONE}")
-MEMO_PRECHECK_WHAT = M("precheck {check}")
-MEMO_PRECHECK_EVAL_FAILED = M("evaluating the precheck failed:\n{stderr}")
-MEMO_PRECHECK_NO_DRV = M("nix eval returned no derivation for the precheck:\n{stdout}")
+MEMO_FLAKE_WHAT = M("flake check {checks}")
+MEMO_FLAKE_EVAL_FAILED = M("evaluating the flake checks ({checks}) failed:\n{stderr}")
+MEMO_FLAKE_NO_DRV = M("nix eval returned no derivation for the flake check {check}:\n{stdout}")
+MEMO_TREE_CHECK_FAILED = M("pre-switch controller check: {report}")
+MEMO_TREE_CHECK_UNPARSED = M("pre-switch controller check: {fault}")
 MEMO_SHORT_WRITE = "short write"
-MEMO_PROOF_WRITE_FAILED = M("eval memo: recording the precheck's pass in {log} failed ({error}); "
+MEMO_PROOF_WRITE_FAILED = M("eval memo: recording the flake check's pass in {log} failed ({error}); "
                             "the next deploy runs it again")

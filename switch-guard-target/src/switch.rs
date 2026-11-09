@@ -76,6 +76,7 @@ pub fn drive(host: &mut System<'_>, mut m: Machine<String>) -> i32 {
 
 pub struct Settings {
     pub config: PathBuf,
+    pub target: String,
     pub deadline: u64,
     pub internet_check: bool,
     pub checks: String,
@@ -92,6 +93,7 @@ impl Settings {
         let c = Config::load(path)?;
         Ok(Settings {
             config: path.to_path_buf(),
+            target: c.str("target")?.to_string(),
             deadline: c.num("deadline")?,
             internet_check: c.str("internet_check")? == "true",
             checks: c.str("checks")?.to_string(),
@@ -293,8 +295,10 @@ impl System<'_> {
 pub const USAGE: &str = text!(switch_usage);
 
 /// The `check` verb: the internet probe when configured, then the target's
-/// checks; nixconvoy reports its last stderr line.  Root, so the checks can
-/// attribute sockets (ss -p) and read state.
+/// checks, told the target's name, the system under verification (the one
+/// running, activated with `test`) and the one the switch replaces (the
+/// record's `previous`); nixconvoy reports its last stderr line.  Root, so
+/// the checks can attribute sockets (ss -p) and read state.
 fn check(s: &Settings) -> i32 {
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } != 0 {
@@ -307,7 +311,13 @@ fn check(s: &Settings) -> i32 {
         return 1;
     }
     use std::os::unix::process::CommandExt;
-    let e = std::process::Command::new(&s.checks).exec();
+    let running = std::fs::read_link("/run/current-system").map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let previous = Record::load(&s.state_dir).ok().flatten().map(|r| r.previous).unwrap_or_default();
+    let e = std::process::Command::new(&s.checks)
+        .env("NIXCONVOY_TARGET", &s.target)
+        .env("NIXCONVOY_TOPLEVEL", running)
+        .env("NIXCONVOY_PREVIOUS", previous)
+        .exec();
     proc::warn(&format!(text!(switch_check_cannot_run), checks = s.checks, e = e));
     1
 }

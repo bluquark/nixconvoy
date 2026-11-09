@@ -130,7 +130,7 @@ class Fail(Exception):
 
 
 # Every run() child in flight, killed by die(): an exit must not wait for a
-# nix eval or precheck build another thread started (executors join their
+# nix eval or flake check build another thread started (executors join their
 # workers at interpreter shutdown) nor let their output trail the error.
 # SWEPT holds the message each killed child's run() fails with instead of
 # its own report of the kill.  Reentrant: a signal handler sweeps too.

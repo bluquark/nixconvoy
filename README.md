@@ -399,13 +399,15 @@ child_worktrees = ".claude/worktrees"
 builders = ["{local_hostname}", "minipc"]
 
 # Precheck step that runs in parallel with eval.  Names a flake check (checks.<targets_arch>.<name>).
-precheck = "repo-lint"
+[checks.pre_switch]
+flake = ["repo-lint"]
 
 # Configure automatic rollback after activating the new NixOS generation, if:
 # A) a fresh ssh connection from the host doesn't reach the target within 10s, or
 # B) the target cannot reach the internet
-[switch]
-auto_rollback_checks = [{ ssh_deadline_secs = 10 }, { internet = true }]
+[checks.post_switch]
+ssh_deadline_secs = 10
+internet = true
 
 # Targets are named by their flake.
 [targets.minipc]
@@ -413,28 +415,28 @@ auto_rollback_checks = [{ ssh_deadline_secs = 10 }, { internet = true }]
 tags = ["lan"]
 
 [targets.router]
-[targets.router.switch]
+[targets.router.checks.pre_switch]
+target_shell = ['[ "$(df --output=pcent /boot | tail -n 1 | tr -dc 0-9)" -lt 90 ]']
+[targets.router.checks.post_switch]
 # This is a NixOS-based router/gateway providing NAT and DNS to my LAN.
 # Configure additional auto-rollback checks for it:
 # C) Routing still works (verified by the nixconvoy control machine trying to reach the internet)
 # D) DNS still works (verified by script running on target)
-auto_rollback_checks = [
-  { controller_shell = ['[ "$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" https://www.google.com/generate_204)" = 204 ]'] },
-  { target_shell = [
-    'systemctl is-active --quiet dnsmasq || { echo "dnsmasq is not active" >&2; exit 1; }',
-    '''
+controller_shell = ['[ "$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" https://www.google.com/generate_204)" = 204 ]']
+target_shell = [
+  'systemctl is-active --quiet dnsmasq || { echo "dnsmasq is not active" >&2; exit 1; }',
+  '''
 pid=$(systemctl show -p MainPID --value dnsmasq)
 [ "$pid" != 0 ] || { echo "dnsmasq is not running" >&2; exit 1; }
 sockets=$(ss -H -ulnp | grep -F "pid=$pid," || true)
 grep -qF " 0.0.0.0:67 " <<<"$sockets" || { echo "dnsmasq has no DHCP socket on port 67" >&2; exit 1; }
-'''
-  ] },
+''',
 ]
 
 [targets.windows-wsl]
 tags = ["lan"]
 # No need for auto-rollback on WSL
-switch = { auto_rollback_checks = false }
+checks = { post_switch = false }
 # This target's hostname doesn't correspond to its domain name
 ssh_address = "bluquark@windows.home.bluquark.net"
 

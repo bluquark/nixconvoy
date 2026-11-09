@@ -1,22 +1,22 @@
 # The switch kit a deploy pushes to a target beside its toplevel (memo.py
 # evaluates this against the target's own pkgs and config, the switch step
 # roots it under /var/lib/nixconvoy/kits by the toplevel's name): the confirmed-switch helper
-# nixconvoy-switch drives, its settings and the target's checks (`checks`:
-# the target_shell statements, each run under `prelude`).  So a target
+# nixconvoy-switch drives, its settings (`target`: the target's name in
+# nixconvoy.toml, for the checks' NIXCONVOY_TARGET) and the target's checks
+# (`checks`: the post-switch target_shell statements, each run under `prelude`).  So a target
 # carries nothing of nixconvoy's in its configuration, and the helper is
 # always the build the deploying nixconvoy was built from.
-{ pkgs, config, deadline, internetCheck, prelude, checks }:
+{ pkgs, config, target, deadline, internetCheck, prelude, checks }:
 let
   inherit (pkgs) lib;
   switchGuard = import ./switch-guard-target.nix { inherit pkgs; };
   # Where the helper keeps the armed switch's record (`previous` names the
-  # system being replaced; boot-assessment.nix reads it by this same path).
+  # system being replaced).
   state = "/run/confirmed-switch";
-  # The checks' PATH: what a boot's gate (no login PATH) must find there too.
+  # The checks' PATH.
   tools = [ pkgs.coreutils pkgs.util-linux config.systemd.package pkgs.curl config.nix.package
             pkgs.iproute2 pkgs.gnugrep pkgs.gnused pkgs.gawk pkgs.findutils ];
-  # The `check` verb's program, and boot-assessment's gate's on a counted
-  # boot (the booted system's kit's /checks): the target_shell statements
+  # The `check` verb's program: the target_shell statements
   # each in a root's-shell process of its own, all at once; their output replayed
   # once all have ended, a failing one's stderr before the last line, one
   # naming every failure, which nixconvoy reports.
@@ -75,6 +75,7 @@ let
     '';
   };
   conf = pkgs.writeText "confirmed-switch.conf" ''
+    target = ${target}
     deadline = ${toString deadline}
     internet_check = ${lib.boolToString internetCheck}
     checks = ${lib.getExe checksApp}

@@ -32,13 +32,5 @@
     } // (if pkgs.stdenv.hostPlatform.isLinux
           then { inherit (p.nixconvoy) tests; inherit (p) switch-guard-target; }
           else { package = p.nixconvoy; }));
-
-    # The target side is pushed by each deploy (nix/kit.nix); the one module
-    # left is boot assessment, whose units live in the system.
-    nixosModules.boot-assessment = { pkgs, ... }: {
-      imports = [ ./nix/modules/boot-assessment.nix ];
-      nixconvoy.bootAssessment.package = nixpkgs.lib.mkDefault
-        self.packages.${pkgs.stdenv.hostPlatform.system}.switch-guard-target;
-    };
   };
 }

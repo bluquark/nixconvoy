@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import NamedTuple
 
 from . import proc, strings, term
-from .config import cfg
-from .proc import die, load_json, run
+from .config import cfg, shell_script
+from .proc import Fail, die, load_json, run
 
 # Seconds one probe of a target may take, so a stalled ssh session holds
 # neither a deploy's start nor verification past the deadline.
@@ -27,9 +27,8 @@ SSH_FAILED = 255  # ssh's exit status for a failure of its own; any other is the
 PROVENANCE_FILE: str = "/var/lib/nixconvoy/provenance.json"
 # Where a target's switch kits (nix/kit.nix) are rooted with the store, one
 # link per system named after its store path (kit_link): a collection in the
-# rollback window cannot take the helper the timer runs, and a boot's
-# assessment finds the booted system's own checks, not the last deploy's.
-# A deploy prunes the links of systems the store no longer holds.
+# rollback window cannot take the helper the timer runs.  A deploy prunes
+# the links of systems the store no longer holds.
 KIT_DIR: str = "/var/lib/nixconvoy/kits"
 CURRENT_SYSTEM: str = "/run/current-system"
 SYSTEM_PROFILE: str = "/nix/var/nix/profiles/system"
@@ -139,8 +138,6 @@ class Probe(NamedTuple):
     provenance: str
     # switch.provenance_digest of it, for the guard's compare.
     digest: str
-    # The kit rooted for the running system (kit_link), "" when none.
-    kit: str = ""
     # Why `running` is None: what ssh or the target said.
     error: str = ""
 
@@ -160,27 +157,6 @@ def kit_root_script(toplevel: str, kit: str) -> str:
             f"{prune}")
 
 
-def refresh_kit(target: str, toplevel: str, kit: str) -> str | None:
-    """A target already running `toplevel` whose rooted kit is not `kit`
-    (its policy or the kit sources moved): the kit copied and rooted in
-    place of the old, no switch.  The failure text, or None."""
-    with term.step(strings.TARGETS_REFRESHING_KIT(target=target),
-                   strings.TARGETS_REFRESHED_KIT(target=target)) as step:
-        step.ok = False
-        if kit:
-            err = copy_closure(target, [kit], quiet=True, fatal=False)
-            if err:
-                return err
-        p = run(target_cmd(target, ["sh", "-c", kit_root_script(toplevel, kit)], sudo=True),
-                check=False, timeout=PROBE_TIMEOUT, merged=True)
-        step.ok = p.returncode == 0
-    if p.returncode != 0:
-        return strings.TARGETS_KIT_ROOT_FAILED(
-            target=target, code=p.returncode,
-            detail=strings.PROC_DETAIL(output=p.stdout.strip()) if p.stdout else "")
-    return None
-
-
 def provenance_digest(text: str) -> str:
     """What the switch guard compares PROVENANCE_FILE against (sha256sum of
     its bytes; an absent file reads as empty)."""
@@ -190,17 +166,15 @@ def provenance_digest(text: str) -> str:
 
 
 def parse_probe(stdout: str) -> Probe:
-    """The remote probe's output: the running system, its kit link's target
-    (a line, empty when none), then the provenance file verbatim."""
-    cur, _, rest = stdout.partition("\n")
-    kit, _, text = rest.partition("\n")
-    return Probe(cur.strip() or None, text, provenance_digest(text), kit.strip())
+    """The remote probe's output: the running system, then the provenance
+    file verbatim."""
+    cur, _, text = stdout.partition("\n")
+    return Probe(cur.strip() or None, text, provenance_digest(text))
 
 
 def probe_script() -> str:
     """The shell of a probe, printing what parse_probe reads."""
-    return (f"cur=$(readlink {CURRENT_SYSTEM}) && echo \"$cur\" && "
-            f"{{ readlink \"{KIT_DIR}/${{cur##*/}}\" 2>/dev/null || echo; }} && "
+    return (f"readlink {CURRENT_SYSTEM} && "
             f"{{ cat {PROVENANCE_FILE} 2>/dev/null || true; }}")
 
 
@@ -386,7 +360,7 @@ def build_drvs(drvs: list[str], what: str, opts: tuple[str, ...] = (),
     text (naming `what`, with the build output when `capture` kept it off
     the terminal - as a terminal taken for the run's rows always does, the
     calling thread's step showing its latest line) or None; the caller
-    dies, since this also runs on the precheck thread."""
+    dies, since this also runs on the tree gate's thread."""
     capture = capture or term.LIVE
     b = builder_host()
     if b:
@@ -497,20 +471,29 @@ def check_builder() -> None:
     builder_host()
 
 
-def rejected_generation(target: str, toplevel: str) -> str | None:
-    """The ESP stub of `toplevel` on `target` when systemd-boot has spent its
-    boot tries on it (the boot-assessment module: a `+0[-N]` counter), else
-    None.  The ESP is root-only, hence sudo."""
-    script = (
-        "for s in /boot/EFI/Linux/nixos-generation-*+0*.efi; do "
-        '[ -e "$s" ] || continue; n=${s##*/nixos-generation-}; g=${n%%-*}; '
-        f'[ "$(readlink -f /nix/var/nix/profiles/system-$g-link 2>/dev/null)" = "{toplevel}" ] '
-        '&& { echo "${s##*/}"; exit 0; }; done; exit 0'
-    )
-    p = run(target_cmd(target, ["sh", "-c", script], sudo=True), check=False, timeout=PROBE_TIMEOUT)
-    if p.returncode != 0:
-        die(strings.TARGETS_ESP_SCAN_FAILED(target=target, code=p.returncode))
-    return p.stdout.strip() or None
+def pre_switch_check(target: str, statements: tuple[str, ...], toplevel: str, previous: str) -> str | None:
+    """The pre-switch target statements on `target`, as root over ssh, one
+    after the other (sh, under config.SHELL_PRELUDE, switch.check_env in the
+    environment): the first failing one's report - its last stderr line,
+    or that it exited so or timed out - else None.  Before the build, so
+    the kit is not there yet: the statements run unparsed by root's shell."""
+    from .switch import check_env  # noqa: PLC0415 - switch imports this module
+
+    env = [f"{k}={v}" for k, v in check_env(target, toplevel, previous).items()]
+    for statement in statements:
+        first = statement.strip().splitlines()
+        head = first[0] if first else ""
+        try:
+            p = run(target_cmd(target, ["env", *env, "sh", "-c", shell_script(statement)], sudo=True),
+                    check=False, timeout=PROBE_TIMEOUT)
+        except Fail as e:
+            return strings.SWITCH_CHECK_INTERRUPTED(error=e)
+        if p.timed_out:
+            return strings.SWITCH_CHECK_TIMED_OUT(statement=head)
+        if p.returncode != 0:
+            lines = (p.stderr or "").strip().splitlines()
+            return lines[-1] if lines else strings.SWITCH_CHECK_EXITED(statement=head, code=p.returncode)
+    return None
 
 
 def unit_changes(dry_activate: str) -> dict[str, list[str]]:

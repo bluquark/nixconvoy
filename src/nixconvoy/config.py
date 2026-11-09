@@ -22,10 +22,22 @@ from .wire import RepoNames
 CLAUDE_WORKTREES = ".claude/worktrees"
 
 
-CHECK_KINDS = ("internet", "target_shell", "controller_shell")
+# nixconvoy.toml's [checks] table: the pre_switch and post_switch phases,
+# each a table of check kinds (a shell kind's list of statements, `flake`'s
+# list of the flake's check names, `internet = true`), the fleet's under
+# [checks.<phase>], a target's own appended under
+# [targets.<name>.checks.<phase>] (a kind set to false there strikes the
+# fleet's).  A kind belongs to the phase that can act on it: `flake` to
+# pre_switch (its result is the tree's alone), `internet` to post_switch.
+PRE, POST = "pre_switch", "post_switch"
 SHELL_KINDS = ("target_shell", "controller_shell")
+PRE_KINDS = ("flake", *SHELL_KINDS)
+POST_KINDS = ("internet", *SHELL_KINDS)
+# The pre-switch kinds that see the tree alone: run once per deploy beside
+# eval, so only the fleet's table may hold them.
+TREE_KINDS = ("flake", "controller_shell")
 DEADLINE_KEY = "ssh_deadline_secs"
-# The deadline of a nixconvoy.toml without [switch]; nixconvoy init writes it out.
+# The deadline of a nixconvoy.toml without [checks.post_switch]; nixconvoy init writes it out.
 DEFAULT_DEADLINE = 10
 # What every shell statement runs under: a failing command, an unset
 # variable or a failing pipe stage fails the check.
@@ -33,7 +45,7 @@ SHELL_PRELUDE = "set -eu -o pipefail"
 # Former kinds, each with what replaces it.
 GONE_KINDS = {
     "routing": "a controller_shell statement reaching the internet from this machine, such as "
-               f"{{ controller_shell = ['{strings.PROBE}'] }}",
+               f"controller_shell = ['{strings.PROBE}']",
     "bash": 'target_shell = ["..."] (a list of statements)',
 }
 
@@ -50,49 +62,71 @@ def controller_shell() -> str:
 
 @dataclass(frozen=True)
 class Check:
-    """One auto_rollback_checks item besides the deadline's: `internet` (an
-    HTTPS probe from the target), `target_shell` (`script`: one statement,
-    run as root on the target in root's shell by the helper's `check` verb
-    after its probe) or `controller_shell` (one statement, run on this
-    machine in its shell).  A policy's statements of a kind run at once,
-    each in a shell of its own, any one's non-zero exit failing the
-    verification; the last stderr line of each failing one is what the
-    report says."""
+    """One check of a phase: `flake` (`script`: a flake check's name, built
+    beside eval and proven per tree), `internet` (an HTTPS probe from the
+    target), `target_shell` (one statement, run as root on the target - by
+    the helper's `check` verb in root's shell after the switch, under sh
+    over ssh before it) or `controller_shell` (one statement, run on this machine in
+    its shell).  A phase's statements of a kind run at once, each in a
+    shell of its own, any one's non-zero exit failing the phase; the last
+    stderr line of each failing one is what the report says.  Every shell
+    statement sees NIXCONVOY_TARGET, NIXCONVOY_TOPLEVEL (the system being
+    switched to) and NIXCONVOY_PREVIOUS (the one it replaces), except a
+    pre-switch controller statement, which runs beside eval with the union's
+    tree as its cwd, before any toplevel is known."""
 
     kind: str
     script: str = ""
 
 
 @dataclass(frozen=True)
-class SwitchPolicy:
-    """How a target is switched: nixconvoy.toml's `[switch]` table, the
-    fleet's defaults, under a target's `[targets.<name>.switch]`."""
+class Checks:
+    """The checks of one phase, the fleet's then the target's own."""
 
-    # auto_rollback_checks' { ssh_deadline_secs = N } item (a target's over
-    # the fleet's): the switch is confirmed - nix/kit.nix's helper arms a
-    # rollback timer, the toplevel is activated with `test`, and within N
-    # seconds of the activation's end this machine must read the new system
-    # running over a new ssh connection (so sshd must admit a login), pass
-    # each check and confirm, the profile set only then; otherwise the
-    # target rolls back on its own.  None: no deadline given, or
-    # auto_rollback_checks = false - a plain switch, as nixos-rebuild
-    # switch would.
-    deadline: int | None = DEFAULT_DEADLINE
-    # The other items: the fleet's, then the target's own appended (a
-    # `false` item of a kind strikes the fleet's of it).
     checks: tuple[Check, ...] = ()
-
-    @property
-    def confirmed(self) -> bool:
-        return self.deadline is not None
 
     def has(self, kind: str) -> bool:
         return any(c.kind == kind for c in self.checks)
 
     def statements(self, kind: str) -> tuple[str, ...]:
-        """The shell checks of `kind`, in order: the kit carries the
-        target's, the control machine runs its own (shell_script each)."""
+        """The checks of `kind`, in order: a shell kind's statements (the
+        kit carries the target's, this machine runs its own, shell_script
+        each), `flake`'s check names."""
         return tuple(c.script for c in self.checks if c.kind == kind)
+
+
+@dataclass(frozen=True)
+class PreSwitch(Checks):
+    """[checks.pre_switch]: what must hold before a target is switched.
+    The flake checks and the controller statements see the tree alone, so
+    they run beside eval (the flake checks proven per tree, the statements
+    every deploy); the target statements run after eval, before any build,
+    with the toplevel in their environment.  A failure ends the deploy with
+    nothing built, switched or committed."""
+
+    @property
+    def flakes(self) -> tuple[str, ...]:
+        return self.statements("flake")
+
+
+@dataclass(frozen=True)
+class SwitchPolicy(Checks):
+    """[checks.post_switch]: how a target is switched, and what must hold
+    afterwards."""
+
+    # ssh_deadline_secs (a target's over the fleet's): the switch is
+    # confirmed - nix/kit.nix's helper arms a rollback timer, the toplevel
+    # is activated with `test`, and within N seconds of the activation's
+    # end this machine must read the new system running over a new ssh
+    # connection (so sshd must admit a login), pass each check and
+    # confirm, the profile set only then; otherwise the target rolls back
+    # on its own.  None: post_switch = false - a plain switch, as
+    # nixos-rebuild switch would.
+    deadline: int | None = DEFAULT_DEADLINE
+
+    @property
+    def confirmed(self) -> bool:
+        return self.deadline is not None
 
 
 @dataclass(frozen=True)
@@ -105,8 +139,9 @@ class TargetConfig:
     # memo's scan root for it (Config.target_root); empty: <targets_dir>/<name>,
     # or the memo's own inference (memo.hosts_candidates).
     dir: str = ""
-    # Its [targets.<name>.switch] over the [switch] defaults; None: the defaults.
-    switch: SwitchPolicy | None = None
+    # Its [targets.<name>.checks.<phase>] over the fleet's; None: the fleet's.
+    pre_switch: PreSwitch | None = None
+    post_switch: SwitchPolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -117,7 +152,7 @@ class Config:
     # relative to the repo root; empty: the `[targets.<name>]` tables name
     # them instead.
     targets_dir: str
-    # The targets' system (checks.<targets_arch>.<precheck> is the precheck).
+    # The targets' system (checks.<targets_arch>.<name> are the flake checks).
     targets_arch: str
     # A target's ssh address (user@name): nixconvoy.toml's
     # ssh_address_template, over {target}; the builder is addressed through it too.
@@ -147,11 +182,10 @@ class Config:
     # there: `remote` and `main_branch`.
     remote: str
     main_branch: str
-    # precheck: a flake check (checks.<targets_arch>.<precheck>) proven
-    # before any build; empty is none.
-    precheck: str = ""
-    # [switch]: every target's switch policy unless its table overrides.
-    switch: SwitchPolicy = field(default_factory=SwitchPolicy)
+    # [checks.pre_switch] and [checks.post_switch]: every target's unless
+    # its own tables add to them.
+    pre_switch: PreSwitch = field(default_factory=PreSwitch)
+    post_switch: SwitchPolicy = field(default_factory=SwitchPolicy)
     targets: dict[str, TargetConfig] = field(default_factory=dict)
 
     def target(self, name: str) -> TargetConfig:
@@ -161,7 +195,20 @@ class Config:
         return self.target(name).ssh_address or self.ssh_template.format(target=name)
 
     def switch_policy(self, name: str) -> SwitchPolicy:
-        return self.target(name).switch or self.switch
+        return self.target(name).post_switch or self.post_switch
+
+    def pre_switch_checks(self, name: str) -> PreSwitch:
+        return self.target(name).pre_switch or self.pre_switch
+
+    @property
+    def flakes(self) -> tuple[str, ...]:
+        """The flake checks (checks.<targets_arch>.<name>) every deploy proves."""
+        return self.pre_switch.flakes
+
+    @property
+    def tree_statements(self) -> tuple[str, ...]:
+        """The pre-switch controller statements, run beside eval."""
+        return self.pre_switch.statements("controller_shell")
 
     def tagged(self, tag: str) -> list[str]:
         return [n for n, h in self.targets.items() if tag in h.tags]
@@ -238,68 +285,93 @@ def _str(t: dict[str, object], k: str, where: str, default: str | None = "") -> 
     return v
 
 
-def _checks(v: object, where: str, base: SwitchPolicy | None) -> SwitchPolicy:
-    """An auto_rollback_checks value over `base` (the fleet's policy; None
-    for `[switch]` itself): false, a plain switch; else a list of at most
-    one { ssh_deadline_secs = N } item, the deadline (over the fleet's),
-    the rest each a table with one key of CHECK_KINDS - internet = true
-    appends the check, a shell kind's list of statements appends one check
-    per statement, false strikes `base`'s of that kind.  Checks need a
-    deadline from one or the other."""
+def _kinds(t: dict[str, object], where: str, phase: str, base: tuple[Check, ...] | None,
+           kinds: tuple[str, ...]) -> tuple[Check, ...]:
+    """The checks a phase table's kind keys make over `base` (the fleet's
+    checks; None for the fleet's own table): a shell kind's or `flake`'s
+    list appends one check per entry, internet = true appends the probe,
+    false strikes `base`'s of that kind.  Keys that are no kind of `phase`
+    are told which phase they belong to, when any."""
+    other = PRE if phase == POST else POST
+    other_kinds = PRE_KINDS if phase == POST else POST_KINDS
+    kept = list(base or ())
+    own: list[Check] = []
+    for kind, val in t.items():
+        at = f"{where}.{kind}"
+        if kind == DEADLINE_KEY:
+            continue
+        if kind in GONE_KINDS:
+            raise ConfigError(strings.CONFIG_CHECK_KIND_GONE(where=at, kind=kind, instead=GONE_KINDS[kind]))
+        if kind == "auto_rollback_checks":
+            raise ConfigError(strings.CONFIG_SWITCH_GONE(where=at))
+        if kind not in kinds:
+            if kind in other_kinds:
+                raise ConfigError(strings.CONFIG_CHECK_OTHER_PHASE(where=at, key=kind, other=other, phase=phase))
+            raise ConfigError(strings.CONFIG_CHECK_KIND(where=at, phase=phase, kinds=", ".join(kinds)))
+        if phase == PRE and kind in TREE_KINDS and base is not None:
+            raise ConfigError(strings.CONFIG_CHECK_FLEET_ONLY(where=at, kind=kind))
+        if val is False:
+            if base is None:
+                raise ConfigError(strings.CONFIG_CHECK_STRIKE(where=at, phase=phase))
+            kept = [c for c in kept if c.kind != kind]
+        elif kind == "internet":
+            if val is not True:
+                raise ConfigError(strings.CONFIG_CHECK_INTERNET(where=at))
+            if not any(c.kind == kind for c in kept):
+                own.append(Check(kind))
+        elif isinstance(val, list) and all(isinstance(st, str) for st in val):
+            if kind == "flake" and len(set(val)) != len(val):
+                raise ConfigError(strings.CONFIG_CHECK_FLAKE_TWICE(where=at))
+            own.extend(Check(kind, st) for st in val)
+        elif kind == "flake":
+            raise ConfigError(strings.CONFIG_CHECK_FLAKE(where=at))
+        else:
+            raise ConfigError(strings.CONFIG_CHECK_SHELL(where=at, kind=kind))
+    return (*kept, *own)
+
+
+def _pre(v: object, where: str, base: PreSwitch | None) -> PreSwitch:
+    """A pre_switch table over `base` (the fleet's; None for the fleet's own)."""
+    if not isinstance(v, dict):
+        raise ConfigError(strings.CONFIG_PRE_NOT_TABLE(where=where))
+    if DEADLINE_KEY in v:
+        raise ConfigError(strings.CONFIG_CHECK_OTHER_PHASE(where=f"{where}.{DEADLINE_KEY}", key=DEADLINE_KEY,
+                                                           other=POST, phase=PRE))
+    return PreSwitch(_kinds(v, where, PRE, base.checks if base else None, PRE_KINDS))
+
+
+def _post(v: object, where: str, base: SwitchPolicy | None) -> SwitchPolicy:
+    """A post_switch value over `base` (the fleet's; None for the fleet's
+    own): false, a plain switch; else a table, its ssh_deadline_secs the
+    deadline (over the fleet's) and its kind keys the checks (_kinds).
+    Checks need a deadline from one or the other."""
     if v is False:
         return SwitchPolicy(deadline=None)
-    if not isinstance(v, list):
-        raise ConfigError(strings.CONFIG_CHECKS(where=where))
+    if not isinstance(v, dict):
+        raise ConfigError(strings.CONFIG_POST_NOT_TABLE(where=where))
     deadline = base.deadline if base else None
-    own_deadline = False
-    kept = list(base.checks if base else ())
-    own: list[Check] = []
-    for i, item in enumerate(v):
-        at = f"{where}[{i}]"
-        if not isinstance(item, dict) or len(item) != 1:
-            raise ConfigError(strings.CONFIG_CHECK_ITEM(where=at))
-        ((kind, val),) = item.items()
-        if kind == DEADLINE_KEY:
-            if own_deadline:
-                raise ConfigError(strings.CONFIG_CHECK_DEADLINE_TWICE(where=at))
-            if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
-                raise ConfigError(strings.CONFIG_DEADLINE(where=at))
-            own_deadline, deadline = True, val
-        elif kind in GONE_KINDS:
-            raise ConfigError(strings.CONFIG_CHECK_KIND_GONE(where=at, kind=kind, instead=GONE_KINDS[kind]))
-        elif kind not in CHECK_KINDS:
-            raise ConfigError(strings.CONFIG_CHECK_ITEM(where=at))
-        elif val is False:
-            if base is None:
-                raise ConfigError(strings.CONFIG_CHECK_STRIKE(where=at))
-            kept = [c for c in kept if c.kind != kind]
-        elif kind in SHELL_KINDS:
-            if not isinstance(val, list) or not all(isinstance(st, str) for st in val):
-                raise ConfigError(strings.CONFIG_CHECK_SHELL(where=at, kind=kind))
-            own.extend(Check(kind, st) for st in val)
-        elif val is True:
-            own.append(Check(kind))
-        else:
-            raise ConfigError(strings.CONFIG_CHECK_ITEM(where=at))
-    checks = (*kept, *own)
+    if DEADLINE_KEY in v:
+        val = v[DEADLINE_KEY]
+        if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
+            raise ConfigError(strings.CONFIG_DEADLINE(where=f"{where}.{DEADLINE_KEY}"))
+        deadline = val
+    checks = _kinds(v, where, POST, base.checks if base else None, POST_KINDS)
     if checks and deadline is None:
         raise ConfigError(strings.CONFIG_CHECK_NO_DEADLINE(where=where))
-    return SwitchPolicy(deadline=deadline, checks=checks)
+    return SwitchPolicy(checks=checks, deadline=deadline)
 
 
-def _switch(t: dict[str, object], where: str, base: SwitchPolicy | None) -> SwitchPolicy:
-    """A `switch` table: `[switch]` (`base` None: the fleet's policy, the
-    built-in default unless its list says) or a `[targets.<name>.switch]`
-    over the fleet's."""
+def _checks(t: dict[str, object], where: str,
+            base: tuple[PreSwitch, SwitchPolicy] | None) -> tuple[PreSwitch | None, SwitchPolicy | None]:
+    """A `checks` table: `[checks]` (`base` None: the fleet's phases, the
+    built-in defaults unless a phase says) or a `[targets.<name>.checks]`
+    over the fleet's; a phase left out is None."""
     for k in t:
-        if k == "deadline_secs":
-            raise ConfigError(strings.CONFIG_DEADLINE_SECS_GONE(where=where))
-        if k != "auto_rollback_checks":
+        if k not in (PRE, POST):
             raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"{where}.{k}"))
-    v = t.get("auto_rollback_checks")
-    if v is None:
-        return base or SwitchPolicy()
-    return _checks(v, f"{where}.auto_rollback_checks", base)
+    pre = _pre(t[PRE], f"{where}.{PRE}", base[0] if base else None) if PRE in t else None
+    post = _post(t[POST], f"{where}.{POST}", base[1] if base else None) if POST in t else None
+    return pre, post
 
 
 def _strs(t: dict[str, object], k: str, where: str) -> tuple[str, ...]:
@@ -348,7 +420,7 @@ def parse(text: str) -> Config:
     if isinstance(version, bool) or version != 1:
         raise ConfigError(strings.CONFIG_VERSION(version=version))
     known = {"config_version", "flake_dir", "targets_dir", "targets_arch", "ssh_address_template", "branch_prefix",
-             "child_worktrees", "builders", "remote", "main_branch", "precheck", "switch",
+             "child_worktrees", "builders", "remote", "main_branch", "checks",
              "targets", "submodules", "work_branches"}
     if "work_branches" in doc and not _noted_work_branches:
         # The allowlist this once had, superseded by branch_prefix's shape:
@@ -368,6 +440,10 @@ def parse(text: str) -> Config:
         raise ConfigError(strings.CONFIG_HOSTNAMES_GONE())
     if "parallel_eval" in doc:
         raise ConfigError(strings.CONFIG_PARALLEL_EVAL_GONE())
+    if "precheck" in doc:
+        raise ConfigError(strings.CONFIG_PRECHECK_GONE())
+    if "switch" in doc:
+        raise ConfigError(strings.CONFIG_SWITCH_GONE(where="[switch]"))
     for k in doc:
         if k not in known:
             raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=k))
@@ -392,15 +468,18 @@ def parse(text: str) -> Config:
     if not children or ".." in children.split("/"):
         raise ConfigError(strings.CONFIG_CHILD_WORKTREES())
     builders = _templates(doc, "builders", "local_hostname")
-    switch = _switch(_table(doc.get("switch", {}), "switch"), "switch", None)
+    fleet_pre, fleet_post = _checks(_table(doc.get("checks", {}), "checks"), "checks", None)
+    fleet = (fleet_pre or PreSwitch(), fleet_post or SwitchPolicy())
     targets: dict[str, TargetConfig] = {}
     for name, h in _table(doc.get("targets", {}), "targets").items():
         t = _table(h, f"targets.{name}")
         for k in t:
-            if k not in ("ssh_address", "tags", "dir", "switch"):
+            if k == "switch":
+                raise ConfigError(strings.CONFIG_SWITCH_GONE(where=f"[targets.{name}.switch]"))
+            if k not in ("ssh_address", "tags", "dir", "checks"):
                 raise ConfigError(strings.CONFIG_UNKNOWN_KEY(key=f"targets.{name}.{k}"))
-        own = (_switch(_table(t["switch"], f"targets.{name}.switch"), f"targets.{name}.switch", switch)
-               if "switch" in t else None)
+        own_pre, own_post = (_checks(_table(t["checks"], f"targets.{name}.checks"), f"targets.{name}.checks", fleet)
+                             if "checks" in t else (None, None))
         d = _str(t, "dir", f"targets.{name}")
         if d.startswith("/") or ".." in d.split("/"):
             raise ConfigError(strings.CONFIG_TARGET_DIR(name=name, dir=d))
@@ -408,7 +487,8 @@ def parse(text: str) -> Config:
         if d == ".":
             raise ConfigError(strings.CONFIG_TARGET_DIR_ROOT(name=name))
         targets[name] = TargetConfig(ssh_address=_str(t, "ssh_address", f"targets.{name}"),
-                                     tags=_strs(t, "tags", f"targets.{name}"), dir=d, switch=own)
+                                     tags=_strs(t, "tags", f"targets.{name}"), dir=d,
+                                     pre_switch=own_pre, post_switch=own_post)
     if not targets_dir and not targets:
         raise ConfigError(strings.CONFIG_NO_TARGETS())
     return Config(
@@ -421,8 +501,8 @@ def parse(text: str) -> Config:
         builders=builders,
         remote=remote,
         main_branch=main_branch,
-        precheck=_str(doc, "precheck", CONFIG_FILE),
-        switch=switch,
+        pre_switch=fleet[0],
+        post_switch=fleet[1],
         targets=targets,
     )
 

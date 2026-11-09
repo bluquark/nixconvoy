@@ -1,5 +1,5 @@
 """A deploy: probe, snapshot and its announcement, union (waiting for a
-deploy under way that reaches the same targets), eval, precheck, build,
+deploy under way that reaches the same targets), eval, tree gate, build,
 copy and the records' push, switch, then commit and push."""
 
 from __future__ import annotations
@@ -188,16 +188,16 @@ def increment_reaches(snap: str, all_targets: list[str]) -> bool:
 
 def commit_unreached(wb: str, msg: str, snap: str) -> None:
     """The increment `snap`, reaching no target: committed onto `wb` and
-    pushed, after the precheck unless its tree has a proven pass (no build
-    gates it), with nothing evaluated, built or switched - the probes
-    started are dropped unread: the targets have nothing to catch up on
-    from it."""
-    if memo.precheck_unproven(snap):
+    pushed, after the tree gate (memo.tree_gate) unless it has nothing to
+    run (no build gates it), with nothing evaluated, built or switched -
+    the probes started are dropped unread: the targets have nothing to
+    catch up on from it."""
+    if memo.tree_checks_due(snap):
         targets.check_builder()
         wt = add_worktree(snap)
         try:
             with term.step(strings.DEPLOY_RUNNING_PRECHECK, strings.DEPLOY_PRECHECK_RAN):
-                err = memo.precheck_gate(wt, snap)
+                err = memo.tree_gate(wt, snap)
                 if err:
                     die(strings.PROC_WITH_NOTHING_DONE(problem=err))
         finally:
@@ -564,7 +564,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
 
     def stage(wt: str, union: str, listed: list[str], branches: list[tuple[str, str]],
               laned: list[tuple[str, Lane]]) -> bool:
-        """Eval, precheck, build and copy for `union`, checked out in `wt`,
+        """Eval, tree gate, build and copy for `union`, checked out in `wt`,
         the work branches shaped like `listed` (nixconvoy.toml's branch_prefix), `branches`
         the ones it merged - the targets of each of `laned` from that
         lane's union and worktree instead: whether the deploy ends here."""
@@ -600,18 +600,19 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         PERF.mark("eval")
         with memo.memo_lock(memo.memo_dir()):
             memo.memo_prune(memo.memo_dir())
-        # The precheck gates each union, not the increment: a branch rebased
+        # The tree gate (the flake checks and the pre-switch controller
+        # statements) gates each union, not the increment: a branch rebased
         # by pull/land, a skip-switch push or a merge of two passing
         # branches can each carry a violation no increment introduced.
-        unproven = [g for g in ({(wt, union): None} | dict.fromkeys(groups)) if memo.precheck_unproven(g[1])]
+        unproven = [g for g in ({(wt, union): None} | dict.fromkeys(groups)) if memo.tree_checks_due(g[1])]
 
         def prechecks() -> str | None:
-            """The first failure among the unproven unions' prechecks, all at once."""
+            """The first failure among the unions' tree gates, all at once."""
             if len(unproven) == 1:
-                return memo.precheck_gate(*unproven[0])
+                return memo.tree_gate(*unproven[0])
             gates = ThreadPoolExecutor(len(unproven))
             try:
-                return next((err for gate in as_completed([gates.submit(memo.precheck_gate, *g) for g in unproven])
+                return next((err for gate in as_completed([gates.submit(memo.tree_gate, *g) for g in unproven])
                              if (err := gate.result())), None)
             finally:
                 gates.shutdown(wait=False, cancel_futures=True)
@@ -640,9 +641,6 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         for (gwt, gunion), hs in groups.items():
             reached |= memo.reached_targets(gwt, gunion, sorted(hs), snap or head, runs)
         policies = {h: memo.union_config(lane(h)[0]).switch_policy(h) for h in tops}
-        for h in sorted(tops):
-            if tops[h].assessed and not tops[h].kit:
-                print(strings.DEPLOY_ASSESSED_PLAIN(target=h), file=sys.stderr)
         cx = Context(names=repo_names(), me=(me, str(Path.cwd())), listed=sorted(listed),
                      tips={**origin_tips(), **(as_if or {})},
                      in_flight=announced(ann.key if ann is not None else None), dead=sorted(dead),
@@ -660,14 +658,16 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         plan, affected = verdict.plan, verdict.affected
         left_alone = [h for h, (kind, _) in verdict.drift.items() if kind == "left-alone"] + unmerged
 
-        # The target fell back from this very toplevel: switching onto it
-        # would run a configuration known not to boot.
-        for name in plan:
-            if not tops[name].assessed:
-                continue
-            stub = targets.rejected_generation(name, tops[name].out)
-            if stub:
-                die(strings.DEPLOY_REJECTED_GENERATION(target=name, stub=stub))
+        # The pre-switch target statements (the union's nixconvoy.toml),
+        # before anything is built: one ssh per target, all at once.
+        pres = {h: memo.union_config(lane(h)[0]).pre_switch_checks(h).statements("target_shell") for h in plan}
+        if due := [h for h in plan if pres[h]]:
+            with ThreadPoolExecutor(len(due)) as pool:
+                reports = {h: pool.submit(targets.pre_switch_check, h, pres[h], tops[h].out, running[h] or "")
+                           for h in due}
+            for h in due:
+                if (report := reports[h].result()) is not None:
+                    die(strings.DEPLOY_PRE_SWITCH_FAILED(target=h, report=report))
 
         # Nothing pending, but targets to switch: announced now, for the
         # records to ride (and the provenance to name).
@@ -748,25 +748,14 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                         and (tip is None or not is_ancestor(r, tip)):
                     records[h] = r
 
-        # A candidate up to date (running the union's toplevel, not left
-        # alone) whose rooted kit is not the one this eval made (its policy
-        # or the kit sources moved): the kit alone is refreshed, no switch -
-        # so a change to a target's checks lands, and a boot's assessment
-        # runs the current ones.
-        refresh = [h for h in sorted(tops) if h in candidates and h not in plan and h not in left_alone
-                   and running.get(h) == tops[h].out and probed[h].kit != tops[h].kit]
-        if dry and refresh:
-            print(strings.DEPLOY_DRY_KIT_REFRESH(targets=", ".join(refresh)))
-            refresh = []
-        if plan or refresh:
+        if plan:
             b = targets.builder_host()
             where = strings.DEPLOY_BUILD_WHERE(host=b) if b else ""
             PERF.mark("build")
-            what = ", ".join([*plan, *(strings.DEPLOY_BUILD_KIT(target=h) for h in refresh)])
+            what = ", ".join(plan)
             with term.step(strings.DEPLOY_BUILDING(what=what, where=where),
                            strings.DEPLOY_BUILT(what=what, where=where)):
-                err = targets.build_drvs([d for h in plan for d in (tops[h].drv, tops[h].kit_drv) if d]
-                                         + [tops[h].kit_drv for h in refresh if tops[h].kit_drv],
+                err = targets.build_drvs([d for h in plan for d in (tops[h].drv, tops[h].kit_drv) if d],
                                          strings.DEPLOY_BUILD_OF(what=what))
                 if err:
                     die(strings.PROC_WITH_NOTHING_DONE(problem=err))
@@ -785,18 +774,13 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
         with term.step(strings.DEPLOY_DRY_ACTIVATING(targets=tried) if tried else "",
                        strings.DEPLOY_DRY_ACTIVATED(targets=tried) if tried
                        else strings.DEPLOY_COPIED(targets=sent) if sent else "") as copying, \
-                ThreadPoolExecutor(2 + len(plan) + len(refresh)) as pool:
+                ThreadPoolExecutor(2 + len(plan)) as pool:
             refetch = pool.submit(fetch_origin)
             # Carried, or a redone stage's stale records dropped.
             pushed = pool.submit(ann.carry, records) if ann is not None and (records or ann.records) else None
             copies = [pool.submit(copy_then_dry, n, tops[n], len(plan) > 1) for n in plan]
-            refreshes = [pool.submit(targets.refresh_kit, h, tops[h].out, tops[h].kit) for h in refresh]
             failures = [r for r in (cp.result() for cp in copies) if r]
             copying.ok = not failures
-            # The old kit stays rooted there: the next deploy tries again.
-            for err in (r.result() for r in refreshes):
-                if err:
-                    print(strings.DEPLOY_KIT_REFRESH_FAILED(err=err), file=sys.stderr)
             refetch.result()
             unpushed = pushed.result() if pushed is not None else None
         if dry:

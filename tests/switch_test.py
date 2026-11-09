@@ -612,32 +612,42 @@ def target_cases() -> None:
                           (toml("parallel_eval = false\n"), "parallel_eval is gone"),
                           (toml().replace("config_version = 1", "config_version = true"), "not supported"),
                           (toml('[targets.a]\nlocal_only = true\n'), "unknown key targets.a.local_only"),
-                          (toml('[switch]\nconfirmed = false\n'), "unknown key switch.confirmed"),
-                          (toml('[switch]\ndeadline = 20\n'), "unknown key switch.deadline"),
-                          (toml('[targets.a.switch]\nlast = true\n'), "unknown key targets.a.switch.last"),
-                          (toml('[targets.a.switch]\nauto_rollback_checks = [{ ssh_deadline_secs = 0 }]\n'),
-                           "targets.a.switch.auto_rollback_checks[0].ssh_deadline_secs is a number"),
-                          (toml('[switch]\nauto_rollback_checks = [{ ssh_deadline_secs = false }]\n'),
-                           "checks[0].ssh_deadline_secs is a number"),
-                          (toml('[switch]\ndeadline_secs = 20\n'), "switch.deadline_secs is gone"),
-                          (toml('[switch]\nauto_rollback_checks = [{ ssh = true }]\n'), "checks[0] is a table"),
-                          (toml('[switch]\nauto_rollback_checks = [{ internet = true }]\n'), "has checks but no { ssh_deadline_secs"),
-                          (toml('[switch]\nauto_rollback_checks = []\n[targets.a.switch]\n'
-                                'auto_rollback_checks = [{ target_shell = ["x"] }]\n'), "targets.a.switch.auto_rollback_checks has checks but no"),
-                          (toml('[switch]\nauto_rollback_checks = true\n'), "switch.auto_rollback_checks is a list"),
-                          (toml('[targets.a.switch]\nauto_rollback_checks = 0\n'), "targets.a.switch.auto_rollback_checks is a list"),
-                          (toml('[switch]\nauto_rollback_checks = [{ ssh_deadline_secs = 5 }, { ssh_deadline_secs = 6 }]\n'),
-                           "checks[1] is a second ssh_deadline_secs"),
-                          (toml('[switch]\nauto_rollback_checks = 1\n'), "switch.auto_rollback_checks is a list"),
-                          (toml('[switch]\nauto_rollback_checks = [{ ssh = 1 }]\n'), "switch.auto_rollback_checks[0] is a table"),
-                          (toml('[switch]\nauto_rollback_checks = [{ target_shell = true }]\n'), "auto_rollback_checks[0].target_shell is a list of statements"),
-                          (toml('[switch]\nauto_rollback_checks = [{ controller_shell = "x" }]\n'), "checks[0].controller_shell is a list of statements"),
-                          (toml('[switch]\nauto_rollback_checks = [{ target_shell = ["x", 1] }]\n'), "checks[0].target_shell is a list of statements"),
-                          (toml('[switch]\nauto_rollback_checks = [{ bash = "x" }]\n'), "checks[0]: `bash` is gone: use target_shell"),
-                          (toml('[switch]\nauto_rollback_checks = [{ routing = true }]\n'), "checks[0]: `routing` is gone: use a controller_shell statement"),
-                          (toml('[switch]\nauto_rollback_checks = [{ ssh_deadline_secs = 5 }, { dns = true }]\n'), "checks[1] is a table"),
-                          (toml('[switch]\nauto_rollback_checks = [{ ssh_deadline_secs = 5, internet = true }]\n'), "checks[0] is a table"),
-                          (toml('[switch]\nauto_rollback_checks = [{ internet = false }]\n'), "checks[0] strikes nothing"),
+                          (toml('[checks]\nconfirmed = false\n'), "unknown key checks.confirmed"),
+                          (toml('[checks.post_switch]\ndeadline = 20\n'), "checks.post_switch.deadline is no post_switch check"),
+                          (toml('[targets.a.checks.post_switch]\nlast = true\n'), "targets.a.checks.post_switch.last is no post_switch check"),
+                          (toml('[targets.a.checks.post_switch]\nssh_deadline_secs = 0\n'),
+                           "targets.a.checks.post_switch.ssh_deadline_secs is a number"),
+                          (toml('[checks.post_switch]\nssh_deadline_secs = false\n'), "post_switch.ssh_deadline_secs is a number"),
+                          (toml('[switch]\ndeadline_secs = 20\n'), "[switch] is gone"),
+                          (toml('[switch]\nauto_rollback_checks = false\n'), "[switch] is gone: a switch's checks are [checks.post_switch]"),
+                          (toml('[targets.a.switch]\nauto_rollback_checks = false\n'), "[targets.a.switch] is gone"),
+                          (toml('[checks.post_switch]\nauto_rollback_checks = false\n'), "post_switch.auto_rollback_checks is gone"),
+                          (toml('[checks.post_switch]\nssh = true\n'), "post_switch.ssh is no post_switch check"),
+                          (toml('[checks.post_switch]\ninternet = true\n'), "has checks but no ssh_deadline_secs"),
+                          (toml('[checks]\npost_switch = {}\n[targets.a.checks.post_switch]\n'
+                                'target_shell = ["x"]\n'), "targets.a.checks.post_switch has checks but no"),
+                          (toml('[checks]\npost_switch = true\n'), "checks.post_switch is a table"),
+                          (toml('[targets.a.checks]\npost_switch = 0\n'), "targets.a.checks.post_switch is a table"),
+                          (toml('[checks]\npost_switch = 1\n'), "checks.post_switch is a table"),
+                          (toml('[checks]\npre_switch = false\n'), "checks.pre_switch is a table"),
+                          (toml('[checks.post_switch]\ntarget_shell = true\n'), "post_switch.target_shell is a list of statements"),
+                          (toml('[checks.post_switch]\ncontroller_shell = "x"\n'), "post_switch.controller_shell is a list of statements"),
+                          (toml('[checks.post_switch]\ntarget_shell = ["x", 1]\n'), "post_switch.target_shell is a list of statements"),
+                          (toml('[checks.post_switch]\nbash = "x"\n'), "post_switch.bash: `bash` is gone: use target_shell"),
+                          (toml('[checks.post_switch]\nrouting = true\n'), "post_switch.routing: `routing` is gone: use a controller_shell statement"),
+                          (toml('[checks.post_switch]\nssh_deadline_secs = 5\ndns = true\n'), "post_switch.dns is no post_switch check"),
+                          (toml('[checks.post_switch]\ninternet = false\n'), "post_switch.internet strikes nothing"),
+                          (toml('[checks.post_switch]\nssh_deadline_secs = 5\ninternet = 1\n'), "post_switch.internet is true, or false"),
+                          (toml('[checks.post_switch]\nssh_deadline_secs = 5\nflake = ["lint"]\n'), "post_switch.flake is a pre_switch check, not a post_switch one"),
+                          (toml('[checks.pre_switch]\ninternet = true\n'), "pre_switch.internet is a post_switch check, not a pre_switch one"),
+                          (toml('[checks.pre_switch]\nssh_deadline_secs = 5\n'), "pre_switch.ssh_deadline_secs is a post_switch check"),
+                          (toml('[checks.pre_switch]\nflake = "lint"\n'), "pre_switch.flake is a list of the flake's check names"),
+                          (toml('[checks.pre_switch]\nflake = false\n'), "pre_switch.flake strikes nothing"),
+                          (toml('[checks.pre_switch]\ntarget_shell = false\n'), "pre_switch.target_shell strikes nothing"),
+                          (toml('[targets.a.checks.pre_switch]\nflake = ["lint"]\n'), "a pre-switch flake check sees the tree alone"),
+                          (toml('[targets.a.checks.pre_switch]\ncontroller_shell = ["x"]\n'), "a pre-switch controller_shell check sees the tree alone"),
+                          (toml("precheck = 1\n"), "precheck is gone"),
+                          (toml('precheck = "lint"\n'), "precheck is gone: the flake checks are [checks.pre_switch]"),
                           (toml(ssh_address_template="x@{host}"), "over {target} alone"),
                           (toml(branch_prefix="{host}-d"), "over {local_hostname} alone"),
                           # No defaults: every scalar key is required.
@@ -659,46 +669,55 @@ def target_cases() -> None:
                           (toml(branch_prefix="work/{{local_hostname}}/"), "branch_prefix may hold"),
                           (toml(branch_prefix="w\u00f6rk/{local_hostname}/"), "branch_prefix may hold"),
                           (toml().replace('child_worktrees = ".claude/worktrees"\n', ""), "child_worktrees is required"),
-                          (toml('[eval]\nparallel = "auto"\n'), "[eval] is gone"),
-                          (toml("precheck = 1\n"), "precheck must be a string")):
+                          (toml('[eval]\nparallel = "auto"\n'), "[eval] is gone")):
         try:
             config.parse(bad_cfg)
         except config.ConfigError as e:
             assert hint in str(e), (bad_cfg, e)
         else:
             raise AssertionError(f"accepted: {bad_cfg!r}")
-    # A target's checks are appended to the fleet's ([switch]'s), a shell
-    # kind's list one check per statement, a false item striking the
-    # fleet's of its kind (never the target's own), its ssh_deadline_secs
-    # item replacing the fleet's; the deadline alone confirms, false (at
-    # either level) is a plain switch, a target's [] adds nothing.
-    Check, Policy = config.Check, config.SwitchPolicy
-    c = config.parse(toml('[switch]\nauto_rollback_checks = [{ ssh_deadline_secs = 45 }, { internet = true }, '
-                          '{ target_shell = ["fleet"] }, { controller_shell = ["out"] }]\n'
-                          '[targets.a.switch]\nauto_rollback_checks = [{ controller_shell = ["mine", "too"] }, '
-                          '{ target_shell = ["one"] }, { target_shell = false }, { target_shell = ["two", "three"] }, '
-                          '{ ssh_deadline_secs = 20 }]\n'
-                          '[targets.b]\nswitch = { auto_rollback_checks = false }\n'
-                          '[targets.e]\nswitch = { auto_rollback_checks = [{ internet = false }, { target_shell = false }, '
-                          '{ controller_shell = false }] }\n'
-                          '[targets.f]\nswitch = { auto_rollback_checks = [] }\n'))
+    # A target's checks are appended to the fleet's ([checks.<phase>]'s), a
+    # shell kind's list one check per statement, a kind set to false
+    # striking the fleet's of it (never the target's own), its
+    # ssh_deadline_secs replacing the fleet's; the deadline alone confirms,
+    # post_switch = false (at either level) is a plain switch, a target's
+    # empty table adds nothing.  The pre-switch flake checks and controller
+    # statements are the fleet's alone; its target statements merge like
+    # the post-switch ones.
+    Check, Policy, Pre = config.Check, config.SwitchPolicy, config.PreSwitch
+    c = config.parse(toml('[checks.pre_switch]\nflake = ["lint", "tests"]\ncontroller_shell = ["here"]\n'
+                          'target_shell = ["there"]\n'
+                          '[checks.post_switch]\nssh_deadline_secs = 45\ninternet = true\n'
+                          'target_shell = ["fleet"]\ncontroller_shell = ["out"]\n'
+                          '[targets.a.checks.pre_switch]\ntarget_shell = ["admit"]\n'
+                          '[targets.a.checks.post_switch]\ncontroller_shell = ["mine", "too"]\n'
+                          'target_shell = ["one", "two", "three"]\ninternet = true\nssh_deadline_secs = 20\n'
+                          '[targets.b]\nchecks = { post_switch = false, pre_switch = { target_shell = false } }\n'
+                          '[targets.e]\nchecks = { post_switch = { internet = false, target_shell = false, '
+                          'controller_shell = false } }\n'
+                          '[targets.f]\nchecks = { post_switch = {}, pre_switch = {} }\n'))
     a, b, d, e, f = (c.switch_policy(n) for n in "abdef")
-    assert a.checks == (Check("internet"), Check("controller_shell", "out"), Check("controller_shell", "mine"),
-                        Check("controller_shell", "too"), Check("target_shell", "one"), Check("target_shell", "two"),
-                        Check("target_shell", "three")), a
-    assert a.confirmed and a.deadline == 20 and a.statements("target_shell") == ("one", "two", "three"), a
-    assert a.statements("controller_shell") == ("out", "mine", "too"), a
+    assert a.checks == (Check("internet"), Check("target_shell", "fleet"), Check("controller_shell", "out"),
+                        Check("controller_shell", "mine"), Check("controller_shell", "too"),
+                        Check("target_shell", "one"), Check("target_shell", "two"), Check("target_shell", "three")), a
+    assert a.confirmed and a.deadline == 20 and a.statements("target_shell") == ("fleet", "one", "two", "three"), a
+    assert a.statements("controller_shell") == ("out", "mine", "too") and a.has("internet"), a
     assert config.shell_script("x | y") == "set -eu -o pipefail\nx | y\n"
-    assert b == Policy(None, ()) and not b.confirmed and b.statements("target_shell") == (), b
-    assert e == Policy(45, ()) and e.confirmed, e
-    assert config.parse(toml('[switch]\nauto_rollback_checks = []\n[targets.a.switch]\n'
-                             'auto_rollback_checks = [{ ssh_deadline_secs = 5 }, { target_shell = ["x"] }]\n')
-                        ).switch_policy("a") == Policy(5, (Check("target_shell", "x"),))
-    assert d == f == c.switch and d == Policy(45, (Check("internet"), Check("target_shell", "fleet"),
-                                                   Check("controller_shell", "out"))), d
-    assert config.parse(toml()).switch == Policy(10, ())
-    assert config.parse(toml('[switch]\nauto_rollback_checks = false\n')).switch == Policy(None, ())
-    assert config.parse(toml('[switch]\nauto_rollback_checks = []\n')).switch == Policy(None, ())
+    assert b == Policy(deadline=None) and not b.confirmed and b.statements("target_shell") == (), b
+    assert e == Policy(deadline=45) and e.confirmed, e
+    assert d == f == c.post_switch and d == Policy((Check("internet"), Check("target_shell", "fleet"),
+                                                    Check("controller_shell", "out")), 45), d
+    assert c.flakes == ("lint", "tests") and c.tree_statements == ("here",)
+    assert c.pre_switch_checks("a").statements("target_shell") == ("there", "admit")
+    assert c.pre_switch_checks("b") == Pre((Check("flake", "lint"), Check("flake", "tests"),
+                                            Check("controller_shell", "here")))
+    assert c.pre_switch_checks("d") == c.pre_switch_checks("f") == c.pre_switch
+    assert config.parse(toml('[checks]\npost_switch = {}\n[targets.a.checks.post_switch]\n'
+                             'ssh_deadline_secs = 5\ntarget_shell = ["x"]\n')
+                        ).switch_policy("a") == Policy((Check("target_shell", "x"),), 5)
+    assert config.parse(toml()).post_switch == Policy((), 10) and config.parse(toml()).pre_switch == Pre()
+    assert config.parse(toml('[checks]\npost_switch = false\n')).post_switch == Policy((), None)
+    assert config.parse(toml('[checks]\npost_switch = {}\n')).post_switch == Policy((), None)
     with tempfile.TemporaryDirectory() as empty:
         try:
             config.load(Path(empty))
@@ -776,7 +795,7 @@ def memo_cases() -> None:
     toplevel is no entry; a tree's proof is found in the log once appended,
     past a torn line, and a prune leaves the log alone; and the dry
     activation's report is parsed."""
-    top = memo.Top("/nix/store/new", "/nix/store/new.drv", "/nix/store/kit", "/nix/store/kit.drv", False)
+    top = memo.Top("/nix/store/new", "/nix/store/new.drv", "/nix/store/kit", "/nix/store/kit.drv")
     with tempfile.TemporaryDirectory() as d:
         memo.memo_write(Path(d) / "e", top)
         assert memo.memo_read(Path(d) / "e") == top
@@ -793,7 +812,7 @@ def memo_cases() -> None:
         (Path(d) / "e").unlink()
         memo.memo_prune(Path(d))
         assert log.exists() and memo.tree_proven(log, "lint", "c" * 40)
-    assert memo.memo_entry({"out": "o", "drv": "d", "protected": {}}) == memo.Top("o", "d", "", "", False)
+    assert memo.memo_entry({"out": "o", "drv": "d", "protected": {}}) == memo.Top("o", "d", "", "")
     assert memo.memo_entry({"out": "o"}) is None
     assert targets.unit_changes("would restart the following units: nftables.service, nginx.service\n"
                                 "would reload the following units: postgresql.service\n"
@@ -870,10 +889,10 @@ def provenance_cases() -> None:
     assert report(provenance_line(NEW), running="/nix/store/union-system")[0] == "side1: up to date"
 
     text = provenance_line(NEW)
-    p = targets.parse_probe(f"{NEW}\n{KIT}\n{text}")
-    assert p.running == NEW and p.provenance == text and p.kit == KIT, p
+    p = targets.parse_probe(f"{NEW}\n{text}")
+    assert p.running == NEW and p.provenance == text, p
     assert p.digest == hashlib.sha256(text.encode()).hexdigest(), p
-    p = targets.parse_probe(f"{OLD}\n\n")
+    p = targets.parse_probe(f"{OLD}\n")
     assert p == targets.Probe(OLD, "", hashlib.sha256(b"").hexdigest()), p
     assert targets.kit_link(NEW) == "/var/lib/nixconvoy/kits/new-system"
     # An unread target carries what ssh said, told under the refusal.
@@ -1009,12 +1028,12 @@ def guard_cases(d: Path) -> None:
 
 def toml(extra: str = "", precheck: str = "", builders: str = '["{local_hostname}"]', **over: str) -> str:
     """A nixconvoy.toml with every required key (the defaults the scratch
-    repos use, `over` overriding; `builders` a TOML value) and `precheck`,
-    `extra` appended."""
+    repos use, `over` overriding; `builders` a TOML value), `extra`
+    appended, then `precheck` as the one flake check."""
     keys = {"flake_dir": ".", "targets_dir": "hosts", "targets_arch": "x86_64-linux", "ssh_address_template": "{target}",
             "remote": "origin", "main_branch": "main", "branch_prefix": "work/{local_hostname}/", "child_worktrees": ".claude/worktrees", **over}
     return ("config_version = 1\n" + "".join(f'{k} = "{v}"\n' for k, v in keys.items())
-            + f"builders = {builders}\n" + (f'precheck = "{precheck}"\n' if precheck else "") + extra)
+            + f"builders = {builders}\n" + extra + (f'[checks.pre_switch]\nflake = ["{precheck}"]\n' if precheck else ""))
 
 
 def sh(cwd: Path, *args: str) -> str:
@@ -3988,11 +4007,11 @@ def init_cases(d: Path) -> None:
         assert (c.flake_dir, c.targets_dir, c.targets_arch) == ("nixos", "", "aarch64-linux"), c
         assert c.inventory == ["a", "b"] and c.target_root("a") is None
         assert c.ssh_template == me + "@{target}" and c.branch_prefix == "nixconvoy/", c
-        assert c.child_worktrees == ".claude/worktrees" and c.builders == ("{local_hostname}",) and not c.precheck
+        assert c.child_worktrees == ".claude/worktrees" and c.builders == ("{local_hostname}",) and not c.flakes
         assert (c.remote, c.main_branch) == ("origin", "main"), c  # no remote: assumed
         assert set(c.targets) == {"a", "b"} and not c.target("a").dir
         text = (repo / "nixconvoy.toml").read_text()
-        assert "[targets.a]\n" in text and "[targets.b]\n" in text and "# precheck = " in text, text
+        assert "[targets.a]\n" in text and "[targets.b]\n" in text and "# flake = " in text, text
         assert "?? nixconvoy.toml" in sh(repo, "status", "--porcelain")  # written, not staged
         assert "already there" in dies(lambda: run_cli(["init"]))
         assert (repo / ".git/nixconvoy/branch-prefix").read_text() == "nixconvoy/\n"  # init notes the prefix (the repo's, not the suite's)

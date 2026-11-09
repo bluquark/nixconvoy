@@ -181,43 +181,6 @@ macro_rules! text {
     (switch_check_cannot_run) => { "cannot run {checks}: {e}" };
     (switch_bad_config) => { "{P}: {e}" };
 
-    // --- switch-guard-target: boot.rs
-    (boot_target_missing) => { "boot-assessment: {target} does not exist" };
-    (boot_bad_record) => { "boot-assessment: {e}; not sparing a pending rollback's system - remove that file once no confirmed switch is in flight" };
-    (boot_esp_full_notice) => { "{host}'s ESP lacks {mib} MiB for the generations its failover needs (target, booted, running, previous): every switch fails to install its boot entry until space is made on {esp}.\n" };
-    (boot_esp_full) => { "boot-assessment: the ESP lacks {bytes} bytes even for the generations the failover needs" };
-    (boot_prune_no_profile) => { "boot-assessment: {profile} does not exist, not pruning" };
-    (boot_prune_no_esp) => { "boot-assessment: cannot read {dir}, not pruning: {e}" };
-    (boot_pruning) => { "boot-assessment: pruning generations {drop} (keeping {kept}: the bootable set, the stubbed, anchors {anchors}, and the newest {newest})" };
-    (boot_would_prune) => { "boot-assessment: would prune generations {drop} (keeping {kept}: the bootable set, the stubbed, anchors {anchors}, and the newest {newest})" };
-    (boot_none) => { "none" };
-    (boot_unknown) => { "?" };
-    (boot_log_failed) => { "boot-assessment: {path}: {e}" };
-    (boot_failover_notice) => { "{host} booted generation {bgen} at {date}, not the newest ({ngen}).\nRejected entries on the ESP: {rejected}\nnixconvoy refuses to switch back onto a rejected generation: change the configuration (a new generation gets its own tries), or re-arm the stub to retry it as is (sudo mv of the +0-N stub to +{tries}, then deploy).\nThe boot-assessment notice, if set, says why the newest one failed.\nLog: journalctl -u boot-assessment-watch -u boot-assessment\n" };
-    (boot_checks_exited) => { "the boot-assessment checks exited {code}" };
-    (boot_checks_cannot_run) => { "cannot run the checks: {e}" };
-    (boot_switch_checks_failed) => { "switch checks failed" };
-    (boot_switch_checks_cannot_run) => { "cannot run the switch checks: {e}" };
-    (boot_gate_passed) => { "reachable: sshd, tailscaled, the boot-assessment checks pass" };
-    (boot_gate_deadline) => { "not reachable by the {deadline}s deadline: {status}" };
-    (boot_gate_settled) => { "not reachable with nothing left starting, {t}s into stage 2: {status}" };
-    (boot_already_blessed) => { "{entry} already blessed this boot" };
-    (boot_no_watchdog) => { "hardware watchdog not armed" };
-    (boot_assessing) => { "assessing {entry}: watchdog {watchdog}s, panic reboot, deadline {deadline}s" };
-    (boot_blessed) => { "passed: {entry} is blessed" };
-    (boot_bless_failed_notice) => { "{host}'s boot of {entry} passed its assessment at {date} but systemd-bless-boot failed, hangs or never ran: the stub keeps its tries counter, and each reboot spends one until the ESP takes the rename.\nLog: journalctl -u systemd-bless-boot\n" };
-    (boot_not_blessed) => { "reachable, but not blessed: systemd-bless-boot failed or never ran" };
-    (boot_gate_never_ran) => { "the gate never ran" };
-    (boot_failed_notice) => { "{host}'s boot of {entry} failed its assessment at {date}: {status}\nRebooting: systemd-boot retries the entry until its tries are spent, then boots the generation deployed before it (if it was never booted), then the last blessed one.\nLog: journalctl -u boot-assessment-watch -u boot-assessment\n" };
-    (boot_usage) => { "usage: nixconvoy-boot-assessment --config <file> install <toplevel> | prune [--dry-run] | report | gate | watch" };
-    (boot_bad_config) => { "boot-assessment: {e}" };
-
-    // --- boot/plan.rs
-    (boot_dropping) => { "boot-assessment: dropping never-proven generation {g} ({stub})" };
-    (boot_drop_failed) => { "boot-assessment: could not drop generation {g}, leaving it" };
-    (boot_not_fit) => { "boot-assessment: generation {g} would not fit the ESP, leaving it out" };
-    (boot_installing) => { "boot-assessment: installing generations {chosen} (anchors: {anchors})" };
-
     // --- switch-guard-target: config.rs
     (config_no_equals) => { "config line {n}: no '='" };
     (config_cannot_read) => { "cannot read {path}: {e}" };

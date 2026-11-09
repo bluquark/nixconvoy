@@ -1,6 +1,5 @@
 //! The armed switch's state: one file, replaced by rename under the helper's
-//! lock, read by the helper and by boot-assessment's planner (which spares
-//! `previous`).
+//! lock.
 use crate::text;
 use std::fmt;
 use std::io::Write;

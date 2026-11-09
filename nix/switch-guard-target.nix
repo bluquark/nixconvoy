@@ -1,6 +1,6 @@
-# The crate behind nixconvoy-confirmed-switch (the helper) and
-# nixconvoy-boot-assessment (switch-guard-target/: the drivers, on
-# switch-guard/'s cores by path).  Linux alone.
+# The crate behind nixconvoy-confirmed-switch (the helper:
+# switch-guard-target/, the driver on switch-guard/'s core by path).
+# Linux alone.
 { pkgs }:
 let
   fs = pkgs.lib.fileset;

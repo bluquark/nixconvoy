@@ -162,9 +162,16 @@ def parse_checks(statements: tuple[str, ...]) -> str | None:
     return None
 
 
-def run_checks(statements: tuple[str, ...], timeout: float) -> tuple[int, str | None]:
+def check_env(target: str, toplevel: str, previous: str) -> dict[str, str]:
+    """What every shell check of a switch sees (config.Check)."""
+    return {"NIXCONVOY_TARGET": target, "NIXCONVOY_TOPLEVEL": toplevel, "NIXCONVOY_PREVIOUS": previous}
+
+
+def run_checks(statements: tuple[str, ...], timeout: float | None, env: dict[str, str] | None = None,
+               cwd: str | None = None) -> tuple[int, str | None]:
     """`statements` at once on this machine, each in its own
-    controller_shell (shell_script), within `timeout` seconds: the exit
+    controller_shell (shell_script) with `env` added and `cwd` its directory,
+    within `timeout` seconds (None: unbounded): the exit
     code (0, 1, or -1 when one timed out and none failed outright) and
     the report, one entry per
     failing statement - its last stderr line, or that it exited so or
@@ -176,7 +183,7 @@ def run_checks(statements: tuple[str, ...], timeout: float) -> tuple[int, str | 
     def one(statement: str) -> tuple[str, proc.Completed]:
         proc.set_finishing(finishing)
         return statement, run([controller_shell(), "-c", shell_script(statement)], check=False, timeout=timeout,
-                              session=True, input="")
+                              session=True, input="", env=env, cwd=cwd)
 
     with ThreadPoolExecutor(max(len(statements), 1)) as pool:
         done = list(pool.map(one, statements))
@@ -325,7 +332,8 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
             case Controller(timeout_ms):
                 # OSError: no such shell (controller_shell).
                 try:
-                    return Checked(*run_checks(controller_checks, secs(timeout_ms)))
+                    return Checked(*run_checks(controller_checks, secs(timeout_ms),
+                                               check_env(target, toplevel, expected)))
                 except (Fail, OSError) as e:
                     return Checked(1, strings.SWITCH_CHECK_INTERRUPTED(error=e))
             case Sleep(ms):
