@@ -98,6 +98,7 @@ Then, `cd` into your NixOS checkout and run **`nixconvoy init`**.  Review the `n
 <details>
 <summary><b>Bash PS1 helper (optional)</b></summary>
 <br>
+	
 Nixconvoy includes `nixconvoy/prompt.bash` defining `__nixconvoy_ps1`, a helper to display nixconvoy worktree status on your prompt.  Depending on install method, it is usually in `/run/current-system/sw/share/nixconvoy/prompt.bash` or `~/.nix-profile/share/nixconvoy/prompt.bash`.  In your `.bashrc`, write e.g.:
 
 ```bash
@@ -110,6 +111,7 @@ PS1='\h:$(__nixconvoy_ps1)\w\$ '  # simple example; adapt your existing PS1 inst
 <details>
 <summary><b>Claude code plugin (optional)</b></summary>
 <br>
+	
 For the plugin to function, both `nixconvoy` and `jq` must be on the `PATH`.  Then:
 
 ```bash
@@ -375,12 +377,13 @@ After you've staged a git change, `nixconvoy deploy` both commits it to the work
 <details>
 <summary><b>Submodules</b></summary>
 <br>
+	
 Nixconvoy has support for git submodules.  If you don't write your own software or substantially modify the software packages you use on your NixOS fleet, you can safely ignore this feature.
-<br><br>
+
 Submodules are one of git's mechanisms for loading a dependency (whose source of truth is an external git repo) into one of your checkout's subdirectories.  This is particularly useful for developers who maintain a public repository and also run it as part of their private NixOS fleet (in my own environment, I use nixconvoy's submodule support to work on nixconvoy itself).  It can also be used for your private fork of a dependency --- although for that, git subtrees are a simpler alternative that also works.
-<br><br>
+
 In your main NixOS config repo, create a gitlink for it using `git submodule add --name <input> <url> <path>`.  Then, target the flake in your nix config to use that submodule directory instead of the usual public repository, using a relative path input (`path:./<path>`) with `inputs.self.submodules = true`.  After a submodule is registered with nixconvoy, do not use raw `git` commands to modify it.
-<br><br>
+
 Then, when you're ready to make a change to it, open a nixconvoy worktree using `nixconvoy open`, then populate the subdirectory using `nixconvoy open --submodule`.  All the other features of nixconvoy compose nicely with submodules.  You can stage a change inside one and run `nixconvoy deploy` from the worktree root as usual.
 </details>
 
@@ -434,7 +437,7 @@ tags = ["lan"]
 [targets.router]
 [targets.router.checks.pre_switch]
 # pre_switch target_shell checks run as root on the target, after eval and before the build.
-# C) Is /boot nearly full?
+# C) /boot has enough free space available.
 target_shell = ['[ "$(df --output=pcent /boot | tail -n 1 | tr -dc 0-9)" -lt 90 ]']
 [targets.router.checks.post_switch]
 # D) Routing still works (verified by the nixconvoy control machine trying to reach the internet)
@@ -505,7 +508,7 @@ This section explains some of the key design decisions and implementation detail
 1. **Survey the environment**.  Fetch origin/main from GitHub (or whatever you're using as your remote) and ask every target machine what it's running.  If any target is unreachable, the deploy is aborted (if so, you can retry, with a more restricted list of targets).  If another `nixconvoy deploy` is actively running against the same target machines, wait until it exits before moving onto the next step.
 2. **Compute the change to apply**. In a hidden worktree internally managed by nixconvoy, take your latest staged changes, rebase them onto `origin/main`, and merge in all deployed-but-not-yet-landed changes from other work branches (if any) using mergiraf.  If mergiraf fails (usually because another deploy changed the exact same line), the deploy is aborted.  (If so, you can land the competing branch and then rebase on top of it.)
 3. In parallel:
-	1. Run two **pre-switch checks**: a flake check (often a bunch of lint or static analysis tools), and `controller_shell` statements.  If one of these returns an error, the deploy is aborted.
+	1. Run the **pre-switch checks** that only need the source tree: flake checks (often a bunch of lint or static analysis tools), and `controller_shell` statements.  If one of these returns an error, the deploy is aborted.
 	2. **Evaluate** targets.  Kick off Nix evals, one for each target machine.  Optimizations:
 		1. Evals run concurrently with each other.
 		2. Only targets that could possibly be affected by a file you changed are re-evaluated -- others reuse the memoized result from the last evaluation.  (To take advantage of this optimization, make sure to keep per-host modules in files other hosts don't import.)
@@ -517,7 +520,7 @@ This section explains some of the key design decisions and implementation detail
 	2. If, within a deadline of the activation's end (10 seconds by default), the new system isn't found running over a fresh ssh connection with every configured check passing, the target machine automatically rolls itself back.  This is done using an executable running on the target, so it works even if the network was taken down.
 8. **Record** into git, phase 2.  Only after every switch succeeded, commit the incremental change onto your work branch and push it to your git remote.
 
-Also, there are two special cases: a change touching only documentation skips everything except pre-switch checks and is simply committed immediately.  And if `--dry-activate` was specified, the process stops after step 5 and simply reports what would have gotten switched.
+Also, there are two special cases: a change touching only documentation skips everything except eval-parallel pre-switch checks and is simply committed immediately.  And if `--dry-activate` was specified, the process skips steps 6 and 8, and in step 7 it copies the closures but only dry-activates them, reporting what would have gotten switched.
 
 </details>
 
