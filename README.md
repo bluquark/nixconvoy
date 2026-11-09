@@ -315,8 +315,8 @@ At a high level, here are the "transactional" properties they are designed to pr
 |---|---|---|
 | **Nothing you deploy is ever silently undone.**  The input to the NixOS generation applied to your fleet is not only your current checkout, but the union of everything the open work branches have deployed to that machine. |  Harder to keep track of what config ended up running on a given machine.<br><br>`deploy` can abort on a merge conflict between two work branches. | The union result is visible on `nixconvoy-history/<target>`.<br><br>nixconvoy uses a syntax-aware merge tool called `mergiraf`, so even two edits of the same line don't necessarily cause a merge conflict. |
 | **Two deploys running at the same time in different worktrees will serialize correctly.** | Trivial (lockfiles). | |
-| **Every deploy runs prechecks (lint/static analysis).** | Additional work on every deploy. | nixconvoy runs precheck in parallel with Nix's eval phase, when there is often CPU to spare. |
-| **Every deploy runs auto-rollback checks (connectivity checks).** | Trivial (small script runs after activation). | |
+| **Every deploy runs pre-switch checks (e.g. lint/static analysis) and aborts on failure.** | Additional work on every deploy. | nixconvoy runs flake checks in parallel with Nix's eval phase, when there is often CPU to spare. |
+| **Every deploy runs post-switch checks (e.g. connectivity checks) and rolls back NixOS on failure.** | Trivial (small script runs after activation). | |
 | **No arguments means "deploy to all targets".** | The deploy fails if any machine is turned off or otherwise inaccessible.<br><br>Extra Nix eval runs for targets that turn out to be unchanged. | You can choose to provide an explicit `<target>`/`@<tag>` parameter, which restricts the set of targets considered.<br><br>A nixconvoy optimization called the "eval memo" (additive to Nix's built-in eval cache), and support for Determinate Nix's "parallel eval". |
 
 ### `nixconvoy deploy`
@@ -329,7 +329,7 @@ After you've staged a git change, `nixconvoy deploy` both commits it to the work
 | `@<tag>` | Similar to `<target>` --- restrict the deploy to only machines with this tag. |
 | `-m <msg>` | The commit message on the work branch for this deploy increment.  (Note that these commit messages get hidden in nixconvoy's internal branches after `nixconvoy land` so it's optional.) |
 | `--evict` | Deploy exactly what's on this branch, skipping over nixconvoy's usual union-of-work-branches step and forcing the target to match it even if that would violate nixconvoy's normal guarantees.<br><br>Called "evict" because it evicts all other work branches' ongoing work from the target.  This is a recovery command in case something went wrong and nixconvoy's union mechanism or safety systems are wedged.  |
-| `--dry-activate` | Run prechecks, evaluation, and build, but don't actually switch the machines to the new NixOS generation. |
+| `--dry-activate` | Run pre-switch checks, evaluation, build, and copy, but don't actually switch the machines to the new NixOS generation. |
 
 ### `nixconvoy undeploy`
 
@@ -342,7 +342,7 @@ After you've staged a git change, `nixconvoy deploy` both commits it to the work
 | `<child-worktree>` | the name of a specific child worktree to undeploy. |
 | `--with-children` | undeploy this worktree and all of its child worktrees. |
 | `--back-to <rev>` | the revision to undeploy back to.  `--back-to HEAD^1` has the same effect as no flags.  `--back-to origin/main` undeploys all unlanded changes in this work branch, effectively turning it back into a freshly opened work branch. |
-| `--dry-activate` | Run prechecks, evaluation, and build, but don't actually switch the machines to the new NixOS generation. |
+| `--dry-activate` | Run pre-switch checks, evaluation, build, and copy, but don't actually switch the machines to the new NixOS generation. |
 
 > [!NOTE]
 > `undeploy` does not switch back to a previous NixOS generation, it pushes a fresh generation (because it does a "merged union of all work branches" just as `deploy` does).
@@ -369,6 +369,20 @@ After you've staged a git change, `nixconvoy deploy` both commits it to the work
 | `--with-children` | land this worktree and all of its child worktrees together, as one commit. |
 | `-m <msg>` | A one-liner commit message.  Will prevent the EDITOR from showing up.  Note that the EDITOR also won't come up if a `COMMIT_MSG.md` is present and the terminal is not interactive (this behavior is intended to allow agents to write up their own commit message while you approve by typing `!land`.) |
 | `--not-yet-deployed` | Override a default safety feature of nixconvoy designed to avoid unpleasant surprises --- namely, that `nixconvoy land` will refuse if not all affected targets are deployed to yet.  If you want to land anyway (e.g. because that machine is powered off at the moment and it is safe to implicitly deploy that change later), then specify this flag. |
+
+## Advanced features
+
+<details>
+<summary><b>Submodules</b></summary>
+<br>
+Nixconvoy has support for git submodules.  If you don't write your own software or substantially modify the software packages you use on your NixOS fleet, you can safely ignore this feature.
+<br><br>
+Submodules are one of git's mechanisms for loading a dependency (whose source of truth is an external git repo) into one of your checkout's subdirectories.  This is particularly useful for developers who maintain a public repository and also run it as part of their private NixOS fleet (in my own environment, I use nixconvoy's submodule support to work on nixconvoy itself).  It can also be used for your private fork of a dependency --- although for that, git subtrees are a simpler alternative that also works.
+<br><br>
+In your main NixOS config repo, create a gitlink for it using `git submodule add --name <input> <url> <path>`.  Then, target the flake in your nix config to use that submodule directory instead of the usual public repository, using a relative path input (`path:./<path>`) with `inputs.self.submodules = true`.  After a submodule is registered with nixconvoy, do not use raw `git` commands to modify it.
+<br><br>
+Then, when you're ready to make a change to it, open a nixconvoy worktree using `nixconvoy open`, then populate the subdirectory using `nixconvoy open --submodule`.  All the other features of nixconvoy compose nicely with submodules.  You can stage a change inside one and run `nixconvoy deploy` from the worktree root as usual.
+</details>
 
 # Configuration
 
@@ -398,8 +412,9 @@ child_worktrees = ".claude/worktrees"
 # The {local_hostname} is considered unavailable if it's the wrong CPU architecture (e.g. my Macbook).
 builders = ["{local_hostname}", "minipc"]
 
-# Precheck step that runs in parallel with eval.  Names a flake check (checks.<targets_arch>.<name>).
+# Checks every deploy must pass before switching anything.
 [checks.pre_switch]
+# Names a flake check (checks.<targets_arch>.<name>), which runs in parallel with eval.
 flake = ["repo-lint"]
 
 # Configure automatic rollback after activating the new NixOS generation, if:
@@ -414,14 +429,16 @@ internet = true
 # This tag can be used in `nixconvoy deploy` using the @ notation
 tags = ["lan"]
 
+# This is a NixOS-based router/gateway providing NAT and DNS to my LAN.  Since it's a critical service,
+# it has a number of additional checks.
 [targets.router]
 [targets.router.checks.pre_switch]
+# pre_switch target_shell checks run as root on the target, after eval and before the build.
+# C) Is /boot nearly full?
 target_shell = ['[ "$(df --output=pcent /boot | tail -n 1 | tr -dc 0-9)" -lt 90 ]']
 [targets.router.checks.post_switch]
-# This is a NixOS-based router/gateway providing NAT and DNS to my LAN.
-# Configure additional auto-rollback checks for it:
-# C) Routing still works (verified by the nixconvoy control machine trying to reach the internet)
-# D) DNS still works (verified by script running on target)
+# D) Routing still works (verified by the nixconvoy control machine trying to reach the internet)
+# E) DNS still works (verified by script running on target)
 controller_shell = ['[ "$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" https://www.google.com/generate_204)" = 204 ]']
 target_shell = [
   'systemctl is-active --quiet dnsmasq || { echo "dnsmasq is not active" >&2; exit 1; }',
@@ -485,22 +502,22 @@ This section explains some of the key design decisions and implementation detail
 <details>
 <summary><b>Detailed stages of <code>nixconvoy deploy</code></b></summary>
 
-
 1. **Survey the environment**.  Fetch origin/main from GitHub (or whatever you're using as your remote) and ask every target machine what it's running.  If any target is unreachable, the deploy is aborted (if so, you can retry, with a more restricted list of targets).  If another `nixconvoy deploy` is actively running against the same target machines, wait until it exits before moving onto the next step.
 2. **Compute the change to apply**. In a hidden worktree internally managed by nixconvoy, take your latest staged changes, rebase them onto `origin/main`, and merge in all deployed-but-not-yet-landed changes from other work branches (if any) using mergiraf.  If mergiraf fails (usually because another deploy changed the exact same line), the deploy is aborted.  (If so, you can land the competing branch and then rebase on top of it.)
 3. In parallel:
-	1. Run an optional **precheck**, usually a flake check running a bunch of lint or static analysis tools.  If one of these returns an error, the deploy is aborted.
+	1. Run two **pre-switch checks**: a flake check (often a bunch of lint or static analysis tools), and `controller_shell` statements.  If one of these returns an error, the deploy is aborted.
 	2. **Evaluate** targets.  Kick off Nix evals, one for each target machine.  Optimizations:
 		1. Evals run concurrently with each other.
 		2. Only targets that could possibly be affected by a file you changed are re-evaluated -- others reuse the memoized result from the last evaluation.  (To take advantage of this optimization, make sure to keep per-host modules in files other hosts don't import.)
-4. **Build** the new closures (including any unit tests you've included as part of your build), on your remote builder if you have one.  This only happens for the targets whose running system's eval result actually turn out to differ.  If anything fails to build (or test, if you include them as part of your build phase), the deploy is aborted.
-5. **Record** into git, phase 1.  Each target’s record commit is attached to the deploy’s announcement on the remote.
-6. **Switch**. Copy the closures to the targets and switch their NixOS generation to the new one.  Safety features:
+4. Run the **`target_shell` pre-switch checks**, as root over ssh, on each target that is about to be switched.  They see the not-yet-built system's store path as `$NIXCONVOY_TOPLEVEL`.  If one fails, the deploy is aborted.
+5. **Build** the new closures (including any unit tests you've included as part of your build), on your remote builder if you have one.  This only happens for the targets whose running system's eval result actually turn out to differ.  If anything fails to build (or test, if you include them as part of your build phase), the deploy is aborted.
+6. **Record** into git, phase 1.  Each target’s record commit is attached to the deploy’s announcement on the remote.
+7. **Switch**. Copy the closures to the targets and switch their NixOS generation to the new one.  Safety features:
 	1. If another switch somehow switched some targets but then somehow died before the following "record" step, then abort.  This should be very rare (for example, it may happen due to a power outage or a bug in nixconvoy) --- if it does, you can recover the affected targets using the `--evict` flag.
 	2. If, within a deadline of the activation's end (10 seconds by default), the new system isn't found running over a fresh ssh connection with every configured check passing, the target machine automatically rolls itself back.  This is done using an executable running on the target, so it works even if the network was taken down.
-7. **Record** into git, phase 2.  Only after every switch succeeded, commit the incremental change onto your work branch and push it to your git remote.
+8. **Record** into git, phase 2.  Only after every switch succeeded, commit the incremental change onto your work branch and push it to your git remote.
 
-Also, there are two special cases: a change touching only documentation skips everything except the precheck and is simply committed immediately.  And if `--dry-activate` was specified, the process stops after step 4 and simply reports what would have gotten switched.
+Also, there are two special cases: a change touching only documentation skips everything except pre-switch checks and is simply committed immediately.  And if `--dry-activate` was specified, the process stops after step 5 and simply reports what would have gotten switched.
 
 </details>
 
@@ -561,7 +578,8 @@ Also, there are two special cases: a change touching only documentation skips ev
 <summary><b>Local state on the target NixOS machines</b></summary>
 
 - `/var/lib/nixconvoy/provenance.json`: a record of the mergiraf union, each branch tip, which machine and checkout deployed it, and when.  (Used for safety checks at the switch stage of `nixconvoy deploy`.  Unless something went wrong, this file is entirely duplicative of state tracked in git.)
-
+- `/var/lib/nixconvoy/kits/`: one symlink per NixOS generation nixconvoy switched to, each pointing at a store path containing the auto-rollback executable, its settings, and your `post_switch` `target_shell` checks.  The symlinks are Nix GC roots, so a garbage collection can't delete the rollback executable out from under a switch in progress.  (Not created if `post_switch = false`.)
+- `/run/confirmed-switch/`: an in-progress switch's record, including which generation to roll back to.
 </details>
 
 ## Codebase
@@ -569,32 +587,6 @@ Also, there are two special cases: a change touching only documentation skips ev
 Nixconvoy is written in a mix of Python and Rust.  Python is used for the script-like code, while Rust is used for core logic, particularly the `deploy` state machine (with its multiple error conditions and concurrency).  The Rust core is tested using stateright and property tests.
 
 The code was written via coding agent, mostly Fable.  This documentation was written artisanally in a text editor followed by LLM review.
-
-# Advanced features
-
-<details>
-<summary><b>Submodules</b></summary>
-<br>
-Nixconvoy has support for git submodules.  If you don't write your own software or substantially modify the software packages you use on your NixOS fleet, you can safely ignore this feature.
-
-Submodules are one of git's mechanisms for loading a dependency (whose source of truth is an external git repo) into one of your checkout's subdirectories.  This is particularly useful for developers who maintain a public repository and also run it as part of their private NixOS fleet (in my own environment, I use nixconvoy's submodule support to work on nixconvoy itself).  It can also be used for your private fork of a dependency --- although for that, git subtrees are a simpler alternative that also works.
-
-In your main NixOS config repo, create a gitlink for it using `git submodule add --name <input> <url> <path>`.  Then, target the flake in your nix config to use that submodule directory instead of the usual public repository, using a relative path input (`path:./<path>`) with `inputs.self.submodules = true`.  After a submodule is registered with nixconvoy, do not use raw `git` commands to modify it.
-
-Then, when you're ready to make a change to it, open a nixconvoy worktree using `nixconvoy open`, then populate the subdirectory using `nixconvoy open --submodule`.  All the other features of nixconvoy compose nicely with submodules.  You can stage a change inside one and run `nixconvoy deploy` from the worktree root as usual.
-
-</details>
-
-<details>
-<summary><b>Bootable generation assessment</b></summary>
-<br>
-Nixconvoy includes an optional module to have smarter behavior for which NixOS generations are selectable on the boot screen.  Compatible with lanzaboote only, and not enabled by default.
-
-Using nixconvoy as intended can rapidly create a rather large number of NixOS generations, so if your `/boot` partition is on the smaller side, lanzaboote's default "preserve latest N generations" might preserve a bunch of near-identical generations --- not a terribly useful backup plan if the change that broke boot was deployed, say, N+5 generations ago.  When `nix-gc` runs, the module performs its own custom generation pruning by age and by proven bootability (it requires `nix.gc.automatic`).
-
-The module also makes it so that a generation that fails to complete boot is rebooted automatically, falling back to the last proven one.
-
-</details>
 
 # Limitations
 
