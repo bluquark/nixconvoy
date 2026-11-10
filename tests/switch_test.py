@@ -844,7 +844,7 @@ def provenance_cases() -> None:
     assert line.startswith(f"side1: left alone: runs an increment of {BRANCH}") and \
         "does not reach it" in line and not died, (line, died)
     line, died = report(provenance_line(NEW), tips={BRANCH: LANDED})
-    assert line.startswith("side1: will switch (catch-up: ") and not died, (line, died)
+    assert (line, died) == ("", ""), (line, died)
     # An announced increment: refused while origin's pending ref of its
     # branch is uncleared - the refusal naming the deploy as dead when this
     # run found it so - and abandoned once it was cleared without the push.
@@ -879,7 +879,7 @@ def provenance_cases() -> None:
     assert line.endswith("taken over by --evict"), line
     line, _ = report(provenance_line(NEW, pending=None, others=("work/M3-Air/9",)))
     assert "side1: refused: runs work of work/M3-Air/9" in line, line
-    assert report(provenance_line(NEW, by=ME))[0].startswith("side1: will switch (this-branch: ")
+    assert report(provenance_line(NEW, by=ME)) == ("", "")
     assert report("") == ("side1: will switch", "")
     assert report("{not json") == ("side1: will switch", "")
     assert report(provenance_line(OLD)) == ("side1: will switch", "")
