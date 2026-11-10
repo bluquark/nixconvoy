@@ -40,6 +40,11 @@ def record_doc(sha: str) -> dict[str, object] | None:
     return doc if isinstance(doc, dict) else None
 
 
+def history_tip(target: str) -> str | None:
+    """`target`'s history branch as fetched."""
+    return rev(remote_ref(f"{DEPLOYED_PREFIX}/{target}"))
+
+
 def running_record(target: str, provenance: str, running: str | None) -> tuple[dict[str, object], str] | None:
     """The record `target` runs and its commit ("" for a provenance naming
     none): the one its provenance file names - or the newest attested
@@ -54,7 +59,7 @@ def running_record(target: str, provenance: str, running: str | None) -> tuple[d
     rec = doc.get("record")
     if not isinstance(rec, str) or rev(f"{rec}^{{commit}}") is None:
         return doc, ""
-    tip = rev(remote_ref(f"{DEPLOYED_PREFIX}/{target}"))
+    tip = history_tip(target)
     if tip is None or tip == rec:
         return doc, rec
     p = run(["git", "rev-list", "--first-parent", f"--max-count={ATTESTED_DEPTH + 1}", tip], check=False)
@@ -71,7 +76,7 @@ def running_record(target: str, provenance: str, running: str | None) -> tuple[d
 def history_doc(target: str) -> dict[str, object] | None:
     """The newest record of `target`'s history branch as fetched: what it
     runs as far as origin knows, with no probe of it."""
-    tip = rev(remote_ref(f"{DEPLOYED_PREFIX}/{target}"))
+    tip = history_tip(target)
     return record_doc(tip) if tip is not None else None
 
 

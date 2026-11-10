@@ -174,6 +174,58 @@ def previous_record(provenance: str) -> str:
     return rec if isinstance(rec, str) else ""
 
 
+def chains_on(target: str, ran: tuple[dict[str, object], str] | None) -> str:
+    """The record `target`'s next one chains on, "" for none: the one it
+    runs (`ran`: lanes.running_record), else the tip of its history.  A
+    provenance of another system than the one running says nothing of
+    what ran - a switch rolled back once its guard had let go leaves one,
+    as does a system staged for a reboot - and one naming no record here
+    gives nothing to chain on."""
+    return (ran[1] if ran is not None else "") or lanes.history_tip(target) or ""
+
+
+def unrecorded(target: str, ran: tuple[dict[str, object], str] | None, provenance: str, me: str) -> str:
+    """The record `target` runs (`ran`: lanes.running_record) by a deploy
+    from this checkout whose push never landed - its history branch lacks
+    it, as its tip or an ancestor of it (a later deploy there chained on
+    it) - else ""."""
+    r = previous_record(provenance)
+    if ran is None or not r or not by_me(provenance, me) or rev(f"{r}^{{commit}}") is None:
+        return ""
+    tip = lanes.history_tip(target)
+    return r if tip is None or not is_ancestor(r, tip) else ""
+
+
+def record_switched(switched: dict[str, bool], records: dict[str, str], tops: dict[str, Top]) -> None:
+    """Once a switch failed, the push of each record a target runs all
+    the same, so its history branch says so though the deploy dies: those
+    of `switched` (whether each target's switch succeeded) and the ones
+    `records` carries beside theirs (unrecorded).  A target whose switch
+    failed counts when it is found settled on the record's system, its
+    provenance naming the record (targets.switched_to): one whose
+    activation reported failures is confirmed all the same once it
+    verifies."""
+    def runs(h: str) -> bool:
+        proc.set_finishing(True)
+        if switched[h]:
+            return True
+        try:
+            text = targets.switched_to(h, tops[h].out)
+        except Fail:
+            return False
+        return text is not None and previous_record(text) == records[h]
+
+    with proc.finishing():
+        with ThreadPoolExecutor(max(1, len(switched))) as pool:
+            ran = [h for h, ok in zip(switched, pool.map(runs, switched), strict=True) if ok]
+        landed = {h: sha for h, sha in records.items() if h in ran or h not in switched}
+        if not landed:
+            return
+        if ran:
+            print(strings.DEPLOY_RECORDING_SWITCHED(targets=", ".join(ran), prefix=DEPLOYED_PREFIX), file=sys.stderr)
+        push_deployed(None, None, landed)
+
+
 def increment_reaches(snap: str, all_targets: list[str]) -> bool:
     """Whether the staged increment `snap` (staged_snapshot) changes
     something a target's evaluation reads - a path of the eval memo's read
@@ -723,8 +775,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                                      dump_json(body))
 
             for h in plan:
-                r = runs_now.get(h)
-                records[h] = record(h, (r[1] if r is not None else "") or previous_record(probed[h].provenance))
+                records[h] = record(h, chains_on(h, runs_now.get(h)))
                 provenances[h] = dump_json({**doc_of(h), "toplevel": tops[h].out, "record": records[h]})
             # A candidate this checkout's work reaches that evaluates to
             # the system it runs: nothing to switch, and without a record
@@ -733,19 +784,15 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
             for h in sorted(tops):
                 r = runs_now.get(h)
                 if (h in candidates and h in reached and h not in plan and running.get(h) == tops[h].out
-                        and r is not None and r[1] and rev(remote_ref(f"{DEPLOYED_PREFIX}/{h}")) == r[1]):
+                        and r is not None and r[1] and lanes.history_tip(h) == r[1]):
                     attested[h] = (record(h, r[1], attested=True), r[1])
             # A target an earlier run from this checkout switched without
             # its push landing (died, or its push failed) runs a record its
-            # history branch lacks (not as an ancestor of its tip either:
-            # a later deploy there chained on it): carried and pushed with
+            # history branch lacks (unrecorded): carried and pushed with
             # this run's, so the branch chains on it - whether or not this
             # run switches it.
             for h, pr in probed.items():
-                r = previous_record(pr.provenance)
-                tip = rev(remote_ref(f"{DEPLOYED_PREFIX}/{h}"))
-                if h not in records and r and by_me(pr.provenance, me) and rev(f"{r}^{{commit}}") \
-                        and (tip is None or not is_ancestor(r, tip)):
+                if h not in records and (r := unrecorded(h, runs_now.get(h), pr.provenance, me)):
                     records[h] = r
 
         if plan:
@@ -800,9 +847,10 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
 
     def switch_all(nixconvoy_switch: str) -> None:
         """The plan's switches, all at once.  A failed switch dies once the
-        others finish; one refused because the target moved meanwhile
-        (SwitchedMeanwhile) is raised once none failed, the moved targets'
-        claims taken back."""
+        others finish and the records of the targets that switched are
+        pushed (record_switched); one refused because the target moved
+        meanwhile (SwitchedMeanwhile) is raised once none failed, the moved
+        targets' claims taken back."""
         if not plan:
             return
         expected: dict[str, str] = {}
@@ -824,16 +872,25 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
                         for n in plan]
         moved: list[SwitchedMeanwhile] = []
         failed: Fail | None = None
-        for f in switches:
+        switched: dict[str, bool] = {}
+        for n, f in zip(plan, switches, strict=True):
             try:
                 f.result()
+                switched[n] = True
             except SwitchedMeanwhile as e:
                 moved.append(e)
             except Fail as e:
                 failed = failed or e
+                switched[n] = False
         if moved and ann is not None:
             ann.claimed = [h for h in ann.claimed if h not in {e.target for e in moved}]
         if failed is not None:
+            # Whatever the records' push meets, the switch's failure is the run's.
+            try:
+                record_switched(switched, {h: r for h, r in records.items() if h in switched or h not in plan}, tops)
+            except Exception as e:  # noqa: BLE001
+                print(strings.CHECKOUT_PUSH_DEPLOYED_FAILED(output=strings.CHECKOUT_PUSH_OUTPUT(output=proc.failure(e))),
+                      file=sys.stderr)
             raise failed
         if moved:
             raise moved[0]

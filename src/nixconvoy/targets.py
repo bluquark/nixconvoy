@@ -195,6 +195,18 @@ def probe(name: str) -> Probe:
     return parse_probe(p.stdout)
 
 
+def switched_to(name: str, toplevel: str) -> str | None:
+    """`name`'s provenance ("" when absent) once it is settled on
+    `toplevel`: running it, its profile naming it too (a switch still
+    armed keeps the old profile until its confirm), in one round trip.
+    None otherwise, or when it cannot be read."""
+    top = shlex.quote(toplevel)
+    script = (f'[ "$(readlink {CURRENT_SYSTEM})" = {top} ] && [ "$(readlink -f {SYSTEM_PROFILE})" = {top} ] && '
+              f"{{ cat {PROVENANCE_FILE} 2>/dev/null || true; }}")
+    p = run(target_cmd(name, ["sh", "-c", script]), check=False, timeout=PROBE_TIMEOUT)
+    return p.stdout if p.returncode == 0 else None
+
+
 def running_system(name: str, timeout: float = PROBE_TIMEOUT, fresh: bool = False) -> str | None:
     """The target's /run/current-system (`fresh`: over a new ssh connection),
     or None if it cannot be read."""

@@ -399,6 +399,7 @@ DEPLOY_REACHES_NO_TARGET = "the increment reaches no target"
 DEPLOY_NOTHING_STAGED = "nothing is staged; stage the change or drop -m"
 DEPLOY_ANNOUNCEMENT_KEPT_RECORDS = M("note: {targets} were switched (or a switch was started), so this deploy's announcement stays, carrying their deploy records: re-run to finish the deploy, or clear it (git push {remote} :{pending_refs}/{key})")
 DEPLOY_ANNOUNCEMENT_KEPT_INCREMENT = M("note: {targets} run this checkout's unpushed increment (or a switch onto it was started), so its announcement stays: re-run to finish the deploy, or clear it to have the increment reverted by the next deploy there (git push {remote} :{pending_refs}/{key})")
+DEPLOY_RECORDING_SWITCHED = M("note: {targets} switched, so the deploy records go to {prefix}/<target> all the same")
 DEPLOY_UNREACHABLE = M("unreachable: {targets}; {NOTHING_DONE}; fix connectivity (or restrict targets) and re-run{reasons}")
 DEPLOY_UNREACHABLE_REASON = M("\n  ssh {address}: {error}")
 DEPLOY_WAITING = M("waiting for {key}'s deploy under way: its increment and this checkout's both reach {targets}...")

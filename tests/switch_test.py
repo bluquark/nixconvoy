@@ -1023,6 +1023,32 @@ def guard_cases(d: Path) -> None:
     assert lock(g, provenance_line("/nix/store/d-system")) == "WROTE"
     until_eof(g)
     assert not provenance.exists()
+    # A guard let go while the target runs the unconfirmed system (the
+    # deploy was killed) keeps the claim, and the timer's rollback after it
+    # leaves it there: a provenance of another system than the one running,
+    # which names no record the target ran (deploy.chains_on).
+    g = guard(NEW, "/nix/store/d-system", probe().digest)
+    assert lock(g, provenance_line("/nix/store/d-system")) == "WROTE"
+    point(cur, "/nix/store/d-system")
+    until_eof(g)
+    point(cur, NEW)
+    left = probe()
+    assert left.running == NEW and '"toplevel": "/nix/store/d-system"' in left.provenance, left
+    assert lanes.running_record("a", left.provenance, left.running) is None
+
+    # What a failed switch's target is settled on (switched_to): the system
+    # it runs with its profile naming it too - its provenance then.
+    with mock.patch.object(targets, "target_cmd", lambda _name, argv, **_kw: argv):
+        assert targets.switched_to("a", NEW) == left.provenance
+        assert targets.switched_to("a", OLD) is None
+        provenance.unlink()
+        assert targets.switched_to("a", NEW) == ""
+        point(profile, OLD)  # armed: the confirm sets the profile
+        assert targets.switched_to("a", NEW) is None
+        point(profile, NEW)
+        point(cur, OLD)  # staged for a reboot
+        assert targets.switched_to("a", NEW) is None
+        point(cur, NEW)
 
     # The kit's rooting script: switched plainly, the system's own link goes
     # (`own`, which the store holds, so the prune alone would keep it); either
@@ -1425,6 +1451,45 @@ def lanes_cases(d: Path) -> None:
         assert lanes.running_record("a", provenance, NEW) == (json.loads(provenance), rec)
         history("a", record("", toplevel=NEW, attested=True, branches={other: tip}))
         assert lanes.running_record("a", provenance, NEW) == (json.loads(provenance), rec)
+
+        # The record a target's next one chains on: the one it runs, its
+        # provenance's when that names one not here - or, the provenance
+        # being another system's (a switch rolled back once its guard had
+        # let go), the tip of its history, not the record nothing ran.
+        def chained(text: str, running: str) -> str:
+            return deploy.chains_on("a", lanes.running_record("a", text, running))
+
+        unpushed_rec = record("", toplevel=NEW)
+        history("a", rec)
+        assert chained(provenance, NEW) == rec
+        assert chained(proc.dump_json({"toplevel": NEW, "record": unpushed_rec}), NEW) == unpushed_rec
+        # One naming no record, or none here, leaves the history's tip too.
+        gone = proc.dump_json({"toplevel": NEW, "record": "e" * 40})
+        assert chained(gone, NEW) == rec and chained(proc.dump_json({"toplevel": NEW}), NEW) == rec
+        rolled_back = record(rec, toplevel="/nix/store/rolled-back")
+        mine = {"machine": "tester", "checkout": str(Path.cwd())}
+        stale = proc.dump_json({"toplevel": "/nix/store/rolled-back", "record": rolled_back, "by": mine})
+        assert chained(stale, NEW) == rec and chained("", NEW) == rec and chained("{not json", NEW) == rec
+        assert deploy.chains_on("never-deployed", None) == ""
+        assert deploy.chains_on("never-deployed", ({"toplevel": NEW}, "")) == ""
+
+        # The record an earlier run here left unpushed: one the target
+        # runs, by this checkout, that its history lacks.
+        def unpushed(text: str, running: str, me: str = "tester") -> str:
+            return deploy.unrecorded("a", lanes.running_record("a", text, running), text, me)
+
+        ran_unpushed = record(rec, toplevel="/nix/store/next")
+        claim = proc.dump_json({"toplevel": "/nix/store/next", "record": ran_unpushed, "by": mine})
+        assert unpushed(claim, "/nix/store/next") == ran_unpushed
+        assert unpushed(claim, "/nix/store/next", me="other") == ""
+        assert unpushed(stale, NEW) == "", "rolled back: nothing ran the record"
+        assert unpushed(proc.dump_json({"toplevel": NEW, "record": "e" * 40, "by": mine}), NEW) == ""
+        history("a", ran_unpushed)
+        assert unpushed(claim, "/nix/store/next") == ""
+        history("a", record(ran_unpushed, toplevel="/nix/store/later"))
+        assert unpushed(claim, "/nix/store/next") == "", "a later deploy chained on it"
+        sh(co, "update-ref", "-d", f"refs/remotes/origin/{checkout.DEPLOYED_PREFIX}/a")
+        assert unpushed(claim, "/nix/store/next") == ran_unpushed
 
         # What a landing finds not deployed: by the history branches alone.
         for h in ("a", "b"):
@@ -2490,6 +2555,39 @@ def announce_cases(d: Path) -> None:
         assert checkout.pending_announcements() == [] and list(checkout.announcements()[1]) == [key]
         checkout.push_deployed(None, None, {})
         assert sh(seed, "ls-remote", "origin", f"{checkout.PENDING_REFS}/{key}") == ""
+
+        # A switch failed: the records of the targets that switched all
+        # the same go to their history branches at once - one whose switch
+        # succeeded, one whose failed switch left it settled on the
+        # record's system (its activation reported failures) and one the
+        # run carried - past the die() under way; a target rolled back, or
+        # settled under another record, keeps its history.
+        def history_of(h: str) -> str:
+            return sh(seed, "ls-remote", "origin", f"refs/heads/{checkout.DEPLOYED_PREFIX}/{h}").split()[0]
+
+        recs: dict[str, str] = {h: checkout.record_commit(h, snap, [main], f"failed run: {h}", "{}") for h in "abcde"}
+        tops: dict[str, memo.Top] = {h: memo.Top(f"/nix/store/{h}-system", "", "", "") for h in "abcd"}
+        found: dict[str, str | None] = {"b": proc.dump_json({"record": recs["b"]}), "c": None,
+                                        "d": proc.dump_json({"record": rec1})}
+        asked: list[tuple[str, str]] = []
+
+        def settled(name: str, top: str) -> str | None:
+            asked.append((name, top))
+            return found[name]
+
+        before = {h: history_of(h) for h in "ab"}
+        with mock.patch.object(targets, "switched_to", settled), mock.patch.object(proc, "EXITING", "a switch died"):
+            note = warned(lambda: deploy.record_switched({"a": True, "b": False, "c": False, "d": False}, recs, tops))
+        assert sorted(asked) == [(h, f"/nix/store/{h}-system") for h in "bcd"], asked
+        assert f"note: a, b switched, so the deploy records go to {checkout.DEPLOYED_PREFIX}/<target>" in note, note
+        assert {h: history_of(h) for h in "abe"} == {h: recs[h] for h in "abe"} and before["a"] != recs["a"]
+        assert sh(seed, "ls-remote", "origin", f"refs/heads/{checkout.DEPLOYED_PREFIX}/c",
+                  f"refs/heads/{checkout.DEPLOYED_PREFIX}/d") == ""
+        assert not proc.is_finishing()
+        # Nothing switched, nothing carried: no push.
+        with mock.patch.object(targets, "switched_to", lambda _name, _top: None), \
+                mock.patch.object(checkout, "git_remote", side_effect=AssertionError("pushed")):
+            assert warned(lambda: deploy.record_switched({"c": False}, {"c": recs["c"]}, tops)) == ""
     say("announcements: ok")
 
 
