@@ -100,7 +100,7 @@ class SwitchedMeanwhile(Exception):
     for the deploy to probe again and redo its plan."""
 
     def __init__(self, target: str, running: str) -> None:
-        super().__init__(strings.SWITCH_MOVED_MEANWHILE(target=target, running=running))
+        super().__init__(strings.SWITCH_MOVED_MEANWHILE(target=target))
         self.target = target
         self.running = running
 

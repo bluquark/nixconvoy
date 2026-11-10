@@ -440,7 +440,7 @@ DEPLOY_NO_DRIFT = M("nothing drifts from the union ({union}); nothing to switch"
 DEPLOY_UNPUSHED = M("{wb} is not pushed (the targets run it; its announcement stays for the re-run): {problem}")
 
 # --- switch.py
-SWITCH_MOVED_MEANWHILE = M("{target} was switched by another deploy while this one ran (now running {running})")
+SWITCH_MOVED_MEANWHILE = M("{target} was switched by another deploy while this one ran")
 SWITCH_NOTHING_READABLE = "nothing readable"
 # Appended by the target's shell to the system it found ({running} above); shell-quoted there.
 SWITCH_PROVENANCE_REWRITTEN = ", its provenance rewritten by another deploy"
@@ -824,7 +824,6 @@ CONFIG_SUBMODULES_IGNORED = M("note: {CONFIG_FILE}: [submodules] is ignored (eve
                               "drop the table")
 
 # --- memo.py: the eval memo
-MEMO_LOCK_WAIT = "waiting for another deploy's turn at the eval memo..."
 MEMO_MEMOIZED = M("  (memoized: {targets})")
 MEMO_NO_NIX_INSTANTIATE = "nix-instantiate is not on PATH: a memoized .drv cannot be rooted"
 MEMO_ROOT_TIMEOUT = M("rooting {drv} timed out after {timeout} s: is the daemon stuck?")
