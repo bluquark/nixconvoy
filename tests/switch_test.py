@@ -384,6 +384,8 @@ def switch_scenarios(d: Path) -> None:
     died, s = scenario("moved", running="/nix/store/other")
     assert died is not None and "was switched by another deploy" in died, died
     assert s["running"] == "/nix/store/other" and "provenance" not in s, s
+    assert "testhost was switched by another deploy" in str(switch.SwitchedMeanwhile("testhost", False))
+    assert "testhost's provenance was rewritten by another deploy" in str(switch.SwitchedMeanwhile("testhost", True))
 
     # A dead deploy's pending rollback, taken over by this arm.
     died, s = scenario("inherited target", check_ok=False, rollback_to="/nix/store/older")

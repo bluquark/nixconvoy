@@ -99,7 +99,7 @@ def short(union: str) -> str:
 
 
 def say_drift(lines: list[str], verdict: DriftOutcome, names: list[str]) -> None:
-    """The drift core's verdict `lines` (one per target: its name, a colon
+    """The drift core's verdict `lines` (each a target's name, a colon
     and what becomes of it) on a terminal, where the step kept them: those
     saying the same of several targets as one line, each colored by its
     targets' part in `verdict` - to be switched, left as it is (dim), or

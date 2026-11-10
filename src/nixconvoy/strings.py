@@ -441,8 +441,8 @@ DEPLOY_UNPUSHED = M("{wb} is not pushed (the targets run it; its announcement st
 
 # --- switch.py
 SWITCH_MOVED_MEANWHILE = M("{target} was switched by another deploy while this one ran")
-SWITCH_NOTHING_READABLE = "nothing readable"
-# Appended by the target's shell to the system it found ({running} above); shell-quoted there.
+SWITCH_REWRITTEN_MEANWHILE = M("{target}'s provenance was rewritten by another deploy while this one ran")
+# Appended by the target's shell to the system it found; shell-quoted there.
 SWITCH_PROVENANCE_REWRITTEN = ", its provenance rewritten by another deploy"
 SWITCH_UNCLAIMED = M("note: could not claim {target}'s provenance in {file}; until its next switch, other deploys treat its system as untracked")
 SWITCH_STALE_KIT_DROP_FAILED = M("warning: dropping {target}'s stale switch kit link failed (exit {code})")
