@@ -594,12 +594,12 @@ The code was written via coding agent, mostly Fable.  This documentation was wri
 
 # Limitations
 
-There are some features that other NixOS deployment tools support but nixconvoy doesn't, either because they haven't been a high priority for me or because they're fundamentally hard to square with nixconvoy's design goals:
+There are some capabilities that other NixOS deployment tools have but nixconvoy doesn't:
 
-* nixconvoy only supports flake-based NixOS configurations.
-* The build and target machines must all be Linux, all of the same CPU architecture.
-* nixconvoy does not support boot or test goals (i.e. all nixconvoy deploys switch the target to the new generation without delay).
-* Nixconvoy's ssh user must have passwordless sudo on the entire NixOS fleet.
+* Nixconvoy deploys whole, flake-based NixOS system configurations only (i.e. no nix-darwin, standalone home-manager, or per-user/per-service profiles).
+* Nixconvoy does not support boot or test goals (i.e. all nixconvoy deploys switch the target to the new generation without delay).
+* The build machine must be Linux, with the same CPU architecture as every target.
+* No support for ssh or sudo password prompts.
 * No offline deploys --- every deploy requires the Git origin to be reachable.
 
 If one of these is a hard blocker for you, consider an alternative NixOS deployment tool, such as [deploy-rs](https://github.com/serokell/deploy-rs), [colmena](https://github.com/nix-community/colmena) or [comin](https://github.com/nlewo/comin).
