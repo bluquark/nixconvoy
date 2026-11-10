@@ -7,7 +7,7 @@ name = "nixconvoy"
 # Once that run has passed, move the branch the README installs from:
 #   git push origin vX.Y.Z~0:refs/heads/release
 # A dry run before tagging: gh workflow run release.yml --ref main
-version = "0.2.1"
+version = "0.2.2"
 description = "Clobber-safe NixOS deploys for targets shared by several checkouts"
 requires-python = ">=3.12"
 license = "Apache-2.0"
