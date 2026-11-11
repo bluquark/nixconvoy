@@ -2,6 +2,8 @@
 
 <!-- Github About: A NixOS deployment tool designed for multitasking -->
 
+![Two worktrees each deploy a one-line change to the same server at the same time; both services end up running](assets/demo.gif)
+
 Nixconvoy is a NixOS deployment tool with a simple command-line interface.  Its distinguishing features are:
 
 * Nixconvoy maintains a detailed record of every change deployed to your NixOS fleet --- allowing you to reconstruct what happened and revert exactly to any previous state.  It does this largely behind the scenes using its own git branches, so your main git branch stays tidy.
