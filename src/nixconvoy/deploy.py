@@ -118,8 +118,10 @@ def say_drift(lines: list[str], verdict: DriftOutcome, names: list[str]) -> None
 
 
 def say_union(line: str) -> None:
-    """A line of the union core's, the branches it merges in cyan."""
-    print(term.paint(line, "cyan") if line.startswith(strings.UNION_MERGING_PREFIX) else line, flush=True)
+    """A line of the union core's, the branch it merges in cyan (a branch
+    name holds no colon, so the first one past the prefix ends it)."""
+    cut = line.find(":", len(strings.UNION_MERGING_PREFIX)) if line.startswith(strings.UNION_MERGING_PREFIX) else 0
+    print(term.paint(line[:cut], "cyan") + line[cut:] if cut > 0 else line, flush=True)
 
 
 def exit_on_signal(signum: int, _frame: object) -> None:

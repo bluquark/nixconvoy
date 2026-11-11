@@ -4285,7 +4285,8 @@ def term_cases() -> None:
         deploy.say_union("origin moved since the last fetch; redoing the union")
     assert tty.screen() == ["union: merging work/x/1: abc1234 increment 1",
                             "origin moved since the last fetch; redoing the union"], tty.screen()
-    assert tty.getvalue().count("\033[36m") == 1 and "\033[36munion: merging work/x/1" in tty.getvalue()
+    assert tty.getvalue().count("\033[36m") == 1, tty.getvalue()
+    assert "\033[36munion: merging work/x/1\033[0m: abc1234 increment 1" in tty.getvalue(), tty.getvalue()
 
 
 def unit_cases() -> None:
