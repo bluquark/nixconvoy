@@ -416,6 +416,7 @@ DEPLOY_EVALUATED_PRECHECK = "evaluated targets, ran the pre-switch checks"
 DEPLOY_PRE_SWITCH_FAILED = M("{target}'s pre-switch check failed: {report}; nothing was built, switched or committed")
 # The drift core's lines saying the same of several targets, as one on a terminal.
 DEPLOY_VERDICT_LINE = M("  {targets}: {verdict}")
+UNION_MERGING_PREFIX = "union: merging "  # how union_merging (switch-guard/src/strings.rs) starts
 # A deploy record's subject: the main branch, then each unioned branch.
 DEPLOY_SUBJECT_BRANCH = M(" + {branch}")
 DEPLOY_UNMERGED = M("not deployed to {targets}: another branch as deployed there does not merge with this "

@@ -4280,6 +4280,12 @@ def term_cases() -> None:
         deploy.say_drift(["  a: will switch", "something else"], verdict, ["a", "b", "c"])
     assert tty.screen() == ["  a: will switch", "  b, c: up to date", "  a: will switch", "something else"], tty.screen()
     assert "\033[36m  a: will switch" in tty.getvalue() and "\033[2m  b, c: up to date" in tty.getvalue()
+    with on_terminal() as tty:
+        deploy.say_union("union: merging work/x/1: abc1234 increment 1")
+        deploy.say_union("origin moved since the last fetch; redoing the union")
+    assert tty.screen() == ["union: merging work/x/1: abc1234 increment 1",
+                            "origin moved since the last fetch; redoing the union"], tty.screen()
+    assert tty.getvalue().count("\033[36m") == 1 and "\033[36munion: merging work/x/1" in tty.getvalue()
 
 
 def unit_cases() -> None:
