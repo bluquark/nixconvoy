@@ -299,7 +299,7 @@ fn names_the_abandoned_increments() {
     // reverted, so nothing is said.
     let (asked, fx, _) = run_with(p.clone(), "kept");
     assert_eq!(asked.len(), 1);
-    assert!(matches!(&fx[0], Effect::Print(l) if l.ends_with("at 13:46)")), "{fx:?}");
+    assert!(fx.is_empty(), "{fx:?}");
 
     // A pending increment of a branch origin has no tip of: in flight
     // while its first push is on its way, caught up once the branch is
@@ -352,7 +352,7 @@ fn names_the_abandoned_increments() {
     p.cx = cx(&[(BRANCH, &"h".repeat(40))]);
     let (asked, fx, _) = run_with(p, "abandoned");
     assert!(asked.is_empty());
-    assert!(matches!(&fx[0], Effect::Print(l) if l.ends_with("at 13:46)")), "{fx:?}");
+    assert!(fx.is_empty(), "{fx:?}");
 }
 
 #[test]
@@ -583,9 +583,19 @@ proptest! {
             let plan: Vec<&String> = affected.iter().filter(|h| o.drift.get(*h).is_some_and(|(k, _)| *k != Kind::LeftAlone)).collect();
             prop_assert_eq!(o.plan.iter().collect::<Vec<_>>(), plan);
         }
-        // One report line per candidate and per excluded drifting target.
+        // One report line per candidate and per excluded drifting target,
+        // none for a switch over contained work that reverts nothing.
         let printed = fx.iter().filter(|e| matches!(e, Effect::Print(_))).count();
-        prop_assert_eq!(printed, p.candidates.len() + affected.iter().filter(|h| !p.candidates.contains(h)).count());
+        let lines = p.candidates.len() + affected.iter().filter(|h| !p.candidates.contains(h)).count();
+        match &out {
+            Ok(o) => {
+                let routine = o.drift.values()
+                    .filter(|(k, why)| matches!(k, Kind::ThisBranch | Kind::CatchUp) && !why.contains("; reverting "))
+                    .count();
+                prop_assert_eq!(printed, lines - routine);
+            }
+            Err(_) => prop_assert!(printed <= lines),
+        }
         prop_assert!(!fx.iter().any(|e| matches!(e, Effect::Warn(_))));
     }
 }

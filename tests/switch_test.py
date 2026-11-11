@@ -384,6 +384,8 @@ def switch_scenarios(d: Path) -> None:
     died, s = scenario("moved", running="/nix/store/other")
     assert died is not None and "was switched by another deploy" in died, died
     assert s["running"] == "/nix/store/other" and "provenance" not in s, s
+    assert "testhost was switched by another deploy" in str(switch.SwitchedMeanwhile("testhost", False))
+    assert "testhost's provenance was rewritten by another deploy" in str(switch.SwitchedMeanwhile("testhost", True))
 
     # A dead deploy's pending rollback, taken over by this arm.
     died, s = scenario("inherited target", check_ok=False, rollback_to="/nix/store/older")
@@ -844,7 +846,7 @@ def provenance_cases() -> None:
     assert line.startswith(f"side1: left alone: runs an increment of {BRANCH}") and \
         "does not reach it" in line and not died, (line, died)
     line, died = report(provenance_line(NEW), tips={BRANCH: LANDED})
-    assert line.startswith("side1: will switch (catch-up: ") and not died, (line, died)
+    assert (line, died) == ("", ""), (line, died)
     # An announced increment: refused while origin's pending ref of its
     # branch is uncleared - the refusal naming the deploy as dead when this
     # run found it so - and abandoned once it was cleared without the push.
@@ -879,7 +881,7 @@ def provenance_cases() -> None:
     assert line.endswith("taken over by --evict"), line
     line, _ = report(provenance_line(NEW, pending=None, others=("work/M3-Air/9",)))
     assert "side1: refused: runs work of work/M3-Air/9" in line, line
-    assert report(provenance_line(NEW, by=ME))[0].startswith("side1: will switch (this-branch: ")
+    assert report(provenance_line(NEW, by=ME)) == ("", "")
     assert report("") == ("side1: will switch", "")
     assert report("{not json") == ("side1: will switch", "")
     assert report(provenance_line(OLD)) == ("side1: will switch", "")
@@ -4278,6 +4280,13 @@ def term_cases() -> None:
         deploy.say_drift(["  a: will switch", "something else"], verdict, ["a", "b", "c"])
     assert tty.screen() == ["  a: will switch", "  b, c: up to date", "  a: will switch", "something else"], tty.screen()
     assert "\033[36m  a: will switch" in tty.getvalue() and "\033[2m  b, c: up to date" in tty.getvalue()
+    with on_terminal() as tty:
+        deploy.say_union("union: merging work/x/1: abc1234 increment 1")
+        deploy.say_union("origin moved since the last fetch; redoing the union")
+    assert tty.screen() == ["union: merging work/x/1: abc1234 increment 1",
+                            "origin moved since the last fetch; redoing the union"], tty.screen()
+    assert tty.getvalue().count("\033[36m") == 1, tty.getvalue()
+    assert "\033[36munion: merging work/x/1\033[0m: abc1234 increment 1" in tty.getvalue(), tty.getvalue()
 
 
 def unit_cases() -> None:

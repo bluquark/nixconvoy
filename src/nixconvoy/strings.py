@@ -416,6 +416,7 @@ DEPLOY_EVALUATED_PRECHECK = "evaluated targets, ran the pre-switch checks"
 DEPLOY_PRE_SWITCH_FAILED = M("{target}'s pre-switch check failed: {report}; nothing was built, switched or committed")
 # The drift core's lines saying the same of several targets, as one on a terminal.
 DEPLOY_VERDICT_LINE = M("  {targets}: {verdict}")
+UNION_MERGING_PREFIX = "union: merging "  # how union_merging (switch-guard/src/strings.rs) starts
 # A deploy record's subject: the main branch, then each unioned branch.
 DEPLOY_SUBJECT_BRANCH = M(" + {branch}")
 DEPLOY_UNMERGED = M("not deployed to {targets}: another branch as deployed there does not merge with this "
@@ -440,9 +441,9 @@ DEPLOY_NO_DRIFT = M("nothing drifts from the union ({union}); nothing to switch"
 DEPLOY_UNPUSHED = M("{wb} is not pushed (the targets run it; its announcement stays for the re-run): {problem}")
 
 # --- switch.py
-SWITCH_MOVED_MEANWHILE = M("{target} was switched by another deploy while this one ran (now running {running})")
-SWITCH_NOTHING_READABLE = "nothing readable"
-# Appended by the target's shell to the system it found ({running} above); shell-quoted there.
+SWITCH_MOVED_MEANWHILE = M("{target} was switched by another deploy while this one ran")
+SWITCH_REWRITTEN_MEANWHILE = M("{target}'s provenance was rewritten by another deploy while this one ran")
+# Appended by the target's shell to the system it found; shell-quoted there.
 SWITCH_PROVENANCE_REWRITTEN = ", its provenance rewritten by another deploy"
 SWITCH_UNCLAIMED = M("note: could not claim {target}'s provenance in {file}; until its next switch, other deploys treat its system as untracked")
 SWITCH_STALE_KIT_DROP_FAILED = M("warning: dropping {target}'s stale switch kit link failed (exit {code})")
@@ -824,7 +825,6 @@ CONFIG_SUBMODULES_IGNORED = M("note: {CONFIG_FILE}: [submodules] is ignored (eve
                               "drop the table")
 
 # --- memo.py: the eval memo
-MEMO_LOCK_WAIT = "waiting for another deploy's turn at the eval memo..."
 MEMO_MEMOIZED = M("  (memoized: {targets})")
 MEMO_NO_NIX_INSTANTIATE = "nix-instantiate is not on PATH: a memoized .drv cannot be rooted"
 MEMO_ROOT_TIMEOUT = M("rooting {drv} timed out after {timeout} s: is the daemon stuck?")

@@ -155,11 +155,7 @@ def memo_lock(d: Path) -> Iterator[None]:
     link.  The lock file sits beside the memo dir, which holds entries,
     records, roots and the proof logs alone."""
     with MEMO_LOCK, d.with_name(f"{d.name}.lock").open("a") as f:
-        try:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print(strings.MEMO_LOCK_WAIT, flush=True)
-            fcntl.flock(f, fcntl.LOCK_EX)
+        fcntl.flock(f, fcntl.LOCK_EX)
         yield
 
 

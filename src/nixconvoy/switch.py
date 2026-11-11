@@ -95,14 +95,15 @@ NOTABLE = re.compile(r"the following (changed )?units:|warning|error|fail", re.I
 
 
 class SwitchedMeanwhile(Exception):
-    """The guard found `target` running `running`, not what was probed:
-    another deploy switched it since.  Raised before anything is activated,
-    for the deploy to probe again and redo its plan."""
+    """The guard found `target` no longer as probed: another deploy
+    switched it since, or (`rewritten`) rewrote its provenance over the
+    same system.  Raised before anything is activated, for the deploy to
+    probe again and redo its plan."""
 
-    def __init__(self, target: str, running: str) -> None:
-        super().__init__(strings.SWITCH_MOVED_MEANWHILE(target=target, running=running))
+    def __init__(self, target: str, rewritten: bool) -> None:
+        said = strings.SWITCH_REWRITTEN_MEANWHILE if rewritten else strings.SWITCH_MOVED_MEANWHILE
+        super().__init__(said(target=target))
         self.target = target
-        self.running = running
 
 
 def switch_guard_script(expected: str, toplevel: str, digest: str) -> str:
@@ -269,8 +270,7 @@ def switch(target: str, expected: str, toplevel: str, kit: str, nixconvoy_switch
                               file=sys.stderr)
                     return Guard(Locked())
                 if line.startswith("MOVED"):
-                    raise SwitchedMeanwhile(target, line.removeprefix("MOVED").strip()
-                                            or strings.SWITCH_NOTHING_READABLE)
+                    raise SwitchedMeanwhile(target, line.endswith(strings.SWITCH_PROVENANCE_REWRITTEN))
                 return Guard(Failed(line))
             case ProbeHelper():
                 # The kit (copied with the toplevel) rooted for it before

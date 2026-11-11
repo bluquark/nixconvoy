@@ -384,6 +384,7 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
     let mut plan = Vec::new();
     let mut refused = Vec::new();
     let mut fates = Fates::new();
+    let mut routine = BTreeSet::new();
     for h in affected.iter().filter(|h| p.candidates.contains(h)) {
         let union = p.unions.get(h).unwrap_or(&p.union);
         let prov = p.provenances.get(h).and_then(|text| parse(text));
@@ -423,13 +424,20 @@ pub fn program(s: &mut Script, p: &Params) -> Run<Outcome> {
         // increment; the other kinds revert or refuse in so many words.
         if let (Kind::ThisBranch | Kind::CatchUp, Some(prov)) = (kind, prov.as_ref()) {
             let notes = reverted(s, union, prov, p, &mut fates)?;
-            if !notes.is_empty() {
+            if notes.is_empty() {
+                routine.insert(h.clone());
+            } else {
                 why = format!(text!(drift_reverting), why = why, notes = notes.join(", "));
             }
         }
         drift.insert(h.clone(), (kind, why));
     }
     for h in by_name(&p.candidates) {
+        // A switch over work the union contains, reverting nothing, is the
+        // ordinary case: the switch itself is its report.
+        if routine.contains(&h) {
+            continue;
+        }
         s.print(match drift.get(&h) {
             Some((k, why)) if k.refused() => format!(text!(drift_line_refused), target = h, why = why),
             None => format!(text!(drift_line_up_to_date), target = h),

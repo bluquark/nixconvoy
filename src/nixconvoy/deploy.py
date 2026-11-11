@@ -99,7 +99,7 @@ def short(union: str) -> str:
 
 
 def say_drift(lines: list[str], verdict: DriftOutcome, names: list[str]) -> None:
-    """The drift core's verdict `lines` (one per target: its name, a colon
+    """The drift core's verdict `lines` (each a target's name, a colon
     and what becomes of it) on a terminal, where the step kept them: those
     saying the same of several targets as one line, each colored by its
     targets' part in `verdict` - to be switched, left as it is (dim), or
@@ -115,6 +115,13 @@ def say_drift(lines: list[str], verdict: DriftOutcome, names: list[str]) -> None
         style = ("cyan" if all(h in verdict.plan for h in hs) else
                  "dim" if not any(h in verdict.drift or h in verdict.affected for h in hs) else "yellow")
         print(term.paint(strings.DEPLOY_VERDICT_LINE(targets=", ".join(hs), verdict=what), style))
+
+
+def say_union(line: str) -> None:
+    """A line of the union core's, the branch it merges in cyan (a branch
+    name holds no colon, so the first one past the prefix ends it)."""
+    cut = line.find(":", len(strings.UNION_MERGING_PREFIX)) if line.startswith(strings.UNION_MERGING_PREFIX) else 0
+    print(term.paint(line[:cut], "cyan") + line[cut:] if cut > 0 else line, flush=True)
 
 
 def exit_on_signal(signum: int, _frame: object) -> None:
@@ -898,7 +905,7 @@ def run_deploy(filter_targets: list[str], candidates: list[str], all_targets: li
     for redo in range(SWITCH_REDOS + 1):
         queries = UnionQueries(lambda: snap or head, fetch, refresh, stage, await_pending, cuts, as_if)
         try:
-            done = decide(UnionParams(repo_names(), wb or "", evict, main0), queries)
+            done = decide(UnionParams(repo_names(), wb or "", evict, main0), queries, say_union)
             if skip or dry:
                 return False
             union = done.union
