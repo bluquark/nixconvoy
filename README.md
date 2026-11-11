@@ -226,9 +226,9 @@ $ nixconvoy close ../homelab-jellyfin
 
 Notice the ordering of the config changes and deploys.  `~/homelab-jellyfin/` doesn't have the changes in `firewall.nix`, and vice versa.  So if you tried this with ordinary git checkouts and ordinary `nixos-rebuild`, the first round of security-critical firewall changes would accidentally get removed from the server when Jellyfin was deployed --- then later, Jellyfin would get uninstalled when the second round of firewall changes was deployed!
 
-But this multitasking difficulty doesn't arise with nixconvoy --- assuming each edit being made to the .nix files is purely adding lines, then nixconvoy guarantees that each `deploy` will be purely additive as well.
+But this multitasking difficulty doesn't arise with nixconvoy --- assuming the edits in each checkout are independent from each other, then nixconvoy will automatically roll them up into one NixOS generation for you.
 
-Absence-means-removal is one of the best properties of NixOS, but for me, it sometimes got in the way of casual multitasking --- when I just want to deploy stuff from different checkouts without thinking too hard about sequencing and version control.  The initial desire motivating nixconvoy was, what if there existed a deploy tool where accidental removal "magically" doesn't happen?
+Absence-means-removal is one of the best properties of NixOS, but for me, it sometimes got in the way when I just wanted to deploy stuff from different checkouts without thinking too hard about sequencing.  The initial desire motivating nixconvoy was, what if there existed a deploy tool where accidental removal "magically" doesn't happen?  What if a deploy tool automatically merged everything deployed so far in a syntax-aware way, and only halted with a conflict message when two worktrees genuinely change the exact same piece of config?
 
 > [!NOTE]
 > So what's the trick?  Nixconvoy uses git worktrees and refs to keep track of everything you have been deploying.  Instead of deploying what's in your current checkout, it merges your latest staged changes with other checkouts' deployed-but-not-landed changes, then builds the NixOS generation from that.
