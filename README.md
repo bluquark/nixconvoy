@@ -2,13 +2,13 @@
 
 <!-- Github About: A NixOS deployment tool designed for multitasking -->
 
-![Two worktrees each deploy a one-line change to the same server at the same time; both services end up running](assets/demo.gif)
-
 Nixconvoy is a NixOS deployment tool with a simple command-line interface.  Its distinguishing features are:
 
 * Nixconvoy maintains a detailed record of every change deployed to your NixOS fleet --- allowing you to reconstruct what happened and revert exactly to any previous state.  It does this largely behind the scenes using its own git branches, so your main git branch stays tidy.
 * Nixconvoy is designed for iterative experimentation on live machines.  If your change breaks ssh connectivity (or any other health check of your choice), then nixconvoy automatically rolls back to the previous NixOS generation.
-* Nixconvoy is designed for multitasking.  It merges all of your work-in-progress changes together using [mergiraf](https://mergiraf.org/) before every deploy, so one half-finished change never undoes another.  And it's designed to serialize correctly when two or more nixconvoy instances are running at the same time.
+* Nixconvoy is designed for multitasking.  It merges all of your work-in-progress changes together using [mergiraf](https://mergiraf.org/) before every deploy, so one half-finished change never undoes another.  And it's designed to serialize correctly when two or more nixconvoy instances are running at the same time:
+
+![Two worktrees each deploy a one-line change to the same server at the same time; both services end up running](assets/demo.gif)
 
 Overall, nixconvoy is well-suited to NixOS fleets managed primarily by a single person, with a rapid pace of changes.  It especially shines for vibe-coded NixOS configurations: it effectively provides each agent its own lane, allowing them to iterate side by side on the same machine, without unforced conflicts.
 
